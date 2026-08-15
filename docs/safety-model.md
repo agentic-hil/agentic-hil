@@ -12,6 +12,8 @@ Every hardware action, from every entry point, walks the same gate:
 ![Action gate: tool call → per-device permission gate → validation → owner lease → execution with pinned executable and timeout → SHA-256 audit chain → structured JSON result; a crash or unknown effect quarantines the resource until operator recovery](diagrams/action-gate.svg#only-light)
 ![Action gate: tool call → per-device permission gate → validation → owner lease → execution with pinned executable and timeout → SHA-256 audit chain → structured JSON result; a crash or unknown effect quarantines the resource until operator recovery](diagrams/action-gate-dark.svg#only-dark)
 
+The gate is in the tool rather than in the agent's host because a probe, a port and a CAN adapter carry no permission model of their own, so enforcement has to sit directly in front of the hardware, the way a database engine and not its client holds the grants. A host's permission system is a second layer in front of this one and answers a different question; [docs/security-design.md](security-design.md) has why both exist.
+
 ## Permissions and validation
 
 - Deny-by-default permission switches for everything that writes or changes state, with deliberate interlocks: flashing is refused while `allow_raw_debugger_commands` or `allow_mass_erase` is enabled. `permission_denied` results are authoritative and agents are instructed to stop (see [AGENTS.md](https://github.com/agentic-hil/agentic-hil/blob/master/AGENTS.md)).

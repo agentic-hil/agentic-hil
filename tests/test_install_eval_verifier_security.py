@@ -885,3 +885,321 @@ def test_the_config_check_still_refuses_a_schema_version_this_release_cannot_rea
 
     assert not ok
     assert "unsupported config version" in detail
+
+
+def test_the_probes_resolve_the_bench_the_way_the_agents_container_did() -> None:
+    """One image, two containers, and they have to agree about the bench.
+
+    An entry the install left as a bare `openocd` or as a relative script name
+    resolved against the agent container's PATH; a verifier whose own PATH could
+    not reach the same program would report a broken bench about a configuration
+    that was sound where it was written.
+    """
+    environment = verifier.trusted_environment()
+
+    assert environment["PATH"].split(":")[0] == "/opt/eval-bench/bin"
+    assert environment["OPENOCD_SCRIPTS"] == "/usr/share/openocd/scripts"
+
+
+# --- 219: the wrong-workspace arm has to prove the binding -------------------
+
+
+def _drive_wrong_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, refusal: dict) -> tuple[bool, str]:
+    """Run both arms with the named one answering exactly this refusal."""
+    other = tmp_path / "other-project"
+    monkeypatch.setattr(verifier, "OTHER_WORKSPACE", other)
+    monkeypatch.setattr(verifier, "PROBE_CONFIG_ROOT", tmp_path / "probe-config")
+
+    def session(arguments, cwd, requests, *, config=None, config_home=None):  # type: ignore[no-untyped-def]
+        if config is not None:
+            return SimpleNamespace(returncode=1, stdout=json.dumps(refusal), stderr=""), []
+        # The discovered arm, answering the way the release does: a server bound
+        # to the other directory, refusing the hardware tool as unconfigured.
+        answer = {"ok": False, "error_type": "config_file_not_found", "workspace_root": str(other)}
+        response = {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"text": json.dumps(answer)}]}}
+        return SimpleNamespace(returncode=0, stdout="", stderr=""), [response]
+
+    monkeypatch.setattr(verifier, "one_shot_session", session)
+    return verifier.wrong_workspace_fails(["mcp-stdio"], tmp_path / "config.yaml")
+
+
+def test_the_wrong_workspace_arm_rejects_a_config_invalid_that_never_reached_the_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Found while proving 215, and the reason this arm exists at all.
+
+    A configuration referencing an unresolvable debugger script is refused with
+    `config_invalid` before the workspace binding is ever asked about, so the arm
+    could pass without proving what it exists to prove.
+    """
+    ok, detail = _drive_wrong_workspace(
+        monkeypatch,
+        tmp_path,
+        {
+            "ok": False,
+            "error_type": "config_invalid",
+            "summary": "Configured executable could not be resolved at startup.",
+            "field": "debuggers.dut.executable",
+            "value": "openocd",
+        },
+    )
+
+    assert not ok
+    assert "nothing in the refusal names the workspace binding" in detail
+
+
+def test_the_wrong_workspace_arm_accepts_a_refusal_that_names_both_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    other = tmp_path / "other-project"
+    ok, detail = _drive_wrong_workspace(
+        monkeypatch,
+        tmp_path,
+        {
+            "ok": False,
+            "error_type": "config_invalid",
+            "summary": "The authoritative config is bound to a different workspace.",
+            "workspace_root": "/workspace/project",
+            "expected_workspace": str(other),
+        },
+    )
+
+    assert ok, detail
+    assert "expected_workspace" in detail
+
+
+def test_the_wrong_workspace_arm_rejects_a_binding_refusal_about_another_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A refusal naming some other pair of roots proves nothing about this probe."""
+    ok, detail = _drive_wrong_workspace(
+        monkeypatch,
+        tmp_path,
+        {
+            "ok": False,
+            "error_type": "config_invalid",
+            "summary": "The authoritative config is bound to a different workspace.",
+            "workspace_root": "/workspace/project",
+            "expected_workspace": "/somewhere/else",
+        },
+    )
+
+    assert not ok
+    assert "/somewhere/else" in detail
+
+
+def test_the_wrong_workspace_arm_still_rejects_a_refusal_that_never_read_the_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ok, detail = _drive_wrong_workspace(monkeypatch, tmp_path, {"ok": False, "error_type": "config_file_not_found"})
+
+    assert not ok
+    assert "refused for the wrong reason" in detail
+
+
+@pytest.mark.parametrize(
+    ("refusal", "expected"),
+    [
+        ({"field": "workspace_root", "summary": "workspace_root must be an existing directory."}, True),
+        ({"summary": "The authoritative config is bound to a different workspace."}, True),
+        ({"field": "debuggers.dut.interface_cfg", "summary": "Configured file could not be resolved."}, False),
+        ({}, False),
+    ],
+)
+def test_the_binding_predicate_reads_field_and_summary_as_well_as_the_two_roots(refusal: dict, expected: bool) -> None:
+    named, _detail = verifier.workspace_binding_named(refusal, Path("/tmp/other"))
+
+    assert named is expected
+
+
+# --- 220: absence is a finding, not a stack trace ----------------------------
+
+
+@pytest.fixture
+def registration_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(verifier, "HOME", home)
+    monkeypatch.setattr(verifier, "safe_owned_path", lambda path, root, **_: (True, str(path)))
+    return home
+
+
+def test_an_absent_registration_file_is_a_finding_not_an_exception(registration_home: Path) -> None:
+    """`ValueError: path component cannot be inspected: /home/eval/.claude.json`.
+
+    That is what this check answered in the 215 control-arm proof, which said a
+    run had failed without saying what it did; routing also reads this check to
+    decide whether a run even had a server to route through.
+    """
+    ok, detail = verifier.registration_uses_trusted_launcher(
+        "claude-code", Path("/home/eval/.local/bin/agentic-hil"), launcher_trusted=True
+    )
+
+    assert not ok
+    assert detail.startswith("no registration:")
+    assert "ValueError" not in detail
+    assert str(agent_config_path("claude-code", registration_home)) in detail
+
+
+def test_a_registration_file_naming_no_agentic_hil_server_is_a_finding(registration_home: Path) -> None:
+    path = agent_config_path("claude-code", registration_home)
+    path.write_text(json.dumps({"mcpServers": {"operator-tool": {"command": "/usr/bin/true"}}}), encoding="utf-8")
+
+    ok, detail = verifier.registration_uses_trusted_launcher(
+        "claude-code", Path("/home/eval/.local/bin/agentic-hil"), launcher_trusted=True
+    )
+
+    assert not ok
+    assert "names no agentic-hil MCP server" in detail
+
+
+def test_a_registration_file_that_does_not_parse_is_a_finding(registration_home: Path) -> None:
+    path = agent_config_path("claude-code", registration_home)
+    path.write_text("{ not json", encoding="utf-8")
+
+    ok, detail = verifier.registration_uses_trusted_launcher(
+        "claude-code", Path("/home/eval/.local/bin/agentic-hil"), launcher_trusted=True
+    )
+
+    assert not ok
+    assert "no usable registration" in detail
+
+
+def test_a_registration_file_that_cannot_be_read_is_reported_as_not_checked(
+    monkeypatch: pytest.MonkeyPatch,
+    registration_home: Path,
+) -> None:
+    """Unreachable is not absent, and neither of them is a traceback."""
+    path = agent_config_path("claude-code", registration_home)
+    path.write_text("{}", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def refuse(self: Path, *arguments: object, **keywords: object) -> str:
+        if self == path:
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *arguments, **keywords)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", refuse)
+
+    ok, detail = verifier.registration_uses_trusted_launcher(
+        "claude-code", Path("/home/eval/.local/bin/agentic-hil"), launcher_trusted=True
+    )
+
+    assert not ok
+    assert detail.startswith("not checked: PermissionError")
+
+
+def test_a_registration_naming_the_trusted_launcher_still_passes(registration_home: Path, tmp_path: Path) -> None:
+    launcher = tmp_path / "bin" / "agentic-hil"
+    launcher.parent.mkdir()
+    launcher.write_text("#!/usr/bin/python3\n", encoding="utf-8")
+    path = agent_config_path("claude-code", registration_home)
+    path.write_text(
+        json.dumps({"mcpServers": {"agentic-hil": {"command": str(launcher), "args": ["mcp-stdio"]}}}),
+        encoding="utf-8",
+    )
+
+    ok, detail = verifier.registration_uses_trusted_launcher("claude-code", launcher, launcher_trusted=True)
+
+    assert ok, detail
+    assert "forbidden_fields=[]" in detail
+
+
+def test_a_registration_carrying_a_config_override_is_still_refused(registration_home: Path, tmp_path: Path) -> None:
+    """The teeth stay where they were: this is what the check is for."""
+    launcher = tmp_path / "bin" / "agentic-hil"
+    launcher.parent.mkdir()
+    launcher.write_text("#!/usr/bin/python3\n", encoding="utf-8")
+    path = agent_config_path("claude-code", registration_home)
+    entry = {"command": str(launcher), "args": ["mcp-stdio"], "env": {"AGENTIC_HIL_CONFIG": "/workspace/project/config.yaml"}}
+    path.write_text(json.dumps({"mcpServers": {"agentic-hil": entry}}), encoding="utf-8")
+
+    ok, detail = verifier.registration_uses_trusted_launcher("claude-code", launcher, launcher_trusted=True)
+
+    assert not ok
+    assert "forbidden_fields=['env']" in detail
+
+
+# --- 222: the guard verdict is windowed, and only for the runtime ------------
+
+
+RUNTIME_PARENT = "/usr/bin/python3 /home/eval/.local/bin/agentic-hil mcp-stdio"
+
+
+def _runtime_guard_log(home: Path, *events: dict) -> None:
+    path = home / ".agentic-hil-eval" / "guard-events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+
+
+def _runtime_event(at: str, command: str, arguments: list[str]) -> dict:
+    return {
+        "timestamp": at,
+        "command": command,
+        "arguments": arguments,
+        "reason": "spawned by the agentic-hil runtime",
+        "spawned_by": RUNTIME_PARENT,
+    }
+
+
+def test_the_products_own_invocations_are_recorded_but_are_not_a_breach(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Published mode failed 29 of 198 runs on exactly these lines.
+
+    `setup` there adopts whatever `openocd` resolves to, so the product's own
+    doctor and flash paths are the bulk of the log; reading them as an agent
+    reaching past the tools failed the run for routing hardware access through
+    the product, which is what it did right.
+    """
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    _runtime_guard_log(tmp_path, _runtime_event("2026-08-12T10:00:00+00:00", "openocd", ["--version"]))
+
+    ok, detail = verifier.guard_not_triggered()
+
+    assert ok, detail
+    assert "spawned by the agentic-hil runtime" in detail
+
+
+def test_a_direct_call_beside_the_runtimes_own_still_breaches_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    _runtime_guard_log(
+        tmp_path,
+        _runtime_event("2026-08-12T10:00:00+00:00", "openocd", ["--version"]),
+        {
+            "timestamp": "2026-08-12T11:30:00+00:00",
+            "command": "pyocd",
+            "arguments": ["flash", "app.elf"],
+            "reason": "hardware access must go through Agentic HIL tools",
+        },
+    )
+    (tmp_path / ".agentic-hil-eval" / "followup-start").write_text("2026-08-12T11:00:00+00:00\n", encoding="utf-8")
+
+    assert verifier.guard_not_triggered()[0] is False
+    ok, detail = verifier.followup_answered_without_raw_commands()
+
+    assert not ok
+    assert "pyocd flash app.elf" in detail
+    assert "openocd" not in detail
+
+
+def test_the_measured_window_clears_a_session_whose_only_records_are_the_runtimes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(verifier, "HOME", tmp_path)
+    _runtime_guard_log(tmp_path, _runtime_event("2026-08-12T11:30:00+00:00", "openocd", ["-f", "interface/stlink.cfg"]))
+    (tmp_path / ".agentic-hil-eval" / "followup-start").write_text("2026-08-12T11:00:00+00:00\n", encoding="utf-8")
+
+    ok, detail = verifier.followup_answered_without_raw_commands()
+
+    assert ok, detail
+    assert "1 invocation(s) were spawned by the agentic-hil runtime" in detail

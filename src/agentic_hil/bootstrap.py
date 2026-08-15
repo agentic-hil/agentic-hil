@@ -35,6 +35,10 @@ DEFAULT_PROJECT_PROFILE: JsonObject = {
     "com_ports": {"dut_uart": {"baudrate": 115200, "permissions": {}}},
 }
 
+# The one backend bootstrap knows. Named once so that every caller reporting
+# which backend answered reports the same one this module actually ran.
+BOOTSTRAP_BACKEND = "stlink"
+
 
 def load_project_profile(workspace: Path) -> JsonObject | None:
     path = workspace / PROJECT_PROFILE
@@ -45,6 +49,53 @@ def load_project_profile(workspace: Path) -> JsonObject | None:
     except (OSError, yaml.YAMLError):
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def enumerate_attached_probes(timeout_s: float = 10.0) -> JsonObject:
+    """List the attached ST-Link probes, and stop there.
+
+    The first half of ``discover_attached_hardware``, on its own, because two
+    callers ask the same question and one answer has to serve both. Discovery
+    asks it before it picks a board to connect to. `agentic-hil debugger-probes`
+    asks it on a project that has no configuration yet, which is precisely the
+    moment before the first `setup` when an operator wants to know whether the
+    board is visible and whether there is exactly one of it.
+
+    The command is the fixed read-only one package code owns, the same one
+    discovery has always run: it enumerates and does nothing else, so no HOTPLUG
+    connect, no reset, no halt, no erase, no flash and no serial port is reached
+    from here.
+
+    An empty listing is a success, exactly as it is for the configured backend.
+    Whether nothing attached is a failure belongs to the caller: discovery needs
+    a board and says `adapter_not_found`, while a probe listing that found none
+    has answered the question it was asked.
+    """
+    executable = find_stm32_programmer_cli()
+    if executable is None:
+        return _discovery_failure("debugger_not_found", "STM32CubeProgrammer CLI was not found.")
+    cwd = str(Path(executable).parent)
+    listed = spawn_command([*invocation(executable), "-q", "-l", "st-link-only"], cwd, timeout_s)
+    if listed.not_found:
+        return _discovery_failure("debugger_not_found", "STM32CubeProgrammer CLI disappeared during discovery.", executable=executable)
+    if listed.timed_out:
+        return _discovery_failure("timeout", "ST-Link enumeration timed out after its process was reaped.", executable=executable)
+    output = f"{listed.stdout}{listed.stderr}"
+    probe_ids = stlink_probe_ids(output)
+    if listed.returncode != 0 or (not probe_ids and not stlink_empty_result(output)):
+        return _discovery_failure("probe_discovery_failed", "STM32CubeProgrammer returned an invalid probe listing.", executable=executable)
+    return {
+        "ok": True,
+        "tool": "bootstrap_hardware_discovery",
+        "backend": BOOTSTRAP_BACKEND,
+        "executable": executable,
+        "probes": [{"probe_id": found} for found in probe_ids],
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "hardware_state": "unchanged",
+        "cleanup_required": False,
+        "summary": f"{len(probe_ids)} connected debugger probe(s) detected.",
+    }
 
 
 def discover_attached_hardware(
@@ -74,21 +125,16 @@ def discover_attached_hardware(
     from it aborts discovery and that result is the answer, which is how a caller
     takes the machine-wide lock on the probe it is about to talk to.
     """
-    executable = find_stm32_programmer_cli()
     com_ports = list_available_com_ports("bootstrap_com_ports")
-    if executable is None:
-        return _discovery_failure("debugger_not_found", "STM32CubeProgrammer CLI was not found.", com_ports=com_ports)
-
+    listed = enumerate_attached_probes(timeout_s)
+    if not listed["ok"]:
+        # The host serial inventory travels with every enumeration failure, as
+        # it always has: an operator whose probe did not enumerate still needs
+        # to see what the host does have.
+        return {**listed, "com_ports": com_ports}
+    executable = str(listed["executable"])
     cwd = str(Path(executable).parent)
-    listed = spawn_command([*invocation(executable), "-q", "-l", "st-link-only"], cwd, timeout_s)
-    if listed.not_found:
-        return _discovery_failure("debugger_not_found", "STM32CubeProgrammer CLI disappeared during discovery.", executable=executable, com_ports=com_ports)
-    if listed.timed_out:
-        return _discovery_failure("timeout", "ST-Link enumeration timed out after its process was reaped.", executable=executable, com_ports=com_ports)
-    output = f"{listed.stdout}{listed.stderr}"
-    probe_ids = stlink_probe_ids(output)
-    if listed.returncode != 0 or (not probe_ids and not stlink_empty_result(output)):
-        return _discovery_failure("probe_discovery_failed", "STM32CubeProgrammer returned an invalid probe listing.", executable=executable, com_ports=com_ports)
+    probe_ids = [str(found["probe_id"]) for found in listed["probes"]]
     if not probe_ids:
         return _discovery_failure("adapter_not_found", "No ST-Link probe is attached.", executable=executable, com_ports=com_ports)
     if probe_id is not None:
@@ -145,7 +191,7 @@ def discover_attached_hardware(
     return {
         "ok": True,
         "tool": "bootstrap_hardware_discovery",
-        "backend": "stlink",
+        "backend": BOOTSTRAP_BACKEND,
         "executable": executable,
         "probe_id": probe_id,
         "target": target,

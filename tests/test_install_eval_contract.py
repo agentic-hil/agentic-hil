@@ -204,7 +204,29 @@ def test_the_guard_survives_a_login_shell() -> None:
     # Written, not merely mentioned: the redirect is what puts the drop-in there.
     assert 'ln -s /opt/evals/install/guard.py "/usr/local/bin/$(basename "$shim")"' in dockerfile
     assert "> /etc/profile.d/00-eval-guard.sh" in dockerfile
-    assert 'PATH="/opt/eval-guard/bin:$PATH"' in dockerfile
+    assert 'PATH="/opt/eval-bench/bin:/opt/eval-guard/bin:$PATH"' in dockerfile
+
+
+def test_the_bench_stand_in_is_what_a_bootstrap_adopts() -> None:
+    """#222: `setup` adopts whatever `openocd` resolves to, and it must work.
+
+    In published mode that was the guard, so every legitimate call the product
+    made afterwards executed a program written to refuse it. The stand-in has to
+    be ahead of the shims in both PATHs the container has, and it has to resolve
+    to a file under the committed tree rather than to the guard's own script:
+    the runtime pins an executable by its resolved path.
+    """
+    dockerfile = (REPOSITORY_ROOT / "evals" / "install" / "container" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ln -s /opt/evals/install/bench_openocd.py /opt/eval-bench/bin/openocd" in dockerfile
+    assert "chmod 0755 /opt/evals/install/bench_openocd.py" in dockerfile
+    assert "PATH=/opt/eval-bench/bin:/opt/eval-guard/bin:" in dockerfile
+    assert 'PATH="/opt/eval-bench/bin:/opt/eval-guard/bin:$PATH"' in dockerfile
+    # A relative script name is what the generated template carries, so the
+    # stand-in needs the tree the image ships to be on its search path.
+    assert "OPENOCD_SCRIPTS=/usr/share/openocd/scripts" in dockerfile
 
 
 def test_the_image_carries_the_openocd_scripts_a_generated_config_names() -> None:

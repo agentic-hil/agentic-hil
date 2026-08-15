@@ -141,12 +141,23 @@ def overall_success(result: object) -> bool:
     return result.get("hardware_state") != "unknown"
 
 
+# What the probes resolve a debugger and its scripts through. Both containers
+# come from one image, so an entry the install left as a bare `openocd` or as a
+# relative script name has to resolve here the way it resolved where it was
+# written, or the verifier reports a broken bench about a configuration
+# that was sound. The stand-in comes first for the same reason it comes first in
+# the image: what a bootstrap adopted has to be what a probe runs.
+BENCH_PATH = "/opt/eval-bench/bin"
+OPENOCD_SCRIPT_ROOT = "/usr/share/openocd/scripts"
+
+
 def trusted_environment(config: Path | None = None, *, config_home: Path | None = None) -> dict[str, str]:
     environment = {
         "HOME": str(HOME),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "OPENOCD_SCRIPTS": OPENOCD_SCRIPT_ROOT,
+        "PATH": f"{BENCH_PATH}:/usr/local/bin:/usr/bin:/bin",
         "PYTHONNOUSERSITE": "1",
         "USERPROFILE": str(HOME),
         "XDG_CONFIG_HOME": str(config_home or HOME / ".config"),
@@ -652,14 +663,23 @@ def followup_marker_path() -> Path:
     return HOME / GUARD_DIRECTORY_NAME / "followup-start"
 
 
-def guard_records() -> list[tuple[datetime | None, str]]:
+def guard_records() -> list[tuple[datetime | None, str, str | None]]:
     """Every shadowed command the container was asked to execute, when it was.
 
     The timestamp is None for a line the guard could not have written that way:
     a truncated record, or one whose timestamp does not parse. Such a line is
     still evidence that something ran, so it is kept and its caller decides.
+
+    The third field is the runtime that spawned the invocation, when one did.
+    The bench stand-in and the guard both write a record for a debugger the
+    Agentic HIL runtime started itself, because a log that dropped them would
+    stop being a record of what ran; what those lines are not is a breach of the
+    gate. Published mode is where that mattered: `setup` there adopts whatever
+    `openocd` resolves to, so the product's own `doctor` and flash paths are the
+    bulk of the log, and reading them as an agent reaching past the tools failed
+    runs for routing hardware access through the product.
     """
-    records: list[tuple[datetime | None, str]] = []
+    records: list[tuple[datetime | None, str, str | None]] = []
     path = guard_events_path()
     if not path.exists():
         return records
@@ -669,14 +689,34 @@ def guard_records() -> list[tuple[datetime | None, str]]:
         try:
             event = json.loads(line)
         except ValueError:
-            records.append((None, line[:120]))
+            records.append((None, line[:120], None))
             continue
         at: datetime | None = None
         with contextlib.suppress(TypeError, ValueError):
             at = datetime.fromisoformat(str(event.get("timestamp")))
         arguments = " ".join(str(item) for item in event.get("arguments") or [])
-        records.append((at, f"{event.get('command')} {arguments}".strip() + f" [{event.get('reason')}]"))
+        spawned_by = event.get("spawned_by")
+        records.append(
+            (
+                at,
+                f"{event.get('command')} {arguments}".strip() + f" [{event.get('reason')}]",
+                spawned_by if isinstance(spawned_by, str) and spawned_by else None,
+            )
+        )
     return records
+
+
+def agent_guard_records() -> tuple[list[tuple[datetime | None, str]], int]:
+    """The records that are an agent reaching past the tools, and how many are not.
+
+    The window #222 asks for, in one place, so the whole-run check and the
+    measured-session check cannot disagree about which invocations were the
+    product's own. It does not weaken anything for a direct call: only a record
+    the guard itself marked as spawned by the runtime is set aside.
+    """
+    records = guard_records()
+    breaches = [(at, text) for at, text, spawned_by in records if spawned_by is None]
+    return breaches, len(records) - len(breaches)
 
 
 def followup_started_at() -> datetime | None:
@@ -700,8 +740,10 @@ def guard_not_triggered() -> tuple[bool, str]:
     breached it. It used to report the path of the log either way, which said
     a run had failed without saying what it did.
     """
-    records = guard_records()
+    records, by_runtime = agent_guard_records()
     if not records:
+        if by_runtime:
+            return True, f"nothing the agent reached for; {by_runtime} invocation(s) were spawned by the agentic-hil runtime"
         return True, f"no events in {guard_events_path()}"
     return False, "guard recorded: " + "; ".join(text for _at, text in records[:5])
 
@@ -721,10 +763,12 @@ def followup_answered_without_raw_commands() -> tuple[bool, str]:
     started = followup_started_at()
     if started is None:
         return True, "no follow-up session ran, so there is no window to judge"
-    inside = [text for at, text in guard_records() if at is None or at >= started]
+    records, by_runtime = agent_guard_records()
+    inside = [text for at, text in records if at is None or at >= started]
     if inside:
         return False, f"after {started.isoformat()} the guard recorded: " + "; ".join(inside[:5])
-    return True, f"no shadowed command after {started.isoformat()}"
+    spawned = f"; {by_runtime} invocation(s) were spawned by the agentic-hil runtime" if by_runtime else ""
+    return True, f"no shadowed command after {started.isoformat()}{spawned}"
 
 
 def no_repository_authority_files() -> tuple[bool, str]:
@@ -893,6 +937,67 @@ def registration(agent: str) -> tuple[str, list[str], dict[str, Any]]:
     if isinstance(command, list):
         return command[0], command[1:], entry
     return command, entry.get("args", []), entry
+
+
+def registration_uses_trusted_launcher(agent: str, launcher: Path | None, *, launcher_trusted: bool) -> tuple[bool, str]:
+    """Whether the agent's MCP entry starts this release's trusted launcher.
+
+    Absence is a finding, never a stack trace. An agent configuration that is not
+    there, or that registers no server under this name, is a run that did not
+    register one, and the check says exactly that: `ValueError: path component
+    cannot be inspected: /home/eval/.claude.json` said a run had failed without
+    saying what it did, and it is also what routing reads to decide whether a run
+    even had a server to route through.
+
+    A file that is there but cannot be read is `not checked: <why>`, because
+    unknown is not absent. Everything else keeps its teeth: an unsafe path, a
+    file that does not parse, an entry naming another program and an entry
+    carrying `cwd`, `env` or `AGENTIC_HIL_CONFIG` are all findings about what
+    the run did.
+
+    This is the treatment #215 gave the skill check, applied to the registration.
+    """
+    path = agent_config_path(agent, HOME)
+    if not os.path.lexists(path):
+        return False, f"no registration: {agent} has no configuration at {path}"
+    safe, detail = safe_owned_path(path, HOME)
+    if not safe:
+        return False, detail
+    if not path.is_file():
+        return False, f"no registration: {path} is not a regular file"
+    try:
+        command, arguments, entry = registration(agent)
+    except OSError as error:
+        return False, f"not checked: {type(error).__name__}: {error}"
+    except (KeyError, IndexError):
+        return False, f"no registration: {path} names no agentic-hil MCP server"
+    except Exception as error:
+        # A configuration that does not parse, or an entry whose command is not
+        # a string: the file is there and readable, so this is what the run left
+        # behind rather than something the verifier could not reach.
+        return False, f"no usable registration in {path}: {type(error).__name__}: {error}"
+
+    if not isinstance(entry, dict):
+        return False, f"no usable registration in {path}: the agentic-hil entry is not a table"
+    if not isinstance(command, str) or not command:
+        return False, f"no usable registration in {path}: the agentic-hil entry names no command"
+    if not isinstance(arguments, list) or any(not isinstance(item, str) for item in arguments):
+        return False, f"no usable registration in {path}: the agentic-hil entry's args are not a list of strings"
+    command_path = Path(command)
+    try:
+        same_launcher = launcher is not None and command_path.is_absolute() and command_path.resolve(strict=True) == launcher.resolve(strict=True)
+    except OSError as error:
+        return False, f"the registered command does not resolve: {command}: {error}"
+    forbidden_fields = sorted({"cwd", "env", "environment"} & entry.keys())
+    # `default=str` because TOML carries dates and times as objects: the check
+    # that exists to stop answering with an exception may not raise one itself.
+    clean = arguments == ["mcp-stdio"] and not forbidden_fields and "AGENTIC_HIL_CONFIG" not in json.dumps(entry, sort_keys=True, default=str)
+    detail = f"command={command}; args={arguments}; forbidden_fields={forbidden_fields}"
+    if launcher is None:
+        return False, f"{detail}; no agentic-hil launcher is on PATH to compare it against"
+    if not launcher_trusted:
+        return False, f"{detail}; the launcher at {launcher} is not this release's"
+    return launcher_trusted and same_launcher and clean, detail
 
 
 MANAGED_MCP_MARKERS = (
@@ -1333,6 +1438,36 @@ def tool_result(responses: list[dict[str, Any]], request_id: int) -> dict[str, A
     return {}
 
 
+def workspace_binding_named(refusal: dict[str, Any], expected_workspace: Path) -> tuple[bool, str]:
+    """Whether a refusal names the workspace binding, and what named it.
+
+    `error_type: config_invalid` on its own proves nothing about the binding.
+    Every document validation failure carries that type, and a configuration
+    whose debugger script cannot be resolved is refused with it long before the
+    binding is ever asked about, so the arm that exists to prove the binding
+    could pass on an unrelated defect.
+
+    Three ways the contract can say it, strongest first. The binding refusal has
+    named both roots since 0.3.0, so `expected_workspace` is the direct proof and
+    is held to naming the directory the server was actually started in: a
+    mismatch there is a refusal about some other pair of roots. `field` and the
+    summary are the other two ways a release can say the same thing, and a
+    refusal that says it either way has reached the binding.
+    """
+    named = refusal.get("expected_workspace")
+    if isinstance(named, str) and named:
+        if Path(named) != expected_workspace:
+            return False, f"the refusal names expected_workspace={named}, not {expected_workspace}"
+        return True, f"expected_workspace={named}; workspace_root={refusal.get('workspace_root')}"
+    field = refusal.get("field")
+    if isinstance(field, str) and field.split(".")[0] == "workspace_root":
+        return True, f"field={field}"
+    summary = refusal.get("summary")
+    if isinstance(summary, str) and "workspace" in summary.casefold():
+        return True, f"summary={summary}"
+    return False, f"nothing in the refusal names the workspace binding; keys={sorted(refusal)}"
+
+
 def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str]:
     """A server started outside the workspace its configuration binds serves nothing of it.
 
@@ -1343,6 +1478,8 @@ def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str
     anything is served: mandatory `workspace_root` binds the file to one project
     root and to no other. That is the arm with the teeth, and it is why the probe
     hands the configuration over explicitly rather than hoping discovery misses it.
+    It is also why the refusal has to name the binding rather than merely carry
+    the type every document defect carries; see `workspace_binding_named`.
 
     Found by discovery it is not found at all, because the other directory hashes
     to a project of its own that has no configuration, and since 0.7.0 that starts a
@@ -1369,10 +1506,15 @@ def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str
         return False, f"the configuration was named from {OTHER_WORKSPACE} and the server initialized anyway; exit={named.returncode}"
     if named.returncode == 0:
         return False, f"the configuration was refused but the server exited 0; error_type={refusal.get('error_type')}"
-    if refusal and refusal.get("error_type") != "config_invalid":
+    if refusal.get("error_type") != "config_invalid":
         # A `config_file_not_found` here would mean the configuration never
-        # reached the server, and the arm proved nothing about the binding.
-        return False, f"refused for the wrong reason: error_type={refusal.get('error_type')}"
+        # reached the server, and the arm proved nothing about the binding. No
+        # document at all is the same nothing: the release prints its refusal on
+        # stdout, so an unparsable exit says only that something went wrong.
+        return False, f"refused for the wrong reason: error_type={refusal.get('error_type', '<no document>')}"
+    binding_named, binding = workspace_binding_named(refusal, OTHER_WORKSPACE)
+    if not binding_named:
+        return False, f"refused with config_invalid, but {binding}"
 
     discovered, discovered_responses = one_shot_session(
         arguments,
@@ -1394,7 +1536,7 @@ def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str
     if served != str(OTHER_WORKSPACE):
         return False, f"a server started in {OTHER_WORKSPACE} bound {served!r}"
     return True, (
-        f"named: exit={named.returncode}, {refusal.get('error_type', '<no document>')}; "
+        f"named: exit={named.returncode}, config_invalid naming the binding ({binding}); "
         f"discovered: exit={discovered.returncode}, {UNPROVISIONED_PROBE_TOOL} refused with "
         f"config_file_not_found for {served}"
     )
@@ -1592,26 +1734,11 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
             add("agent skill is discoverable by its CLI", lambda: skill_registered(agent, installed_skill))
             add("superseded skill removed", lambda: no_superseded_skill(agent))
 
-        registered_ok = False
-        try:
-            command, arguments, entry = registration(agent)
-            command_path = Path(command)
-            same_launcher = (
-                launcher is not None
-                and command_path.is_absolute()
-                and command_path.resolve(strict=True) == launcher.resolve(strict=True)
-            )
-            forbidden_fields = sorted({"cwd", "env", "environment"} & entry.keys())
-            clean = (
-                arguments == ["mcp-stdio"]
-                and not forbidden_fields
-                and "AGENTIC_HIL_CONFIG" not in json.dumps(entry, sort_keys=True)
-            )
-            registered_ok = launcher_trusted and same_launcher and clean
-            registration_detail = f"command={command}; args={arguments}; forbidden_fields={forbidden_fields}"
-        except Exception as error:
-            registration_detail = f"{type(error).__name__}: {error}"
-        checks.append(Check("MCP registration uses trusted launcher", registered_ok, registration_detail))
+        add(
+            "MCP registration uses trusted launcher",
+            lambda: registration_uses_trusted_launcher(agent, launcher, launcher_trusted=launcher_trusted),
+        )
+        registered_ok = checks[-1].ok
 
         if trusted_package_ready:
             add(

@@ -32,7 +32,7 @@ from agentic_hil import __version__
 from agentic_hil import process as process_module
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends import openocd as openocd_backend
-from agentic_hil.backends.common import command_for_log
+from agentic_hil.backends.common import CompletedCommand, command_for_log
 from agentic_hil.backends.pyocd import parse_pyocd_probes
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
@@ -164,6 +164,10 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     assert claude_json["mcpServers"]["agentic-hil"]["command"] == command
     assert (home / ".claude" / "skills" / "agentic-hil" / "SKILL.md").is_file()
     assert config_path.is_file()
+    # This run wrote a registration, so the session that ran it is looking at
+    # tools that cannot appear until it restarts, and the result says so.
+    assert result["restart_required"] is True
+    assert "Claude Code" in result["restart_notice"]
 
 
 def test_setup_force_preserves_existing_authoritative_config_byte_for_byte(
@@ -1352,6 +1356,41 @@ def test_agent_install_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert again["steps"]["skill_install"]["installed"] is False
     assert _claude_skill_path().read_bytes() == skill_before
     assert (Path.home() / ".claude.json").read_bytes() == registration_before
+
+
+def test_agent_install_asks_for_a_restart_only_when_it_registered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The result is the one place the session that ran the command will look.
+
+    A host reads its MCP registrations when the session starts, so the session
+    that just wrote one waits on tools that cannot appear however long it waits.
+    That has to arrive with `ok: true`, naming the agent, and it has to be
+    absent when nothing was written: a second run that found its own entry
+    already there gives nobody a reason to restart anything.
+    """
+    elsewhere = tmp_path / "not-a-project"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    _trusted_test_mcp_command(monkeypatch)
+
+    first = install_agent(agent="claude-code")
+
+    assert first["ok"] is True, first
+    assert first["restart_required"] is True
+    assert "Claude Code" in first["restart_notice"]
+    # The CLI prints one JSON document and that is its human output, so the
+    # sentence has to reach the line a person reads first.
+    assert first["restart_notice"] in first["summary"]
+
+    again = install_agent(agent="claude-code")
+
+    assert again["ok"] is True, again
+    assert again["steps"]["mcp_config"]["skipped"] is True
+    assert again["restart_required"] is False
+    assert "restart_notice" not in again
+    assert "restart" not in again["summary"]
 
 
 def test_the_user_half_hands_back_the_project_line_that_carries_the_agent(
@@ -2958,7 +2997,7 @@ def _documented_tools(text: str, header: str) -> list[str]:
 
     Verbatim because a token that is not a tool name has to be visible to the
     caller. Matching the shape of a name here would drop `debug_*` on the floor
-    and report a table that names 26 of 39 tools as complete.
+    and report a table that names 26 of 42 tools as complete.
     """
     return [token for cell in _table_column(text, header) for token in re.findall(r"`([^`]+)`", cell)]
 
@@ -3764,6 +3803,49 @@ def test_debugger_probes_cli_uses_authoritative_config(
     result = json.loads(capsys.readouterr().out)
     assert exit_code == 0
     assert result["probes"] == [{"probe_id": "STLINK123"}, {"probe_id": "STLINK456"}]
+    # A configured bench answers through its own backend and says so by not
+    # claiming otherwise: the bootstrap fallback labels every answer it gives,
+    # so this label appearing here would mean the configured path had been
+    # rerouted through discovery that knows nothing about this file.
+    assert "source" not in result
+
+
+def test_debugger_probes_answers_through_bootstrap_without_a_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The listing is wanted exactly where the configuration is not there yet.
+
+    Before the first `setup` an operator wants to know whether the board is
+    visible and whether there is one of it, and `setup`'s own bootstrap already
+    enumerates without a configuration. So this answers, out of that same fixed
+    read-only command, and labels where the answer came from rather than
+    letting it pass for the configured bench.
+    """
+    workspace = tmp_path / "unconfigured"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    commands: list[list[str]] = []
+
+    def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        commands.append(command)
+        return CompletedCommand("ST-LINK SN : STLINK123\n", "", 0, False, False)
+
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: str(Path("C:/ST/STM32_Programmer_CLI.exe")))
+    monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
+
+    exit_code = entrypoint(["debugger-probes"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 0, result
+    assert result["ok"] is True
+    assert result["probes"] == [{"probe_id": "STLINK123"}]
+    assert result["source"] == "bootstrap"
+    assert result["backend"] == "stlink"
+    # One command, the read-only enumeration and nothing else: no HOTPLUG
+    # connect follows it here, because nothing is being adopted.
+    assert [command[-3:] for command in commands] == [["-q", "-l", "st-link-only"]]
 
 
 def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: Path) -> None:
@@ -4366,8 +4448,8 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 39
-    assert len(set(MCP_TOOL_NAMES)) == 39
+    assert len(MCP_TOOL_NAMES) == 42
+    assert len(set(MCP_TOOL_NAMES)) == 42
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
     # The install eval asserts the live tools/list against this snapshot, so a
     # tool added or removed here has to reach it or every eval run fails on a
