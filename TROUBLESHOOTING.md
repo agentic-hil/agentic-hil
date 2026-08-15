@@ -44,6 +44,22 @@ Do not store `uvx`, a workspace virtual environment, or a bare PATH command in `
 
 The MCP host must start in the firmware project root so Agentic HIL can discover its external authoritative config. If an operator-controlled registration or parent environment sets `AGENTIC_HIL_CONFIG`, it must be an absolute path; do not commit its machine-specific value in repository-controlled `.mcp.json`.
 
+## 1a. The One-Line Installer Stopped Before It Finished
+
+Symptom: `install.sh` or `install.ps1` printed one of its five steps and stopped, or finished without the `agentic-hil` command being reachable.
+
+Every step names itself, so the line it stopped on says which of these it is. Four failures account for almost all of them.
+
+**No Python 3.10 or newer, and Astral's uv installer cannot be reached.** Step 2 says `no uv and no Python 3.10 or newer here` and then fails on the fetch. The script has no third route by design: it will not install a system package manager's Python and it never runs `sudo`. Install `uv` or `pipx` yourself, user-local, or install a Python 3.10 or newer, then run the one-liner again. It is idempotent: a second run re-probes and picks up from where the machine now is.
+
+**`error: externally-managed-environment` (PEP 668).** The script prints `this Python is externally managed (PEP 668), so pip cannot own it; falling back to uv` and continues into the uv branch by itself, which is the correct resolution: `uv` installs into an environment of its own and needs no exception. If that fallback also fails, install `uv` or `pipx` by hand and run the one-liner again. Never reach for `pip install --break-system-packages`; neither script offers it, and it makes the distribution's own Python the thing that breaks next.
+
+**Step 3 says the command does not resolve on `PATH`.** The package is installed and its console script landed in a directory your shell does not look in. The script prints the exact line to add and deliberately edits no shell rc file and no Windows environment variable for you. Add it, open a fresh shell, and check with `agentic-hil --version`. If step 3 printed no directory at all, section 1 above has the wider fix.
+
+**`invalid peer certificate: UnknownIssuer`, or a `curl` or `Invoke-RestMethod` TLS error.** A TLS-intercepting proxy sits between this machine and `astral.sh` or PyPI. The `--system-certs` paragraph in section 1 above is the fix, including why `UV_SYSTEM_CERTS=1` in the operator's environment beats the flag on a single command line, and why disabling verification is not a fallback. On Windows PowerShell 5.1 the script raises TLS 1.2 before it fetches anything, so a TLS failure there is the proxy and not the protocol.
+
+Two things the one-liner never does, so they are never the cause: it writes no project configuration, and it runs nothing with elevated rights. If a step failed after `agent-install` had already run, the package and that agent's registration are in place, and the one line left is `agentic-hil agent-install --agent <claude-code|codex|opencode>` for whichever agent was missed.
+
 ## 2. `config_file_not_found` / `config_invalid` / `config_unreadable`
 
 Symptom: `agentic-hil doctor` returns one of these `error_type` values.
