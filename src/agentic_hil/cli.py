@@ -620,6 +620,45 @@ def _unsupported_agent(agent: str, summary: str) -> JsonObject:
     return {"ok": False, "error_type": "unsupported_agent", "summary": summary, "agent": normalize_agent(agent), "allowed_agents": supported_skill_agents()}
 
 
+def _registration_restart(agent: SkillAgent, mcp_result: JsonObject) -> JsonObject:
+    """Whether a registration was just written, and the sentence that says so.
+
+    A host reads its MCP registrations once, when the session starts, so the
+    session that writes one cannot see the tools it registered however long it
+    waits for them. That news belongs on this result and nowhere else: the
+    session that ran the command reads this and reports it in the same breath as
+    `ok: true`, instead of both sides discovering it by waiting.
+
+    It is claimed only for a registration that was actually written. A second
+    `agent-install` that finds its own entry already there reports `skipped`, and
+    a conflict or a failure wrote nothing at all; asking for a restart on any of
+    those would be asking for one that reloads what is already loaded.
+    """
+    if mcp_result.get("ok") is not True or mcp_result.get("skipped") is True:
+        return {"restart_required": False}
+    return {
+        "restart_required": True,
+        "restart_notice": (
+            f"The {agent.display_name} session that ran this must be restarted before the agentic-hil MCP tools "
+            "appear; it read its registrations when it started and this one is newer. `agentic-hil doctor` at a "
+            "shell works now and needs no restart."
+        ),
+    }
+
+
+def _with_restart_notice(result: JsonObject) -> JsonObject:
+    """Put the restart sentence where a person reading the terminal sees it.
+
+    The CLI prints one JSON document and that is its human output, so a field
+    nobody reads first is a field a person scrolls past. `summary` is the line
+    both a person and an agent read, so the sentence goes there as well as into
+    its own key."""
+    notice = result.get("restart_notice")
+    if isinstance(notice, str) and isinstance(result.get("summary"), str):
+        result["summary"] = f"{result['summary']} {notice}"
+    return result
+
+
 def install_agent(agent: str, force: bool = False) -> JsonObject:
     """Install what is user-wide, once per user and agent.
 
@@ -676,6 +715,7 @@ def install_agent(agent: str, force: bool = False) -> JsonObject:
             "scope": "user",
             "summary": "Agentic HIL agent integration installed for this user account." if ok else "Agentic HIL agent installation failed; committed file changes were rolled back.",
             "agent": agent,
+            **_registration_restart(resolved_agent, mcp_result),
             "command": command,
             "permission_changes": permission_changes,
             "rollback": {"attempted": not ok, "ok": not rollback_errors, "errors": rollback_errors},
@@ -690,7 +730,7 @@ def install_agent(agent: str, force: bool = False) -> JsonObject:
             surviving = _skill_rollback_did_not_own(snapshots, _agent_skill_target(resolved_agent))
             if surviving is not None:
                 result["left_behind"] = surviving
-        return result
+        return _with_restart_notice(result)
 
 
 _NO_AGENT_NAMED = "No agent was named, so no agent write restriction was applied. Pass --agent to have that agent refuse its own write tools on the policy files."
@@ -869,6 +909,10 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
         "tool": "agentic_hil_setup",
         "summary": summary,
         "agent": agent,
+        # Read off the user-wide half rather than decided again: that half is the
+        # one that writes the registration, and a second reading of the same
+        # step is a second answer waiting to differ from the first.
+        **{key: user_result[key] for key in ("restart_required", "restart_notice") if key in user_result},
         "state_root_changes": project_result["state_root_changes"],
         "permission_changes": [*user_result["permission_changes"], *project_result["permission_changes"]],
         "rollback": {
@@ -894,7 +938,7 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
         )
     if "left_behind" in user_result:
         result["left_behind"] = user_result["left_behind"]
-    return result
+    return _with_restart_notice(result)
 
 
 def _skill_rollback_did_not_own(snapshots: list[FileSnapshot], skill_target: Path) -> JsonObject | None:

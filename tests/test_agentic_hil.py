@@ -163,6 +163,10 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     assert claude_json["mcpServers"]["agentic-hil"]["command"] == command
     assert (home / ".claude" / "skills" / "agentic-hil" / "SKILL.md").is_file()
     assert config_path.is_file()
+    # This run wrote a registration, so the session that ran it is looking at
+    # tools that cannot appear until it restarts, and the result says so.
+    assert result["restart_required"] is True
+    assert "Claude Code" in result["restart_notice"]
 
 
 def test_setup_force_preserves_existing_authoritative_config_byte_for_byte(
@@ -876,6 +880,41 @@ def test_agent_install_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert again["steps"]["skill_install"]["installed"] is False
     assert _claude_skill_path().read_bytes() == skill_before
     assert (Path.home() / ".claude.json").read_bytes() == registration_before
+
+
+def test_agent_install_asks_for_a_restart_only_when_it_registered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The result is the one place the session that ran the command will look.
+
+    A host reads its MCP registrations when the session starts, so the session
+    that just wrote one waits on tools that cannot appear however long it waits.
+    That has to arrive with `ok: true`, naming the agent, and it has to be
+    absent when nothing was written: a second run that found its own entry
+    already there gives nobody a reason to restart anything.
+    """
+    elsewhere = tmp_path / "not-a-project"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    _trusted_test_mcp_command(monkeypatch)
+
+    first = install_agent(agent="claude-code")
+
+    assert first["ok"] is True, first
+    assert first["restart_required"] is True
+    assert "Claude Code" in first["restart_notice"]
+    # The CLI prints one JSON document and that is its human output, so the
+    # sentence has to reach the line a person reads first.
+    assert first["restart_notice"] in first["summary"]
+
+    again = install_agent(agent="claude-code")
+
+    assert again["ok"] is True, again
+    assert again["steps"]["mcp_config"]["skipped"] is True
+    assert again["restart_required"] is False
+    assert "restart_notice" not in again
+    assert "restart" not in again["summary"]
 
 
 def test_the_user_half_hands_back_the_project_line_that_carries_the_agent(
