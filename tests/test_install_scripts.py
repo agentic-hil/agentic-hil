@@ -139,6 +139,8 @@ def _docker() -> str:
             [docker, "version", "--format", "{{.Server.Version}}"],
             capture_output=True,
             text=True,
+        encoding="utf-8",
+        errors="replace",
             timeout=DOCKER_PROBE_TIMEOUT_S,
             check=False,
         )
@@ -213,6 +215,8 @@ def test_the_shell_script_parses_in_a_posix_shell() -> None:
         [shell, "-n", str(SHELL_SCRIPT)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=SCRIPT_TIMEOUT_S,
         check=False,
     )
@@ -234,6 +238,8 @@ def test_the_powershell_script_parses_in_powershell() -> None:
         [powershell, "-NoProfile", "-Command", command],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=SCRIPT_TIMEOUT_S,
         check=False,
     )
@@ -248,6 +254,8 @@ def test_the_shell_script_prints_every_documented_flag() -> None:
         [shell, str(SHELL_SCRIPT), "--help"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=SCRIPT_TIMEOUT_S,
         check=False,
     )
@@ -266,6 +274,8 @@ def test_the_powershell_script_prints_every_documented_flag() -> None:
         [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(POWERSHELL_SCRIPT), "--help"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=SCRIPT_TIMEOUT_S,
         check=False,
     )
@@ -284,6 +294,8 @@ def test_an_unknown_flag_is_refused_by_both_scripts() -> None:
         [shell, str(SHELL_SCRIPT), "--not-a-flag"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=SCRIPT_TIMEOUT_S,
         check=False,
     )
@@ -322,6 +334,12 @@ mkdir -p "$HOME" /work/bin
 printf '#!/bin/sh\nexit 0\n' > /work/bin/claude
 chmod +x /work/bin/claude
 export PATH="/work/bin:$HOME/.local/bin:$PATH"
+
+# The line is typed in a firmware project, not in the home directory or at the
+# filesystem root: from those, the user-file safety check reads every path as
+# inside the working directory and refuses (its own issue, filed separately).
+mkdir -p "$HOME/project"
+cd "$HOME/project"
 
 sh /repo/install.sh
 
@@ -362,6 +380,8 @@ def test_the_one_liner_installs_the_machine_half_in_a_fresh_container() -> None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=CONTAINER_TIMEOUT_S,
         check=False,
     )
