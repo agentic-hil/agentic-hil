@@ -42,13 +42,17 @@ The easiest path: copy/paste this prompt to your AI agent:
 Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md to install Agentic HIL and set it up for this project.
 ```
 
-Here is that prompt doing the whole thing, unscripted:
+### It installs itself
+
+That prompt doing the whole thing, unscripted:
 
 https://github.com/user-attachments/assets/ba9d58b2-6cd7-457b-ac74-d5cecdebe9d2
 
 One step stays yours after `setup` finishes: **restart your agent once** (or open a new session). The agent CLI reads MCP registrations when a session starts, so the freshly registered `agentic-hil` server and its tools appear at the next start, not in the session that installed them.
 
-And here is the same agent, after that restart, making the board say it and proving the board said it:
+### It proves itself on the board
+
+The same agent after that restart, making the board say it and proving the board said it:
 
 <!-- demo-video-part-2: drop the recorded proof demo here (drag the .mp4 into this file in GitHub's web editor; the uploaded attachment renders as an inline player) -->
 
