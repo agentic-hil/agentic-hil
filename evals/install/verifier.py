@@ -895,6 +895,67 @@ def registration(agent: str) -> tuple[str, list[str], dict[str, Any]]:
     return command, entry.get("args", []), entry
 
 
+def registration_uses_trusted_launcher(agent: str, launcher: Path | None, *, launcher_trusted: bool) -> tuple[bool, str]:
+    """Whether the agent's MCP entry starts this release's trusted launcher.
+
+    Absence is a finding, never a stack trace. An agent configuration that is not
+    there, or that registers no server under this name, is a run that did not
+    register one, and the check says exactly that: `ValueError: path component
+    cannot be inspected: /home/eval/.claude.json` said a run had failed without
+    saying what it did, and it is also what routing reads to decide whether a run
+    even had a server to route through.
+
+    A file that is there but cannot be read is `not checked: <why>`, because
+    unknown is not absent. Everything else keeps its teeth: an unsafe path, a
+    file that does not parse, an entry naming another program and an entry
+    carrying `cwd`, `env` or `AGENTIC_HIL_CONFIG` are all findings about what
+    the run did.
+
+    This is the treatment #215 gave the skill check, applied to the registration.
+    """
+    path = agent_config_path(agent, HOME)
+    if not os.path.lexists(path):
+        return False, f"no registration: {agent} has no configuration at {path}"
+    safe, detail = safe_owned_path(path, HOME)
+    if not safe:
+        return False, detail
+    if not path.is_file():
+        return False, f"no registration: {path} is not a regular file"
+    try:
+        command, arguments, entry = registration(agent)
+    except OSError as error:
+        return False, f"not checked: {type(error).__name__}: {error}"
+    except (KeyError, IndexError):
+        return False, f"no registration: {path} names no agentic-hil MCP server"
+    except Exception as error:
+        # A configuration that does not parse, or an entry whose command is not
+        # a string: the file is there and readable, so this is what the run left
+        # behind rather than something the verifier could not reach.
+        return False, f"no usable registration in {path}: {type(error).__name__}: {error}"
+
+    if not isinstance(entry, dict):
+        return False, f"no usable registration in {path}: the agentic-hil entry is not a table"
+    if not isinstance(command, str) or not command:
+        return False, f"no usable registration in {path}: the agentic-hil entry names no command"
+    if not isinstance(arguments, list) or any(not isinstance(item, str) for item in arguments):
+        return False, f"no usable registration in {path}: the agentic-hil entry's args are not a list of strings"
+    command_path = Path(command)
+    try:
+        same_launcher = launcher is not None and command_path.is_absolute() and command_path.resolve(strict=True) == launcher.resolve(strict=True)
+    except OSError as error:
+        return False, f"the registered command does not resolve: {command}: {error}"
+    forbidden_fields = sorted({"cwd", "env", "environment"} & entry.keys())
+    # `default=str` because TOML carries dates and times as objects: the check
+    # that exists to stop answering with an exception may not raise one itself.
+    clean = arguments == ["mcp-stdio"] and not forbidden_fields and "AGENTIC_HIL_CONFIG" not in json.dumps(entry, sort_keys=True, default=str)
+    detail = f"command={command}; args={arguments}; forbidden_fields={forbidden_fields}"
+    if launcher is None:
+        return False, f"{detail}; no agentic-hil launcher is on PATH to compare it against"
+    if not launcher_trusted:
+        return False, f"{detail}; the launcher at {launcher} is not this release's"
+    return launcher_trusted and same_launcher and clean, detail
+
+
 MANAGED_MCP_MARKERS = (
     "# >>> agentic-hil mcp (managed) >>>",
     "# <<< agentic-hil mcp (managed) <<<",
@@ -1629,26 +1690,11 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
             add("agent skill is discoverable by its CLI", lambda: skill_registered(agent, installed_skill))
             add("superseded skill removed", lambda: no_superseded_skill(agent))
 
-        registered_ok = False
-        try:
-            command, arguments, entry = registration(agent)
-            command_path = Path(command)
-            same_launcher = (
-                launcher is not None
-                and command_path.is_absolute()
-                and command_path.resolve(strict=True) == launcher.resolve(strict=True)
-            )
-            forbidden_fields = sorted({"cwd", "env", "environment"} & entry.keys())
-            clean = (
-                arguments == ["mcp-stdio"]
-                and not forbidden_fields
-                and "AGENTIC_HIL_CONFIG" not in json.dumps(entry, sort_keys=True)
-            )
-            registered_ok = launcher_trusted and same_launcher and clean
-            registration_detail = f"command={command}; args={arguments}; forbidden_fields={forbidden_fields}"
-        except Exception as error:
-            registration_detail = f"{type(error).__name__}: {error}"
-        checks.append(Check("MCP registration uses trusted launcher", registered_ok, registration_detail))
+        add(
+            "MCP registration uses trusted launcher",
+            lambda: registration_uses_trusted_launcher(agent, launcher, launcher_trusted=launcher_trusted),
+        )
+        registered_ok = checks[-1].ok
 
         if trusted_package_ready:
             add(

@@ -1000,3 +1000,111 @@ def test_the_binding_predicate_reads_field_and_summary_as_well_as_the_two_roots(
     named, _detail = verifier.workspace_binding_named(refusal, Path("/tmp/other"))
 
     assert named is expected
+
+
+# --- 220: absence is a finding, not a stack trace ----------------------------
+
+
+@pytest.fixture
+def registration_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(verifier, "HOME", home)
+    monkeypatch.setattr(verifier, "safe_owned_path", lambda path, root, **_: (True, str(path)))
+    return home
+
+
+def test_an_absent_registration_file_is_a_finding_not_an_exception(registration_home: Path) -> None:
+    """`ValueError: path component cannot be inspected: /home/eval/.claude.json`.
+
+    That is what this check answered in the 215 control-arm proof, which said a
+    run had failed without saying what it did; routing also reads this check to
+    decide whether a run even had a server to route through.
+    """
+    ok, detail = verifier.registration_uses_trusted_launcher(
+        "claude-code", Path("/home/eval/.local/bin/agentic-hil"), launcher_trusted=True
+    )
+
+    assert not ok
+    assert detail.startswith("no registration:")
+    assert "ValueError" not in detail
+    assert str(agent_config_path("claude-code", registration_home)) in detail
+
+
+def test_a_registration_file_naming_no_agentic_hil_server_is_a_finding(registration_home: Path) -> None:
+    path = agent_config_path("claude-code", registration_home)
+    path.write_text(json.dumps({"mcpServers": {"operator-tool": {"command": "/usr/bin/true"}}}), encoding="utf-8")
+
+    ok, detail = verifier.registration_uses_trusted_launcher(
+        "claude-code", Path("/home/eval/.local/bin/agentic-hil"), launcher_trusted=True
+    )
+
+    assert not ok
+    assert "names no agentic-hil MCP server" in detail
+
+
+def test_a_registration_file_that_does_not_parse_is_a_finding(registration_home: Path) -> None:
+    path = agent_config_path("claude-code", registration_home)
+    path.write_text("{ not json", encoding="utf-8")
+
+    ok, detail = verifier.registration_uses_trusted_launcher(
+        "claude-code", Path("/home/eval/.local/bin/agentic-hil"), launcher_trusted=True
+    )
+
+    assert not ok
+    assert "no usable registration" in detail
+
+
+def test_a_registration_file_that_cannot_be_read_is_reported_as_not_checked(
+    monkeypatch: pytest.MonkeyPatch,
+    registration_home: Path,
+) -> None:
+    """Unreachable is not absent, and neither of them is a traceback."""
+    path = agent_config_path("claude-code", registration_home)
+    path.write_text("{}", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def refuse(self: Path, *arguments: object, **keywords: object) -> str:
+        if self == path:
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *arguments, **keywords)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", refuse)
+
+    ok, detail = verifier.registration_uses_trusted_launcher(
+        "claude-code", Path("/home/eval/.local/bin/agentic-hil"), launcher_trusted=True
+    )
+
+    assert not ok
+    assert detail.startswith("not checked: PermissionError")
+
+
+def test_a_registration_naming_the_trusted_launcher_still_passes(registration_home: Path, tmp_path: Path) -> None:
+    launcher = tmp_path / "bin" / "agentic-hil"
+    launcher.parent.mkdir()
+    launcher.write_text("#!/usr/bin/python3\n", encoding="utf-8")
+    path = agent_config_path("claude-code", registration_home)
+    path.write_text(
+        json.dumps({"mcpServers": {"agentic-hil": {"command": str(launcher), "args": ["mcp-stdio"]}}}),
+        encoding="utf-8",
+    )
+
+    ok, detail = verifier.registration_uses_trusted_launcher("claude-code", launcher, launcher_trusted=True)
+
+    assert ok, detail
+    assert "forbidden_fields=[]" in detail
+
+
+def test_a_registration_carrying_a_config_override_is_still_refused(registration_home: Path, tmp_path: Path) -> None:
+    """The teeth stay where they were: this is what the check is for."""
+    launcher = tmp_path / "bin" / "agentic-hil"
+    launcher.parent.mkdir()
+    launcher.write_text("#!/usr/bin/python3\n", encoding="utf-8")
+    path = agent_config_path("claude-code", registration_home)
+    entry = {"command": str(launcher), "args": ["mcp-stdio"], "env": {"AGENTIC_HIL_CONFIG": "/workspace/project/config.yaml"}}
+    path.write_text(json.dumps({"mcpServers": {"agentic-hil": entry}}), encoding="utf-8")
+
+    ok, detail = verifier.registration_uses_trusted_launcher("claude-code", launcher, launcher_trusted=True)
+
+    assert not ok
+    assert "forbidden_fields=['env']" in detail
