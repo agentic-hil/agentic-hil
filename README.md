@@ -36,19 +36,32 @@ Deny-by-default permissions per device, every hardware action validated, leased 
 
 ## Install
 
-The easiest path: copy/paste this prompt to your AI agent:
-
-```text
-Read and follow the complete guide at https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md to install Agentic HIL and set it up for this project.
+```bash
+curl -LsSf https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh | sh
 ```
 
-### It installs itself
+```powershell
+irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 | iex
+```
 
-That prompt doing the whole thing, unscripted:
+One line installs the package user-local (through `uv` where it exists, `pip --user` otherwise) and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository: no project configuration is written, no shell profile is edited. To read it before you run it, download the script, verify it against the `install.sh.sha256` (or `install.ps1.sha256`) asset published with the release, and run the file you checked:
 
-https://github.com/user-attachments/assets/ba9d58b2-6cd7-457b-ac74-d5cecdebe9d2
+```bash
+curl -LsSfO https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh
+curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh.sha256
+sha256sum -c install.sh.sha256 && sh install.sh
+```
 
-One step stays yours after `setup` finishes: **restart your agent once** (or open a new session). The agent CLI reads MCP registrations when a session starts, so the freshly registered `agentic-hil` server and its tools appear at the next start, not in the session that installed them.
+Pass `--agent claude-code` (or `codex`, `opencode`) to register one agent instead of all of them, `--help` for the rest; piped, that reads `| sh -s -- --agent claude-code`. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
+
+If you would rather drive your own package manager, the same two halves by hand:
+
+```bash
+uv tool install "agentic-hil[can]"               # or: pip install --user "agentic-hil[can]"
+agentic-hil agent-install --agent claude-code    # or: codex / opencode
+```
+
+[Installation](docs/installation.md) has `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend; [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
 
 ### It proves itself on the board
 
@@ -57,17 +70,6 @@ The same agent after that restart, making the board say it and proving the board
 <!-- demo-video-part-2: drop the recorded proof demo here (drag the .mp4 into this file in GitHub's web editor; the uploaded attachment renders as an inline player) -->
 
 Nothing in that run is staged: the firmware is written on the spot, `flash_firmware` and `com_read` go through the gate, the twelve bytes come back off the wire, and the plan it writes afterwards is run once green and once against the wrong expectation, because a test that cannot fail proves nothing.
-
-Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md): everything installs user-local, **no admin rights required, ever**. The same is true doing it by hand, from the firmware project root:
-
-```bash
-pip install --user agentic-hil
-agentic-hil setup                 # add --agent codex or --agent opencode for those
-```
-
-`setup` installs the agent skill, registers the MCP server with a verified absolute executable path, creates the policy file outside the repository, and runs `doctor`. It prints where that file landed: review it, and take back whatever this bench should not have. Your agent's host will ask you to approve the command once, because it writes the agent's own skill file and MCP registration.
-
-If `pip` is missing, Python is externally managed, or `agentic-hil` does not end up on `PATH`, use `uv tool install agentic-hil` or `pipx install agentic-hil` instead and rerun `setup`. [Installation](docs/installation.md) has the two halves `setup` composes, the optional extras, and upgrading; [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
 
 ## Quickstart: one real run
 
