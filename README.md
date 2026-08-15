@@ -48,6 +48,12 @@ https://github.com/user-attachments/assets/ba9d58b2-6cd7-457b-ac74-d5cecdebe9d2
 
 One step stays yours after `setup` finishes: **restart your agent once** (or open a new session). The agent CLI reads MCP registrations when a session starts, so the freshly registered `agentic-hil` server and its tools appear at the next start, not in the session that installed them.
 
+And here is the same agent, after that restart, making the board say it and proving the board said it:
+
+<!-- demo-video-part-2: drop the recorded proof demo here (drag the .mp4 into this file in GitHub's web editor; the uploaded attachment renders as an inline player) -->
+
+Nothing in that run is staged: the firmware is written on the spot, `flash_firmware` and `com_read` go through the gate, the twelve bytes come back off the wire, and the plan it writes afterwards is run once green and once against the wrong expectation, because a test that cannot fail proves nothing.
+
 Agents follow [AI_AGENT_QUICKSTART.md](AI_AGENT_QUICKSTART.md): everything installs user-local, **no admin rights required, ever**. The same is true doing it by hand, from the firmware project root:
 
 ```bash
