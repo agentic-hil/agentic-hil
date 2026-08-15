@@ -426,7 +426,11 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
         extras_warning = missing_configured_extras(load_cli_authoritative_config(None))
     summary = f"Agentic HIL upgraded from {previous_version} to {current_version}; restart agent hosts to load the new MCP server."
     if rewritten:
-        summary += f" The MCP registration was rewritten for {_named_agents(rewritten)}, so restart {_named_agents(rewritten)} to load it."
+        # An agent host reads its MCP registration at startup, so the agent
+        # whose entry moved is the one that has to be restarted before it uses
+        # the launcher this upgrade resolved.
+        hosts = _named_agents(rewritten)
+        summary += f" The MCP registration was rewritten for {hosts}, so restart {hosts} to load it."
     if failed:
         # Not a failed upgrade. The package moved; what did not is a file this
         # command maintains for somebody else's program, and each entry carries
@@ -545,21 +549,20 @@ def _refresh_one_agent(agent: SkillAgent, maintenance_cwd: str) -> JsonObject:
         with suppress(json.JSONDecodeError):
             child["result"] = json.loads(completed.stdout)
     reported = child.get("result")
-    steps = reported.get("steps", {}) if isinstance(reported, dict) else {}
+    steps = reported.get("steps") if isinstance(reported, dict) else None
     steps = steps if isinstance(steps, dict) else {}
-    skill_step = steps.get("skill_install")
     mcp_step = steps.get("mcp_config")
-    skill = completed.returncode == 0 and _step_succeeded(skill_step)
+    skill = completed.returncode == 0 and _step_succeeded(steps.get("skill_install"))
     registration = completed.returncode == 0 and _step_succeeded(mcp_step)
-    ok = completed.returncode == 0 and skill and registration
+    ok = skill and registration
     return {
         **outcome,
         "ok": ok,
         "skill": skill,
-        # An entry that already named this launcher is in place and current, so
-        # it counts as refreshed; it was not rewritten, and only a rewrite is
-        # something an agent host has to be restarted to pick up.
         "registration": registration,
+        # An entry that already named this launcher is in place and current, so
+        # it counts as refreshed. It was not rewritten, and only a rewrite is
+        # something an agent host has to be restarted to pick up.
         "registration_rewritten": registration and not (isinstance(mcp_step, dict) and mcp_step.get("skipped") is True),
         "install": child,
         "summary": (
