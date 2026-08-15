@@ -350,15 +350,23 @@ For the operator case, `lease-status` carries a `quarantine_guidance` entry per 
 
 Use `agentic-hil upgrade` to move an existing installation forward. It upgrades through the manager that owns the interpreter running it (`uv tool`, `pipx`, `uv pip`, or `pip`) instead of whichever `agentic-hil` `PATH` resolves first, so a second copy is never upgraded by mistake. Restart the agent hosts afterwards; they load the MCP server at startup and keep running the old one until they do.
 
-**Read the version, not the exit code.** The result distinguishes three outcomes, because the package manager does not: `uv tool upgrade` exits 0 for "upgraded" and for "nothing to do" alike, and reading that code alone once made every no-op report success and send the operator to a restart that reloaded the same release.
+An upgrade that moved the version also rewrites what it had written outside the package: the agent skill file and the user-level MCP registration, for every agent that already has one of the two, out of the new release and never for an agent that was never set up. `refreshed` on the result reports both halves per agent, a refresh that failed carries the line that finishes it by hand and does not fail the upgrade, and an agent whose registration was rewritten is named in the summary because that is the one its host has to be restarted to pick up. `--agent` narrows that set and never widens it.
+
+**Read the version, not the exit code.** The result distinguishes these outcomes, because the package manager does not: `uv tool upgrade` exits 0 for "upgraded" and for "nothing to do" alike, and reading that code alone once made every no-op report success and send the operator to a restart that reloaded the same release.
 
 | Result | What happened | What to do |
 |---|---|---|
 | `ok: true`, `restart_required: true` | `previous_version` and `version` differ; the summary names both | Restart the agent hosts |
 | `ok: true`, `already_current: true` | Nothing newer to install; both version fields are the same number | Nothing. Do not restart: the same release would be reloaded |
 | `ok: false`, `error_type: upgrade_blocked_by_pin` | The manager records an exact version pin, so the upgrade could not move it | Run the line in `reinstall_command`, with the host stopped |
+| `ok: false`, `error_type: upgrade_failed`, `installation_intact: true` | The manager failed and the installation it was replacing still works; `version` is what it still runs | Fix what the manager reported and run it again. Nothing was lost |
+| `ok: false`, `error_type: installation_broken` | The manager stopped part way and the package did not survive it: `agentic-hil` still starts and dies with a `ModuleNotFoundError` | Run the line in `reinstall_command`, with the host stopped. It carries the extras and the scope this installation had |
 
-Only the pinned case is a refusal, and only it exits non-zero: a machine that is already at the newest release has nothing wrong with it, so a provisioning script may run `agentic-hil upgrade` unconditionally. Read `restart_required` rather than assuming one: it is true on exactly the outcome that replaced something.
+Only the pinned case and the two failures are refusals, and only they exit non-zero: a machine that is already at the newest release has nothing wrong with it, so a provisioning script may run `agentic-hil upgrade` unconditionally. Read `restart_required` rather than assuming one: it is true on exactly the outcome that replaced something.
+
+**Already current installs nothing.** On the `pip` and `uv pip` routes the upgrade command is a plain `install --upgrade`, which decides whether there is anything to do while it is already replacing files. So the resolver is asked first, as that same install with `--dry-run`, and an installation already at the newest release answers `already_current` with `install_skipped: true` before any command that could remove a file has run. `uv tool upgrade` and `pipx upgrade` answer that question inside the manager and are not asked twice.
+
+**A failed upgrade says whether it left an installation.** After the manager stops, `agentic-hil upgrade` runs the same import the console script runs, through the same interpreter. That is the difference between the two failure rows above, and it is measured rather than assumed. On a per-user `pip` installation the upgrade also passes `--user`, which keeps the replacement in the same directory the old copy was in; without it pip uninstalls from the per-user site and installs into the interpreter's default site, and a failure between those two steps is what leaves a console script with no package under it.
 
 An exact pin comes from the requirement the installation was created with: `uv tool install "agentic-hil==X.Y.Z"` records `==X.Y.Z`, and every later `uv tool upgrade` honours it and reports `hint: agentic-hil is pinned to ... (installed with an exact version pin)` on stderr. The Claude Code plugin's skill installs that way on purpose (it ships guidance for one release and says so), so a bench set up from the plugin is the case this refusal names. `reinstall_command` is the fix, and it carries the extras `installed_extras` found on the installation; `uv`'s own hint suggests `agentic-hil@latest`, which re-resolves the bare distribution and uninstalls whatever `[can]` or `[pyocd]` brought in. Stop the agent host before running it: it reinstalls the environment, and none of `uv tool install`'s forms have the `installation_in_use` check. Agentic HIL never runs that reinstall for you: which version a machine runs is the operator's decision, and a pin can be deliberate.
 
@@ -372,7 +380,7 @@ ModuleNotFoundError: No module named 'agentic_hil'
 
 `agentic-hil upgrade` refuses with `installation_in_use` before anything is removed, naming each holding process by pid and image path, and leaves the installation working. Close the host and run it again. Running `uv tool install --upgrade` or `uv tool install --force` by hand is what the refusal is protecting against: those have no such check.
 
-If an upgrade already destroyed the installation, nothing is recoverable in place; reinstall it, naming the extras, and take the environment name from the error message:
+If an upgrade already destroyed the installation, nothing is recoverable in place; reinstall it, naming the extras. When the destruction happened under `agentic-hil upgrade` itself, that result is `installation_broken` and `reinstall_command` on it is already the exact line for this machine, extras included. When it happened under a manager run by hand, take the environment name from the error message:
 
 ```bash
 uv tool install --force "agentic-hil[pyocd]"     # or pipx install --force "agentic-hil[pyocd]"
