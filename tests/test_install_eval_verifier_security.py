@@ -885,3 +885,118 @@ def test_the_config_check_still_refuses_a_schema_version_this_release_cannot_rea
 
     assert not ok
     assert "unsupported config version" in detail
+
+
+# --- 219: the wrong-workspace arm has to prove the binding -------------------
+
+
+def _drive_wrong_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, refusal: dict) -> tuple[bool, str]:
+    """Run both arms with the named one answering exactly this refusal."""
+    other = tmp_path / "other-project"
+    monkeypatch.setattr(verifier, "OTHER_WORKSPACE", other)
+    monkeypatch.setattr(verifier, "PROBE_CONFIG_ROOT", tmp_path / "probe-config")
+
+    def session(arguments, cwd, requests, *, config=None, config_home=None):  # type: ignore[no-untyped-def]
+        if config is not None:
+            return SimpleNamespace(returncode=1, stdout=json.dumps(refusal), stderr=""), []
+        # The discovered arm, answering the way the release does: a server bound
+        # to the other directory, refusing the hardware tool as unconfigured.
+        answer = {"ok": False, "error_type": "config_file_not_found", "workspace_root": str(other)}
+        response = {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"text": json.dumps(answer)}]}}
+        return SimpleNamespace(returncode=0, stdout="", stderr=""), [response]
+
+    monkeypatch.setattr(verifier, "one_shot_session", session)
+    return verifier.wrong_workspace_fails(["mcp-stdio"], tmp_path / "config.yaml")
+
+
+def test_the_wrong_workspace_arm_rejects_a_config_invalid_that_never_reached_the_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Found while proving 215, and the reason this arm exists at all.
+
+    A configuration referencing an unresolvable debugger script is refused with
+    `config_invalid` before the workspace binding is ever asked about, so the arm
+    could pass without proving what it exists to prove.
+    """
+    ok, detail = _drive_wrong_workspace(
+        monkeypatch,
+        tmp_path,
+        {
+            "ok": False,
+            "error_type": "config_invalid",
+            "summary": "Configured executable could not be resolved at startup.",
+            "field": "debuggers.dut.executable",
+            "value": "openocd",
+        },
+    )
+
+    assert not ok
+    assert "nothing in the refusal names the workspace binding" in detail
+
+
+def test_the_wrong_workspace_arm_accepts_a_refusal_that_names_both_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    other = tmp_path / "other-project"
+    ok, detail = _drive_wrong_workspace(
+        monkeypatch,
+        tmp_path,
+        {
+            "ok": False,
+            "error_type": "config_invalid",
+            "summary": "The authoritative config is bound to a different workspace.",
+            "workspace_root": "/workspace/project",
+            "expected_workspace": str(other),
+        },
+    )
+
+    assert ok, detail
+    assert "expected_workspace" in detail
+
+
+def test_the_wrong_workspace_arm_rejects_a_binding_refusal_about_another_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A refusal naming some other pair of roots proves nothing about this probe."""
+    ok, detail = _drive_wrong_workspace(
+        monkeypatch,
+        tmp_path,
+        {
+            "ok": False,
+            "error_type": "config_invalid",
+            "summary": "The authoritative config is bound to a different workspace.",
+            "workspace_root": "/workspace/project",
+            "expected_workspace": "/somewhere/else",
+        },
+    )
+
+    assert not ok
+    assert "/somewhere/else" in detail
+
+
+def test_the_wrong_workspace_arm_still_rejects_a_refusal_that_never_read_the_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ok, detail = _drive_wrong_workspace(monkeypatch, tmp_path, {"ok": False, "error_type": "config_file_not_found"})
+
+    assert not ok
+    assert "refused for the wrong reason" in detail
+
+
+@pytest.mark.parametrize(
+    ("refusal", "expected"),
+    [
+        ({"field": "workspace_root", "summary": "workspace_root must be an existing directory."}, True),
+        ({"summary": "The authoritative config is bound to a different workspace."}, True),
+        ({"field": "debuggers.dut.interface_cfg", "summary": "Configured file could not be resolved."}, False),
+        ({}, False),
+    ],
+)
+def test_the_binding_predicate_reads_field_and_summary_as_well_as_the_two_roots(refusal: dict, expected: bool) -> None:
+    named, _detail = verifier.workspace_binding_named(refusal, Path("/tmp/other"))
+
+    assert named is expected

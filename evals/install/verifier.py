@@ -1333,6 +1333,36 @@ def tool_result(responses: list[dict[str, Any]], request_id: int) -> dict[str, A
     return {}
 
 
+def workspace_binding_named(refusal: dict[str, Any], expected_workspace: Path) -> tuple[bool, str]:
+    """Whether a refusal names the workspace binding, and what named it.
+
+    `error_type: config_invalid` on its own proves nothing about the binding.
+    Every document validation failure carries that type, and a configuration
+    whose debugger script cannot be resolved is refused with it long before the
+    binding is ever asked about, so the arm that exists to prove the binding
+    could pass on an unrelated defect.
+
+    Three ways the contract can say it, strongest first. The binding refusal has
+    named both roots since 0.3.0, so `expected_workspace` is the direct proof and
+    is held to naming the directory the server was actually started in: a
+    mismatch there is a refusal about some other pair of roots. `field` and the
+    summary are the other two ways a release can say the same thing, and a
+    refusal that says it either way has reached the binding.
+    """
+    named = refusal.get("expected_workspace")
+    if isinstance(named, str) and named:
+        if Path(named) != expected_workspace:
+            return False, f"the refusal names expected_workspace={named}, not {expected_workspace}"
+        return True, f"expected_workspace={named}; workspace_root={refusal.get('workspace_root')}"
+    field = refusal.get("field")
+    if isinstance(field, str) and field.split(".")[0] == "workspace_root":
+        return True, f"field={field}"
+    summary = refusal.get("summary")
+    if isinstance(summary, str) and "workspace" in summary.casefold():
+        return True, f"summary={summary}"
+    return False, f"nothing in the refusal names the workspace binding; keys={sorted(refusal)}"
+
+
 def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str]:
     """A server started outside the workspace its configuration binds serves nothing of it.
 
@@ -1343,6 +1373,8 @@ def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str
     anything is served: mandatory `workspace_root` binds the file to one project
     root and to no other. That is the arm with the teeth, and it is why the probe
     hands the configuration over explicitly rather than hoping discovery misses it.
+    It is also why the refusal has to name the binding rather than merely carry
+    the type every document defect carries; see `workspace_binding_named`.
 
     Found by discovery it is not found at all, because the other directory hashes
     to a project of its own that has no configuration, and since 0.7.0 that starts a
@@ -1369,10 +1401,15 @@ def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str
         return False, f"the configuration was named from {OTHER_WORKSPACE} and the server initialized anyway; exit={named.returncode}"
     if named.returncode == 0:
         return False, f"the configuration was refused but the server exited 0; error_type={refusal.get('error_type')}"
-    if refusal and refusal.get("error_type") != "config_invalid":
+    if refusal.get("error_type") != "config_invalid":
         # A `config_file_not_found` here would mean the configuration never
-        # reached the server, and the arm proved nothing about the binding.
-        return False, f"refused for the wrong reason: error_type={refusal.get('error_type')}"
+        # reached the server, and the arm proved nothing about the binding. No
+        # document at all is the same nothing: the release prints its refusal on
+        # stdout, so an unparsable exit says only that something went wrong.
+        return False, f"refused for the wrong reason: error_type={refusal.get('error_type', '<no document>')}"
+    binding_named, binding = workspace_binding_named(refusal, OTHER_WORKSPACE)
+    if not binding_named:
+        return False, f"refused with config_invalid, but {binding}"
 
     discovered, discovered_responses = one_shot_session(
         arguments,
@@ -1394,7 +1431,7 @@ def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str
     if served != str(OTHER_WORKSPACE):
         return False, f"a server started in {OTHER_WORKSPACE} bound {served!r}"
     return True, (
-        f"named: exit={named.returncode}, {refusal.get('error_type', '<no document>')}; "
+        f"named: exit={named.returncode}, config_invalid naming the binding ({binding}); "
         f"discovered: exit={discovered.returncode}, {UNPROVISIONED_PROBE_TOOL} refused with "
         f"config_file_not_found for {served}"
     )
