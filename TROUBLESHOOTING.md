@@ -91,7 +91,7 @@ Symptom: `backend_error_type` is `interface_config_not_found`, `target_config_no
 
 Likely cause: OpenOCD cannot find `interface/stlink.cfg` or `target/stm32f4x.cfg`, or the target config does not match the installed OpenOCD layout.
 
-Fix: verify OpenOCD's script directory. In the authoritative config, use absolute paths to host-owned interface and target scripts outside the workspace.
+Fix: verify OpenOCD's script directory. `interface/stlink.cfg` and `target/stm32f4x.cfg` are search names that OpenOCD resolves itself, so the configuration accepts them without a file here and this failure means the installed OpenOCD found no script tree where it looks. Install the scripts, point `OPENOCD_SCRIPTS` at them, or name the files in the authoritative config by absolute path, outside the workspace. Do not write scripts under the system temporary directory and point the config there: that path is refused at load, because it stops describing the bench at the next reboot.
 
 ## 5a. `target_type_invalid` (pyOCD): the CMSIS pack is missing
 

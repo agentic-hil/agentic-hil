@@ -654,14 +654,22 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Check `debuggers.<name>.interface_cfg` and `.target_cfg` against what is installed on this machine; "
-            "`agentic-hil doctor` names the entry and the file it could not use.",
-            "Set them with `project_config_set` to the absolute paths of the scripts for this probe and target. A "
-            "configured script path must be absolute and must live outside the workspace.",
+            "`agentic-hil doctor` names the entry, says of each value whether it is an OpenOCD search name or a path, "
+            "and for a path whether the file is there.",
+            "Set them with `project_config_set`, either to OpenOCD's own script names for this probe and target "
+            "(`interface/stlink.cfg`, `target/stm32f4x.cfg`), which the installed OpenOCD resolves against its script "
+            "path, or to absolute paths of the script files. A configured script path must be absolute and must live "
+            "outside the workspace.",
+            "If the search names do not resolve, the OpenOCD on this machine has no script tree where it expects one: "
+            "install the scripts, or point `OPENOCD_SCRIPTS` at them, or name the files by absolute path.",
         ),
         do_not=(
             "Do not copy OpenOCD scripts into the repository and point the configuration at them. A script inside the "
             "workspace is repository-controlled Tcl running in the debugger, and a configured absolute path inside the "
             "workspace is refused at load for that reason.",
+            "Do not write a script under the system temporary directory and point the configuration there. It is "
+            "cleared without warning, so the file would describe this bench only until the next reboot, and the "
+            "configuration refuses such a path at load.",
             "Do not run `openocd` directly to get past it.",
         ),
     ),
@@ -1782,8 +1790,8 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "probe_id": {"status": "optional", "note": "Adapter serial number, passed as `adapter serial <probe_id>`. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "OpenOCD selects the target through target_cfg."},
         "interface": {"status": "ignored", "note": "OpenOCD selects the transport through interface_cfg."},
-        "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Once this entry names a toolchain it must be an absolute path to an existing file outside the workspace: the relative default is what OpenOCD's own search path would resolve, and what that resolves to is not this configuration's to promise."},
-        "target_cfg": {"status": "required", "default": "target/stm32f4x.cfg", "note": "OpenOCD script, passed as `-f`, absolute and outside the workspace like interface_cfg. Must match the MCU family."},
+        "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Either an OpenOCD search name such as `interface/stlink.cfg`, which OpenOCD resolves against its own script path and which therefore does not have to exist on this host, or an absolute path to an existing file outside the workspace. A path under the system temporary directory is refused: it is cleared without warning and the configuration would stop describing this bench."},
+        "target_cfg": {"status": "required", "default": "target/stm32f4x.cfg", "note": "OpenOCD script, passed as `-f`, a search name or an absolute path outside the workspace like interface_cfg. Must match the MCU family."},
         "flash_address": {"status": "ignored", "note": "OpenOCD takes the load address from the image."},
     },
     "stlink": {
@@ -2290,10 +2298,13 @@ debuggers:
     type: "openocd"
     executable: null            # resolved from PATH when this file is loaded
     probe_id: "066AFF495451885087171450"
-    # Absolute, and outside workspace_root. An OpenOCD entry that anything can
-    # reach — and under version 2 reading reaches every entry — is refused with
-    # relative script names: those resolve out of OPENOCD_SCRIPTS and the
-    # per-user script directories, which is not a path this file states.
+    # Spelled as paths here, so this bench names the exact scripts it runs
+    # rather than whatever OPENOCD_SCRIPTS and the per-user script directories
+    # resolve on the day. A path is checked as one: absolute, outside
+    # workspace_root, an existing file, and never under the system temporary
+    # directory. The other spelling is `interface/stlink.cfg`, OpenOCD's own
+    # search name, which the installed OpenOCD resolves and this file does not
+    # promise a location for.
     interface_cfg: "C:/tools/openocd/share/openocd/scripts/interface/stlink.cfg"
     target_cfg: "C:/tools/openocd/share/openocd/scripts/target/stm32f4x.cfg"
     timeout_s: 60
@@ -2895,6 +2906,8 @@ target_type: stm32f446retx   # also accepted: stm32f446re
 # stlink
 interface: SWD
 ```
+
+The two OpenOCD values above are search names: OpenOCD resolves them against its own script path, so they name no file on this host and the configuration accepts them without one. Give an absolute path instead when this bench should run exactly the script files it names; a path is then checked as a path, and must exist, live outside the workspace, and not be under the system temporary directory.
 
 `flash_address: "0x08000000"` is required only to flash a `.bin` on `stlink` or `pyocd`.
 
