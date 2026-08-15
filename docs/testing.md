@@ -71,6 +71,12 @@ agentic-hil test-reactor --test-config .agentic-hil/testconfig.yaml
 
 See [`examples/testconfig.example.yaml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/testconfig.example.yaml) for the expanded form.
 
+### The two ways to run a plan
+
+An agent runs a plan with the `test_reactor_run` MCP tool; an operator runs it with `agentic-hil test-reactor` at a shell. Both reach the same code, so a plan behaves identically whichever one started it: the same preflight before the first hardware action, the same devices locked for the same duration, the same permission judged per step, the same report at the end. The tool takes `test_config_path` where the command takes `--test-config`, holds it to `workspace_root` the same way, and `detach: true` where the command takes `--detach`. `test_reactor_status` and `test_reactor_stop` answer as `test-reactor-status` and `test-reactor-stop` do.
+
+The tool is the route for an agent because it is the only one an operator can see and audit: a plan run through a shell is a shell command, judged by whatever the agent host makes of it, while a plan run through the tool is coordinated and reported like every other hardware action here. A plan is also a run in its own right, so it needs no `bench_run_start` around it, and a call made while the bench is held by something else is refused with the holder named rather than queued.
+
 ### Detached runs, status and a cooperative stop
 
 A time-bounded endurance plan runs for hours, and a caller that has to sit in front of it for that long is a caller that cannot do anything else. `--detach` runs the plan in its own process and returns at once with a run handle and the path the report will be written to:
@@ -81,7 +87,7 @@ agentic-hil test-reactor-status --run run-3f9c2a1b4e6d8071
 agentic-hil test-reactor-stop   --run run-3f9c2a1b4e6d8071
 ```
 
-The start command answers as soon as the run holds the devices it declared, so a handle it printed is a handle with the bench. The plan is loaded before the worker is started, so a plan that does not load is refused immediately rather than behind a second command. The synchronous invocation is the default and does exactly what it always did; it is registered under a handle too, so a plan running in one terminal can be stopped from another.
+The start command answers as soon as the run holds the devices it declared, so a handle it printed is a handle with the bench. The plan is loaded before the worker is started, so a plan that does not load is refused immediately rather than behind a second command. The synchronous invocation is the default and does exactly what it always did; it is registered under a handle too, so a plan running in one terminal can be stopped from another. Over MCP the same three are `test_reactor_run` with `detach: true`, `test_reactor_status` with `run`, and `test_reactor_stop` with `run`; the handle is the same handle, so a run an agent detached is one an operator can ask about and end from a shell, and the other way round.
 
 `test-reactor-status` answers for one handle: running, with the step and, inside a `repeat`, the iteration it is on; finished or stopped, with the report path and the verdict; or worker gone. Without `--run` it lists the runs the bench still has records of. Whether the process behind a handle is still there is asked of the operating system rather than of a process id: a run holds a lock for as long as it runs, so a lock that can be taken is a run whose process has ended, however it ended.
 

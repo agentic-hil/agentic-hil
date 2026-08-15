@@ -31,14 +31,21 @@ def _evidence(result: subprocess.CompletedProcess[str]) -> str:
 
 
 def _built_at(docker: str) -> datetime | None:
-    """When this image was built, or None if it is not on this machine."""
-    result = subprocess.run(
-        [docker, "image", "inspect", "--format", "{{.Created}}", IMAGE],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
+    """When this image was built, or None if this machine cannot answer.
+
+    None covers the absent image and the unreachable daemon alike: a healthy
+    daemon answers an inspect in milliseconds, and one that hangs the whole
+    timeout is a machine these tests must skip on, not fail on."""
+    try:
+        result = subprocess.run(
+            [docker, "image", "inspect", "--format", "{{.Created}}", IMAGE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None
     if result.returncode != 0:
         return None
     try:
@@ -53,7 +60,7 @@ def _in_image(*arguments: str) -> subprocess.CompletedProcess[str]:
         pytest.skip("Docker is not installed on this machine")
     built = _built_at(docker)
     if built is None:
-        pytest.skip(f"the eval image {IMAGE} is not built here; {BUILD_HINT}")
+        pytest.skip(f"the eval image {IMAGE} is not reachable here (no daemon, or not built); {BUILD_HINT}")
     # An image built before the Dockerfile it should come from answers about a
     # tree nobody is asking about. That is not a failing image, it is a stale
     # one, and this asks about the image rather than about the checkout it lags.

@@ -37,3 +37,6 @@ project_config_reload_description
 project_config_set
 reset_target
 server_upgrade
+test_reactor_run
+test_reactor_status
+test_reactor_stop
