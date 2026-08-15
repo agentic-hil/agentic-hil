@@ -702,13 +702,10 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
     # "nothing can drive this entry" are the same set.
     #
     # The shipped OpenOCD skeleton is the one entry pinning does not go looking
-    # for a toolchain for. It is also the only entry allowed to keep the two
-    # relative script names, and those two facts have to travel together:
-    # autodetection used to resolve `openocd` off PATH for it as well, so on any
-    # host with OpenOCD installed `agentic-hil init` left behind an entry that
-    # granted everything, had a real program behind it, and drove
-    # a board with `interface/stlink.cfg` — skipped by `doctor` and exempt from
-    # the absolute-and-outside-the-workspace rule, because both keyed on it being
+    # for a toolchain for: autodetection used to resolve `openocd` off PATH for
+    # it as well, so on any host with OpenOCD installed `agentic-hil init` left
+    # behind an entry that granted everything, had a real program behind it, and
+    # drove a board while `doctor` skipped it, because the skip keyed on it being
     # the starter entry. It stays inert until somebody names an executable in it.
     starter = debugger_is_starter_entry(debugger)
     candidates = (
@@ -756,14 +753,15 @@ def pinned_debugger_scripts(config: AgenticHILConfig, debugger: DebuggerConfig, 
     changes which permissions apply to an entry has to ask this again, so it has
     to be callable on its own.
 
-    Idempotent: an already-validated absolute path resolves to itself, so running
-    it a second time over the same entry changes nothing.
+    Idempotent: a search name is kept as written and an already-validated
+    absolute path resolves to itself, so running it a second time over the same
+    entry changes nothing.
     """
     if debugger_drives_hardware(config, debugger) and debugger.type == "openocd":
         return replace(
             debugger,
-            interface_cfg=configured_external_file(config, debugger.interface_cfg, f"{field_prefix}.interface_cfg"),
-            target_cfg=configured_external_file(config, debugger.target_cfg, f"{field_prefix}.target_cfg"),
+            interface_cfg=configured_openocd_script(config, debugger.interface_cfg, f"{field_prefix}.interface_cfg"),
+            target_cfg=configured_openocd_script(config, debugger.target_cfg, f"{field_prefix}.target_cfg"),
         )
     return debugger
 
@@ -899,6 +897,113 @@ def disabled_executable_path(config: AgenticHILConfig, field: str) -> str:
 def executable_is_disabled(executable: str) -> bool:
     """Whether this is the placeholder pinning writes rather than a real toolchain."""
     return Path(executable).name.startswith(DISABLED_EXECUTABLE_PREFIX)
+
+
+# The two things an OpenOCD script field can hold, and they are not the same
+# kind of statement. `interface/stlink.cfg` is a *search name*: OpenOCD resolves
+# it against its own script tree, and which tree that is belongs to the OpenOCD
+# that runs, not to this file. A path is this configuration's own promise about
+# this host, and it is held to the rule every other configured file is held to.
+OPENOCD_SCRIPT_SEARCH_NAME = "search_name"
+OPENOCD_SCRIPT_PATH = "path"
+
+
+def openocd_script_kind(value: str) -> str:
+    """Whether this script value is an OpenOCD search name or a path on this host.
+
+    A search name is what the generated configuration writes and what OpenOCD's
+    own documentation shows: a forward-slash name with nothing in it that
+    navigates. Everything else is a path (a leading `.` or `~`, a backslash, a
+    drive letter, a leading slash), because everything else is a claim about
+    where a file is, and only this host can answer that.
+    """
+    if not value or value.startswith(("~", ".", "/", "\\")) or "\\" in value:
+        return OPENOCD_SCRIPT_PATH
+    if re.match(r"^[A-Za-z]:", value):
+        return OPENOCD_SCRIPT_PATH
+    if any(not component or component.startswith((".", "~")) for component in value.split("/")):
+        return OPENOCD_SCRIPT_PATH
+    return OPENOCD_SCRIPT_SEARCH_NAME
+
+
+def temporary_roots() -> tuple[Path, ...]:
+    """Every directory this platform calls temporary storage.
+
+    ``tempfile.gettempdir()`` is one of them and not all of them: it answers out
+    of ``TMPDIR``/``TEMP``/``TMP`` when the environment names one, so a bench
+    measured only against it would be measured against whatever root the process
+    that happened to load the configuration inherited. The platform's own fixed
+    locations are listed beside it, POSIX and Windows each with its own, so the
+    same rule holds wherever the config is read.
+    """
+    roots = [Path(tempfile.gettempdir())]
+    if os.name == "nt":
+        for variable in ("TEMP", "TMP"):
+            named = os.environ.get(variable)
+            if named:
+                roots.append(Path(named))
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            roots.append(Path(local_app_data) / "Temp")
+        roots.append(Path(os.environ.get("SYSTEMROOT") or "C:/Windows") / "Temp")
+    else:
+        roots.extend([Path("/tmp"), Path("/var/tmp")])
+    unique: dict[str, Path] = {}
+    for root in roots:
+        unique.setdefault(str(root), root)
+    return tuple(unique.values())
+
+
+def refuse_temporary_debugger_script(config: AgenticHILConfig, value: str, field: str) -> None:
+    """Refuse a script in temporary storage, whichever way the field spells it.
+
+    Asked before the search-name/path split and so of both spellings, because
+    the objection is to where the file is and not to how the value reads. A
+    search name never answers yes, because OpenOCD resolves it against its
+    script tree and never against ``/tmp``, and that is the honest answer for
+    it rather than an exemption.
+
+    This is its own refusal because it is its own defect. An install that could
+    not find a script tree once answered by writing one under ``/tmp`` and
+    pointing the authoritative configuration at it: valid that afternoon, and
+    describing nothing after the next reboot. "Not an existing file" would be
+    the wrong sentence for it, since the file was right there.
+    """
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        return
+    config_file = Path(config.config_path) if config.config_path else None
+    for root in temporary_roots():
+        if not is_path_within(candidate, root):
+            continue
+        # A configuration that lives in temporary storage itself is already as
+        # ephemeral as this field could make it, so the field is not what is
+        # wrong with it and saying so here would name the wrong thing.
+        if config_file is not None and is_path_within(config_file, root):
+            continue
+        raise ConfigError(
+            "config_invalid",
+            "Configured debugger files must not live in system temporary storage: it is cleared without warning, so the configuration would stop describing this bench.",
+            {"field": field, "path": str(candidate), "temporary_root": str(root)},
+        )
+
+
+def configured_openocd_script(config: AgenticHILConfig, value: str, field: str) -> str:
+    """One OpenOCD script field, validated for what it actually is.
+
+    Scoped to the OpenOCD backend on purpose: it is the only one that reads
+    these fields, and the only one whose tool resolves a name of its own. Every
+    other configured file, this backend's paths included, goes through
+    ``configured_external_file`` unchanged.
+    """
+    refuse_temporary_debugger_script(config, value, field)
+    if openocd_script_kind(value) == OPENOCD_SCRIPT_SEARCH_NAME:
+        # Left exactly as written. Resolving it here would put this process's
+        # idea of OpenOCD's script path into the config, and the OpenOCD that
+        # runs is the authority on that; it is passed through to `-f` and the
+        # tool answers for it.
+        return value
+    return configured_external_file(config, value, field)
 
 
 def configured_external_file(config: AgenticHILConfig, value: str, field: str) -> str:
@@ -1241,6 +1346,12 @@ debuggers:
     executable: null
     probe_id: null
     target_type: null
+    # OpenOCD's own script names: OpenOCD resolves these against its script
+    # path when it runs, so they name no file on this machine and nothing here
+    # asks them to. Replace either with an absolute path to a script file when
+    # this bench should run exactly that file; a path must exist, must be
+    # outside workspace_root, and must not be under the system temporary
+    # directory, which is cleared without warning.
     interface_cfg: "interface/stlink.cfg"
     target_cfg: "target/stm32f4x.cfg"
     timeout_s: 60
@@ -2519,11 +2630,10 @@ def debugger_is_starter_entry(debugger: DebuggerConfig) -> bool:
 
     Asked before pinning, and the only entry pinning refuses to find a toolchain
     for. Type and both script names exactly as the skeleton writes them, and no
-    executable named: that combination is the one entry allowed to keep relative
-    script names, and it may keep them only for as long as nothing can run them.
-    Autodetecting `openocd` for it would make "exempt from validation" and
-    "drives nothing" two different sets on any host with OpenOCD installed, which
-    is the hole this predicate closes.
+    executable named: nothing in it says which board this is or what runs it.
+    Autodetecting `openocd` for it would make "drives nothing" and "is checked by
+    nobody" two different sets on any host with OpenOCD installed, which is the
+    hole this predicate closes.
 
     Untouched has to mean untouched, identity included. The predicate once asked
     only about the type, the two script names and the absent executable, and
@@ -2532,13 +2642,12 @@ def debugger_is_starter_entry(debugger: DebuggerConfig) -> bool:
     executable, took the disabled marker instead, and was skipped by `doctor` for
     looking untouched. An entry that names a board is not the shipped skeleton
     however its scripts read; it resolves its toolchain normally and its scripts
-    are validated with everything else's, which for OpenOCD means absolute files
-    outside the workspace.
+    are validated with everything else's, each for what it is: a search name
+    OpenOCD will resolve, or a path that has to exist outside the workspace.
 
     An entry an operator has typed is outside this in the same way — `type:
     stlink` on the skeleton, the documented first edit of `init`, plug the board
-    in, adopt — and it simply has no relative scripts to be exempt about, because
-    no other backend reads them.
+    in, adopt, and its script fields are read by no backend at all.
     """
     skeleton = _skeleton_debugger()
     return (

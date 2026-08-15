@@ -27,6 +27,7 @@ from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     CONFIG_ENV,
     DEFAULT_CONFIG_TEMPLATE,
+    OPENOCD_SCRIPT_SEARCH_NAME,
     ConfigError,
     absolute_without_symlinks,
     atomic_write_text,
@@ -38,6 +39,7 @@ from agentic_hil.config import (
     is_path_within_frozen,
     load_authoritative_config,
     load_config,
+    openocd_script_kind,
     permission_summary,
     project_config_path,
     safe_directory,
@@ -90,7 +92,7 @@ from agentic_hil.tools import (
     narrowed_permissions,
     unbound_debugger_error,
 )
-from agentic_hil.types import AgenticHILConfig, JsonObject
+from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
 from agentic_hil.upgrade import CLI_UPGRADE_TOOL, missing_configured_extras, replace_installation
 
 SKILL_NAME = "agentic-hil"
@@ -1683,9 +1685,10 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narro
         # rather than picking up whatever `openocd` happens to be on PATH.
         next_steps.append(
             "Your debuggers entry names no toolchain yet, so it drives no board however its permissions read. Set "
-            "`executable` to the absolute path of your OpenOCD, STM32CubeProgrammer or pyOCD binary; for OpenOCD also "
-            "set interface_cfg and target_cfg to absolute script paths outside the workspace. `agentic-hil doctor` "
-            "checks the entry from the moment it names one."
+            "`executable` to the absolute path of your OpenOCD, STM32CubeProgrammer or pyOCD binary; for OpenOCD keep "
+            "interface_cfg and target_cfg as OpenOCD script names such as `interface/stlink.cfg`, or give them "
+            "absolute paths to scripts outside the workspace. `agentic-hil doctor` checks the entry from the moment it "
+            "names one."
         )
     next_steps.append(granted_step)
     next_steps.extend([
@@ -2278,6 +2281,30 @@ def config_reload(config_path: str | None = None) -> JsonObject:
     }
 
 
+def _doctor_debugger_scripts(entry: DebuggerConfig) -> JsonObject:
+    """Say what each OpenOCD script field is, rather than what it is not.
+
+    `interface/stlink.cfg` names no file on this host and is not meant to: it is
+    the name OpenOCD resolves against its own script tree. Reported as a missing
+    file it reads as a broken bench, and the first answer an install found for
+    that reading was to fabricate the file under `/tmp` and point the
+    authoritative configuration there. So the report labels the kind, and only a
+    value that claims to be a path on this host is answered with whether it is
+    one.
+    """
+    report: JsonObject = {}
+    for field, value in (("interface_cfg", entry.interface_cfg), ("target_cfg", entry.target_cfg)):
+        kind = openocd_script_kind(value)
+        detail: JsonObject = {"value": value, "kind": kind}
+        if kind == OPENOCD_SCRIPT_SEARCH_NAME:
+            detail["resolved_by"] = "openocd"
+            detail["note"] = "An OpenOCD search name, resolved against OpenOCD's own script path when it runs. It does not name a file on this host and does not have to exist here."
+        else:
+            detail["exists"] = Path(value).is_file()
+        report[field] = detail
+    return report
+
+
 def _section_preview(config: AgenticHILConfig, section: str) -> object:
     if section == "target":
         return asdict(config.target)
@@ -2315,7 +2342,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "ok": True,
         "tool": "debugger_info",
         "skipped": True,
-        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission it can, so what is missing is the toolchain, not a grant — set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary, and for OpenOCD its two scripts as absolute paths outside the workspace.",
+        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission it can, so what is missing is the toolchain, not a grant: set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary. For OpenOCD its two scripts are either OpenOCD's own script names, which it resolves itself, or absolute paths outside the workspace.",
     }
     # Only a definite negative is a failure. A target-support check that could
     # not run said nothing about this configuration, and reporting it as broken
@@ -2387,6 +2414,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
                 "probe_id": entry.probe_id,
                 "bound": name == config.debugger_id,
                 "permissions": asdict(entry.permissions),
+                **({"scripts": _doctor_debugger_scripts(entry)} if entry.type == "openocd" else {}),
                 **({"check": checks[name]} if name in checks else {}),
                 **({"target_support": target_support[name]} if name in target_support else {}),
             }
