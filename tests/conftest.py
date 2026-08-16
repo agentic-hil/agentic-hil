@@ -37,10 +37,12 @@ from support import remove_trusted_launcher  # noqa: E402
 # which is long enough that a per-test TMPDIR derived from it pushes the CAN
 # broker's AF_UNIX socket addresses past the platform's 104-byte limit, and the
 # whole macOS CI matrix failed on exactly that. /tmp is the shortest root every
-# POSIX platform has; the per-process directory under it is this user's own, and
-# everything below stays per-test as before.
+# POSIX platform has; resolved, because on macOS /tmp is itself a symlink to
+# /private/tmp and the path rules refuse a component that is a symlink, so the
+# sandbox has to carry the real spelling. The per-process directory under it is
+# this user's own, and everything below stays per-test as before.
 SANDBOX_PREFIX = "ahil-pt-"
-_SANDBOX_PARENT = Path("/tmp") if os.name == "posix" else Path(tempfile.gettempdir()).resolve()
+_SANDBOX_PARENT = Path("/tmp").resolve() if os.name == "posix" else Path(tempfile.gettempdir()).resolve()
 SANDBOX_ROOT = _SANDBOX_PARENT / f"{SANDBOX_PREFIX}{os.getpid()}"
 # How long a sibling root may sit untouched before a later session sweeps it. A
 # live session creates and removes a sandbox inside its own root on every single
