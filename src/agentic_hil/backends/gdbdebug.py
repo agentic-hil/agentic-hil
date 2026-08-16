@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from agentic_hil.config import ConfigError, display_path, safe_configured_directory
+from agentic_hil.elfsymbols import read_elf_symbol
 from agentic_hil.gdbmi import (
     GdbMiClient,
     GdbMiStopResult,
@@ -498,7 +499,7 @@ class GdbDebugSessions:
         except (ConfigError, OSError) as error:
             return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "output_write_failed", "summary": "Intel HEX output file could not be written.", "backend_error": str(error)})
         self._write_session_log(session)
-        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "symbol": symbol, "address": resolved["address"], "size_bytes": size_bytes, "output": output, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Symbol memory dumped as Intel HEX."})
+        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "symbol": symbol, "address": resolved["address"], "size_bytes": size_bytes, "resolved_from": resolved["resolved_from"], "output": output, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Symbol memory dumped as Intel HEX."})
 
     def close(self) -> None:
         session = self.session
@@ -713,20 +714,68 @@ class GdbDebugSessions:
         return result
 
     def _resolve_symbol(self, tool: str, session: GdbDebugSession, symbol: str) -> JsonObject:
+        """Address and size for one symbol: the debug information first, the ELF's
+        symbol table when the debug information has nothing to say.
+
+        The expression evaluator is asked first because it is the route that
+        understands types, scopes and C++ names. It needs a typed symbol for
+        both `&symbol` and `sizeof(symbol)`, and an object the assembler defined
+        with `.global` / `.type` / `.size` and no DWARF has no type for either,
+        the vector table being the standard example. That symbol is not
+        under-specified, it is described somewhere else: `st_value` and
+        `st_size` are in the symbol table of the very ELF this session loaded,
+        so that is where the answer comes from when GDB declines (#187).
+
+        The fallback narrows nothing. The allowlist is checked before either
+        route runs, `debug.max_dump_size_bytes` is applied by the callers to
+        whichever size came back, and a symbol neither route can describe is
+        refused exactly as it was before, now naming what the symbol table said
+        as well.
+        """
         validated = self._validate_symbol(tool, symbol)
         if not validated["ok"]:
             return validated
-        address_response = self._gdb_command(session, f"-data-evaluate-expression {mi_string(f'(unsigned long)&{symbol}')}")
-        if not address_response.ok:
-            return self._symbol_failure(tool, symbol, address_response.error_message, address_response.timed_out)
-        address_value = parse_gdb_integer(mi_field(address_response.line, "value"))
-        size_response = self._gdb_command(session, f"-data-evaluate-expression {mi_string(f'sizeof({symbol})')}")
-        if not size_response.ok:
-            return self._symbol_failure(tool, symbol, size_response.error_message, size_response.timed_out)
-        size_value = parse_gdb_integer(mi_field(size_response.line, "value"))
-        if address_value is None or size_value is None:
+        # The stop reason as it stood before the queries. An untyped symbol makes
+        # GDB answer `^error`, and _gdb_command records every failed command as a
+        # debugger_error stop, which would make the next debug_continue
+        # short-circuit on "Target is already stopped" because a symbol lookup
+        # took the second route. Restored below for the same reason
+        # clear_breakpoints restores it: resolving a symbol does not change
+        # target execution state.
+        prior_stop_reason = session.stop_reason
+        address_value, failed = self._evaluate_symbol_expression(session, f"(unsigned long)&{symbol}")
+        size_value = None
+        if failed is None:
+            size_value, failed = self._evaluate_symbol_expression(session, f"sizeof({symbol})")
+        if failed is None:
+            return {"ok": True, "symbol": symbol, "address": hex(int(address_value)), "address_value": int(address_value), "size_bytes": int(size_value), "resolved_from": "debug_info"}
+        if failed.timed_out or getattr(failed, "audit_failure", False):
+            # A query that never got an answer says nothing about the symbol. The
+            # symbol table would answer a question the caller never got to ask
+            # and would hide a debugger that has stopped responding or an audit
+            # trail that has broken, so neither is covered by this fallback.
+            return self._symbol_expression_failure(tool, symbol, failed)
+        table = read_elf_symbol(str(session.artifact["resolved_path"]), symbol)
+        if not table["ok"]:
+            return {**self._symbol_expression_failure(tool, symbol, failed), "symbol_table_lookup": table["reason"]}
+        if session.stop_reason is not None and str(session.stop_reason.get("stop_reason")) == "debugger_error":
+            session.stop_reason = prior_stop_reason
+        address = int(table["address"])
+        return {"ok": True, "symbol": symbol, "address": hex(address), "address_value": address, "size_bytes": int(table["size_bytes"]), "resolved_from": "elf_symbol_table"}
+
+    def _evaluate_symbol_expression(self, session: GdbDebugSession, expression: str) -> tuple[int | None, object | None]:
+        """One expression evaluation, as a value or as the response that did not
+        produce one. The response travels back rather than a message, because
+        whether it timed out and whether the audit latch refused it decide
+        whether the symbol table may be consulted at all."""
+        response = self._gdb_command(session, f"-data-evaluate-expression {mi_string(expression)}")
+        value = parse_gdb_integer(mi_field(response.line, "value")) if response.ok else None
+        return value, None if value is not None else response
+
+    def _symbol_expression_failure(self, tool: str, symbol: str, response: object) -> JsonObject:
+        if getattr(response, "ok", False):
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "symbol_resolution_failed", "summary": "GDB returned an unparsable symbol address or size.", "symbol": symbol, "side_effect_committed": False}
-        return {"ok": True, "symbol": symbol, "address": hex(address_value), "address_value": address_value, "size_bytes": size_value}
+        return self._symbol_failure(tool, symbol, getattr(response, "error_message", None), bool(getattr(response, "timed_out", False)))
 
     def _validate_symbol(self, tool: str, symbol: str) -> JsonObject:
         if not isinstance(symbol, str) or DEBUG_SYMBOL_PATTERN.match(symbol) is None:

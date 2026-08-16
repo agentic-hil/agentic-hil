@@ -5,16 +5,24 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_GDB, FAKE_STLINK, FAKE_STLINK_READ_UNCONFIRMED, write_config
+from conftest import FAKE_GDB, FAKE_STLINK, FAKE_STLINK_READ_UNCONFIRMED, elf_with_symbols, write_config
 
 from agentic_hil.backends.common import command_for_log
 from agentic_hil.config import ConfigError, load_config
+from agentic_hil.elfsymbols import read_elf_symbol
 from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, write_intel_hex_file
 from agentic_hil.report import overall_success, read_last_report
 from agentic_hil.tools import AgenticHILToolService
 
 CTC_ARRAY_ADDRESS = 0x200006F0
 CTC_ARRAY_SIZE = 408
+# The issue's own example: an assembly-defined object the fake GDB refuses for
+# both expressions, carried only by the symbol table of the ELF a test builds.
+# Eight bytes rather than a real vector table's four hundred, so one test can
+# show the fallback resolving it and the value tool decoding what it holds.
+VECTOR_TABLE_ADDRESS = 0x08000000
+VECTOR_TABLE_SIZE = 8
+UNTYPED_SYMBOL_TABLE = [("g_pfnVectors", VECTOR_TABLE_ADDRESS, VECTOR_TABLE_SIZE)]
 START_TIMEOUT_S = 10.0
 # The fake gdb answers a hang by never replying, so any cap detects it. What the
 # cap must not do is mistake a healthy reply for one, and at 0.1 s it did: on a
@@ -24,14 +32,26 @@ START_TIMEOUT_S = 10.0
 TIMEOUT_TEST_CAP_S = 2.0
 
 
-def debug_service(tmp_path: Path, fake_gdb_behavior: str | None = None, **config_kwargs) -> AgenticHILToolService:
+def artifact_bytes(fake_gdb_behavior: str | None = None, elf_symbols: list[tuple] | None = None) -> bytes:
+    """The ELF a test hands the bench.
+
+    Four bytes of magic by default, which is everything the artifact validator
+    inspects and everything the fake GDB needs to answer from its own tables.
+    `elf_symbols` builds a real one instead, for the tests that make the
+    resolution read a symbol table rather than ask GDB (#187); the behaviour
+    marker rides along in both, past everything a section header describes.
+    """
+    trailer = b"" if fake_gdb_behavior is None else f"\nFAKE_GDB_BEHAVIOR={fake_gdb_behavior}\n".encode()
+    if elf_symbols is None:
+        return b"\x7fELF" + b"\x00" * 12 + trailer
+    return elf_with_symbols(elf_symbols, trailer=trailer)
+
+
+def debug_service(tmp_path: Path, fake_gdb_behavior: str | None = None, elf_symbols: list[tuple] | None = None, **config_kwargs) -> AgenticHILToolService:
     config_path = write_config(tmp_path, gdb_executable=FAKE_GDB, **config_kwargs)
     elf_path = tmp_path / "build" / "app.elf"
     elf_path.parent.mkdir(parents=True, exist_ok=True)
-    elf_data = b"\x7fELF" + b"\x00" * 12
-    if fake_gdb_behavior is not None:
-        elf_data += f"\nFAKE_GDB_BEHAVIOR={fake_gdb_behavior}\n".encode()
-    elf_path.write_bytes(elf_data)
+    elf_path.write_bytes(artifact_bytes(fake_gdb_behavior, elf_symbols))
     return AgenticHILToolService(load_config(str(config_path)))
 
 
@@ -1147,7 +1167,7 @@ def test_direct_debug_call_reenters_validation_for_invalid_timeout(tmp_path: Pat
 # confirmation line never printed says so.
 
 
-def stlink_dump_service(tmp_path: Path, *, debugger_executable: Path = FAKE_STLINK, **config_kwargs) -> AgenticHILToolService:
+def stlink_dump_service(tmp_path: Path, *, debugger_executable: Path = FAKE_STLINK, elf_symbols: list[tuple] | None = None, **config_kwargs) -> AgenticHILToolService:
     config_path = write_config(
         tmp_path,
         debugger_type="stlink",
@@ -1157,7 +1177,7 @@ def stlink_dump_service(tmp_path: Path, *, debugger_executable: Path = FAKE_STLI
     )
     elf_path = tmp_path / "build" / "app.elf"
     elf_path.parent.mkdir(parents=True, exist_ok=True)
-    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    elf_path.write_bytes(artifact_bytes(elf_symbols=elf_symbols))
     return AgenticHILToolService(load_config(str(config_path)))
 
 
@@ -1520,3 +1540,218 @@ def test_openocd_dump_still_resolves_through_its_own_session(tmp_path: Path) -> 
     # The session answered, so no ELF of the service's travels in the result.
     assert "symbol_source" not in dumped
     assert (tmp_path / "build" / "memory.hex").read_text(encoding="ascii").splitlines()[0] == ":020000042000DA"
+
+
+# --- the symbol table behind the debug information --------------------------
+#
+# Offline resolution asks GDB's expression evaluator for `&symbol` and
+# `sizeof(symbol)`, and both need a typed symbol. An object the assembler
+# defined with `.global`/`.type`/`.size` and no DWARF has no type for either,
+# while its address and size sit in the ELF's symbol table (#187). What these
+# pin is that the second route answers where the first cannot, that it narrows
+# no permission on the way, and that a symbol neither route carries is still
+# refused.
+
+
+def fake_target_bytes(address: int, size: int) -> bytes:
+    """What the fake GDB returns for a memory read: one byte per address, the low
+    byte of the address itself."""
+    return bytes((address + index) & 0xFF for index in range(size))
+
+
+def read_elf_symbol_from_bytes(tmp_path: Path, data: bytes, symbol: str) -> dict:
+    path = tmp_path / "symbols.elf"
+    path.write_bytes(data)
+    return read_elf_symbol(path, symbol)
+
+
+def test_elf_symbol_table_answers_address_and_size(tmp_path: Path) -> None:
+    table = elf_with_symbols([("g_pfnVectors", 0x08000000, 428), ("main", 0x080001C0, 64)])
+
+    assert read_elf_symbol_from_bytes(tmp_path, table, "g_pfnVectors") == {"ok": True, "address": 0x08000000, "size_bytes": 428}
+    assert read_elf_symbol_from_bytes(tmp_path, table, "main") == {"ok": True, "address": 0x080001C0, "size_bytes": 64}
+
+
+@pytest.mark.parametrize(("bits", "big_endian"), [(32, False), (32, True), (64, False), (64, True)])
+def test_elf_symbol_table_is_read_in_the_class_and_order_the_file_declares(tmp_path: Path, bits: int, big_endian: bool) -> None:
+    """Four layouts, one answer. ELF32 and ELF64 order a symbol record
+    differently and either can be written LSB or MSB first, so the reader is held
+    to the header's own claim rather than to the one shape a Cortex-M toolchain
+    happens to emit."""
+    table = elf_with_symbols([("g_pfnVectors", 0x08000000, 428)], bits=bits, big_endian=big_endian)
+
+    assert read_elf_symbol_from_bytes(tmp_path, table, "g_pfnVectors") == {"ok": True, "address": 0x08000000, "size_bytes": 428}
+
+
+@pytest.mark.parametrize(
+    ("entries", "symbol", "reason"),
+    [
+        ([("main", 0x080001C0, 64)], "g_pfnVectors", "not_found"),
+        # A bare assembler label: in the table, with no `.size` behind it. A
+        # zero-length read is not an answer, so this stays a refusal.
+        ([("g_pfnVectors", 0x08000000, 0)], "g_pfnVectors", "no_size"),
+        # An undefined symbol has a name and no definition; answering from it
+        # would hand back an address that is nowhere on the target.
+        ([("g_pfnVectors", 0x08000000, 428, 0)], "g_pfnVectors", "not_found"),
+        # Two definitions of one name: a file-order first match would be a board
+        # address chosen by luck.
+        ([("g_pfnVectors", 0x08000000, 428), ("g_pfnVectors", 0x08010000, 428)], "g_pfnVectors", "ambiguous"),
+    ],
+    ids=["absent", "no_size_directive", "undefined", "two_definitions"],
+)
+def test_elf_symbol_table_refuses_what_it_cannot_answer(tmp_path: Path, entries: list[tuple], symbol: str, reason: str) -> None:
+    assert read_elf_symbol_from_bytes(tmp_path, elf_with_symbols(entries), symbol) == {"ok": False, "reason": reason}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"", b"\x7fELF", b"not an elf at all", b"\x7fELF" + b"\x00" * 12, b"\x7fELF\x01\x01\x01" + b"\xff" * 60],
+    ids=["empty", "magic_only", "not_elf", "magic_and_zeroes", "unparsable_section_table"],
+)
+def test_elf_symbol_table_reports_a_file_it_cannot_parse_rather_than_raising(tmp_path: Path, data: bytes) -> None:
+    """Including the four-byte stand-in the rest of this suite writes. A file this
+    cannot read has to come back as a reason, never as a traceback: the caller is
+    holding GDB's own refusal and has to be able to report it."""
+    assert read_elf_symbol_from_bytes(tmp_path, data, "g_pfnVectors") == {"ok": False, "reason": "unreadable"}
+
+
+def test_elf_symbol_table_reports_a_missing_file_rather_than_raising(tmp_path: Path) -> None:
+    assert read_elf_symbol(tmp_path / "nothing.elf", "g_pfnVectors") == {"ok": False, "reason": "unreadable"}
+
+
+def test_symbol_info_falls_back_to_the_symbol_table_for_an_untyped_symbol(tmp_path: Path) -> None:
+    """The issue's own case, end to end through a session.
+
+    The fake GDB answers both expressions with the message real GDB gives for a
+    symbol with no debug type, and carries no address or size for it at all, so
+    what comes back was read out of the ELF this test built. `resolved_from` says
+    which route answered rather than leaving a caller to guess.
+    """
+    service = debug_service(tmp_path, elf_symbols=UNTYPED_SYMBOL_TABLE)
+    try:
+        assert start_debug_session(service)["ok"] is True
+        typed = service.call("debug_symbol_info", {"symbol": "CTC_array"})
+        untyped = service.call("debug_symbol_info", {"symbol": "g_pfnVectors"})
+    finally:
+        service.close()
+
+    assert untyped["ok"] is True, untyped
+    assert untyped["address"] == hex(VECTOR_TABLE_ADDRESS)
+    assert untyped["size_bytes"] == VECTOR_TABLE_SIZE
+    assert untyped["resolved_from"] == "elf_symbol_table"
+    # The route that still works is unchanged, and says which one it was.
+    assert typed["ok"] is True, typed
+    assert typed["resolved_from"] == "debug_info"
+    assert typed["address"] == hex(CTC_ARRAY_ADDRESS)
+
+
+def test_symbol_dump_falls_back_to_the_symbol_table_for_an_untyped_symbol(tmp_path: Path) -> None:
+    """The dump reaches the same address by the same second route: the fallback
+    is in the resolution, so every tool built on it gains it at once."""
+    service = debug_service(tmp_path, elf_symbols=UNTYPED_SYMBOL_TABLE)
+    try:
+        assert start_debug_session(service)["ok"] is True
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "g_pfnVectors", "output_path": "build/vectors.hex"})
+    finally:
+        service.close()
+
+    assert dumped["ok"] is True, dumped
+    assert dumped["address"] == hex(VECTOR_TABLE_ADDRESS)
+    assert dumped["size_bytes"] == VECTOR_TABLE_SIZE
+    assert dumped["resolved_from"] == "elf_symbol_table"
+    written = (tmp_path / "build" / "vectors.hex").read_text(encoding="ascii").splitlines()
+    assert written[-1] == ":00000001FF"
+    assert fake_target_bytes(VECTOR_TABLE_ADDRESS, VECTOR_TABLE_SIZE).hex().upper() in "".join(written)
+
+
+def test_the_fallback_still_refuses_a_symbol_no_route_carries(tmp_path: Path) -> None:
+    """The refusal that has to survive. GDB's classification is kept word for
+    word, and what the symbol table was asked and answered is added to it rather
+    than replacing it."""
+    service = debug_service(tmp_path, elf_symbols=UNTYPED_SYMBOL_TABLE)
+    try:
+        assert start_debug_session(service)["ok"] is True
+        refused = service.call("debug_symbol_info", {"symbol": "missing_symbol"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "symbol_not_found"
+    assert refused["symbol"] == "missing_symbol"
+    assert refused["symbol_table_lookup"] == "not_found"
+
+
+def test_the_fallback_narrows_no_permission(tmp_path: Path) -> None:
+    """`debug.allowed_symbols` is checked before either route runs, so a symbol
+    the operator did not list is refused whether or not the ELF describes it."""
+    service = debug_service(tmp_path, elf_symbols=UNTYPED_SYMBOL_TABLE, allowed_symbols=["CTC_array"])
+    try:
+        assert start_debug_session(service)["ok"] is True
+        refused = service.call("debug_symbol_info", {"symbol": "g_pfnVectors"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "permission_denied"
+    assert refused["summary"] == "Symbol is not allowed by debug.allowed_symbols."
+    assert "symbol_table_lookup" not in refused
+
+
+def test_an_untyped_symbol_lookup_does_not_poison_the_next_continue(tmp_path: Path) -> None:
+    """The `^error` GDB answers for an untyped symbol is not a target fault.
+
+    `_gdb_command` records every failed command as a debugger_error stop, and
+    `debug_continue` short-circuits on one. A resolution that recovered through
+    the symbol table therefore leaves the stop reason where it found it, or a
+    plan that reads the vector table would find the target unable to run
+    afterwards.
+    """
+    service = debug_service(tmp_path, elf_symbols=UNTYPED_SYMBOL_TABLE)
+    try:
+        assert start_debug_session(service)["ok"] is True
+        assert service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})["ok"] is True
+        assert service.call("debug_symbol_info", {"symbol": "g_pfnVectors"})["ok"] is True
+        continued = service.call("debug_continue", {"timeout_s": 5})
+    finally:
+        service.close()
+
+    assert continued["ok"] is True, continued
+    assert continued["stop_reason"] == "breakpoint_hit"
+
+
+def test_stlink_resolution_falls_back_to_the_symbol_table_for_an_untyped_symbol(tmp_path: Path) -> None:
+    """The same second route on the backend that has no session.
+
+    The offline query runs against a private copy of the flashed ELF whose digest
+    was checked before GDB saw it, and the fallback reads that same copy, so the
+    address it answers is covered by the digest the result carries.
+    """
+    service = stlink_dump_service(tmp_path, elf_symbols=UNTYPED_SYMBOL_TABLE)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "g_pfnVectors", "output_path": "build/vectors.hex"})
+    finally:
+        service.close()
+
+    assert dumped["ok"] is True, dumped
+    assert dumped["backend"] == "stlink"
+    assert dumped["address"] == hex(VECTOR_TABLE_ADDRESS)
+    assert dumped["size_bytes"] == VECTOR_TABLE_SIZE
+    assert dumped["resolved_from"] == "elf_symbol_table"
+    assert dumped["symbol_source"]["path"] == "build/app.elf"
+
+
+def test_stlink_resolution_still_refuses_a_symbol_the_flashed_elf_lacks(tmp_path: Path) -> None:
+    service = stlink_dump_service(tmp_path, elf_symbols=UNTYPED_SYMBOL_TABLE)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        refused = service.call("debug_dump_symbol_ihex", {"symbol": "missing_symbol", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "symbol_not_found"
+    assert refused["summary"] == "Symbol was not found in the flashed ELF."
+    assert refused["symbol_table_lookup"] == "not_found"
+    assert refused["target_contacted"] is False
+    assert not (tmp_path / "build" / "memory.hex").exists()
