@@ -13,6 +13,7 @@ from typing import Any, ClassVar
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
 
+from agentic_hil.backends.gdbdebug import INTEGER_VALUE_WIDTHS
 from agentic_hil.can import parse_can_id, parse_hex_bytes
 from agentic_hil.comports import data_result, decode_bytes
 from agentic_hil.config import (
@@ -113,6 +114,32 @@ CAN_COMPARATOR_SUMMARIES: dict[str, tuple[str, str]] = {
         "No value captured from a frame's payload fell inside the expected range before this step's timeout.",
     ),
 }
+# What a `read_symbol` comparator says about itself, per kind of claim: (met,
+# unmet). The same two-sentence shape the other two media use, with one word
+# missing from every unmet sentence on purpose: there is no "before this step's
+# timeout" here, because there is no timeout. A halted target's memory does not
+# change under the step, so the value is read once and judged once, and a
+# sentence promising a deadline would describe waiting that never happens.
+SYMBOL_COMPARATOR_SUMMARIES: dict[str, tuple[str, str]] = {
+    "equals": (
+        "The symbol held the expected value.",
+        "The symbol did not hold the expected value.",
+    ),
+    "range": (
+        "The symbol's value fell inside the expected range.",
+        "The symbol's value fell outside the expected range.",
+    ),
+    "mask": (
+        "The symbol's masked bits held the expected value.",
+        "The symbol's masked bits did not hold the expected value.",
+    ),
+}
+# What a `read_symbol` verdict repeats from the read it judged. The value in
+# every reading the tool returned, and where it came from: a red step that
+# cannot say what it read is a failure an operator has to reproduce by hand,
+# which is the same honesty `received_tail` is on a serial line, in the unit
+# this medium has.
+SYMBOL_VALUE_FIELDS: tuple[str, ...] = ("symbol", "address", "size_bytes", "resolved_from", "hex", "byte_order", "value_unsigned", "value_signed")
 # How many of the frames a `can_read` comparator saw are reported when its claim
 # went unmet. The `received_tail` honesty, in the unit this medium has: a red
 # step that cannot say what the bus did carry is a failure an operator has to
@@ -1724,6 +1751,70 @@ class CanRunner(SessionDevice):
                 time.sleep(min(CAN_COMPARATOR_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))
 
 
+class SymbolComparator:
+    """What a `read_symbol` step claims about the number a symbol holds.
+
+    Deliberately not a `StepComparator`. That class is a claim about text judged
+    again and again against a rolling window as more of it arrives, and neither
+    half of that exists here: a symbol is bytes, not characters, and a halted
+    target's memory does not change under the step, so there is one read, one
+    look and one verdict. Sharing the base class would have meant inheriting a
+    deadline, a window and a capture group that mean nothing about a word of
+    memory.
+
+    Three claims over the integer `debug_symbol_value` already decodes the bytes
+    into: `equals` is one value, `range` is inclusive bounds, and `mask` beside
+    `equals` is a claim about bits, `(value & mask) == equals`, which is how a
+    plan asserts one flag of a status word without stating the rest of it.
+
+    `signed` picks which of the two readings the claim is about, because the tool
+    returns both: the same bytes are honestly both, and above the top bit the two
+    disagree. A mask has no use for it and is refused beside it by the schema,
+    since a mask selects bits while a sign is a reading of the whole width."""
+
+    def __init__(self, raw: JsonObject):
+        self.raw = dict(raw)
+        self.equals: int | None = None if raw.get("equals") is None else int(raw["equals"])
+        bounds = raw.get("range")
+        self.bounds: tuple[int, int] | None = None if bounds is None else (int(bounds["min"]), int(bounds["max"]))
+        self.mask: int | None = None if raw.get("mask") is None else int(raw["mask"])
+        self.signed = bool(raw.get("signed", False))
+        # The value this claim was judged on, kept so an unmet claim can say what
+        # the symbol did hold. Both are filled by `matches`, and `masked_value`
+        # stays None for a claim that masks nothing.
+        self.captured_value: int | None = None
+        self.masked_value: int | None = None
+
+    @property
+    def claim(self) -> str:
+        if self.mask is not None:
+            return "mask"
+        return "equals" if self.equals is not None else "range"
+
+    @property
+    def reading(self) -> str:
+        """Which of the tool's two integer readings this claim is made against.
+        Reported beside the verdict, so nobody has to infer from `signed` which
+        of two numbers a step was really talking about."""
+        return "value_signed" if self.signed else "value_unsigned"
+
+    def matches(self, value: int) -> bool:
+        self.captured_value = value
+        self.masked_value = None if self.mask is None else value & self.mask
+        judged = value if self.masked_value is None else self.masked_value
+        if self.bounds is not None:
+            low, high = self.bounds
+            return low <= judged <= high
+        return judged == self.equals
+
+    def report(self) -> JsonObject:
+        """What the result says about this comparator, met or unmet."""
+        report: JsonObject = {"comparator": self.raw, "reading": self.reading, "captured_value": self.captured_value}
+        if self.masked_value is not None:
+            report["masked_value"] = self.masked_value
+        return report
+
+
 class DebuggerRunner(StepDevice):
     """Executes one test plan's debugger steps against a single named probe and
     owns the debug session it opened, so cleanup can close exactly what this
@@ -1739,7 +1830,7 @@ class DebuggerRunner(StepDevice):
     # This kind's own actions that require a live debug session, and therefore a
     # typed-debug backend. Internal to the class that serves them, not a second
     # answer to "which device kind runs this action".
-    debug_session_actions: ClassVar[frozenset[str]] = frozenset({"debug_start", "run_until_breakpoint", "dump_memory", "debug_stop"})
+    debug_session_actions: ClassVar[frozenset[str]] = frozenset({"debug_start", "run_until_breakpoint", "dump_memory", "read_symbol", "debug_stop"})
 
     def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, **kwargs: Any):
         super().__init__(config_id, device, service, **kwargs)
@@ -1773,6 +1864,79 @@ class DebuggerRunner(StepDevice):
     @step_action("dump_memory", schema="dumpMemory", tool="debug_dump_symbol_ihex")
     def _dump_memory(self, step: TestStep) -> JsonObject:
         return self.call_tool(step)
+
+    @step_action("read_symbol", schema="readSymbol", tool="debug_symbol_value", forwards_arguments=False)
+    def _read_symbol(self, step: TestStep) -> JsonObject:
+        """Read one allowed symbol, and judge the number it holds if the plan
+        said what it wants.
+
+        The read is `debug_symbol_value` and nothing more: the same allowlist,
+        the same `debug.max_dump_size_bytes` ceiling on the resolved size, the
+        same resolution (the image's debug information first, the ELF's own
+        symbol table where there is no type to work with), all of it inside the
+        debug session this plan already opened. A plan therefore reads exactly
+        what an agent calling the tool by hand reads, and a refusal the tool
+        gives is the step's result unchanged rather than a sentence written here
+        about somebody else's rule.
+
+        The step's own arguments are not the tool's, which is why it does not
+        forward them: `size_bytes` is a claim about the symbol and `comparator:`
+        is a claim about its value, and neither is something `debug_symbol_value`
+        has ever been asked. Without either, this is a plain read whose answer is
+        the tool's answer, which is how a plan records a value it does not want
+        to assert."""
+        result = self.service.call("debug_symbol_value", {"symbol": str(step.arguments["symbol"])})
+        if result_failed(result):
+            return result
+        return self._judge_symbol(step, result)
+
+    def _judge_symbol(self, step: TestStep, result: JsonObject) -> JsonObject:
+        """The read, held to whatever the step claimed about it.
+
+        Both claims fail as steps rather than as refusals of the plan, because
+        both are statements about the board that only the board can answer: a
+        width the plan declared and the target does not have is a firmware whose
+        type moved, and a comparator is the assertion the step exists to make."""
+        read: JsonObject = {key: result[key] for key in SYMBOL_VALUE_FIELDS if key in result}
+        declared = step.arguments.get("size_bytes")
+        size_bytes = result.get("size_bytes")
+        if declared is not None and int(declared) != int(size_bytes or 0):
+            return merge_result_status({
+                "ok": False,
+                "tool": "test_reactor",
+                "error_type": "symbol_size_mismatch",
+                "summary": "The symbol is not the width this step declared.",
+                "debugger": self.id,
+                "expected_size_bytes": int(declared),
+                **read,
+            }, result)
+        comparator = step.arguments.get("comparator")
+        if not comparator:
+            return result
+        claim = SymbolComparator(comparator)
+        if claim.reading not in result:
+            # The width has no integer reading, and the plan did not declare a
+            # width for preflight to have refused. Its own error rather than an
+            # unmet claim: nothing was judged and nothing was wrong with the
+            # value, so calling it a failed assertion would send an operator
+            # looking at firmware that is behaving.
+            return merge_result_status({
+                "ok": False,
+                "tool": "test_reactor",
+                "error_type": "symbol_width_not_numeric",
+                "summary": "The symbol's width carries no integer reading, so this step's comparator could not be judged.",
+                "debugger": self.id,
+                "comparator": claim.raw,
+                "integer_widths": sorted(INTEGER_VALUE_WIDTHS),
+                **read,
+                **({"value_not_decoded": result["value_not_decoded"]} if "value_not_decoded" in result else {}),
+            }, result)
+        met, unmet = SYMBOL_COMPARATOR_SUMMARIES[claim.claim]
+        matched = claim.matches(int(result[claim.reading]))
+        common = {"debugger": self.id, **read, **claim.report()}
+        if matched:
+            return merge_result_status({"ok": True, "tool": "test_reactor", "summary": met, **common}, result)
+        return merge_result_status({"ok": False, "tool": "test_reactor", "error_type": "comparator_unmet", "summary": unmet, **common}, result)
 
     @step_action("debug_start", schema="debugStart", tool="debug_start_session")
     def _debug_start(self, step: TestStep) -> JsonObject:
@@ -1931,6 +2095,8 @@ class DebuggerRunner(StepDevice):
         if symbol is not None and not symbol_allowed(config, str(symbol)):
             field_name = "location" if step.action == "run_until_breakpoint" else "symbol"
             return preflight_error(location, step, field_name, "Symbol is not allowed by the authoritative debug config.", {"symbol": symbol})
+        if step.action == "read_symbol":
+            return cls._declared_width_refusal(config, location, step)
         if step.action == "dump_memory" and hasattr(reactor.service, "artifacts"):
             output = reactor.service.artifacts.validate_output_path(str(step.arguments["output_path"]), "debug_dump_symbol_ihex")
             if output.get("ok") is not True:
@@ -1941,6 +2107,47 @@ class DebuggerRunner(StepDevice):
                     str(output.get("summary", "Memory dump output path is invalid.")),
                     {"validation": output},
                 )
+        return None
+
+    @classmethod
+    def _declared_width_refusal(cls, config: AgenticHILConfig, location: StepLocation, step: TestStep) -> JsonObject | None:
+        """Refuse a `read_symbol` whose width this bench or this format cannot
+        serve, before the run.
+
+        Only a width the plan states can be answered here. Preflight builds
+        nothing and reaches no board, so the size of a symbol that only the
+        target's own image describes is not knowable at plan time and is judged
+        at runtime instead, with a stated reason; a plan that does declare one
+        has said something checkable, and both gates it has to pass are checked
+        against it rather than against a board an hour into a run.
+
+        The two are the bench's and the format's. `debug.max_dump_size_bytes` is
+        the operator's ceiling on what may be read at all, applied here to the
+        same number the backend will apply it to; and the decoded integer a
+        comparator judges exists only at 1, 2, 4 and 8 bytes, so a numeric claim
+        on a 3-byte or 408-byte object is a claim the format cannot make. A width
+        without a comparator is untouched by the second: reading a structure and
+        reporting its bytes is exactly what a plain `read_symbol` is for."""
+        declared = step.arguments.get("size_bytes")
+        if declared is None:
+            return None
+        size_bytes = int(declared)
+        if size_bytes > config.debug.max_dump_size_bytes:
+            return preflight_error(
+                location,
+                step,
+                "size_bytes",
+                "Symbol read exceeds debug.max_dump_size_bytes.",
+                {"size_bytes": size_bytes, "max_dump_size_bytes": config.debug.max_dump_size_bytes},
+            )
+        if step.arguments.get("comparator") and size_bytes not in INTEGER_VALUE_WIDTHS:
+            return preflight_error(
+                location,
+                step,
+                "size_bytes",
+                "A comparator judges the symbol's decoded integer, which exists only at 1, 2, 4 and 8 bytes.",
+                {"size_bytes": size_bytes, "integer_widths": sorted(INTEGER_VALUE_WIDTHS)},
+            )
         return None
 
     @classmethod

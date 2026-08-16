@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_GDB, FAKE_OPENOCD, write_authoritative_config, write_config
 
+from agentic_hil.backends.gdbdebug import decode_symbol_value
 from agentic_hil.cli import build_parser, entrypoint
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR
@@ -3235,10 +3236,11 @@ def test_a_version_3_plan_cannot_reach_for_the_repeat_step(tmp_path: Path) -> No
 
 
 def test_the_version_gate_descends_into_a_repeat_blocks_own_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # No shipped action is newer than `repeat` itself, so the marker is moved
-    # onto one for the length of this test. What is under test is the walk: a
-    # step nested inside a block is held to the plan's version exactly as a
-    # top-level step is, or a block would be the way around the gate.
+    # The marker is moved onto `reset` for the length of this test, so what is
+    # under test stays the walk rather than whichever action happens to be the
+    # newest one shipped: a step nested inside a block is held to the plan's
+    # version exactly as a top-level step is, or a block would be the way around
+    # the gate.
     from agentic_hil import test_reactor
 
     schema = json.loads(json.dumps(test_reactor.test_config_schema()))
@@ -3546,3 +3548,388 @@ def test_a_repeat_whose_nested_step_names_no_configured_device_is_refused_before
     assert result["validation_error"]["step"] == 1
     assert result["failed_step"] == 1
     assert service.calls == []
+
+
+# --- read_symbol, plan format version 5 --------------------------------------
+#
+# The other half of #174. `debug_symbol_value` made a symbol's value readable
+# over the tool surface, and the plan format still had no way to ask for one:
+# no action that reads a symbol, and no comparator that judges a decoded
+# number, every comparator it carried judging text and reading a `range` out of
+# a regular expression's capture group.
+
+# The fake GDB's own memory rule: one byte per address, the low byte of the
+# address itself. `boot_counter` is the typed four-byte symbol it describes, at
+# an address whose top byte makes the two integer readings disagree.
+BOOT_COUNTER_ADDRESS = 0x20000080
+BOOT_COUNTER_BYTES = bytes((BOOT_COUNTER_ADDRESS + index) & 0xFF for index in range(4))
+BOOT_COUNTER_VALUE = int.from_bytes(BOOT_COUNTER_BYTES, "little")
+
+
+def symbol_plan(tmp_path: Path, step: str, *, version: int = 5) -> Path:
+    """A plan that opens a debug session and then runs `step` inside it."""
+    return write_test_config(
+        tmp_path,
+        f"version: {version}\nsteps:\n  - {{device: dut, action: debug_start, image_path: build/app.elf}}\n  - {step}\n",
+    )
+
+
+def symbol_value_result(data: bytes, symbol: str) -> dict:
+    """What `debug_symbol_value` answers for one symbol.
+
+    Decoded by the backend's own function rather than by a copy of it here, so a
+    double cannot promise a reading the real tool does not give: which widths
+    carry an integer, and what the two readings are at those widths, is the
+    backend's answer in these tests as well."""
+    return {
+        "ok": True,
+        "tool": "debug_symbol_value",
+        "symbol": symbol,
+        "address": hex(BOOT_COUNTER_ADDRESS),
+        "size_bytes": len(data),
+        "resolved_from": "debug_info",
+        **decode_symbol_value(data),
+    }
+
+
+class SymbolService(RecordingService):
+    """A bench whose symbols all hold `data`."""
+
+    def __init__(self, data: bytes, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.data = data
+
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        result = super().call(name, arguments)
+        if name == "debug_symbol_value":
+            return symbol_value_result(self.data, str((arguments or {}).get("symbol")))
+        return result
+
+
+def run_symbol_plan(tmp_path: Path, path: Path, service: RecordingService, **config_kwargs) -> dict:
+    config = load_config(str(write_config(tmp_path, **config_kwargs)))
+    return TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+
+def test_read_symbol_asserts_a_value_in_target_memory_end_to_end(tmp_path: Path) -> None:
+    # The whole path with no double in it: the reactor's own step, the real
+    # OpenOCD backend, a live typed session against the fake GDB, and the value
+    # the target answered with judged against what the plan claimed.
+    service, _ = reactor_service(tmp_path)
+    test_path = write_test_config(
+        tmp_path,
+        f"""version: 5
+name: assert-a-counter
+steps:
+  - {{device: dut, action: debug_start, image_path: build/app.elf, mode: attach}}
+  - {{device: dut, action: read_symbol, symbol: boot_counter, size_bytes: 4, comparator: {{equals: {BOOT_COUNTER_VALUE}}}}}
+  - {{device: dut, action: debug_stop}}
+""",
+    )
+    try:
+        result = TestReactor(service.config, service).run(load_test_config(str(test_path), str(tmp_path)))
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert [step["action"] for step in result["steps"]] == ["debug_start", "read_symbol", "debug_stop"]
+    read = result["steps"][1]["result"]
+    assert read["summary"] == "The symbol held the expected value."
+    assert read["symbol"] == "boot_counter"
+    assert read["address"] == hex(BOOT_COUNTER_ADDRESS)
+    assert read["size_bytes"] == 4
+    # The same resolution the tool uses, which is what makes an assembly-defined
+    # object readable here too: the field says which route answered.
+    assert read["resolved_from"] == "debug_info"
+    assert read["hex"] == BOOT_COUNTER_BYTES.hex()
+    assert read["captured_value"] == BOOT_COUNTER_VALUE
+    assert read["reading"] == "value_unsigned"
+
+
+def test_read_symbol_without_a_comparator_records_the_value_unchanged(tmp_path: Path) -> None:
+    # The plain read every feedback action has: no claim, and the tool's own
+    # answer in the report, so a plan can record a value it does not assert.
+    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: boot_counter}")
+    service = SymbolService(b"\x2a\x00\x00\x00")
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["tool"] == "debug_symbol_value"
+    assert read["hex"] == "2a000000"
+    assert read["value_unsigned"] == 42
+    assert ("debug_symbol_value", {"symbol": "boot_counter"}) in service.calls
+
+
+def test_a_symbol_comparator_that_goes_unmet_fails_the_step_and_ends_the_run(tmp_path: Path) -> None:
+    # Abort-on-failure, unchanged: the step after it never runs, and the session
+    # the plan opened is closed by the run's own cleanup rather than by a step
+    # that was never reached.
+    path = write_test_config(
+        tmp_path,
+        """version: 5
+steps:
+  - {device: dut, action: debug_start, image_path: build/app.elf}
+  - {device: dut, action: read_symbol, symbol: boot_counter, comparator: {equals: 42}}
+  - {device: dut, action: read_symbol, symbol: boot_counter}
+""",
+    )
+    service = SymbolService(b"\x07\x00\x00\x00")
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 2
+    assert result["error_type"] == "comparator_unmet"
+    read = result["steps"][1]["result"]
+    assert read["summary"] == "The symbol did not hold the expected value."
+    assert read["comparator"] == {"equals": 42}
+    # What it did read, so a red step is readable without reconnecting to the
+    # board: the number that was judged, and the bytes it was decoded from.
+    assert read["captured_value"] == 7
+    assert read["hex"] == "07000000"
+    assert [step["action"] for step in result["steps"]] == ["debug_start", "read_symbol"]
+    assert [record["action"] for record in result["cleanup"]] == ["debug_stop"]
+
+
+@pytest.mark.parametrize(("value", "met"), [(20, True), (25, True), (30, True), (19, False), (31, False)], ids=str)
+def test_a_symbol_range_holds_the_value_to_inclusive_bounds(tmp_path: Path, value: int, met: bool) -> None:
+    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: boot_counter, comparator: {range: {min: 20, max: 30}}}")
+    service = SymbolService(value.to_bytes(4, "little"))
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    read = result["steps"][1]["result"]
+    assert read["ok"] is met, read
+    assert read["captured_value"] == value
+    assert read["summary"] == ("The symbol's value fell inside the expected range." if met else "The symbol's value fell outside the expected range.")
+
+
+@pytest.mark.parametrize(("data", "met"), [(b"\xf5\x00\x00\x00", True), (b"\xf6\x00\x00\x00", False)], ids=["bits_match", "bits_differ"])
+def test_a_symbol_mask_judges_the_bits_it_names(tmp_path: Path, data: bytes, met: bool) -> None:
+    # One flag of a status word, asserted without stating every other bit of it.
+    # The report carries the whole word beside the bits, so a red step says both
+    # what was read and what was compared. `0x0f` is a YAML number like any
+    # other, which the echoed comparator shows.
+    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: status_word, comparator: {mask: 0x0f, equals: 5}}")
+    service = SymbolService(data)
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    read = result["steps"][1]["result"]
+    assert read["ok"] is met, read
+    assert read["comparator"] == {"mask": 15, "equals": 5}
+    assert read["captured_value"] == data[0]
+    assert read["masked_value"] == data[0] & 0x0F
+    assert read["summary"] == ("The symbol's masked bits held the expected value." if met else "The symbol's masked bits did not hold the expected value.")
+
+
+@pytest.mark.parametrize(
+    ("claim", "met", "reading"),
+    [("{equals: -3, signed: true}", True, "value_signed"), ("{equals: -3}", False, "value_unsigned")],
+    ids=["signed", "unsigned_by_default"],
+)
+def test_signed_picks_the_reading_the_claim_is_about(tmp_path: Path, claim: str, met: bool, reading: str) -> None:
+    # The same four bytes are honestly both readings and above the top bit the
+    # two disagree, which is why the tool returns both. A plan asserting a
+    # counter that went negative says so here rather than writing the two's
+    # complement of the number it means.
+    path = symbol_plan(tmp_path, f"{{device: dut, action: read_symbol, symbol: drift, comparator: {claim}}}")
+    service = SymbolService((-3).to_bytes(4, "little", signed=True))
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    read = result["steps"][1]["result"]
+    assert read["ok"] is met, read
+    assert read["reading"] == reading
+    assert read["value_signed"] == -3
+    assert read["value_unsigned"] == 2**32 - 3
+    assert read["captured_value"] == (-3 if met else 2**32 - 3)
+
+
+def test_read_symbol_needs_the_debug_session_the_plan_opened(tmp_path: Path) -> None:
+    # The lifecycle every other typed debug action is held to: the session is
+    # the plan's own, and a step outside one is refused before the run.
+    path = write_test_config(tmp_path, "version: 5\nsteps:\n  - {device: dut, action: read_symbol, symbol: boot_counter}\n")
+    service = SymbolService(b"\x2a\x00\x00\x00")
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    assert result["ok"] is False
+    assert result["validation_error"]["summary"] == "A debug session must be started before this action."
+    assert service.calls == []
+
+
+def test_read_symbol_is_held_to_the_symbol_allowlist(tmp_path: Path) -> None:
+    # The operator's statement about what may be read off this bench, and a new
+    # way of reading it is not a way around it. Refused before the run, so the
+    # board is never asked.
+    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: boot_counter}")
+    service = SymbolService(b"\x2a\x00\x00\x00")
+
+    result = run_symbol_plan(tmp_path, path, service, allowed_symbols=["CTC_array"])
+
+    assert result["ok"] is False
+    assert result["validation_error"]["field"] == "steps[1].symbol"
+    assert result["validation_error"]["summary"] == "Symbol is not allowed by the authoritative debug config."
+    assert service.calls == []
+
+
+def test_a_declared_width_with_no_integer_reading_is_refused_before_the_run(tmp_path: Path) -> None:
+    # The decoded integer exists at four widths, so a numeric claim on a 3-byte
+    # object is a claim the format cannot make. The plan stated the width, so it
+    # is answered at plan time rather than an hour into a run.
+    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: rgb, size_bytes: 3, comparator: {equals: 1}}")
+    service = SymbolService(b"\x01\x00\x00")
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    assert result["ok"] is False
+    assert result["steps"] == []
+    assert result["validation_error"]["field"] == "steps[1].size_bytes"
+    assert result["validation_error"]["summary"] == "A comparator judges the symbol's decoded integer, which exists only at 1, 2, 4 and 8 bytes."
+    assert result["validation_error"]["integer_widths"] == [1, 2, 4, 8]
+    assert service.calls == []
+
+
+def test_a_declared_width_above_the_benchs_ceiling_is_refused_before_the_run(tmp_path: Path) -> None:
+    # `debug.max_dump_size_bytes` bounds what may be read at all, comparator or
+    # not, and a width the plan states is one the ceiling can be applied to here
+    # instead of after the session is open.
+    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: CTC_array, size_bytes: 408}")
+    service = SymbolService(bytes(408))
+
+    result = run_symbol_plan(tmp_path, path, service, max_dump_size_bytes=16)
+
+    assert result["ok"] is False
+    assert result["validation_error"]["field"] == "steps[1].size_bytes"
+    assert result["validation_error"]["summary"] == "Symbol read exceeds debug.max_dump_size_bytes."
+    assert result["validation_error"]["max_dump_size_bytes"] == 16
+    assert service.calls == []
+
+
+def test_a_width_with_no_integer_reading_is_refused_at_runtime_when_the_plan_declared_none(tmp_path: Path) -> None:
+    # The other half of the width rule. Preflight builds nothing and reaches no
+    # board, so a symbol whose size only the image describes is judged here,
+    # with a stated reason and the bytes it did read rather than a green step or
+    # an invented number.
+    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: CTC_array, comparator: {equals: 1}}")
+    service = SymbolService(bytes(408))
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    assert result["ok"] is False
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "symbol_width_not_numeric"
+    assert read["summary"] == "The symbol's width carries no integer reading, so this step's comparator could not be judged."
+    assert read["size_bytes"] == 408
+    assert read["integer_widths"] == [1, 2, 4, 8]
+    assert read["hex"] == bytes(408).hex()
+    assert read["value_not_decoded"].startswith("size_bytes is not 1, 2, 4 or 8")
+    assert "captured_value" not in read
+
+
+def test_a_declared_width_the_target_does_not_have_fails_the_step(tmp_path: Path) -> None:
+    # A firmware that turned a `uint32_t` into a `uint16_t` is a test whose value
+    # means something else now, so a stated width is asserted rather than
+    # assumed, and the value is not judged at all.
+    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: boot_counter, size_bytes: 4, comparator: {equals: 7}}")
+    service = SymbolService(b"\x07\x00")
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    assert result["ok"] is False
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "symbol_size_mismatch"
+    assert read["summary"] == "The symbol is not the width this step declared."
+    assert read["expected_size_bytes"] == 4
+    assert read["size_bytes"] == 2
+    assert "captured_value" not in read
+
+
+def test_a_plain_read_may_name_any_width_the_bench_allows(tmp_path: Path) -> None:
+    # A width without a claim is not a claim about a number: reading a structure
+    # and recording its bytes is exactly what a plain `read_symbol` is for.
+    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: CTC_array, size_bytes: 408}")
+    service = SymbolService(bytes(408))
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    assert result["ok"] is True, result
+    assert result["steps"][1]["result"]["hex"] == bytes(408).hex()
+
+
+def test_read_symbol_takes_no_timeout_because_it_does_not_wait(tmp_path: Path) -> None:
+    # A halted target's memory does not change under the step, so there is no
+    # deadline to give it. The key is refused rather than accepted and ignored.
+    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: boot_counter, timeout_s: 5}")
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.details["field"] == "steps[1].timeout_s"
+
+
+@pytest.mark.parametrize(
+    ("comparator", "field"),
+    [
+        ("{}", "steps[1].comparator"),
+        ("{equals: 1, range: {min: 0, max: 2}}", "steps[1].comparator"),
+        ("{mask: 15}", "steps[1].comparator"),
+        ("{mask: 15, equals: 1, signed: true}", "steps[1].comparator"),
+        ("{equals: 1, pattern: abc}", "steps[1].comparator.pattern"),
+    ],
+    ids=["neither", "both", "mask_without_equals", "mask_with_signed", "text_vocabulary"],
+)
+def test_a_symbol_comparator_the_format_cannot_mean_is_refused_at_load(tmp_path: Path, comparator: str, field: str) -> None:
+    # One claim per comparator, `mask` only as a claim about a value, and no sign
+    # beside a mask because a mask selects bits while a sign reads the whole
+    # width. The text vocabulary is not this comparator's at all.
+    path = symbol_plan(tmp_path, f"{{device: dut, action: read_symbol, symbol: boot_counter, comparator: {comparator}}}")
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.error_type == "test_config_invalid"
+    assert refused.value.details["field"] == field
+
+
+def test_a_version_4_plan_cannot_reach_for_read_symbol(tmp_path: Path) -> None:
+    # The version a plan declares is what tells another install whether it can
+    # run it, so a v4 plan using the v5 action is refused by name rather than
+    # working here and failing on an older install for no stated reason.
+    path = symbol_plan(tmp_path, "{device: dut, action: read_symbol, symbol: boot_counter}", version=4)
+
+    with pytest.raises(ConfigError) as refused:
+        load_test_config(str(path), str(tmp_path))
+
+    assert refused.value.details["field"] == "steps[1].action"
+    assert refused.value.details["value"] == "read_symbol"
+    assert refused.value.details["plan_version"] == 4
+    assert refused.value.details["requires_plan_version"] == 5
+    assert "version: 5" in refused.value.details["migration"]
+
+
+def test_a_version_4_plan_loads_and_behaves_exactly_as_it_did(tmp_path: Path) -> None:
+    # The format grew a version; a plan written against the old one is held to
+    # the old one and runs unchanged, block step, comparator and all.
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    path = write_test_config(
+        tmp_path,
+        """version: 4
+steps:
+  - {device: dut_uart, action: uart_open}
+  - action: repeat
+    count: 2
+    steps:
+      - {device: dut_uart, action: uart_read, comparator: {equals: "cycle done"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"cycle done\r\n", b"cycle done\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert result["steps"][1]["result"]["iterations_run"] == 2
+    assert [record["action"] for record in result["cleanup"]] == ["uart_close"]

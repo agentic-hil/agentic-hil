@@ -14,7 +14,7 @@
 # There are no close steps: end-of-run cleanup closes every session this run
 # opened. Write an explicit close only where the plan means to close,
 # reconfigure and reopen a line or a bus mid-run.
-version: 4
+version: 5
 name: capture-state
 steps:
   - device: dut
@@ -73,6 +73,38 @@ steps:
       range: { min: 20, max: 30 }
     max_frames: 64
     timeout_s: 5
+
+  # What a symbol holds, claimed rather than dumped. The comparator here is a
+  # numeric one, because a word of memory has no text to match: `equals:` for
+  # one value, `range:` for inclusive bounds, and `mask:` beside `equals:` for
+  # `(value & mask) == equals`, which asserts one flag of a status word without
+  # stating the rest of it. `signed: true` picks the signed reading of the same
+  # bytes, and is refused beside a mask, which is a claim about bits. The
+  # decoded integer exists only at 1, 2, 4 and 8 bytes, so `size_bytes:` here
+  # both asserts the width the firmware must still have and lets a width that
+  # could never be judged be refused before the run instead of on the bench.
+  # Nothing waits: a halted target's memory does not change under the step.
+  - device: dut
+    action: read_symbol
+    symbol: capture_count
+    size_bytes: 4
+    comparator:
+      equals: 64
+
+  - device: dut
+    action: read_symbol
+    symbol: status_word
+    size_bytes: 4
+    comparator:
+      mask: 0x0f
+      equals: 5
+
+  # Without a comparator it is a plain read: the value reaches the run's report
+  # and nothing is asserted about it, which is how a plan records a structure it
+  # has no numeric claim to make about.
+  - device: dut
+    action: read_symbol
+    symbol: capture_buffer
 
   - device: dut
     action: dump_memory

@@ -23,7 +23,7 @@ The plan schema is
 [`src/agentic_hil/schemas/testconfig.schema.json`](https://github.com/agentic-hil/agentic-hil/blob/master/src/agentic_hil/schemas/testconfig.schema.json),
 and it is closed: `additionalProperties: false` at the root and on every step,
 so a key the schema does not name is a refusal rather than something ignored.
-A plan document has exactly three root keys: `version:` (2, 3 or 4), an optional
+A plan document has exactly three root keys: `version:` (2, 3, 4 or 5), an optional
 `name` (defaulting to the file's stem), and `steps`, between 1 and 128 of them.
 
 A step is a route field, an action, and that action's arguments. One step is
@@ -39,14 +39,15 @@ several it must be named, because picking a board for the author is how the
 wrong board gets flashed.
 
 **Actions are the ones the device classes declare.** `flash` and `reset` on a
-probe; `debug_start`, `run_until_breakpoint`, `dump_memory` and `debug_stop` for
-a debug session; `uart_open`, `uart_write`, `uart_read`, `uart_expect` and
-`uart_close` on a serial line; `can_open`, `can_send`, `can_read` and
-`can_close` on a bus; and `delay`, declared once on the base class and served by
-every kind. Each action is declared on the method that implements it, so the
-authoritative list is the set of declarations; an action a kind does not
-declare answers `not_supported` naming the kind. From plan format v3, `device:`
-is the one routing key for every step; the v2 route keys stay valid as aliases.
+probe; `debug_start`, `run_until_breakpoint`, `dump_memory`, `read_symbol` and
+`debug_stop` for a debug session; `uart_open`, `uart_write`, `uart_read`,
+`uart_expect` and `uart_close` on a serial line; `can_open`, `can_send`,
+`can_read` and `can_close` on a bus; and `delay`, declared once on the base
+class and served by every kind. Each action is declared on the method that
+implements it, so the authoritative list is the set of declarations; an action a
+kind does not declare answers `not_supported` naming the kind. From plan format
+v3, `device:` is the one routing key for every step; the v2 route keys stay
+valid as aliases.
 
 **Arguments are the test's own parameters.** A firmware image path, a reset
 mode, a breakpoint location, a symbol to dump and where to write it, a frame id
@@ -74,6 +75,28 @@ is an object deliberately, so preprocessing keys (scale, convert) can be added
 later without breaking the format. `uart_expect` with `text`/`pattern` remains
 valid as the v2 spelling. Every other step states its expectation by existing:
 the step must succeed, and the plan stops at the first one that does not.
+
+**A value in target memory is its own claim.** From plan format v5, `read_symbol`
+reads what one allowed symbol currently holds through the debug session the plan
+opened, exactly as the `debug_symbol_value` tool reads it, and its `comparator:`
+judges the integer those bytes decode to rather than any text: `equals` for one
+value, `range: {min, max}` for inclusive bounds, or `mask` beside `equals` for
+`(value & mask) == equals`, which asserts one flag of a status word without
+stating the rest of it. It is a separate comparator vocabulary because there is
+no text in a word of memory and nothing to run a regular expression against.
+`signed: true` picks the signed reading, since the tool returns both and above
+the top bit the two disagree; a mask is a claim about bits, so `signed` is
+refused beside it rather than quietly ignored. That decoded integer exists only
+at 1, 2, 4 and 8 bytes: a plan that declares `size_bytes` is refused at preflight
+for any other width beside a comparator, and one that declares none is refused at
+runtime with a stated reason, never judged on an invented number. A declared
+`size_bytes` is asserted against the width the target resolves, so a firmware
+whose type changed fails the step instead of having its new value read as the old
+one, and it is what lets `debug.max_dump_size_bytes` refuse an oversized read
+before the run rather than on the bench. Without a comparator the step is a plain
+read whose value the report records. Nothing here waits: a halted target's memory
+does not change under the step, so there is no `timeout_s` to give it and the
+value is read once and judged once.
 
 **One step is a block, not a route.** From plan format v4, `repeat` carries a
 nested `steps:` list and no route field at all: it drives nothing, and the
@@ -118,10 +141,12 @@ says, and it says it once for every plan that runs on that bench.
 The split is enforced rather than conventional. The reactor's preflight walks
 every step before the first hardware action and refuses the whole plan when the
 two documents disagree: a name the configuration does not declare, an action a
-permission does not allow, a breakpoint or dump symbol outside
-`debug.allowed_symbols`, a firmware artifact outside the allowed roots or
-extensions, a dump output path the artifact validator rejects, a session closed
-before it was opened, a `can_send` on a bus configured `listen_only: true`.
+permission does not allow, a breakpoint, dump or read symbol outside
+`debug.allowed_symbols`, a declared symbol width above
+`debug.max_dump_size_bytes` or one no decoded integer exists at beside a
+comparator, a firmware artifact outside the allowed roots or extensions, a dump
+output path the artifact validator rejects, a session closed before it was
+opened, a `can_send` on a bus configured `listen_only: true`.
 Preflight builds nothing (no service, no lock, no directory), so a plan refused
 there has touched no hardware at all, and the same plan asked twice gets the
 same answer.
@@ -246,29 +271,33 @@ make the plan wrong the first time a board is swapped.
 
 **Two behaviours are backend-bound and therefore travel only as far as the
 backend does.** The typed debug actions (`debug_start`, `run_until_breakpoint`,
-`dump_memory`, `debug_stop`) currently require a debugger of type `openocd`,
-and `reset` with `mode: init` is OpenOCD-only, refused by other backends with
-their own `not_supported`. A flash-and-serial plan runs on all three backends; a
-plan that opens a debug session states, implicitly, that its bench runs OpenOCD.
+`dump_memory`, `read_symbol`, `debug_stop`) currently require a debugger of type
+`openocd`, and `reset` with `mode: init` is OpenOCD-only, refused by other
+backends with their own `not_supported`. A flash-and-serial plan runs on all
+three backends; a plan that opens a debug session states, implicitly, that its
+bench runs OpenOCD.
 
 ## Open
 
 These are limits of what a plan can currently express, verified against the
 schema and the reactor rather than inferred:
 
-- **No expectation on a value in target memory.** The debugger's two feedback
-  actions assert reaching a place, not reading a value: `run_until_breakpoint`
-  asserts that the target stopped where the plan said, and `dump_memory` writes
-  an Intel HEX file and succeeds on having written it. The backend half of this
-  is no longer missing: `debug_symbol_value` returns an allowed symbol's bytes,
-  as hex and as an unsigned and a signed integer at 1, 2, 4 or 8 bytes, so
-  there is now something for a `read_symbol` action to call. What is still
-  missing is the plan half, and it is more than the decorated method this
-  paragraph used to promise: a `comparator:` here would judge a decoded number,
-  while every comparator the format carries today judges text and reads a
-  `range` out of a regular expression's capture group. Closing it means a
-  numeric comparator, a schema entry for the action and the plan version that
-  introduces it, and it is tracked separately from the tool.
+- **No claim about a symbol's bytes, only about the number they decode to.**
+  From v5 a plan can assert a value in target memory, which is what
+  `read_symbol` and its numeric comparator are. What that comparator judges is
+  the decoded integer, and that reading exists at 1, 2, 4 and 8 bytes only. A
+  structure, a buffer or a 3-byte object is still readable, and the report
+  records its `hex`, but there is no comparator over those bytes: a plan cannot
+  say what a captured buffer must contain, only that reading it succeeded. The
+  refusal is stated rather than silent (at preflight for a width the plan
+  declared, at runtime for one only the image knows), so such a claim is never
+  answered with an invented number.
+- **No waiting on a value.** A `read_symbol` step reads once and judges once,
+  because a halted target's memory does not change under it; there is no
+  `timeout_s` and no polling. "Wait until this counter reaches ten" is therefore
+  not a claim the format carries, and the next bullet is why it cannot be built
+  out of a `repeat` either: a nested step that fails ends the run rather than
+  going round again.
 - **No branch, no reuse, no parameters.** From v4 there is one control-flow
   construct, `repeat`, and it repeats: it does not decide. There is no branch,
   no retry, no until, no include, and no variable or substitution: an argument
