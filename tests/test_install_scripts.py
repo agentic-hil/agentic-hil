@@ -761,8 +761,9 @@ chmod +x /work/bin/claude
 export PATH="/work/bin:$HOME/.local/bin:$PATH"
 
 # The line is typed in a firmware project, not in the home directory or at the
-# filesystem root: from those, the user-file safety check reads every path as
-# inside the working directory and refuses (its own issue, filed separately).
+# filesystem root: the release this pulls from the index still reads every
+# user-level path as inside the working directory there and refuses (#235). The
+# two lines below go once a release carries the fix.
 mkdir -p "$HOME/project"
 cd "$HOME/project"
 

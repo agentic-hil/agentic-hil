@@ -601,10 +601,33 @@ def _agent_permission_config_path(agent_id: str) -> Path | None:
     return _external_user_path(paths[agent_id], "Agent permission configuration")
 
 
+def _workspace_boundary() -> Path | None:
+    """The project directory the user-wide half must stay out of, or None.
+
+    The boundary is the working directory, and what it protects is a project: a
+    repository is untrusted content, so the files that govern the agent may
+    neither be written inside one nor launched out of one. The home directory is
+    not such a project. Run from home itself, or from a directory above it (the
+    filesystem root is the everyday one, and an operator typing the install
+    one-liner is standing in one or the other), a boundary drawn at the working
+    directory swallows the home directory whole: every user-level target and
+    every uv- or pipx-installed launcher then reads as "inside the workspace",
+    and a half whose entire output is user-level files has nothing left it may
+    write. There is no workspace to keep out of there, so this reports none, and
+    every directory that is not home or above it keeps the strict boundary. A
+    host that cannot name a home directory keeps it too.
+    """
+    workspace = absolute_without_symlinks(Path.cwd())
+    with suppress(RuntimeError):
+        if is_path_within_frozen(absolute_without_symlinks(Path.home()), workspace):
+            return None
+    return workspace
+
+
 def _external_user_path(path: Path, label: str) -> Path:
     absolute = absolute_without_symlinks(path)
-    workspace = absolute_without_symlinks(Path.cwd())
-    if is_path_within_frozen(absolute, workspace):
+    workspace = _workspace_boundary()
+    if workspace is not None and is_path_within_frozen(absolute, workspace):
         raise ConfigError("unsafe_configured_path", f"{label} must be stored outside the project workspace.", {"field": "user_config", "path": str(absolute), "workspace_root": str(workspace)})
     return absolute
 
@@ -1790,7 +1813,11 @@ def _mcp_cache_roots() -> list[Path]:
 
 
 def _trusted_mcp_command(command: str) -> str:
-    return trusted_persistent_executable(command, workspace=Path.cwd(), disallowed_roots=_mcp_cache_roots())
+    # The same boundary the user-level files are checked against: from home or
+    # above it the launcher a package manager just installed under `~/.local/bin`
+    # would otherwise be refused for coming "from the workspace", which is the
+    # one thing agent-install is there to register.
+    return trusted_persistent_executable(command, workspace=_workspace_boundary(), disallowed_roots=_mcp_cache_roots())
 
 
 def _mcp_command_candidates() -> list[str]:
@@ -2104,6 +2131,11 @@ def _replaceable_agentic_hil_command(configured: object) -> bool:
     replaceable by definition, and anything else must pass the same trust check
     as a new command. An operator's own absolute path satisfies neither and is
     reported as a conflict instead of being silently repointed.
+
+    Run from home or above it there is no workspace (`_workspace_boundary`), so
+    nothing is workspace-local and the trust check decides alone. Reading every
+    path under home as workspace-local there would hand an entry an operator
+    installed system-wide to whatever this run found.
     """
     if not isinstance(configured, str):
         return False
@@ -2111,7 +2143,8 @@ def _replaceable_agentic_hil_command(configured: object) -> bool:
     if not path.is_absolute():
         return False
     with suppress(OSError, ValueError):
-        if is_path_within_frozen(path, Path.cwd().resolve()):
+        workspace = _workspace_boundary()
+        if workspace is not None and is_path_within_frozen(path, workspace):
             return True
     try:
         _trusted_mcp_command(str(path))
