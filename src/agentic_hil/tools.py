@@ -376,7 +376,10 @@ class AgenticHILToolService:
         symbol = (payload or {}).get("symbol")
         if not isinstance(symbol, str) or not symbol.strip():
             return tool_error("debug_symbol_value", "invalid_argument", "symbol must be a non-empty string.")
-        return self.backend.debug_symbol_value(symbol.strip())
+        # The same offer the dump gets: an ELF a confirmed flash proved is on the
+        # target, for a backend with no session to ask. A backend that has one
+        # ignores it.
+        return self.backend.debug_symbol_value(symbol.strip(), self._symbol_elf)
 
     def debug_dump_symbol_ihex(self, payload: JsonObject | None = None) -> JsonObject:
         if self._dispatch_depth == 0:

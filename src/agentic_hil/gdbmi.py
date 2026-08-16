@@ -17,6 +17,18 @@ MI_FIELD_ESCAPE_PATTERN = re.compile(r"\\(.)")
 STOP_RECORD_PREFIX = "*stopped,"
 INTEL_HEX_BYTES_PER_RECORD = 16
 INTEL_HEX_EOF_RECORD = ":00000001FF"
+# The record types a dump can contain. The two base records are the only way an
+# Intel HEX file addresses anything above 64 KiB, so a reader that ignored them
+# would read a Cortex-M dump as if it began at zero; the start-address records
+# name an entry point and carry no memory at all, so they are skipped. Anything
+# else is refused rather than skipped, because a record type this does not
+# understand may be carrying the very bytes that were asked for.
+INTEL_HEX_DATA_RECORD = 0x00
+INTEL_HEX_EOF_RECORD_TYPE = 0x01
+INTEL_HEX_SEGMENT_BASE_RECORD = 0x02
+INTEL_HEX_LINEAR_BASE_RECORD = 0x04
+INTEL_HEX_START_ADDRESS_RECORDS = frozenset({0x03, 0x05})
+INTEL_HEX_RECORD_PATTERN = re.compile(r"^:(?:[0-9a-fA-F]{2})+$")
 GDB_EXIT_COMMAND_TIMEOUT_S = 2.0
 
 
@@ -292,3 +304,75 @@ def intel_hex_record(address16: int, record_type: int, payload: bytes) -> str:
     record = bytes([len(payload), (address16 >> 8) & 0xFF, address16 & 0xFF, record_type, *payload])
     checksum = (-sum(record)) & 0xFF
     return f":{record.hex().upper()}{checksum:02X}"
+
+
+def read_intel_hex_file(file_path: Path, start_address: int, size_bytes: int) -> bytes | None:
+    """The bytes an Intel HEX file records for exactly ``[start_address, +size_bytes)``.
+
+    The inverse of ``write_intel_hex_file``, for the backend that has no other
+    way to read memory: STM32CubeProgrammer's `-r` uploads into a file and that
+    is the whole of its read, so answering a caller with bytes means parsing the
+    dump back (#249). Every record carries its own address, so the window is
+    taken by address rather than by position, and bytes outside it are ignored:
+    a CLI that rounds a read up to a word boundary has still read what was asked
+    for.
+
+    ``None`` for anything that is not exactly that window: a malformed record, a
+    failed checksum, a record type that could be carrying bytes and is not
+    understood, one address written twice with different values, or a hole.
+    Never a partial answer, because half of a status word is a different number
+    rather than a smaller one, and the caller reports a read that failed.
+    """
+    if size_bytes <= 0 or start_address < 0:
+        return None
+    try:
+        text = file_path.read_text(encoding="ascii")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    window = bytearray(size_bytes)
+    covered = bytearray(size_bytes)
+    base = 0
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parsed = parse_intel_hex_record(line)
+        if parsed is None:
+            return None
+        record_type, offset, payload = parsed
+        if record_type == INTEL_HEX_EOF_RECORD_TYPE:
+            break
+        if record_type in {INTEL_HEX_LINEAR_BASE_RECORD, INTEL_HEX_SEGMENT_BASE_RECORD}:
+            if len(payload) != 2:
+                return None
+            shift = 16 if record_type == INTEL_HEX_LINEAR_BASE_RECORD else 4
+            base = int.from_bytes(payload, "big") << shift
+        elif record_type == INTEL_HEX_DATA_RECORD:
+            for index, value in enumerate(payload):
+                position = base + offset + index - start_address
+                if not 0 <= position < size_bytes:
+                    continue
+                if covered[position] and window[position] != value:
+                    return None
+                window[position] = value
+                covered[position] = 1
+        elif record_type not in INTEL_HEX_START_ADDRESS_RECORDS:
+            return None
+    if not all(covered):
+        return None
+    return bytes(window)
+
+
+def parse_intel_hex_record(line: str) -> tuple[int, int, bytes] | None:
+    """One ``:llaaaatt<data>cc`` record as (type, 16-bit offset, payload), or None.
+
+    The same shape checks the artifact validator makes of an uploaded `.hex`,
+    kept here rather than borrowed because this reader needs the fields as well
+    as the verdict: the byte count against the record's real length, and the
+    checksum, since a record that fails either says nothing about memory."""
+    if INTEL_HEX_RECORD_PATTERN.match(line) is None:
+        return None
+    record = bytes.fromhex(line[1:])
+    if len(record) < 5 or len(record) != record[0] + 5 or sum(record) & 0xFF:
+        return None
+    return record[3], int.from_bytes(record[1:3], "big"), record[4:-1]

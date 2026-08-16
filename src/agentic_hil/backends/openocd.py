@@ -236,7 +236,10 @@ class OpenOCDBackend:
     def debug_symbol_info(self, symbol: str) -> JsonObject:
         return self._debug.symbol_info(symbol)
 
-    def debug_symbol_value(self, symbol: str) -> JsonObject:
+    def debug_symbol_value(self, symbol: str, symbol_elf: JsonObject | None = None) -> JsonObject:
+        # `symbol_elf` is ignored here for the reason it is ignored by the dump
+        # below: this backend has a session, and the image that session loaded is
+        # the one the target is running.
         return self._debug.symbol_value(symbol)
 
     def debug_dump_symbol_ihex(self, symbol: str, output: JsonObject, symbol_elf: JsonObject | None = None) -> JsonObject:
