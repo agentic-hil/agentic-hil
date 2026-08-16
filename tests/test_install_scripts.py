@@ -438,6 +438,109 @@ def test_a_newer_install_answers_agent_install_over_an_older_copy_earlier_on_pat
     assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
 
 
+def test_both_scripts_ask_uv_where_it_put_the_executable() -> None:
+    """A uv install is located through `uv tool dir --bin`, not a guessed user bin.
+
+    uv writes its tool executables into a directory that can sit outside the
+    guessed user bins: `UV_TOOL_BIN_DIR` names one, the XDG data directory another,
+    and `uv tool dir --bin` is uv's own authoritative report of where `uv tool
+    install` just wrote the console script. A scan that only guesses the user bins
+    misses a copy that landed there and lets an older agentic-hil earlier on PATH
+    answer instead. Both scripts must consult uv; the PowerShell side has no
+    interpreter in every checkout, so this static check is its regression guard.
+    """
+    assert "uv tool dir --bin" in _code_only(_shell_source())
+    assert "'tool', 'dir', '--bin'" in _code_only(_powershell_source())
+
+
+def test_a_uv_install_outside_the_user_bin_answers_over_an_older_path_copy(tmp_path: Path) -> None:
+    """The `UV_TOOL_BIN_DIR` case, run end to end through a POSIX shell.
+
+    uv is told to write tool executables into a directory that is neither the user
+    bin nor on PATH, the way `UV_TOOL_BIN_DIR` and the XDG data directory can move
+    it, and reports that directory with `uv tool dir --bin`. Before this fix the
+    candidate scan only guessed the user bins, missed the fresh copy, and step 3
+    accepted the stale 0.3.0 copy earlier on PATH, which then answered
+    `agent-install` while the script reported success. The fix asks uv where the
+    copy went, version-checks it there, and routes the machine half through that
+    exact one.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    early_bin = tmp_path / "early-bin"
+    user_bin = home / ".local" / "bin"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    for directory in (project, early_bin, user_bin, uv_bin):
+        directory.mkdir(parents=True)
+
+    marker = tmp_path / "who-ran-agent-install"
+
+    # The stale copy, earlier on PATH than the user bin, and older than the floor.
+    _stub_executable(
+        early_bin / "agentic-hil",
+        'case "$1" in\n'
+        '  --version) echo "0.3.0" ;;\n'
+        f'  agent-install) echo "stale" > "{marker}" ;;\n'
+        "esac\n"
+        "exit 0\n",
+    )
+    # A stub claude, so agent detection has a claude-code to register for.
+    _stub_executable(early_bin / "claude", "exit 0\n")
+    # A fake uv that honours UV_TOOL_BIN_DIR: it reports that directory with
+    # `tool dir --bin`, and `tool install` writes the fresh console script there,
+    # the way the real uv does. The copy lands nowhere the old candidate scan
+    # looked, and nowhere on PATH.
+    _stub_executable(
+        early_bin / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "9.9.9" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{early_bin}:{user_bin}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--version", "9.9.9", "--no-can"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+    # The fresh copy landed off PATH, so the script says so rather than pretending
+    # it resolves, and still routes the machine half through it.
+    assert f"landed in {uv_bin}" in transcript, transcript
+
+
 # The container run, end to end: a machine with nothing on it, the real package
 # from the index, a stub `claude` on PATH so agent detection has something to
 # find, and then the four questions that decide whether the line did its job.

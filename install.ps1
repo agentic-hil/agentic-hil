@@ -148,6 +148,25 @@ function Get-PackageSpec {
     return $spec
 }
 
+function Get-RequiredVersion {
+    # The lowest version a freshly installed copy may report and still be accepted
+    # as the one this run installed: the pin when one was asked for, the floor
+    # otherwise. A copy older than this in a candidate directory is a stale one
+    # left behind, not what the manager just wrote.
+    if ($Version) { return $Version }
+    return $Floor
+}
+
+function Get-UvBinDirectory {
+    # uv's own executable directory, straight from uv. This is authoritative: it
+    # honours UV_TOOL_BIN_DIR and the XDG data directory, neither of which the
+    # guessed user bin can name, and it is where `uv tool install` just wrote the
+    # console script.
+    $probe = Invoke-Captured -File 'uv' -Arguments @('tool', 'dir', '--bin')
+    if ($probe.ExitCode -eq 0) { return $probe.Output.Trim() }
+    return ''
+}
+
 function Find-Python {
     foreach ($candidate in @('py', 'python', 'python3')) {
         if (-not (Test-Executable $candidate)) { continue }
@@ -177,8 +196,17 @@ function Add-UserBinToPath {
 }
 
 function Get-CandidateBinDirectories {
-    param([string]$PythonCommand)
-    $directories = @(Join-Path $env:USERPROFILE '.local\bin')
+    param([string]$PythonCommand, [string]$PackageManager)
+    # uv's own executable directory first, so an install whose copy landed outside
+    # the default user bin is still found there; the guessed user bin and the
+    # interpreter's user scripts path follow. pip --user writes its scripts into
+    # that nt_user path, so the pip branch is covered without a separate lookup.
+    $directories = @()
+    if ($PackageManager -eq 'uv') {
+        $uvBin = Get-UvBinDirectory
+        if ($uvBin) { $directories += $uvBin }
+    }
+    $directories += (Join-Path $env:USERPROFILE '.local\bin')
     if ($PythonCommand) {
         $probe = Invoke-Captured -File $PythonCommand -Arguments @(
             '-c',
@@ -222,11 +250,15 @@ if (Test-Executable 'agentic-hil') {
 
 # Step 2: install the package, user-local, never elevated.
 $pythonCommand = ''
+# Which manager step 2 installed with, so step 3 can ask that manager where it
+# actually put the executable rather than guess.
+$packageManager = ''
 if (-not $needsPackage) {
     Write-Step 2 'package: nothing to install'
 } elseif (Test-Executable 'uv') {
     Write-Step 2 "package: uv is here, installing $(Get-PackageSpec) user-local with uv tool install"
     Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure 'uv could not install agentic-hil'
+    $packageManager = 'uv'
 } else {
     $pythonCommand = Find-Python
     if ($pythonCommand) {
@@ -244,9 +276,12 @@ if (-not $needsPackage) {
                 Add-UserBinToPath
                 if (-not (Test-Executable 'uv')) { throw 'uv installed but does not resolve yet; open a new shell and run this again' }
                 Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure 'uv could not install agentic-hil'
+                $packageManager = 'uv'
             } else {
                 throw "pip could not install $(Get-PackageSpec); TROUBLESHOOTING.md section 1 has the fallbacks"
             }
+        } else {
+            $packageManager = 'pip'
         }
     } else {
         Write-Step 2 "package: no uv and no Python 3.10 or newer here, fetching Astral's uv installer first"
@@ -254,6 +289,7 @@ if (-not $needsPackage) {
         if (-not (Test-Executable 'uv')) { throw 'uv installed but does not resolve yet; open a new shell and run this again' }
         Write-Say "package: installing $(Get-PackageSpec) user-local with uv tool install"
         Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure 'uv could not install agentic-hil'
+        $packageManager = 'uv'
     }
 }
 
@@ -270,9 +306,17 @@ if (-not $needsPackage) {
     Write-Step 3 "PATH: agentic-hil $installed is already here and was kept, nothing to add"
 } else {
     $found = ''
-    foreach ($directory in (Get-CandidateBinDirectories -PythonCommand $pythonCommand)) {
+    $minimum = Get-RequiredVersion
+    foreach ($directory in (Get-CandidateBinDirectories -PythonCommand $pythonCommand -PackageManager $packageManager)) {
         if (-not $directory) { continue }
-        if ((Test-Path (Join-Path $directory 'agentic-hil.exe')) -and -not $found) { $found = $directory }
+        if ($found) { continue }
+        $executable = Join-Path $directory 'agentic-hil.exe'
+        if (-not (Test-Path $executable)) { continue }
+        # Version-check the copy: this is the proof that it is the one the manager
+        # just wrote and not an older one left in a candidate directory.
+        $probe = Invoke-Captured -File $executable -Arguments @('--version')
+        if ($probe.ExitCode -ne 0) { continue }
+        if (Test-VersionAtLeast -Found $probe.Output.Trim() -Floor $minimum) { $found = $directory }
     }
     if ($found) {
         # Call this exact copy for the machine half, and put its directory first
@@ -289,13 +333,24 @@ if (-not $needsPackage) {
             Write-Host ''
         }
         $env:Path = "$found;$env:Path"
-    } elseif (Test-Executable 'agentic-hil') {
-        # Installed, but not into any directory this script installs into:
-        # whatever put it elsewhere owns where it resolves, and if it resolves at
-        # all that is the copy the machine half will use.
-        Write-Step 3 'PATH: agentic-hil resolves on this PATH already, nothing to add'
     } else {
-        Write-Step 3 'PATH: agentic-hil is installed but does not resolve here; TROUBLESHOOTING.md section 1 has the fix'
+        # Installed, but the fresh copy could not be located and version-checked
+        # where the manager put it. We do not fall back to whatever bare
+        # agentic-hil PATH resolves: that is exactly the older copy earlier on PATH
+        # this step exists to step past. $AgenticHilCmd stays the bare name, and
+        # step 4 refuses to run the machine half against it.
+        Write-Step 3 'PATH: agentic-hil is installed but the fresh copy does not resolve here; TROUBLESHOOTING.md section 1 has the fix'
+    }
+}
+
+# Refuse to run the machine half against a copy this run could not prove is the
+# one it installed. $AgenticHilCmd is still the bare name only when a package was
+# installed and step 3 could not resolve the fresh copy; running the bare name
+# there would hand agent-install to whatever older agentic-hil PATH resolves,
+# which is the failure this whole path guards against.
+function Assert-ResolvedForAgentInstall {
+    if ($needsPackage -and $AgenticHilCmd -eq 'agentic-hil') {
+        throw 'the agentic-hil this run installed could not be located where the package manager put it, so the machine half was not run against a possibly stale PATH copy; TROUBLESHOOTING.md section 1 has the fix'
     }
 }
 
@@ -304,6 +359,7 @@ $configured = @()
 if (-not $WithAgentInstall) {
     Write-Step 4 'agent: --no-agent-install was given, so nothing of any agent''s was written'
 } elseif ($Agent) {
+    Assert-ResolvedForAgentInstall
     Write-Step 4 "agent: registering the skill and the MCP server for $Agent"
     Invoke-Checked -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $Agent) -Failure "agent-install failed for $Agent"
     $configured = @($Agent)
@@ -319,6 +375,7 @@ if (-not $WithAgentInstall) {
         Write-Host '    agentic-hil agent-install --agent <claude-code|codex|opencode>'
         Write-Host ''
     } else {
+        Assert-ResolvedForAgentInstall
         foreach ($agentId in $detected) {
             Write-Step 4 "agent: registering the skill and the MCP server for $agentId"
             Invoke-Checked -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $agentId) -Failure "agent-install failed for $agentId"

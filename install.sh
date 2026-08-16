@@ -181,6 +181,18 @@ package_spec() {
     printf '%s' "$spec"
 }
 
+# The lowest version a freshly installed copy may report and still be accepted as
+# the one this run installed: the pin when one was asked for, the floor otherwise.
+# A copy older than this in a candidate directory is a stale one left behind, not
+# what the manager just wrote, so it does not get to answer for the install.
+required_version() {
+    if [ -n "$PINNED" ]; then
+        printf '%s' "$PINNED"
+    else
+        printf '%s' "$FLOOR"
+    fi
+}
+
 fetch_uv() {
     # Astral's own installer for uv. It downloads the release archive for this
     # platform and verifies its published checksums itself, which is why nothing
@@ -222,7 +234,27 @@ install_with_pip() {
     esac
 }
 
+# Which manager step 2 installed with, so step 3 can ask that manager where it
+# actually put the executable rather than guess.
+PACKAGE_MANAGER=""
+
+manager_bin_dir() {
+    # uv's own executable directory, straight from uv. This is authoritative: it
+    # honours UV_TOOL_BIN_DIR and the XDG data directory, neither of which the
+    # guessed user bins below can name, and it is where `uv tool install` just
+    # wrote the console script. pip --user writes its scripts into the
+    # interpreter's user scripts path, which candidate_bin_dirs already probes,
+    # so only the uv branch needs naming here.
+    if [ "${PACKAGE_MANAGER:-}" = "uv" ]; then
+        uv tool dir --bin 2>/dev/null || true
+    fi
+}
+
 candidate_bin_dirs() {
+    # The manager's own executable directory first, so an install whose copy
+    # landed outside the default user bin is still found there; the guessed user
+    # bins follow as a fallback for a uv too old to report its bin directory.
+    manager_bin_dir
     printf '%s\n' "${XDG_BIN_HOME:-$HOME/.local/bin}"
     printf '%s\n' "$HOME/.local/bin"
     if [ -n "${DISCOVERED_PYTHON:-}" ]; then
@@ -237,11 +269,17 @@ candidate_bin_dirs() {
 AGENTIC_HIL_CMD="agentic-hil"
 
 installed_executable_dir() {
-    # The first candidate bin directory that now holds an executable agentic-hil.
-    # These are the directories uv and pip --user write console scripts into, so
-    # the copy this run installed is one of them whatever else is on PATH.
+    # The first candidate bin directory that now holds an agentic-hil which
+    # answers and is at least the version this run asked for. The version check is
+    # the proof that this is the copy the manager just wrote and not an older one
+    # left in a candidate directory; the manager's own bin directory is tried
+    # first, so a copy that landed outside the default user bin is still found.
+    minimum=$(required_version)
     while IFS= read -r directory; do
-        if [ -n "$directory" ] && [ -x "$directory/agentic-hil" ]; then
+        [ -n "$directory" ] || continue
+        [ -x "$directory/agentic-hil" ] || continue
+        found_version=$("$directory/agentic-hil" --version 2>/dev/null) || continue
+        if version_at_least "$found_version" "$minimum"; then
             printf '%s\n' "$directory"
             return 0
         fi
@@ -277,14 +315,13 @@ report_path() {
         export PATH
         return 0
     fi
-    # Installed, but not into any directory this script installs into: whatever
-    # put it elsewhere owns where it resolves, and if it resolves at all that is
-    # the copy the machine half will use.
-    if have agentic-hil; then
-        step 3 "PATH: agentic-hil resolves on this PATH already, nothing to add"
-        return 0
-    fi
-    step 3 "PATH: agentic-hil is installed but does not resolve here; TROUBLESHOOTING.md section 1 has the fix"
+    # Installed, but the fresh copy could not be located and version-checked where
+    # the manager put it. We do not fall back to whatever bare agentic-hil PATH
+    # resolves: that is exactly the older copy earlier on PATH this step exists to
+    # step past. AGENTIC_HIL_CMD stays the bare name, and step 4 refuses to run the
+    # machine half against it rather than register with a copy this run cannot
+    # prove is the one it installed.
+    step 3 "PATH: agentic-hil is installed but the fresh copy does not resolve here; TROUBLESHOOTING.md section 1 has the fix"
     return 0
 }
 
@@ -335,6 +372,7 @@ if [ "$NEEDS_PACKAGE" -eq 0 ]; then
 elif have uv; then
     step 2 "package: uv is here, installing $(package_spec) user-local with uv tool install"
     install_with_uv
+    PACKAGE_MANAGER="uv"
 elif DISCOVERED_PYTHON=$(find_python); then
     step 2 "package: installing $(package_spec) user-local with $DISCOVERED_PYTHON -m pip install --user"
     pip_status=0
@@ -347,8 +385,11 @@ elif DISCOVERED_PYTHON=$(find_python); then
         fi
         have uv || fail "package: uv installed but does not resolve yet; open a new shell and run this again"
         install_with_uv
+        PACKAGE_MANAGER="uv"
     elif [ "$pip_status" -ne 0 ]; then
         fail "package: pip could not install $(package_spec); TROUBLESHOOTING.md section 1 has the fallbacks"
+    else
+        PACKAGE_MANAGER="pip"
     fi
 else
     step 2 "package: no uv and no Python 3.10 or newer here, fetching Astral's uv installer first"
@@ -356,16 +397,29 @@ else
     user_bin_on_path
     have uv || fail "package: uv installed but does not resolve yet; open a new shell and run this again"
     install_with_uv
+    PACKAGE_MANAGER="uv"
 fi
 
 # Step 3: say where it landed, and edit nobody's shell profile.
 report_path
+
+# Refuse to run the machine half against a copy this run could not prove is the
+# one it installed. AGENTIC_HIL_CMD is still the bare name only when a package
+# was installed and step 3 could not resolve the fresh copy; running the bare
+# name there would hand agent-install to whatever older agentic-hil PATH resolves,
+# which is the failure this whole path guards against.
+ensure_resolved_for_agent_install() {
+    if [ "$NEEDS_PACKAGE" -eq 1 ] && [ "$AGENTIC_HIL_CMD" = "agentic-hil" ]; then
+        fail "agent: the agentic-hil this run installed could not be located where the package manager put it, so the machine half was not run against a possibly stale PATH copy; TROUBLESHOOTING.md section 1 has the fix"
+    fi
+}
 
 # Step 4: the machine half, and only the machine half.
 CONFIGURED=""
 if [ "$WITH_AGENT_INSTALL" -eq 0 ]; then
     step 4 "agent: --no-agent-install was given, so nothing of any agent's was written"
 elif [ -n "$AGENT" ]; then
+    ensure_resolved_for_agent_install
     step 4 "agent: registering the skill and the MCP server for $AGENT"
     "$AGENTIC_HIL_CMD" agent-install --agent "$AGENT"
     CONFIGURED="$AGENT"
@@ -376,6 +430,7 @@ else
         say "agent: the package is installed. Once your agent CLI is here, run this one line:"
         printf '\n    agentic-hil agent-install --agent <claude-code|codex|opencode>\n\n'
     else
+        ensure_resolved_for_agent_install
         for agent_id in $DETECTED; do
             step 4 "agent: registering the skill and the MCP server for $agent_id"
             "$AGENTIC_HIL_CMD" agent-install --agent "$agent_id"
