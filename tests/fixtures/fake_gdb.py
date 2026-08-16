@@ -14,12 +14,18 @@ ASYNC_STOP_DELAY_S = 0.02
 
 CTC_ARRAY_ADDRESS = 0x200006F0
 CTC_ARRAY_SIZE = 408
+BOOT_COUNTER_ADDRESS = 0x20000080
+BOOT_COUNTER_SIZE = 4
 BATCH_ADDRESS_PATTERN = re.compile(r'^printf\s+"(?P<marker>[A-Za-z_]+=)%lu\\n",\s*\(unsigned long\)&(?P<symbol>\w+)$')
 BATCH_SIZE_PATTERN = re.compile(r'^printf\s+"(?P<marker>[A-Za-z_]+=)%lu\\n",\s*\(unsigned long\)sizeof\((?P<symbol>\w+)\)$')
 # What the ELF's debug information holds, for the offline query. Address and size
 # match the values this fake answers over MI, so a dump resolves to the same
 # place whether it went through a session or through the batch query.
-BATCH_SYMBOLS = {"CTC_array": (CTC_ARRAY_ADDRESS, CTC_ARRAY_SIZE), "big_buffer": (0x20001000, 4096)}
+BATCH_SYMBOLS = {
+    "CTC_array": (CTC_ARRAY_ADDRESS, CTC_ARRAY_SIZE),
+    "big_buffer": (0x20001000, 4096),
+    "boot_counter": (BOOT_COUNTER_ADDRESS, BOOT_COUNTER_SIZE),
+}
 # Symbols the linker placed and the compiler never described: an assembly object
 # with `.global`/`.type`/`.size` and no DWARF behind it. Real GDB answers both
 # `&symbol` and `sizeof(symbol)` for one of these with this message, on stderr in
@@ -65,6 +71,10 @@ def evaluate_expression(token: str, expression: str) -> None:
         emit(f'{token}^done,value="{hex(CTC_ARRAY_ADDRESS)}"')
     elif expression == "sizeof(CTC_array)":
         emit(f'{token}^done,value="{CTC_ARRAY_SIZE}"')
+    elif expression == "(unsigned long)&boot_counter":
+        emit(f'{token}^done,value="{hex(BOOT_COUNTER_ADDRESS)}"')
+    elif expression == "sizeof(boot_counter)":
+        emit(f'{token}^done,value="{BOOT_COUNTER_SIZE}"')
     elif untyped is not None:
         emit(f'{token}^error,msg="{UNKNOWN_TYPE_MESSAGE.format(symbol=untyped)}"')
     elif "missing_symbol" in expression:

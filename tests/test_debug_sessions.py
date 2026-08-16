@@ -8,6 +8,7 @@ import pytest
 from conftest import FAKE_GDB, FAKE_STLINK, FAKE_STLINK_READ_UNCONFIRMED, elf_with_symbols, write_config
 
 from agentic_hil.backends.common import command_for_log
+from agentic_hil.backends.gdbdebug import decode_symbol_value
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.elfsymbols import read_elf_symbol
 from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, write_intel_hex_file
@@ -16,6 +17,10 @@ from agentic_hil.tools import AgenticHILToolService
 
 CTC_ARRAY_ADDRESS = 0x200006F0
 CTC_ARRAY_SIZE = 408
+# A typed 4-byte symbol, so a value read has an integer to decode, at an address
+# whose top byte makes the signed and the unsigned reading differ.
+BOOT_COUNTER_ADDRESS = 0x20000080
+BOOT_COUNTER_SIZE = 4
 # The issue's own example: an assembly-defined object the fake GDB refuses for
 # both expressions, carried only by the symbol table of the ELF a test builds.
 # Eight bytes rather than a real vector table's four hundred, so one test can
@@ -1755,3 +1760,174 @@ def test_stlink_resolution_still_refuses_a_symbol_the_flashed_elf_lacks(tmp_path
     assert refused["symbol_table_lookup"] == "not_found"
     assert refused["target_contacted"] is False
     assert not (tmp_path / "build" / "memory.hex").exists()
+
+
+# --- the value a symbol holds -----------------------------------------------
+#
+# `debug_symbol_info` answers where a symbol is, `debug_dump_symbol_ihex` answers
+# with a file, and the bytes the backend read on the way to writing that file
+# reached nobody who wanted to compare them (#174). `debug_symbol_value` is that
+# same read ending differently: nothing written anywhere, and the bytes returned.
+
+
+def test_symbol_value_returns_the_bytes_and_both_integer_readings(tmp_path: Path) -> None:
+    service = debug_service(tmp_path)
+    try:
+        assert start_debug_session(service)["ok"] is True
+        value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    expected = fake_target_bytes(BOOT_COUNTER_ADDRESS, BOOT_COUNTER_SIZE)
+    assert value["ok"] is True, value
+    assert value["backend"] == "openocd"
+    assert value["symbol"] == "boot_counter"
+    assert value["address"] == hex(BOOT_COUNTER_ADDRESS)
+    assert value["size_bytes"] == BOOT_COUNTER_SIZE
+    assert value["resolved_from"] == "debug_info"
+    assert value["hex"] == expected.hex()
+    assert value["byte_order"] == "little"
+    # This width has one integer reading and the two signs disagree about it,
+    # which is the whole reason both are returned instead of one.
+    assert value["value_unsigned"] == int.from_bytes(expected, "little", signed=False)
+    assert value["value_signed"] == int.from_bytes(expected, "little", signed=True)
+    assert value["value_unsigned"] != value["value_signed"]
+    assert value["summary"] == "Symbol value read from target memory."
+    # A read, and nothing else: no file appeared anywhere under the workspace.
+    assert list((tmp_path / "build").iterdir()) == [tmp_path / "build" / "app.elf"]
+
+
+def test_symbol_value_states_when_a_width_has_no_integer_reading(tmp_path: Path) -> None:
+    """408 bytes is a structure, not a number. The bytes still come back; what is
+    withheld is the reading that would have been invented."""
+    service = debug_service(tmp_path)
+    try:
+        assert start_debug_session(service)["ok"] is True
+        value = service.call("debug_symbol_value", {"symbol": "CTC_array"})
+    finally:
+        service.close()
+
+    assert value["ok"] is True, value
+    assert value["hex"] == fake_target_bytes(CTC_ARRAY_ADDRESS, CTC_ARRAY_SIZE).hex()
+    assert "value_unsigned" not in value
+    assert "value_signed" not in value
+    assert value["value_not_decoded"] == "size_bytes is not 1, 2, 4 or 8, so the bytes carry no single integer reading."
+
+
+@pytest.mark.parametrize(
+    ("data", "unsigned", "signed"),
+    [
+        (b"\xff", 255, -1),
+        (b"\x00\x80", 32768, -32768),
+        (b"\x01\x00\x00\x00", 1, 1),
+        (b"\xff\xff\xff\xff\xff\xff\xff\xff", 2**64 - 1, -1),
+    ],
+    ids=["one_byte", "two_bytes", "four_bytes", "eight_bytes"],
+)
+def test_symbol_value_decoding_covers_every_integer_width(data: bytes, unsigned: int, signed: int) -> None:
+    decoded = decode_symbol_value(data)
+
+    assert decoded["hex"] == data.hex()
+    assert decoded["byte_order"] == "little"
+    assert decoded["value_unsigned"] == unsigned
+    assert decoded["value_signed"] == signed
+
+
+@pytest.mark.parametrize("size", [0, 3, 5, 6, 7, 9, 408], ids=str)
+def test_symbol_value_decoding_offers_no_number_at_any_other_width(size: int) -> None:
+    decoded = decode_symbol_value(bytes(size))
+
+    assert decoded["hex"] == bytes(size).hex()
+    assert "value_unsigned" not in decoded and "value_signed" not in decoded
+    assert "value_not_decoded" in decoded
+
+
+def test_symbol_value_reads_a_symbol_only_the_symbol_table_describes(tmp_path: Path) -> None:
+    """The two changes meeting: the value of a symbol GDB's expression evaluator
+    cannot resolve at all. Neither half answers this on its own."""
+    service = debug_service(tmp_path, elf_symbols=UNTYPED_SYMBOL_TABLE)
+    try:
+        assert start_debug_session(service)["ok"] is True
+        value = service.call("debug_symbol_value", {"symbol": "g_pfnVectors"})
+    finally:
+        service.close()
+
+    expected = fake_target_bytes(VECTOR_TABLE_ADDRESS, VECTOR_TABLE_SIZE)
+    assert value["ok"] is True, value
+    assert value["resolved_from"] == "elf_symbol_table"
+    assert value["address"] == hex(VECTOR_TABLE_ADDRESS)
+    assert value["hex"] == expected.hex()
+    assert value["value_unsigned"] == int.from_bytes(expected, "little", signed=False)
+
+
+def test_symbol_value_enforces_the_allowlist(tmp_path: Path) -> None:
+    """The refusal `debug_symbol_info` gives, word for word. The allowlist is the
+    operator's statement about what may leave this bench, and a new way of
+    leaving it must not be a way around it."""
+    service = debug_service(tmp_path, allowed_symbols=["CTC_array"])
+    try:
+        assert start_debug_session(service)["ok"] is True
+        refused = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        allowed = service.call("debug_symbol_value", {"symbol": "CTC_array"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "permission_denied"
+    assert refused["summary"] == "Symbol is not allowed by debug.allowed_symbols."
+    assert "hex" not in refused
+    assert allowed["ok"] is True, allowed
+
+
+def test_symbol_value_enforces_the_configured_size_cap(tmp_path: Path) -> None:
+    """`debug.max_dump_size_bytes` bounds what may be read, not only what may be
+    written: this tool writes nothing and is held to the same ceiling, checked on
+    the resolved size before any memory is read."""
+    service = debug_service(tmp_path, max_dump_size_bytes=16)
+    try:
+        assert start_debug_session(service)["ok"] is True
+        refused = service.call("debug_symbol_value", {"symbol": "CTC_array"})
+        within = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "permission_denied"
+    assert refused["size_bytes"] == CTC_ARRAY_SIZE
+    assert refused["max_dump_size_bytes"] == 16
+    assert within["ok"] is True, within
+
+
+def test_symbol_value_requires_a_session_and_a_symbol(tmp_path: Path) -> None:
+    service = debug_service(tmp_path)
+    try:
+        without_session = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        assert start_debug_session(service)["ok"] is True
+        without_symbol = service.call("debug_symbol_value", {"symbol": "   "})
+    finally:
+        service.close()
+
+    assert without_session["ok"] is False, without_session
+    assert without_session["error_type"] == "session_not_active"
+    # Refused by the tool's own schema before the service is reached: `symbol`
+    # carries the identifier pattern every symbol tool shares, so a name that is
+    # not one costs nothing and never becomes an address.
+    assert without_symbol["ok"] is False, without_symbol
+    assert without_symbol["error_type"] == "invalid_argument"
+    assert without_symbol["summary"] == "Tool arguments failed schema validation."
+
+
+def test_symbol_value_is_not_served_where_there_is_no_typed_session(tmp_path: Path) -> None:
+    """The stlink backend serves the dump because STM32CubeProgrammer writes a
+    file, which is what the dump promises. It does not serve this one, and says
+    so in the words the rest of the typed family uses."""
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        refused = service.call("debug_symbol_value", {"symbol": "CTC_array"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "not_supported"
+    assert refused["summary"] == "Typed debug sessions require the OpenOCD backend."

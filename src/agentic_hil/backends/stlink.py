@@ -255,6 +255,16 @@ class STLinkBackend:
     def debug_symbol_info(self, symbol: str = "") -> JsonObject:
         return self._unsupported_debug_tool("debug_symbol_info")
 
+    def debug_symbol_value(self, symbol: str = "") -> JsonObject:
+        # Not served here, unlike the dump beside it. STM32CubeProgrammer reads
+        # target memory into a file, which is exactly what `-r` produces and
+        # exactly what `debug_dump_symbol_ihex` promises; returning the bytes
+        # instead would mean writing a temporary file, parsing it back and
+        # calling the result a memory read. That is a second reading of the same
+        # bytes through a format that was never in the question, so this backend
+        # says what it does not do rather than approximating it.
+        return self._unsupported_debug_tool("debug_symbol_value")
+
     def debug_dump_symbol_ihex(self, symbol: str = "", output: JsonObject | None = None, symbol_elf: JsonObject | None = None) -> JsonObject:
         """Read one allowed symbol out of target memory and write Intel HEX.
 

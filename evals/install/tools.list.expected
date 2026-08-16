@@ -24,6 +24,7 @@ debug_set_breakpoint
 debug_start_session
 debug_stop_session
 debug_symbol_info
+debug_symbol_value
 debugger_info
 debugger_probes_list
 flash_firmware

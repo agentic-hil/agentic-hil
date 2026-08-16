@@ -259,14 +259,16 @@ schema and the reactor rather than inferred:
 - **No expectation on a value in target memory.** The debugger's two feedback
   actions assert reaching a place, not reading a value: `run_until_breakpoint`
   asserts that the target stopped where the plan said, and `dump_memory` writes
-  an Intel HEX file and succeeds on having written it. A `read_symbol` action
-  with a `comparator:` over the value would be one decorated method like any
-  other (the plan format already carries the vocabulary), but there is nothing
-  underneath it to call: of the two symbol tools, `debug_symbol_info` answers
-  with an address and a size, and `debug_dump_symbol_ihex` answers with a file.
-  The debug backend does read a symbol's bytes on the way to writing that file;
-  no tool returns them to a caller. This gap therefore closes with a
-  value-returning debug tool, not with a plan format change.
+  an Intel HEX file and succeeds on having written it. The backend half of this
+  is no longer missing: `debug_symbol_value` returns an allowed symbol's bytes,
+  as hex and as an unsigned and a signed integer at 1, 2, 4 or 8 bytes, so
+  there is now something for a `read_symbol` action to call. What is still
+  missing is the plan half, and it is more than the decorated method this
+  paragraph used to promise: a `comparator:` here would judge a decoded number,
+  while every comparator the format carries today judges text and reads a
+  `range` out of a regular expression's capture group. Closing it means a
+  numeric comparator, a schema entry for the action and the plan version that
+  introduces it, and it is tracked separately from the tool.
 - **No branch, no reuse, no parameters.** From v4 there is one control-flow
   construct, `repeat`, and it repeats: it does not decide. There is no branch,
   no retry, no until, no include, and no variable or substitution: an argument

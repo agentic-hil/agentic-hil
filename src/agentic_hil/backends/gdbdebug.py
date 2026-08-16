@@ -49,6 +49,10 @@ ABNORMAL_STOP_REASONS = {"debugger_error", "exception", "fault", "timeout", "une
 TCP_POLL_INTERVAL_S = 0.05
 TCP_CONNECT_TIMEOUT_S = 0.2
 MEMORY_READ_CHUNK_BYTES = 1024
+# The widths a run of bytes has one integer reading at, and the order they are
+# read in. See decode_symbol_value for why both are stated rather than assumed.
+INTEGER_VALUE_WIDTHS = frozenset({1, 2, 4, 8})
+SYMBOL_VALUE_BYTE_ORDER = "little"
 GDB_COMMAND_TIMEOUT_CAP_S = 10.0
 CONTINUE_COMMAND_TIMEOUT_CAP_S = 5.0
 STOP_SESSION_TIMEOUT_CAP_S = 5.0
@@ -477,6 +481,50 @@ class GdbDebugSessions:
         if not resolved["ok"]:
             return self._report(resolved)
         return self._report({**resolved, "tool": tool, "backend": self.backend_name, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Symbol resolved."})
+
+    def symbol_value(self, symbol: str) -> JsonObject:
+        """One allowed symbol's bytes, returned to the caller.
+
+        The gap the other two symbol tools leave between them: `symbol_info`
+        answers where a symbol is and how large it is, `dump_symbol_ihex`
+        answers with a file on disk, and the bytes this backend already reads on
+        the way to writing that file never reach anybody who wanted to compare
+        them against an expected value (#174).
+
+        The same read as the dump, ending differently. Same allowlist, same
+        `debug.max_dump_size_bytes` cap on the resolved size, same
+        `_read_memory_bytes` path; what changes is that nothing is written
+        anywhere and the bytes come back as `hex` plus, at an integer width, the
+        two readings of them.
+        """
+        tool = "debug_symbol_value"
+        session_result = self._require_session(tool)
+        if not session_result["ok"]:
+            return self._report(session_result)
+        session = session_result["session"]
+        resolved = self._resolve_symbol(tool, session, symbol)
+        if not resolved["ok"]:
+            return self._report(resolved)
+        size_bytes = int(resolved["size_bytes"])
+        if size_bytes > self.config.debug.max_dump_size_bytes:
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": "Symbol read exceeds debug.max_dump_size_bytes.", "symbol": symbol, "size_bytes": size_bytes, "max_dump_size_bytes": self.config.debug.max_dump_size_bytes})
+        memory = self._read_memory_bytes(tool, session, int(resolved["address_value"]), size_bytes)
+        if not memory["ok"]:
+            return self._report(memory)
+        self._write_session_log(session)
+        return self._report({
+            "ok": True,
+            "tool": tool,
+            "backend": self.backend_name,
+            "symbol": symbol,
+            "address": resolved["address"],
+            "size_bytes": size_bytes,
+            "resolved_from": resolved["resolved_from"],
+            **decode_symbol_value(memory["data"]),
+            "session": self._session_status(session),
+            "log_path": display_path(self.config, session.log_path),
+            "summary": "Symbol value read from target memory.",
+        })
 
     def dump_symbol_ihex(self, symbol: str, output: JsonObject) -> JsonObject:
         tool = "debug_dump_symbol_ihex"
@@ -966,6 +1014,30 @@ def _is_missing_breakpoint_error(response: object) -> bool:
         return False
     message = (getattr(response, "error_message", "") or "").lower()
     return "no breakpoint number" in message
+
+
+def decode_symbol_value(data: bytes) -> JsonObject:
+    """The bytes a symbol holds, as hex and, where the width allows it, as a number.
+
+    `hex` is always there and is the answer: the bytes in memory order, which is
+    what a caller comparing against a firmware structure needs and the only
+    reading that is right for every symbol. The two integer readings are an
+    interpretation on top of it, and they are offered only for the four widths
+    that have one: a 3-byte or 408-byte object is not a number, and inventing a
+    reading for it would be inventing the answer rather than returning it.
+
+    Little-endian, which is the byte order of the Cortex-M targets this project
+    supports; the field says so rather than leaving a caller to assume it. A
+    big-endian target would need this to become configurable, and until then the
+    raw `hex` is the reading that stays correct there.
+    """
+    result: JsonObject = {"hex": data.hex(), "byte_order": SYMBOL_VALUE_BYTE_ORDER}
+    if len(data) in INTEGER_VALUE_WIDTHS:
+        result["value_unsigned"] = int.from_bytes(data, SYMBOL_VALUE_BYTE_ORDER, signed=False)
+        result["value_signed"] = int.from_bytes(data, SYMBOL_VALUE_BYTE_ORDER, signed=True)
+    else:
+        result["value_not_decoded"] = "size_bytes is not 1, 2, 4 or 8, so the bytes carry no single integer reading."
+    return result
 
 
 def public_artifact(artifact: JsonObject) -> JsonObject:
