@@ -1048,6 +1048,42 @@ def _round_records(repository: Path) -> list[dict[str, object]]:
     return json.loads(summary)["rounds"]
 
 
+class _FrozenClock:
+    """One second, for two runs that must still not share a directory."""
+
+    @staticmethod
+    def now() -> datetime:
+        return datetime(2026, 8, 16, 22, 52, 33)
+
+
+def test_two_runs_that_start_in_the_same_second_get_temporary_roots_of_their_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Shared temporary storage needs a name for the run, not for the second.
+
+    The scratch root was `<repo name>-<run id>` under the system temp, and the
+    run id names the second. A machine runs several clones of one project and a
+    suite builds fixture repositories that are all called the same thing, so two
+    runs starting together met in one directory: one created a round directory
+    the other had just removed, and the round died on the collision rather than
+    on anything it was reviewing.
+    """
+    monkeypatch.setattr(agent_review_loop, "datetime", _FrozenClock)
+    roots: list[str] = []
+    for name in ("first", "second"):
+        (tmp_path / name).mkdir()
+        repository = _repository(tmp_path / name)
+        agent = _stalling_agent(tmp_path / name, then=_COMMITS)
+
+        assert _one_round(repository, agent, monkeypatch) == agent_review_loop.EXIT_CLEAN
+
+        roots += [line for line in capsys.readouterr().out.splitlines() if line.startswith("scratch")]
+
+    # Same repository name, same second, and still two directories.
+    assert len(roots) == 2, roots
+    assert roots[0] != roots[1], roots
+
+
 def test_a_no_commit_round_that_left_work_in_the_tree_is_finished_rather_than_called_declined(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

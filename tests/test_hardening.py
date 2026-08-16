@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -285,20 +286,75 @@ def test_the_loaded_configuration_carries_no_trust_mode(tmp_path: Path) -> None:
     assert "windows_path_trust" not in json.loads(config_schema_text())["properties"]
 
 
-def test_the_suite_does_not_divert_its_own_scaffolding_into_the_real_profile(tmp_path: Path, isolated_config_environment: Path) -> None:
+def test_the_suite_does_not_divert_its_own_scaffolding_into_the_real_profile(isolated_config_environment: Path) -> None:
     """Where the suite writes, which is not the operator's own configuration.
 
     `tests/conftest.py` and `tests/support.py` once diverted into the real Local
     AppData because the removed trust check refused the standard per-user Temp —
     the strongest single argument against that check was that the tool's own tests
-    had to evade its rule. The config sandbox stays beside `tmp_path`; the
-    launcher stays under the real home, because the MCP executable check still
-    walks its parent chain.
+    had to evade its rule. The launcher stays under the real home, because the
+    MCP executable check still walks its parent chain.
+
+    The sandbox itself sits in the system temp root and not beside `tmp_path`,
+    which is the one thing `--basetemp` can move: pointed inside this clone, it
+    used to put the isolated HOME under the working directory, and a home inside
+    a project is what `agent-install` refuses. Where the suite writes is the
+    suite's decision, not the command line's.
     """
+    from conftest import ROOT, SANDBOX_ROOT
     from support import LAUNCHER_ROOT, REAL_HOME
 
-    assert isolated_config_environment.parent.parent == tmp_path.parent
+    assert isolated_config_environment.parent.parent == SANDBOX_ROOT
+    assert ROOT not in isolated_config_environment.parents
     assert LAUNCHER_ROOT.parent == REAL_HOME
+
+
+def test_each_test_gets_temporary_storage_of_its_own(isolated_config_environment: Path) -> None:
+    """The one directory every suite on this machine would otherwise share.
+
+    Redirecting HOME is not isolation while temporary storage stays machine-wide.
+    `tempfile` answers out of TMPDIR/TEMP/TMP, so a tool that asks the system for
+    scratch space gets a directory two parallel suites both reach: the review
+    loop's scratch root is named after the repository and the current second, and
+    two runs that started together deleted each other's rounds out of it.
+
+    Both halves are checked, because they fail apart: the variables are what a
+    child process reads, and the module attribute is what this process reads,
+    since `gettempdir` caches its first answer.
+    """
+    temporary = isolated_config_environment.parent / "tmp"
+
+    assert [os.environ[name] for name in ("TMPDIR", "TEMP", "TMP")] == [str(temporary)] * 3
+    assert Path(tempfile.gettempdir()) == temporary
+    assert Path(tempfile.mkdtemp()).parent == temporary
+
+
+def test_a_sandbox_root_is_swept_only_once_nobody_is_using_it() -> None:
+    """The residue nothing else collects, and the suite beside it that must survive.
+
+    A per-test sandbox Windows would not delete, because a detached child still
+    held a lock file in it, outlives both finalizers, and the system temp root
+    has no garbage collection of its own. Age is what tells residue from a live
+    suite: a running session creates and removes a sandbox inside its root on
+    every test, so only a root nothing has written to for hours is free.
+    """
+    from conftest import SANDBOX_PREFIX, SANDBOX_ROOT, STALE_SANDBOX_AGE_S, sweep_stale_sandbox_roots
+
+    stale = SANDBOX_ROOT.parent / f"{SANDBOX_PREFIX}test-stale"
+    fresh = SANDBOX_ROOT.parent / f"{SANDBOX_PREFIX}test-fresh"
+    for root in (stale, fresh):
+        (root / "held").mkdir(parents=True, exist_ok=True)
+    os.utime(stale, (time.time() - STALE_SANDBOX_AGE_S - 60,) * 2)
+    try:
+        removed = sweep_stale_sandbox_roots()
+
+        assert stale in removed and not stale.exists()
+        assert fresh not in removed and fresh.is_dir()
+        # This session's own root is never a candidate, however long it has run.
+        assert SANDBOX_ROOT not in removed
+    finally:
+        shutil.rmtree(fresh, ignore_errors=True)
+        shutil.rmtree(stale, ignore_errors=True)
 
 
 def test_stdio_rejects_oversized_message_and_keeps_serving(tmp_path: Path) -> None:

@@ -4,8 +4,11 @@ import json
 import os
 import shutil
 import struct
+import tempfile
+import time
 import uuid
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -15,12 +18,68 @@ pytest_plugins = ["pytester"]
 
 from support import remove_trusted_launcher  # noqa: E402
 
+# Where every test's isolated HOME, config, state and temporary storage go.
+# Resolved once, here, out of the system temp root and before any test has
+# redirected anything.
+#
+# It used to be derived from `tmp_path.parent`, which follows `--basetemp`
+# wherever it is pointed -- including inside this clone, which is what a
+# developer does to keep a scratch path off Windows MAX_PATH. An isolated HOME
+# under the working directory is a home inside a project, and the user-level
+# half of `agent-install` refuses exactly that through `_external_user_path`, so
+# a basetemp choice decided whether unrelated tests passed. The system temp root
+# is never inside the repository, whatever the basetemp is.
+#
+# Per process, so two suites on one machine cannot meet here, and short, because
+# every sandbox path is derived from it and MAX_PATH is the reason a basetemp
+# gets moved in the first place.
+SANDBOX_PREFIX = "ahil-pt-"
+SANDBOX_ROOT = Path(tempfile.gettempdir()).resolve() / f"{SANDBOX_PREFIX}{os.getpid()}"
+# How long a sibling root may sit untouched before a later session sweeps it. A
+# live session creates and removes a sandbox inside its own root on every single
+# test, so a root this old is residue: a directory Windows refused to delete
+# because a detached child still held a lock file when the test that spawned it
+# ended. Under the old location pytest's own numbered root eventually collected
+# such leftovers; here nothing else on the machine knows what this directory is.
+# Generous, because the cost of being wrong is deleting a live suite's sandbox.
+STALE_SANDBOX_AGE_S = 6 * 60 * 60
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _clean_up_trusted_launcher() -> Iterator[None]:
     """Remove the session's trusted launcher, wherever a test created it."""
     yield
     remove_trusted_launcher()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _clean_up_sandbox_root() -> Iterator[None]:
+    """Keep this session's sandbox root to itself, and take nothing with it.
+
+    Each test's own sandbox is removed by its own finalizer; this is what
+    catches a test that died before its finalizer ran, and the root directory
+    itself."""
+    sweep_stale_sandbox_roots()
+    yield
+    shutil.rmtree(SANDBOX_ROOT, ignore_errors=True)
+
+
+def sweep_stale_sandbox_roots(now: float | None = None) -> list[Path]:
+    """Remove sandbox roots no session has touched in STALE_SANDBOX_AGE_S.
+
+    Returns what it removed. A root belonging to a suite running beside this one
+    is fresh by construction and is never touched, which is the whole property
+    that matters here."""
+    cutoff = (time.time() if now is None else now) - STALE_SANDBOX_AGE_S
+    removed: list[Path] = []
+    for candidate in SANDBOX_ROOT.parent.glob(f"{SANDBOX_PREFIX}*"):
+        if candidate == SANDBOX_ROOT:
+            continue
+        with suppress(OSError):
+            if candidate.is_dir() and candidate.stat().st_mtime < cutoff:
+                shutil.rmtree(candidate, ignore_errors=True)
+                removed.append(candidate)
+    return removed
 
 ROOT = Path(__file__).resolve().parents[1]
 FAKE_OPENOCD = ROOT / "tests" / "fixtures" / "fake_openocd.py"
@@ -47,18 +106,18 @@ def isolated_config_environment(
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
 ) -> Path:
-    # pytest owns tmp_path.parent on every platform, and the trust check accepts
-    # it on every platform. It used to divert to Local AppData on Windows because
-    # the ACEs a normal profile carries below Temp were read as untrusted; the
-    # suite evading the project's own rule was the clearest evidence that the
-    # rule was drawn wrong. Keeping user policy and state out of tmp_path itself
-    # still matters: tests use tmp_path as the workspace cwd.
-    test_sandbox = tmp_path.parent / f"agentic-hil-pytest-{os.getpid()}-{uuid.uuid4().hex}"
+    # Owner-only, and outside the repository whatever `--basetemp` says: see
+    # SANDBOX_ROOT. Keeping user policy and state out of tmp_path itself still
+    # matters, because tests use tmp_path as the workspace cwd.
+    SANDBOX_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    test_sandbox = SANDBOX_ROOT / uuid.uuid4().hex[:12]
     home_root = test_sandbox / "home"
     config_root = test_sandbox / "config"
     state_root = test_sandbox / "state"
+    temp_root = test_sandbox / "tmp"
     request.addfinalizer(lambda: shutil.rmtree(test_sandbox, ignore_errors=True))
     home_root.mkdir(parents=True)
+    temp_root.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home_root))
     monkeypatch.setenv("USERPROFILE", str(home_root))
     monkeypatch.setenv("APPDATA", str(config_root))
@@ -67,6 +126,18 @@ def isolated_config_environment(
     monkeypatch.setenv("XDG_DATA_HOME", str(home_root / ".local" / "share"))
     monkeypatch.setenv("LOCALAPPDATA", str(state_root))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    # Temporary storage is redirected for the same reason HOME is. `tempfile`
+    # answers out of TMPDIR/TEMP/TMP, and the one directory it otherwise names
+    # is shared by every suite on the machine: two runs that reached
+    # `tools/agent_review_loop.py` in the same second met in one scratch root
+    # named after the repository and that second, and deleted each other's round
+    # directories. Anything that asks the system for scratch space now lands in
+    # this test's sandbox, so two sandboxes cannot meet. `gettempdir` caches its
+    # answer, so the module attribute moves too; the variables alone would reach
+    # child processes and not this one.
+    for variable in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.setenv(variable, str(temp_root))
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
     monkeypatch.delenv("AGENTIC_HIL_CONFIG", raising=False)
     return config_root
 
