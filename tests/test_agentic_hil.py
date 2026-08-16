@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -3571,16 +3572,19 @@ def test_the_absolute_opencode_pattern_matched_nothing() -> None:
     assert _opencode_evaluate("edit", str(_OPENCODE_CONFIG_DIR / "config.yaml"), stale) == "deny"
 
 
-def test_initialize_carries_the_one_thing_said_before_the_agent_decides() -> None:
+def test_initialize_carries_the_one_thing_said_before_the_agent_decides(tmp_path: Path) -> None:
     """A refusal and a skill both arrive after the first decision.
 
     Measured: a small model ran st-flash before calling a single tool here, so
     nothing this server says at call time could have reached it. initialize is
     the only moment that precedes the decision.
     """
+    # In tmp_path rather than the working directory: this wrote a configuration
+    # into the clone, which is one fixed path two concurrent runs of this module
+    # share, and which the version gate then has to be told to ignore.
     response = handle_mcp_message(
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": MCP_PROTOCOL_VERSION}},
-        AgenticHILToolService(load_config(str(write_config(Path.cwd())))),
+        AgenticHILToolService(load_config(str(write_config(tmp_path / "workspace")))),
     )
     instructions = response["result"]["instructions"]
 
@@ -4022,10 +4026,13 @@ def test_register_agent_mcp_rejects_workspace_injected_command(
 
 
 def test_register_agent_mcp_rejects_temp_and_uv_cache_injected_commands(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    temp_command = tmp_path / "agentic-hil"
+    # From the temporary root this process actually names, not from `tmp_path`:
+    # what makes the first command untrusted is that it is in temporary storage,
+    # and tmp_path is only in temporary storage while nobody has moved
+    # `--basetemp`. The file need not exist; the refusal is about where it is.
+    temp_command = Path(tempfile.gettempdir()) / "agentic-hil"
     uv_cache = Path.home() / "uv-cache"
     monkeypatch.setenv("UV_CACHE_DIR", str(uv_cache))
 

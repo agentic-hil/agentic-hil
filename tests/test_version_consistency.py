@@ -367,6 +367,55 @@ def test_a_new_home_for_the_version_cannot_appear_unnoticed(tree: Path) -> None:
     assert CHECK in found[0]
 
 
+@pytest.mark.parametrize(
+    ("name", "marked"),
+    [
+        # The name a developer gives an in-clone basetemp, and the automatic
+        # root, both recognised without pytest having left anything behind.
+        pytest.param(".pytest-tmp", False, id="the-conventional-name"),
+        pytest.param("pytest-of-someone", False, id="the-automatic-root"),
+        # A root under any other name, recognised by pytest's own cleanup lock.
+        pytest.param("scratch", True, id="marked-by-pytest"),
+    ],
+)
+def test_a_pytest_temporary_root_in_the_tree_is_scratch_and_not_a_position(tree: Path, name: str, marked: bool) -> None:
+    """A basetemp inside the clone is a command-line choice, not a version.
+
+    `--basetemp` gets pointed here on Windows on purpose: the automatic root
+    nests a per-user, a per-run and a per-test directory before a fixture's own
+    paths begin, which is how a suite meets MAX_PATH. Every configuration and
+    report a test then writes carries this tree's version, and the gate used to
+    refuse the tree for them, which is a gate reporting on how the suite was
+    invoked rather than on the tree.
+    """
+    root = tree / name
+    (root / "test_something0").mkdir(parents=True)
+    (root / "test_something0" / "config.yaml").write_text(
+        f"# written by a fixture at {package_version(tree)}\n", encoding="utf-8"
+    )
+    if marked:
+        (root / ".lock").write_text("", encoding="utf-8")
+
+    assert uncovered_files(tree) == []
+
+
+def test_a_scratch_directory_pytest_never_marked_is_still_swept(tree: Path) -> None:
+    """The skip is narrow: only a root pytest named or marked is left out.
+
+    A directory the gate cannot tell from content is content, or the exemption
+    would be a hole anyone could put a version in by choosing a directory name.
+    """
+    (tree / "scratch").mkdir()
+    (tree / "scratch" / "installation.md").write_text(
+        f'pip install "agentic-hil=={package_version(tree)}"\n', encoding="utf-8"
+    )
+
+    found = uncovered_files(tree)
+
+    assert found
+    assert "scratch/installation.md" in found[0]
+
+
 def test_a_new_home_for_the_development_version_cannot_appear_either(development_tree: Path) -> None:
     """The sweep learned the second version, or half of it would be unwatched.
 

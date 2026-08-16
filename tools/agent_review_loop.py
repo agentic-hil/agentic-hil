@@ -58,6 +58,7 @@ import contextlib
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -1726,17 +1727,28 @@ def main(argv: list[str] | None = None) -> int:
     schema_path = log_dir / "verdict-schema.json"
     schema_path.write_text(json.dumps(VERDICT_SCHEMA, indent=2), encoding="utf-8")
 
+    # The two directories below live in shared temporary storage, so the name has
+    # to identify this run and not merely this second. `run_id` names the second,
+    # and the repository is often called the same thing twice on one machine (a
+    # clone per agent, a fixture repository per suite), so two runs that started
+    # together got one scratch root between them and swept each other's round
+    # directories out from under themselves. The token is what distinguishes
+    # them, and it is random rather than the process id because two runs in one
+    # process are still two runs. The paperwork inside the repository keeps
+    # naming the run by its time alone: that name is for a person to read, and
+    # no two runs share a clone.
+    temporary_name = f"{repo.name}-{run_id}-{secrets.token_hex(3)}"
     # Outside the repository by default: a checkout nested inside the tree it
     # isolates the reviewer from is not isolation, and git would have to be told
     # to ignore it.
     checkout_dir = options.review_checkout_dir or (
-        Path(tempfile.gettempdir()) / "agentic-loop-review" / f"{repo.name}-{run_id}"
+        Path(tempfile.gettempdir()) / "agentic-loop-review" / temporary_name
     )
     # Outside the repository for the same reason, and because everything under it
     # is a temporary directory an agent's tools created: none of it belongs in a
     # tree that is about to be committed, and `git add -A` in salvage_commit
     # would otherwise be the thing that swept it in.
-    scratch_root = Path(tempfile.gettempdir()) / "agentic-loop-scratch" / f"{repo.name}-{run_id}"
+    scratch_root = Path(tempfile.gettempdir()) / "agentic-loop-scratch" / temporary_name
     # The directories that are the loop's own rather than the round's work. Every
     # question this run asks about the working tree, and every commit it makes of
     # one, leaves them out: a review of a round is not part of that round.

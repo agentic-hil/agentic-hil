@@ -38,6 +38,18 @@ install. `Location.tracks` says which of the two each position carries, and that
 field is the whole of the rule: on a tree without a suffix the two versions are
 the same string and everything behaves exactly as it did.
 
+The sweep walks the working tree, which means it meets whatever else is sitting
+in it, and a temporary directory is the thing most likely to be. pytest's
+`--basetemp` can be pointed anywhere and on Windows it gets pointed inside the
+clone on purpose: the automatic root nests a per-user directory, a numbered run
+directory and a per-test directory before the fixture's own paths start, and
+that is how a suite runs into MAX_PATH. So `.pytest-tmp` and the roots pytest
+marks as its own are skipped here, not as a courtesy to the suite, but because
+a version string under one of them is a fixture's scratch file. A single
+focused run with `--basetemp=.pytest-tmp` used to fail this gate on a tree that
+agreed with itself perfectly, which is a gate reporting on the developer's
+command line rather than on the tree.
+
 tomllib is deliberately absent: it is stdlib only from 3.11 and this project
 still supports 3.10, so importing it would make the gate itself the thing that
 fails on a matrix leg the developer machine never runs. `packaging` is absent for
@@ -111,6 +123,18 @@ SKIPPED_DIRECTORIES = frozenset(
 # so one that mentions a version is reporting a conversation, not tracking the
 # release -- and running the loop in this tree used to fail this gate.
 SKIPPED_PATHS = frozenset({".agentic-hil", ".agentic-loop", ".claude", "evals/install/artifacts"})
+# A pytest temporary root, wherever it landed. `--basetemp` may be pointed
+# anywhere, and inside the clone is where a developer points it on Windows, to
+# keep a deep scratch path off MAX_PATH; `PYTEST_DEBUG_TEMPROOT` lands the
+# automatic root in the same place. Everything below either one is a fixture's
+# scratch file (a configuration a test wrote, a report it read back), so a
+# version string in one of them is test data and not a position that tracks the
+# release. Recognised by the conventional name and by the marker files pytest
+# itself leaves, so a root under a different name is still recognised by what is
+# in it: `.lock` is a numbered root's cleanup lock and `pytest-current` the link
+# to the newest one.
+PYTEST_TEMPORARY_NAMES = frozenset({".pytest-tmp", ".pytest_tmp", "pytest-tmp"})
+PYTEST_TEMPORARY_MARKERS = (".lock", "pytest-current")
 SKIPPED_NAMES = frozenset({"package-lock.json", "uv.lock", "poetry.lock"})
 SKIPPED_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".ico", ".whl", ".gz", ".zip"})
 MAX_SWEPT_BYTES = 4_000_000
@@ -446,6 +470,19 @@ def version_problems(root: Path, release_tag: str | None = None) -> list[str]:
     return found
 
 
+def is_pytest_temporary_root(directory: Path) -> bool:
+    """Whether this directory is a pytest temporary root rather than content.
+
+    By name for the conventional in-clone basetemp, and otherwise by the marker
+    files pytest leaves in a root of its own making, so one under any name is
+    still recognised. Nothing in this repository is called `.pytest-tmp`, sits
+    under a `pytest-of-` root, or carries pytest's cleanup lock, so this can
+    only ever exclude a temporary root."""
+    if directory.name in PYTEST_TEMPORARY_NAMES or directory.name.startswith("pytest-of-"):
+        return True
+    return any((directory / marker).exists() for marker in PYTEST_TEMPORARY_MARKERS)
+
+
 def _swept_files(root: Path) -> list[Path]:
     found: list[Path] = []
 
@@ -457,7 +494,7 @@ def _swept_files(root: Path) -> list[Path]:
                 relative = entry.relative_to(root).as_posix()
                 if entry.name in SKIPPED_DIRECTORIES or entry.name.endswith(".egg-info"):
                     continue
-                if relative in SKIPPED_PATHS:
+                if relative in SKIPPED_PATHS or is_pytest_temporary_root(entry):
                     continue
                 walk(entry)
             elif entry.is_file():
