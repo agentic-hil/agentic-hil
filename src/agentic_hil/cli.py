@@ -118,6 +118,53 @@ CONFLICT_NEXT_STEP = (
     "a program the operator did not choose. This conflict is the answer to the request. Report it, "
     "name the file, and stop."
 )
+# What `agentic-hil uninstall` does, and the whole of the argument for the two
+# flags it does not offer. It is the parser's own `description`, so it is what
+# `agentic-hil uninstall --help` prints, and it is written once here rather than
+# split between the help text and a comment nobody reading the help can see.
+UNINSTALL_DESCRIPTION = """Take back the user-wide half of this installation, for every agent it set up or for
+the ones --agent names: the agent's skill file, its user-level MCP registration,
+and, for Claude Code, the write-refusal rules `init --agent` added. Each half is
+taken back only where it is recognisably this tool's own, by the same checks that
+refuse to overwrite an operator's file. Everything those checks do not claim is
+named on the result and left exactly where it was found.
+
+Two trees are left standing on purpose, and no flag purges them.
+
+A state root is the evidence. It holds every hardware action this bench
+performed and any incident record saying a board is in an unknown physical
+state until an operator signs for its recovery, and removing a package does not
+put that board back. Agentic HIL quarantines a whole bench when a single audit
+record cannot be written, so a flag that deleted all of them would contradict
+the rule this tool enforces at every hardware call.
+
+A project configuration is operator policy: which permissions are open on which
+board. An agent may narrow a permission and may never widen one, which is why
+`grant` lives at the operator's shell. A purge followed by a reinstall would put
+every permission back to the template's, and that is the one move that turns
+that ratchet the wrong way, out of a command an agent can be asked to run.
+
+Both are named on the result, with their paths. Removing them is `rm -rf` at
+your own shell, after reading what is in them.
+
+The package is not removed here either, and cannot be: a process cannot delete
+the files it is executing out of. The result ends on the removal line for the
+manager that owns this installation. Run that line last."""
+# Why each of those trees stays, on the result itself, for a reader who never
+# opened the help.
+_KEPT_TOOL_TREE = (
+    "Agentic HIL creates this tree for itself, and what is in it outlives an installation: the audit trail of "
+    "every hardware action, any incident still standing over a board that removing a package does not put back, "
+    "the project configurations, and the machine-wide device locks. Read it before deleting it, and delete it yourself."
+)
+_KEPT_CONFIGURATION = (
+    "A project configuration is operator policy, and its permissions only ever narrow. Deleting it would "
+    "put every permission back to the template's on the next install. Delete it yourself if that is what you want."
+)
+_LEFT_FOREIGN_ENTRY = (
+    "Agentic HIL did not write this, so it stays. Once the package is gone it will name a command that is "
+    "gone with it, and whether to edit the file is the operator's decision."
+)
 
 
 @dataclass(frozen=True)
@@ -326,6 +373,18 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_parser = subparsers.add_parser("upgrade", help="upgrade this Agentic HIL installation and refresh the agent skills and MCP registrations it wrote")
     upgrade_parser.add_argument("--agent", action="append", default=[], help="refresh only this agent, instead of every agent this installation had already set up; repeat for multiple agents. An agent that has neither a skill nor a registration is never installed for.")
 
+    uninstall_parser = subparsers.add_parser(
+        "uninstall",
+        help="the user-wide half in reverse: take back the agent skills, MCP registrations and write-refusal rules this installation wrote, then name the line that removes the package. Project configurations and state roots are left standing, and there is no flag that purges them",
+        description=UNINSTALL_DESCRIPTION,
+        # The description is five paragraphs and the argument for the flags this
+        # command refuses to offer; reflowed into one block it is unreadable, and
+        # a reader who cannot get through it is a reader who deletes the state
+        # root by hand instead.
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    uninstall_parser.add_argument("--agent", action="append", default=[], help="take back only this agent's half, instead of every agent this installation set up; repeat for multiple agents. An agent that has nothing installed is reported and left alone.")
+
     return parser
 
 
@@ -386,6 +445,8 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return setup_project(args.agent, args.force)
     if args.command == "upgrade":
         return upgrade_installation(args.agent)
+    if args.command == "uninstall":
+        return uninstall_agent_integration(args.agent)
     return {"ok": False, "error_type": "unknown_command", "summary": f"unknown command: {args.command}"}
 
 
@@ -885,6 +946,492 @@ def install_agent(agent: str, force: bool = False) -> JsonObject:
             if surviving is not None:
                 result["left_behind"] = surviving
         return _with_restart_notice(result)
+
+
+def uninstall_agent_integration(agents: list[str] | None = None) -> JsonObject:
+    """Take back the user-wide half, and name the line that removes the package.
+
+    The reverse of `install_agent`, and of the one step of `init --agent` that
+    writes into a user-level file. What it takes back is only what is
+    recognisably this installation's own, through the same checks that refuse to
+    overwrite an operator's file rather than through a second set: the skill by
+    `is_agentic_hil_setup_skill`, the JSON registrations by
+    `_claude_mcp_entry_kind` and `_opencode_mcp_entry_kind`, the Codex ones by
+    the managed markers, and the write refusals by `_tool_written_deny_tree` and
+    the exact text this tool derives from a project's own paths. Whatever those
+    do not claim is reported under `left_alone` and stays.
+
+    The order inside one agent is the reverse of the order that wrote it, and it
+    is load-bearing rather than tidy. The registration is what lets a host launch
+    the server; the deny rules are what stop that host editing the configuration
+    the server reads. Taking the rules back first would open a window with the
+    lock already off and the door still there.
+
+    Nothing is rolled back, and this half needs no transaction. Every step here
+    removes something or does not, so a run that stops part way leaves no file
+    half-written and is finished by running it again. `install_agent` rolls back
+    because a half-installed integration is worse than none; a half-removed one
+    is just less removed.
+
+    It writes nothing project-side and needs no configuration, so it runs from
+    anywhere `agent-install` runs, the home directory and the filesystem root
+    included: every path it touches goes through the same `_external_user_path`
+    that collapses the workspace boundary there (#235).
+
+    The package itself is last and is not this command's to remove. A process
+    cannot delete the files it is executing out of, so what comes back is the
+    line for the operator's shell, from the manager that owns the installation.
+    """
+    requested = agents or []
+    invalid = [agent for agent in requested if resolve_skill_agent(agent) is None]
+    if invalid:
+        return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know one or more requested agents.", "agents": invalid, "allowed_agents": supported_skill_agents()}
+
+    wanted = {resolved.id for name in requested if (resolved := resolve_skill_agent(name)) is not None}
+    reports = [_uninstall_one_agent(agent) for agent in skill_agents() if not wanted or agent.id in wanted]
+    removed = [item for report in reports for item in report["removed"]]
+    left_alone = [item for report in reports for item in report["left_alone"]]
+    kept = _uninstall_kept_trees()
+    failed = [report["agent"] for report in reports if not report["ok"]]
+
+    command = upgrade.removal_command()
+    package_directory = upgrade.installed_package_directory()
+    summary = f"Agentic HIL's user-wide half was taken back for {_named_agents([report['agent'] for report in reports])}: {len(removed)} item(s) removed."
+    if left_alone:
+        summary += f" {len(left_alone)} item(s) this installation did not write were left where they were; `left_alone` names each one."
+    if failed:
+        summary += f" It could not be finished for {_named_agents(failed)}; that agent's step says why."
+    summary += f" The package is still installed and this command cannot remove it: run `{command}`."
+    return {
+        "ok": not failed,
+        "tool": "agentic_hil_uninstall",
+        "scope": "user",
+        "summary": summary,
+        "agents": reports,
+        "removed": removed,
+        "left_alone": left_alone,
+        "kept": kept,
+        "package_removal": {"manager": upgrade.owning_manager(), "command": command, **({"package_directory": package_directory} if package_directory else {})},
+        "next_step": (
+            f"Run `{command}` at your shell; nothing running out of the installation can remove it. "
+            + (
+                f"If `import agentic_hil` still succeeds after that, a `__pycache__` left under {package_directory} is why, and removing that directory finishes it. "
+                if package_directory
+                else ""
+            )
+            + "`kept` names the trees this command deliberately did not touch and why."
+        ),
+    }
+
+
+def _uninstall_one_agent(agent: SkillAgent) -> JsonObject:
+    """One agent's half, taken back in the reverse of the order that wrote it."""
+    steps = {
+        "mcp_config": _remove_agent_mcp(agent),
+        "skill": _remove_agent_skill(agent),
+        "agent_write_restriction": _remove_agent_deny_rules(agent),
+    }
+    removed = [item for step in steps.values() for item in step["removed"]]
+    left_alone = [item for step in steps.values() for item in step["left_alone"]]
+    ok = all(step["ok"] for step in steps.values())
+    if not ok:
+        summary = f"Agentic HIL's half for {agent.display_name} was not fully taken back; `steps` says which part and why."
+    elif removed:
+        summary = f"Agentic HIL's half for {agent.display_name} was taken back."
+    else:
+        summary = f"Nothing to take back for {agent.display_name}: this installation had written nothing of its own here."
+    return {"agent": agent.id, "ok": ok, "summary": summary, "removed": removed, "left_alone": left_alone, "steps": steps}
+
+
+def _uninstall_step(summary: str, *, ok: bool = True, removed: list[JsonObject] | None = None, left_alone: list[JsonObject] | None = None, **fields: object) -> JsonObject:
+    """One step's answer in the shape every step of this command answers in."""
+    return {"ok": ok, "summary": summary, "removed": removed or [], "left_alone": left_alone or [], **fields}
+
+
+def _removed_entry(what: str, path: Path | str) -> JsonObject:
+    return {"what": what, "path": str(path)}
+
+
+def _left_entry(what: str, path: Path | str, reason: str) -> JsonObject:
+    return {"what": what, "path": str(path), "reason": reason}
+
+
+def _remove_agent_mcp(agent: SkillAgent) -> JsonObject:
+    """Take back the user-level MCP registration, where this installation wrote it.
+
+    The file is another program's, and an absent one is answered without opening
+    it: every guarded read and every lock in this package builds the directory
+    chain on the way in, so probing a registration that was never written would
+    plant `~/.codex` or `~/.config/opencode` on a machine that has neither.
+    """
+    path = _agent_mcp_config_path(agent.id)
+    if not _path_entry_exists(path):
+        return _uninstall_step(f"{agent.display_name} has no user-level MCP configuration, so there is no registration to take back.", path=str(path))
+    with secure_user_file_lock(path):
+        result = _remove_codex_mcp(agent, path) if agent.id == "codex" else _remove_json_mcp(agent, path)
+    _release_lock_sidecar(path)
+    return result
+
+
+def _release_lock_sidecar(path: Path) -> None:
+    """Remove the lock sidecar a transaction of this tool's leaves beside a file.
+
+    `user_file_lock_path` states that the sidecar outlives its transaction, so
+    anything cleaning up after this tool has to know the name. Without this an
+    uninstall leaves a `.agentic-hil.lock` in `~/.claude`, in `~/.codex`, in
+    `~/.config/opencode` and in the home directory itself, each one a file this
+    tool put in another program's directory and named after itself: exactly the
+    leftover this command exists to take back.
+
+    Only after the lock has been released, and never insisted on. On Windows the
+    sidecar cannot be unlinked while it is held, and a lock some other process is
+    holding right now is one this run has no business taking away.
+    """
+    with suppress(OSError):
+        user_file_lock_path(path).unlink()
+
+
+def _remove_json_mcp(agent: SkillAgent, path: Path) -> JsonObject:
+    """Claude Code and opencode: one named entry out of one JSON object.
+
+    Which entry is ours is `_claude_mcp_entry_kind` / `_opencode_mcp_entry_kind`,
+    the same three answers `register_agent_mcp` uses to tell its own earlier
+    entry from an operator's. They are asked with the entry this run would write
+    where the launcher still resolves and with nothing where it does not: a
+    launcher that has stopped passing the trust check is a reason to be careful
+    about writing an entry, and no reason to disown one.
+
+    The containing object stays whatever it is left holding. `~/.claude.json` is
+    the whole of that host's state and `opencode.json` carries the operator's own
+    permissions; neither is this command's to tidy or to delete.
+    """
+    section = "mcpServers" if agent.id == "claude-code" else "mcp"
+    document = _load_json_object(path)
+    if document is None:
+        return _uninstall_step(f"{path} is not a JSON object; left untouched.", ok=False, error_type="config_invalid", path=str(path))
+    servers = document.get(section)
+    if not isinstance(servers, dict) or "agentic-hil" not in servers:
+        return _uninstall_step(f"{agent.display_name} has no agentic-hil MCP entry to take back.", path=str(path))
+    if not _tool_written_mcp_entry(agent.id, servers["agentic-hil"]):
+        return _uninstall_step(
+            f"The agentic-hil MCP entry in {path} is not one Agentic HIL wrote; left untouched.",
+            path=str(path),
+            left_alone=[_left_entry("MCP registration", f"{path} :: {section}.agentic-hil", _LEFT_FOREIGN_ENTRY)],
+        )
+    del servers["agentic-hil"]
+    secure_atomic_write_text(path, json.dumps(document, indent=2) + "\n")
+    return _uninstall_step(
+        f"The agentic-hil MCP entry was removed from {path}.",
+        path=str(path),
+        removed=[_removed_entry("MCP registration", f"{path} :: {section}.agentic-hil")],
+    )
+
+
+def _tool_written_mcp_entry(agent_id: str, entry: object) -> bool:
+    """Whether one JSON MCP entry is this tool's own rather than the operator's."""
+    desired: JsonObject = {}
+    with suppress(ConfigError, OSError, ValueError):
+        command = mcp_server_command()
+        desired = {"type": "stdio", "command": command, "args": ["mcp-stdio"]} if agent_id == "claude-code" else {"type": "local", "command": [command, "mcp-stdio"], "enabled": True}
+    kind = _claude_mcp_entry_kind(entry, desired) if agent_id == "claude-code" else _opencode_mcp_entry_kind(entry, desired)
+    return kind is not None
+
+
+def _remove_codex_mcp(agent: SkillAgent, path: Path) -> JsonObject:
+    """Codex: the managed block, which is the only provenance that file carries.
+
+    A TOML table without the markers around it was written by somebody else, and
+    an `mcp_servers.agentic-hil` outside them is exactly what `_register_codex_mcp`
+    refuses to touch on the way in.
+    """
+    try:
+        existing = secure_optional_read_text(path)
+    except UnicodeDecodeError:
+        return _uninstall_step(f"{path} is not UTF-8 text, so it holds no marked block of this tool's; left untouched.", ok=False, error_type="config_invalid", path=str(path))
+    if existing is None:
+        return _uninstall_step("Codex has no user config.toml, so there is no registration to take back.", path=str(path))
+    if existing.count(AGENTIC_HIL_MCP_START) != existing.count(AGENTIC_HIL_MCP_END) or existing.count(AGENTIC_HIL_MCP_START) > 1:
+        return _uninstall_step(f"{path} contains malformed or duplicate Agentic HIL managed markers; left untouched.", ok=False, error_type="config_invalid", path=str(path))
+    remainder = _text_without_marked_block(existing, AGENTIC_HIL_MCP_START, AGENTIC_HIL_MCP_END)
+    if remainder is None:
+        parsed, _parse_error = _parse_toml(existing)
+        servers = parsed.get("mcp_servers") if isinstance(parsed, dict) else None
+        if isinstance(servers, dict) and "agentic-hil" in servers:
+            return _uninstall_step(
+                f"The agentic-hil MCP table in {path} carries no Agentic HIL markers, so it is not one this tool wrote; left untouched.",
+                path=str(path),
+                left_alone=[_left_entry("MCP registration", f"{path} :: mcp_servers.agentic-hil", _LEFT_FOREIGN_ENTRY)],
+            )
+        return _uninstall_step(f"{agent.display_name} has no agentic-hil MCP entry to take back.", path=str(path))
+    _write_or_remove(path, remainder)
+    return _uninstall_step(
+        f"The managed agentic-hil MCP block was removed from {path}.",
+        path=str(path),
+        removed=[_removed_entry("MCP registration", f"{path} :: mcp_servers.agentic-hil")],
+    )
+
+
+def _text_without_marked_block(existing: str, start: str, end: str) -> str | None:
+    """`existing` with its one marked block gone, or None when it holds no block.
+
+    The counterpart of `upsert_marked_block`, and it has to hand a file back to
+    the program that owns it in a readable state: the blank line that separated
+    the block from what came before goes with the block, and a remainder that is
+    nothing but whitespace means the file held this tool's block and nothing
+    else. The caller decides what an empty remainder is worth.
+    """
+    if start not in existing:
+        return None
+    pattern = re.compile(rf"\n*{re.escape(start)}[\s\S]*?{re.escape(end)}\n*")
+    remainder = pattern.sub("\n\n", existing).strip()
+    return f"{remainder}\n" if remainder else ""
+
+
+def _write_or_remove(path: Path, text: str) -> None:
+    """Write what is left of a file this tool appended to, or remove an empty one.
+
+    A file whose entire content was this tool's block is this tool's file, and
+    leaving a zero-byte `config.toml` or `AGENTS.md` behind is leaving a trace of
+    an installation that is being removed. One created empty by somebody else and
+    then appended to comes back to empty either way, so nothing anybody wrote is
+    lost in the one case that cannot be told apart.
+    """
+    if text:
+        secure_atomic_write_text(path, text)
+        return
+    secure_remove_file(path)
+
+
+def _remove_agent_skill(agent: SkillAgent) -> JsonObject:
+    """Take back the skill file, its directory, and any registration pointing at it.
+
+    Ownership is `is_agentic_hil_setup_skill`, the frontmatter check
+    `skill-install` refuses a foreign file by, so a skill somebody else put at
+    this path is reported and left. Bytes that are not UTF-8 are not this tool's
+    skill either, and answering that with a decode error out of an uninstall
+    would be an internal error where a sentence belongs.
+
+    The lock sidecar and the directory go after the transaction rather than
+    inside it: the sidecar outlives the lock by design and on Windows is held
+    open for as long as it is taken, so removing it from inside would fail and
+    leave a directory that can never be empty.
+    """
+    target = _agent_skill_target(agent)
+    removed: list[JsonObject] = []
+    left_alone: list[JsonObject] = []
+    ours = True
+    if _path_entry_exists(target):
+        with secure_user_file_lock(target):
+            try:
+                existing = secure_optional_read_text(target)
+            except UnicodeDecodeError:
+                existing, ours = None, False
+            if existing is not None and not is_agentic_hil_setup_skill(existing):
+                ours = False
+            if ours and existing is not None:
+                secure_remove_file(target)
+                removed.append(_removed_entry("agent skill", target))
+            removed.extend(_removed_entry("superseded agent skill", path) for path in remove_legacy_skills(target))
+        _release_lock_sidecar(target)
+        if ours:
+            _remove_skill_directory(target)
+        else:
+            left_alone.append(_left_entry("agent skill", target, "This file is not the Agentic HIL setup skill, and --force never replaces a foreign skill either."))
+    registration = _remove_skill_registration(agent, target)
+    removed.extend(registration["removed"])
+    left_alone.extend(registration["left_alone"])
+    if not registration["ok"]:
+        return _uninstall_step(registration["summary"], ok=False, removed=removed, left_alone=left_alone, path=str(target), registration=registration)
+    if removed:
+        summary = f"The Agentic HIL skill for {agent.display_name} was removed."
+    elif left_alone:
+        summary = f"The file at the {agent.display_name} skill path is not Agentic HIL's; left untouched."
+    else:
+        summary = f"{agent.display_name} has no Agentic HIL skill installed."
+    return _uninstall_step(summary, removed=removed, left_alone=left_alone, path=str(target))
+
+
+def _remove_skill_directory(target: Path) -> None:
+    """Remove the directory this tool created to hold the skill.
+
+    Only the directory named for the skill; anything else at that path was
+    chosen by somebody else. `rmdir` and not a tree removal, so a directory
+    holding a file this command did not put there survives with that file in it,
+    and the `skills` directory above it is the host's own convention and stays
+    whether or not it is left empty.
+    """
+    if target.parent.name != SKILL_NAME:
+        return
+    with suppress(OSError):
+        target.parent.rmdir()
+
+
+def _remove_skill_registration(agent: SkillAgent, target: Path) -> JsonObject:
+    """Take back the AGENTS.md block that told an agents-md host the skill is there.
+
+    Only Codex has one; the other two read their skills directory, so removing
+    the file is the whole of the removal for them.
+    """
+    if agent.registration != "agents-md":
+        return _uninstall_step(f"{agent.display_name} discovers skills from its skills directory, so nothing registered it.")
+    path = _external_user_path(Path(skill_install_root(str(target))) / "AGENTS.md", "Agent skill registration")
+    if not _path_entry_exists(path):
+        return _uninstall_step(f"{agent.display_name} has no AGENTS.md, so nothing registered the skill.", path=str(path))
+    with secure_user_file_lock(path):
+        result = _remove_registration_block(agent, path)
+    _release_lock_sidecar(path)
+    return result
+
+
+def _remove_registration_block(agent: SkillAgent, path: Path) -> JsonObject:
+    try:
+        existing = secure_optional_read_text(path)
+    except UnicodeDecodeError:
+        return _uninstall_step(f"{path} is not UTF-8 text; left untouched.", ok=False, error_type="config_invalid", path=str(path))
+    if existing is None:
+        return _uninstall_step(f"{agent.display_name} has no AGENTS.md, so nothing registered the skill.", path=str(path))
+    if existing.count(AGENTIC_HIL_REGISTRATION_START) != existing.count(AGENTIC_HIL_REGISTRATION_END) or existing.count(AGENTIC_HIL_REGISTRATION_START) > 1:
+        return _uninstall_step(f"{path} contains malformed or duplicate Agentic HIL registration markers; left untouched.", ok=False, error_type="config_invalid", path=str(path))
+    remainder = _text_without_marked_block(existing, AGENTIC_HIL_REGISTRATION_START, AGENTIC_HIL_REGISTRATION_END)
+    if remainder is None:
+        return _uninstall_step(f"{path} carries no Agentic HIL skill registration.", path=str(path))
+    _write_or_remove(path, remainder)
+    return _uninstall_step(
+        f"The Agentic HIL skill registration was removed from {path}.",
+        path=str(path),
+        removed=[_removed_entry("skill registration", path)],
+    )
+
+
+def _remove_agent_deny_rules(agent: SkillAgent) -> JsonObject:
+    """Take back the write refusals `init --agent` wrote into an agent's settings.
+
+    Only Claude Code ever received one. Codex sandboxes model-generated shell
+    commands and was given nothing; opencode is left to the operator on purpose,
+    and the inert absolute patterns earlier releases wrote there deny nothing
+    whatever tree they name, so reaching into a file this tool no longer writes
+    to would buy that nothing.
+
+    Which rules are this tool's own is not decided here. It is
+    `_tool_written_deny_tree`, the namespace claim #206 established, widened by
+    exactly what `_superseded_claude_code_deny_rules` already recognises: the
+    literal text this tool derives from a project's own paths, for every project
+    configuration still on disk. That second half is what reaches a `state_root`
+    an operator put outside this tool's own roots, which the namespace claim
+    cannot reach and deliberately never claims.
+
+    What #206 weighs and this does not is whether a tree is still *wanted*. There
+    it decides everything, because a refresh runs while other projects still want
+    their protection. Here the installation that wrote every one of these rules
+    is going away, so nothing wants any of them, and a rule left behind is the
+    exact leftover #206 was reported from.
+    """
+    path = _agent_permission_config_path(agent.id)
+    if path is None:
+        return _uninstall_step("Codex was never given a write refusal, so there is none to take back.", mode="sandboxed-by-the-agent")
+    if agent.id != "claude-code":
+        return _uninstall_step(f"{_OPENCODE_UNRESTRICTED} Nothing was written there, so nothing is taken back.", mode="operator-managed", path=str(path))
+    if not _path_entry_exists(path):
+        return _uninstall_step(f"{agent.display_name} has no settings file, so there are no write refusals to take back.", path=str(path))
+    with secure_user_file_lock(path):
+        result = _remove_claude_code_deny_rules(agent, path)
+    _release_lock_sidecar(path)
+    return result
+
+
+def _remove_claude_code_deny_rules(agent: SkillAgent, path: Path) -> JsonObject:
+    document = _load_json_object(path)
+    if document is None:
+        return _uninstall_step(f"{path} is not a JSON object; left untouched.", ok=False, error_type="agent_permissions_unreadable", path=str(path))
+    permissions = document.get("permissions")
+    deny = permissions.get("deny") if isinstance(permissions, dict) else None
+    if not isinstance(deny, list):
+        return _uninstall_step(f"{agent.display_name} has no deny rules, so there are none to take back.", path=str(path))
+    written = _project_written_deny_rules()
+    # `isinstance` first, for the same reason the writer needs it: the list
+    # belongs to another program and an entry that is not a string is not a rule
+    # anybody wrote here.
+    removed = [rule for rule in deny if isinstance(rule, str) and (rule in written or _tool_written_deny_tree(rule) is not None)]
+    if not removed:
+        return _uninstall_step(f"{agent.display_name} carries no write refusal this installation wrote.", path=str(path))
+    taken_back = set(removed)
+    permissions["deny"] = [rule for rule in deny if not (isinstance(rule, str) and rule in taken_back)]
+    secure_atomic_write_text(path, json.dumps(document, indent=2) + "\n")
+    return _uninstall_step(
+        f"The write refusals Agentic HIL wrote were removed from {path}; every other rule in it is the operator's and stayed.",
+        path=str(path),
+        removed=[_removed_entry("write refusal", f"{path} :: {rule}") for rule in removed],
+    )
+
+
+def _project_written_deny_rules() -> set[str]:
+    """Every deny rule this tool wrote for a project configuration still on disk.
+
+    The namespace claim in `_tool_written_deny_tree` covers a tree at or under
+    one of this tool's own per-user roots and stops there, so a `state_root` an
+    operator put on another volume is outside it. Every configuration this user
+    has names its own state root, and the rules were derived from that name, so
+    for a configuration that can still be read the text is recoverable exactly:
+    the same argument `_superseded_claude_code_deny_rules` makes, over the same
+    strings, and never over a shape.
+
+    A configuration that cannot be read contributes nothing rather than stopping
+    the removal. `_protected_trees_still_wanted` answers `None` there because an
+    incomplete answer could take protection off a bench that still wants it; the
+    incompleteness costs the opposite here, which is one rule left standing.
+    """
+    rules: set[str] = set()
+    for config_path, state_root in _visible_project_configurations():
+        if state_root is None:
+            continue
+        rules |= _superseded_claude_code_deny_rules(config_path, state_root)
+        rules |= {f"Edit({pattern})" for pattern in _claude_code_deny_patterns(config_path, state_root)}
+    return rules
+
+
+def _visible_project_configurations() -> list[tuple[Path, Path | None]]:
+    """Every project configuration under the config root, with the state root it names.
+
+    `None` for one that cannot be read. A configuration bound by
+    `AGENTIC_HIL_CONFIG` is invisible here and nothing on disk records where it
+    is, which is the same blind spot `_protected_trees_still_wanted` has and for
+    the same reason.
+    """
+    found: list[tuple[Path, Path | None]] = []
+    directory = project_config_directory()
+    with suppress(OSError):
+        if directory.is_dir():
+            for entry in sorted(directory.iterdir()):
+                candidate = entry / PROJECT_CONFIG_FILENAME
+                if candidate.is_file():
+                    found.append((candidate, _configured_state_root(candidate)))
+    return found
+
+
+def _uninstall_kept_trees() -> list[JsonObject]:
+    """The trees this command names and does not remove, with the reason on each.
+
+    Named rather than counted, because "state root" is an abstraction and a path
+    is something an operator can look inside before deciding. The per-user roots
+    are the ones this tool creates for itself, reported only where they are
+    actually there; a `state_root` a configuration points somewhere else is
+    added from the configuration that names it.
+    """
+    configurations = _visible_project_configurations()
+    kept: list[JsonObject] = [
+        {
+            "what": "project configurations",
+            "path": str(project_config_directory()),
+            "count": len(configurations),
+            "reason": _KEPT_CONFIGURATION,
+        }
+    ]
+    trees: dict[str, Path] = {}
+    for path in [*tool_owned_user_roots(), *(state_root for _config, state_root in configurations if state_root is not None)]:
+        if _path_entry_exists(path):
+            trees.setdefault(os.path.normcase(str(path)), path)
+    kept.extend({"what": "tree Agentic HIL created for itself", "path": str(path), "reason": _KEPT_TOOL_TREE} for path in trees.values())
+    return kept
 
 
 _NO_AGENT_NAMED = "No agent was named, so no agent write restriction was applied. Pass --agent to have that agent refuse its own write tools on the policy files."

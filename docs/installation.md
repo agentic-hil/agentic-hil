@@ -185,6 +185,32 @@ there would be nothing new to load. Installing without an exact pin, as the
 lines above do, keeps the second one from arising at all; the Claude Code plugin
 pins on purpose and states the consequence where it does.
 
+## Uninstalling
+
+Removal is two lines, and the first one has to come first. `agentic-hil
+uninstall` takes back the user-wide half while there is still a command left to
+run it with: the agent skill files it wrote, the user-level MCP registrations it
+made, the Claude Code write refusals `init --agent` added, and the lock sidecars
+it left in those agents' directories, for every agent it set up or for the one
+`--agent` names. Each is taken back only where it is recognisably Agentic HIL's
+own, by the same checks that refuse to overwrite an operator's file, so an entry
+somebody else wrote is named on the result and left where it is. Then run the
+line the result ends on, which removes the package through the manager that owns
+this installation. It has to be a line rather than a step, because a process
+cannot delete the files it is executing out of.
+
+Doing it the other way round leaves everything above standing with no command
+left to clear it, which is what makes a leftover MCP registration point at a
+launcher that is gone.
+
+Two trees are left alone, and there is no flag that purges them. A state root
+holds the audit trail of every hardware action and any incident still standing
+over a board, which removing a package does not put back. A project
+configuration is operator policy, and its permissions only ever narrow, so
+deleting it would put every one of them back to the template's on the next
+install. Both are named with their paths on the result, so `rm -rf` at your own
+shell is one copy away once you have read what is in them.
+
 ## Platforms and debugger backends
 
 Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`agentic-hil[pyocd]`: covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debuggers.<name>.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
@@ -204,6 +230,8 @@ pyocd pack install stm32f446retx  # downloads it from the vendor index
 agentic-hil setup --agent <claude-code|codex|opencode>         # both halves, first run
 agentic-hil agent-install --agent <claude-code|codex|opencode> # user-wide half
 agentic-hil init [--agent <agent>]                             # project half
+agentic-hil upgrade [--agent <agent>]                          # upgrade the installation and refresh what it wrote
+agentic-hil uninstall [--agent <agent>]                        # take the user-wide half back, then run the removal line it names
 agentic-hil adopt-hardware [--dry-run]                         # board plugged in after init: fill in what is unset
 agentic-hil doctor
 agentic-hil config-reload                                      # what a running server's description reload would take from this file
