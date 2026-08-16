@@ -1389,6 +1389,35 @@ def test_agent_install_needs_no_workspace_and_writes_nothing_project_local(
     assert not _default_state_root().exists()
 
 
+@pytest.mark.parametrize("where", ["home", "filesystem-root"])
+def test_agent_install_runs_where_the_install_line_is_typed(
+    where: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The half that writes only user-level files has to run from home.
+
+    Its entire output lives under the home directory, and the check that keeps
+    those files out of a repository read the working directory as the
+    repository: from home, and from the filesystem root above it, every one of
+    its own targets was "inside the workspace" and the command refused with
+    `unsafe_configured_path` in the two places an install one-liner is actually
+    typed. The one-liner's container proof had to `mkdir` a project directory to
+    get past it. (#235)
+    """
+    home = Path.home()
+    monkeypatch.chdir(home if where == "home" else Path(home.anchor))
+    command = _trusted_test_mcp_command(monkeypatch)
+
+    result = install_agent(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["scope"] == "user"
+    assert result["steps"]["skill_install"]["ok"] is True
+    assert result["steps"]["mcp_config"]["ok"] is True
+    assert _claude_skill_path().is_file()
+    assert _registered_claude_command() == command
+
+
 def test_agent_install_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     elsewhere = tmp_path / "not-a-project"
     elsewhere.mkdir()
@@ -3342,21 +3371,63 @@ def test_register_agent_mcp_rejects_temp_and_uv_cache_injected_commands(
     assert not (Path.home() / ".claude.json").exists()
 
 
-def test_default_mcp_path_is_rejected_when_home_is_inside_workspace(
-    tmp_path: Path,
+def test_default_mcp_path_is_written_when_the_working_directory_is_home(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    monkeypatch.setenv("HOME", str(workspace))
-    monkeypatch.setenv("USERPROFILE", str(workspace))
+    """The registration's own home is not a workspace it has to stay out of.
+
+    The check that keeps user-level files out of a repository read the working
+    directory as the repository, so standing in the home directory made
+    `~/.claude.json` "inside the workspace" and refused the one place that file
+    is supposed to be. (#235)
+    """
+    monkeypatch.chdir(Path.home())
+
+    result = register_agent_mcp("claude-code", command=str(trusted_launcher()))
+
+    assert result["ok"] is True, result
+    assert (Path.home() / ".claude.json").is_file()
+
+
+def test_default_skill_path_is_rejected_from_a_workspace_below_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Home and the directories above it are the whole of the exception.
+
+    The boundary collapses only where it would otherwise swallow the home
+    directory whole. A working directory below home is a project like any other,
+    and a user-level target inside its tree is still refused.
+    """
+    inside = Path.home() / ".claude"
+    inside.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(inside)
 
     with pytest.raises(ConfigError) as excinfo:
-        register_agent_mcp("claude-code", command=str(trusted_launcher()))
+        install_skill("claude-code")
 
     assert excinfo.value.error_type == "unsafe_configured_path"
-    assert not (workspace / ".claude.json").exists()
+    assert not _claude_skill_path().exists()
+
+
+def test_the_pinned_launcher_may_live_in_the_directory_the_command_runs_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """uv and pipx install the launcher under home, and home is where it is typed.
+
+    The launcher trust check draws its boundary at the working directory too, so
+    from home the copy `install.sh` had just written to `~/.local/bin` was
+    refused for coming "from the workspace" and the registration had nothing
+    left to register. A launcher inside a real project workspace stays refused,
+    which `test_register_agent_mcp_rejects_workspace_injected_command` pins. (#235)
+    """
+    launcher = trusted_launcher()
+    home = launcher.parent.parent
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(home)
+    monkeypatch.setattr("agentic_hil.cli._mcp_command_candidates", lambda: [str(launcher)])
+
+    assert mcp_server_command() == str(launcher)
 
 
 def test_register_agent_mcp_rejects_hardlinked_user_config_without_changes(
