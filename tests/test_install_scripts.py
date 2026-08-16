@@ -61,6 +61,13 @@ CALM_LINE = (
     "The next start of your agent has everything, and the first hardware question "
     "creates this project's configuration."
 )
+# The plural form of the restart block. Step 5 names every running agent CLI
+# rather than the first one found: a warning that names one is read as clearing
+# the others, and the operator who had two open restarted only one.
+MULTI_RESTART_LINES = (
+    "RESTART REQUIRED: these agent CLIs are running right now:",
+    "Quit each process and start it again once. An agent CLI reads its MCP",
+)
 
 # `agentic-hil init` and `agentic-hil setup` write a project's own configuration.
 # Neither script may reach them, in any spelling, in code or in prose.
@@ -350,6 +357,17 @@ def test_both_scripts_carry_the_same_restart_instruction() -> None:
     for name, source in _both_sources().items():
         for line in RESTART_LINES:
             assert line in source, f"{name} is missing the restart line: {line}"
+
+
+def test_both_scripts_name_every_running_agent_cli_not_the_first() -> None:
+    """Two open agent CLIs mean two restarts, and the block says so.
+
+    The first shape of step 5 stopped at the first running CLI it found, so an
+    operator with claude and codex both open was told about claude and read the
+    silence about codex as codex being fine. Measured on a real install."""
+    for name, source in _both_sources().items():
+        for line in MULTI_RESTART_LINES:
+            assert line in source, f"{name} is missing the plural restart line: {line}"
 
 
 def test_both_scripts_carry_the_same_calm_closing_sentence() -> None:

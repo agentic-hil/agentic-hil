@@ -538,18 +538,24 @@ else
     fi
 fi
 
-# Step 5: the one thing that stays the operator's.
+# Step 5: the one thing that stays the operator's. Every running agent CLI is
+# named, not the first one found: an operator with two of them open restarts
+# both, and a warning that names one is read as clearing the other.
+RUNNING_LIST=""
+RUNNING_COUNT=0
 RUNNING_NAME=""
 RUNNING_PID=""
 for agent_id in $CONFIGURED; do
     process=$(process_name_for "$agent_id")
     pid=$(running_pid "$process")
-    if [ -n "$pid" ] && [ -z "$RUNNING_NAME" ]; then
+    if [ -n "$pid" ]; then
+        RUNNING_LIST="${RUNNING_LIST}    ${process} (PID ${pid})\n"
+        RUNNING_COUNT=$((RUNNING_COUNT + 1))
         RUNNING_NAME="$process"
         RUNNING_PID="$pid"
     fi
 done
-if [ -z "$RUNNING_NAME" ] && [ -n "${CLAUDECODE:-}" ]; then
+if [ "$RUNNING_COUNT" -eq 0 ] && [ -n "${CLAUDECODE:-}" ]; then
     # Running inside a Claude Code session, which is the only signal where there
     # is no pgrep. It speaks for claude-code alone: an operator who asked for
     # codex is not told to restart something else.
@@ -558,17 +564,29 @@ if [ -z "$RUNNING_NAME" ] && [ -n "${CLAUDECODE:-}" ]; then
             claude-code | claude)
                 RUNNING_NAME="claude"
                 RUNNING_PID="this session"
+                RUNNING_COUNT=1
                 ;;
         esac
     done
 fi
 
-if [ -n "$RUNNING_NAME" ]; then
+if [ "$RUNNING_COUNT" -eq 1 ]; then
     step 5 "restart: $RUNNING_NAME is running right now, and that is the one step left"
     printf '\n'
     printf '========================================================================\n'
     printf '  RESTART REQUIRED: %s is running right now (PID %s).\n' "$RUNNING_NAME" "$RUNNING_PID"
     printf '  Quit that process and start it again once. An agent CLI reads its MCP\n'
+    printf '  registrations when a session starts, so the agentic-hil tools appear in\n'
+    printf '  the next session, not in this one.\n'
+    printf '========================================================================\n'
+    printf '\n'
+elif [ "$RUNNING_COUNT" -gt 1 ]; then
+    step 5 "restart: $RUNNING_COUNT of your agent CLIs are running right now, and that is the one step left"
+    printf '\n'
+    printf '========================================================================\n'
+    printf '  RESTART REQUIRED: these agent CLIs are running right now:\n'
+    printf '%b' "$RUNNING_LIST"
+    printf '  Quit each process and start it again once. An agent CLI reads its MCP\n'
     printf '  registrations when a session starts, so the agentic-hil tools appear in\n'
     printf '  the next session, not in this one.\n'
     printf '========================================================================\n'

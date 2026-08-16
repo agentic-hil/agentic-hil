@@ -486,36 +486,47 @@ if (-not $WithAgentInstall) {
     }
 }
 
-# Step 5: the one thing that stays the operator's.
-$runningName = ''
-$runningPid = ''
+# Step 5: the one thing that stays the operator's. Every running agent CLI is
+# named, not the first one found: an operator with two of them open restarts
+# both, and a warning that names one is read as clearing the other.
+$running = @()
 foreach ($agentId in $configured) {
-    if ($runningName) { continue }
     $processName = Get-ProcessNameForAgent $agentId
     $process = @(Get-Process -Name $processName -ErrorAction SilentlyContinue) | Select-Object -First 1
     if ($process) {
-        $runningName = $processName
-        $runningPid = $process.Id
+        $running += [pscustomobject]@{ Name = $processName; ProcessId = $process.Id }
     }
 }
-if (-not $runningName -and $env:CLAUDECODE) {
+if ($running.Count -eq 0 -and $env:CLAUDECODE) {
     # Running inside a Claude Code session, which is the only signal where the
     # process list has nothing to show. It speaks for claude-code alone: an
     # operator who asked for codex is not told to restart something else.
     foreach ($agentId in $configured) {
         if ($agentId -eq 'claude-code' -or $agentId -eq 'claude') {
-            $runningName = 'claude'
-            $runningPid = 'this session'
+            $running += [pscustomobject]@{ Name = 'claude'; ProcessId = 'this session' }
         }
     }
 }
 
-if ($runningName) {
-    Write-Step 5 "restart: $runningName is running right now, and that is the one step left"
+if ($running.Count -eq 1) {
+    Write-Step 5 "restart: $($running[0].Name) is running right now, and that is the one step left"
     Write-Host ''
     Write-Host '========================================================================'
-    Write-Host "  RESTART REQUIRED: $runningName is running right now (PID $runningPid)."
+    Write-Host "  RESTART REQUIRED: $($running[0].Name) is running right now (PID $($running[0].ProcessId))."
     Write-Host '  Quit that process and start it again once. An agent CLI reads its MCP'
+    Write-Host '  registrations when a session starts, so the agentic-hil tools appear in'
+    Write-Host '  the next session, not in this one.'
+    Write-Host '========================================================================'
+    Write-Host ''
+} elseif ($running.Count -gt 1) {
+    Write-Step 5 "restart: $($running.Count) of your agent CLIs are running right now, and that is the one step left"
+    Write-Host ''
+    Write-Host '========================================================================'
+    Write-Host '  RESTART REQUIRED: these agent CLIs are running right now:'
+    foreach ($entry in $running) {
+        Write-Host "    $($entry.Name) (PID $($entry.ProcessId))"
+    }
+    Write-Host '  Quit each process and start it again once. An agent CLI reads its MCP'
     Write-Host '  registrations when a session starts, so the agentic-hil tools appear in'
     Write-Host '  the next session, not in this one.'
     Write-Host '========================================================================'
