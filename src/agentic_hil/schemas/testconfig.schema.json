@@ -7,7 +7,7 @@
   "required": ["version", "steps"],
   "$comment": "Additions this schema marks `x-since-version` belong to that plan format version and later. A plan is held to what its own `version:` contains, so a version 2 plan reaching for a version 3 action or key is refused by name rather than quietly accepted here and rejected by an older install elsewhere.",
   "properties": {
-    "version": { "enum": [2, 3, 4], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions — a serial line's on `uart_read`, a bus's on `can_read` — `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional. Version 4 adds the `repeat` block step, which runs a nested subset of steps by count or by wall time." },
+    "version": { "enum": [2, 3, 4, 5], "description": "Format version. Version 1 addressed a `device:` naming a modelled unit that no longer exists. Version 2 routes each step by the section it drives (`debugger` / `port_id` / `bus_id`). Version 3 adds `device:` as the one routing key for every step, the `comparator:` object on feedback actions (a serial line's on `uart_read`, a bus's on `can_read`), `uart_write`, `uart_read` and `delay`, and makes explicit close steps optional. Version 4 adds the `repeat` block step, which runs a nested subset of steps by count or by wall time. Version 5 adds the `read_symbol` action and the numeric `comparator:` it carries, which is the first claim in this format about a value in target memory rather than about text a device sent." },
     "name": { "type": "string", "minLength": 1 },
     "steps": { "$ref": "#/$defs/steps" }
   },
@@ -33,6 +33,7 @@
           { "$ref": "#/$defs/debugStart" },
           { "$ref": "#/$defs/runUntilBreakpoint" },
           { "$ref": "#/$defs/dumpMemory" },
+          { "$ref": "#/$defs/readSymbol" },
           { "$ref": "#/$defs/debugStop" },
           { "$ref": "#/$defs/delay" },
           { "$ref": "#/$defs/repeat" }
@@ -44,6 +45,7 @@
     "portId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a com_ports.<name> entry." },
     "busId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a can_buses.<name> entry." },
     "path": { "type": "string", "minLength": 1 },
+    "symbol": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$", "description": "The name of a symbol in the flashed image, in the one spelling every symbol tool here accepts. A plan may name only a symbol the bench allows: `debug.allowed_symbols` is the operator's statement about what may be read off this board, and a step naming anything outside it is refused before the run starts unless the configuration sets `debug.allow_all_symbols`." },
     "timeout": { "type": "number", "minimum": 0 },
     "positiveTimeout": { "type": "number", "exclusiveMinimum": 0, "description": "A deadline a step waits out. Zero is refused rather than read as 'do not wait': a step whose whole purpose is to wait has no useful reading of no time at all." },
     "comparator": {
@@ -98,6 +100,33 @@
             "max": { "type": "number" }
           }
         }
+      }
+    },
+    "symbolComparator": {
+      "type": "object",
+      "additionalProperties": false,
+      "x-since-version": 5,
+      "description": "What a `read_symbol` step claims about the number a symbol holds. Its own vocabulary rather than the `comparator:` the feedback actions carry: that one judges text and reads a `range` out of a regular expression's capture group, and there is no text in a word of target memory. The claim is made against the integer `debug_symbol_value` decodes the bytes into, which exists only at 1, 2, 4 and 8 bytes, so a plan claiming a number at any other width is refused rather than judged. Exactly one of `equals` and `range` says what the value must be, and `mask` beside `equals` makes the claim about bits instead of about the whole word. Nothing here waits: a halted target's memory does not change under the step, so the value is read once and judged once, and an unmet claim fails at once carrying the value it read.",
+      "oneOf": [
+        { "required": ["equals"], "not": { "required": ["range"] } },
+        { "required": ["range"], "not": { "required": ["equals"] } }
+      ],
+      "dependentRequired": { "mask": ["equals"] },
+      "dependentSchemas": { "mask": { "not": { "required": ["signed"] } } },
+      "properties": {
+        "equals": { "type": "integer", "description": "The value the symbol must hold, exactly. Beside `mask` it is what the masked bits must hold instead. A YAML plan may write it in hexadecimal (`0x2a`) where that is how the firmware reads; it is the same number either way, and a JSON plan writes the decimal. Mutually exclusive with `range`." },
+        "range": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["min", "max"],
+          "description": "Inclusive bounds the value must fall inside. Integers, because the reading they bound is one: a symbol holds bytes, and the number those bytes decode to has no fractional part for a bound to sit between. Mutually exclusive with `equals`, and therefore never combined with `mask`.",
+          "properties": {
+            "min": { "type": "integer" },
+            "max": { "type": "integer" }
+          }
+        },
+        "mask": { "type": "integer", "minimum": 0, "description": "The bits the claim is about: the step compares `value & mask` against `equals`, which is how a plan asserts one flag of a status word without stating every other bit of it. Applied to the unsigned reading, because a mask selects bits while a sign is a reading of the whole width; that is why `signed` is refused beside it rather than quietly ignored. The report carries both the value read and the masked value it was judged on." },
+        "signed": { "type": "boolean", "default": false, "description": "Which of the two integer readings this claim is about. `debug_symbol_value` returns `value_unsigned` and `value_signed` because the same bytes are honestly both, and above the top bit the two disagree, so a plan asserting a counter that can go negative says so here instead of writing the two's complement of the number it means. Defaults to false, which is the reading `hex` shows in memory order." }
       }
     },
     "location": {
@@ -330,8 +359,23 @@
         "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "dump_memory" },
-        "symbol": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$" },
+        "symbol": { "$ref": "#/$defs/symbol" },
         "output_path": { "$ref": "#/$defs/path" }
+      }
+    },
+    "readSymbol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "symbol"],
+      "x-since-version": 5,
+      "description": "Read what one allowed symbol currently holds, through the debug session this plan has open, exactly as the `debug_symbol_value` tool reads it: the same allowlist, the same `debug.max_dump_size_bytes` ceiling applied to the resolved size before any memory is read, and the same resolution, which asks the image's debug information first and falls back to the ELF's own symbol table where there is no type to work with, so an assembly-defined object is readable too. With a `comparator:` the step judges the number the bytes decode to and fails naming the value it read; without one it is a plain read, answered exactly as the tool answers it, which is how a plan records a value it does not want to assert. This is the format's first claim about target memory rather than about what a device sent, and it is deliberately not a wait: there is no `timeout_s` here, because a halted target's memory does not change under the step.",
+      "properties": {
+        "device": { "$ref": "#/$defs/device" },
+        "debugger": { "$ref": "#/$defs/debugger" },
+        "action": { "const": "read_symbol" },
+        "symbol": { "$ref": "#/$defs/symbol" },
+        "size_bytes": { "type": "integer", "minimum": 1, "description": "The width this plan expects the symbol to have, in bytes, which the step asserts against the width the target actually resolves it at: a firmware that turned a `uint32_t` into a `uint16_t` fails the step rather than having its new value judged as if nothing had moved. Stating it is also what lets two refusals be earned before the run instead of on the bench, because the width is then known without asking a board: a width above this bench's `debug.max_dump_size_bytes`, and a width beside a `comparator:` that is not 1, 2, 4 or 8. Leave it out and the plan is judged on both counts at runtime instead, where the resolved size is finally known, with a stated reason either way." },
+        "comparator": { "$ref": "#/$defs/symbolComparator" }
       }
     },
     "debugStop": {

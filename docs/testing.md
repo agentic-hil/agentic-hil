@@ -16,6 +16,10 @@ Feedback steps say what they are claiming, not merely that they read something. 
 
 `can_read` takes the same comparator over the medium a bus has. A frame arrives complete and with an identifier on it, so the claim is two things at once: `id:` (optionally widened by `id_mask:` into a family of identifiers) says which frame the plan is waiting for, and `equals:`, `pattern:` or `pattern:` with `range:` says what that frame must carry, read against the payload as hexadecimal. The identifier is required rather than optional, because a bus carries every node's traffic and a payload matched without saying whose frame it was is a green another ECU can produce; frames the filter rejects are passed over and nothing is captured from them. The step reads again until a frame meets the claim or its `timeout_s` passes, and an unmet claim fails with the last frames the bus did carry, so a plan waiting on the wrong identifier and a node that never sent anything read differently. Without a comparator it is the version 2 step unchanged: one read, answered exactly as `can_read` answers it.
 
+`read_symbol` claims a value in target memory, which is the first thing this format asserts about the board's own state rather than about what it sent. It reads one allowed symbol through the debug session the plan opened, exactly as the `debug_symbol_value` tool reads it: the same `debug.allowed_symbols`, the same `debug.max_dump_size_bytes` on the resolved size, and the same resolution, which asks the image's debug information first and falls back to the ELF's own symbol table where there is no type to work with, so an assembly-defined object is readable too. Its `comparator:` is a numeric one, because a word of memory has no text to match: `equals:` for one value, `range:` for inclusive bounds, and `mask:` beside `equals:` for `(value & mask) == equals`, which asserts one flag of a status word without stating the rest of it. `signed: true` picks the signed reading, since the tool returns both and above the top bit the two disagree, and a mask is a claim about bits, so `signed` is refused beside it. A claim that goes unmet fails with the value it did read, the bytes it decoded and, for a mask, the masked value it compared. Without a comparator the step is a plain read whose value the report keeps.
+
+That decoded integer exists only at 1, 2, 4 and 8 bytes, so a plan claiming a number at any other width is refused rather than answered with an invented one. A step may state `size_bytes:`, which is both an assertion (a firmware that turned a `uint32_t` into a `uint16_t` fails the step instead of having its new value read as the old one) and what makes the width knowable before the run: a declared width that no integer reading exists at, and one above this bench's `debug.max_dump_size_bytes`, are refused at preflight, where nothing has been opened. A plan that declares no width is refused at runtime instead, with the reason stated and the bytes it did read. There is no `timeout_s` on this step and no waiting: a halted target's memory does not change under it, so the symbol is read once and judged once.
+
 Close steps are optional: end-of-run cleanup closes every session the run opened, so a plan that never closes is complete. Write an explicit close where the plan means to close, reconfigure and reopen a line or a bus mid-run.
 
 A plan states a cycle once and says how often it runs it. `repeat` is a block step the reactor serves itself: it routes to no device, the steps nested under its own `steps:` are the subset that repeats, and it is bounded by `count:` (iterations), by `duration_s:` (wall time), or by both, where the first bound reached ends the loop. At least one bound is required, so a plan cannot loop unbounded. Both bounds are asked between iterations and nowhere else, so a cycle is never cut in half and a block always runs at least one whole iteration however small its `duration_s` is; reaching a bound is the green exit. The nested list has the same shape as the plan's own, so a `repeat` may contain a `repeat`.
@@ -35,7 +39,7 @@ steps:
   - {device: dut, action: reset}
 ```
 
-Before the first hardware action, the reactor validates every device name, permission, session order, artifact, breakpoint symbol, and dump path. A plan that contradicts the bus it declared is refused there as well: `can_send` on a bus configured `listen_only: true` can never work, because that flag is the claim that observing the bus sends nothing. `uart_write` on a port whose entry does not grant `permissions.allow_write` is refused by name in the same pass, as is a `range:` whose pattern captures nothing to put in it. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug, UART and CAN sessions opened by the runner are closed even when a step raises an exception. Breakpoint and dump symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
+Before the first hardware action, the reactor validates every device name, permission, session order, artifact, breakpoint symbol, and dump path. A plan that contradicts the bus it declared is refused there as well: `can_send` on a bus configured `listen_only: true` can never work, because that flag is the claim that observing the bus sends nothing. `uart_write` on a port whose entry does not grant `permissions.allow_write` is refused by name in the same pass, as is a `range:` whose pattern captures nothing to put in it, and a `read_symbol` whose declared width the bench's `debug.max_dump_size_bytes` will not read or the format cannot decode a number from. Execution is fail-fast, each reactor-created breakpoint is removed after use, and debug, UART and CAN sessions opened by the runner are closed even when a step raises an exception. Breakpoint, dump and read symbols must be present in `debug.allowed_symbols` unless `allow_all_symbols: true` is explicitly set.
 
 The run pipeline is deliberately simple. It validates everything, then executes, then always cleans up:
 
@@ -44,7 +48,7 @@ The run pipeline is deliberately simple. It validates everything, then executes,
 
 ```yaml
 # .agentic-hil/testconfig.yaml
-version: 3
+version: 5
 name: capture-state
 steps:
   - {device: dut, action: flash, image_path: build/app.elf}
@@ -55,13 +59,15 @@ steps:
   - {device: dut, action: debug_start, image_path: build/app.elf, mode: attach}
   - {device: dut, action: run_until_breakpoint, location: capture_done, timeout_s: 5}
   - {device: dut_can, action: can_read, comparator: {id: "0x201", pattern: "^02(..)$", range: {min: 20, max: 30}}, timeout_s: 5}
+  - {device: dut, action: read_symbol, symbol: capture_count, size_bytes: 4, comparator: {equals: 64}}
+  - {device: dut, action: read_symbol, symbol: status_word, size_bytes: 4, comparator: {mask: 0x0f, equals: 5}}
   - {device: dut, action: dump_memory, symbol: capture_buffer, output_path: build/capture.hex}
   - {device: dut, action: debug_stop}
 ```
 
 `dut_can` above is the `listen_only: true` bus from the [configuration example](configuration.md#what-it-declares), so the plan only reads it. A `can_send` step belongs on a bus whose entry sets `listen_only: false` and grants `allow_write`. The plan closes neither the port nor the bus, because it does not have to. Cleanup does.
 
-A plan already written against `version: 2` or `version: 3` keeps loading and behaving exactly as it did; the older `uart_expect` action stays valid too. A plan is held to what its own `version:` contains, so a `version: 3` plan reaching for the version 4 block step is refused by name rather than working on one install and failing on an older one for no stated reason.
+A plan already written against `version: 2`, `version: 3` or `version: 4` keeps loading and behaving exactly as it did; the older `uart_expect` action stays valid too. A plan is held to what its own `version:` contains, so a `version: 3` plan reaching for the version 4 block step, or a `version: 4` plan reaching for the version 5 `read_symbol` action, is refused by name rather than working on one install and failing on an older one for no stated reason.
 
 `.agentic-hil/testconfig.yaml` and `--test-config` select only this test plan: ordered test steps and the device names they run on. They contain no hardware resources or permissions. The reactor gets all hardware settings from the discovered authoritative config or its `AGENTIC_HIL_CONFIG` override:
 
