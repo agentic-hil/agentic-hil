@@ -15,9 +15,14 @@ outside that checkout is the review document the next implementer round reads.
 
 Four further properties make it safe to run unattended:
 
-* Every round must produce at least one commit. A fix round that changes nothing
-  is a stalled loop, not progress, so it stops instead of burning the remaining
-  rounds on an agent that has given up.
+* Every round must produce at least one commit, and a round that produced none is
+  classified against the working tree rather than assumed. A clean tree is an
+  implementer that looked and declined: a stalled loop rather than progress, so
+  the run stops instead of burning the remaining rounds on an agent that has
+  given up. A dirty tree is the opposite case, and was read as the same one: a
+  round's work sitting uncommitted because the implementer stopped between its
+  last edit and its `git commit`. That work is handed back to be finished and
+  committed, and committed here if it comes back uncommitted a second time.
 * The verdict is parsed from a JSON schema Codex is required to satisfy, not from
   prose. Prose like "looks good apart from ..." has no stable meaning to a loop
   condition, and guessing at it is how a loop exits one round before the bug.
@@ -105,6 +110,26 @@ PAPERWORK_IGNORE = """\
 # How the salvage commit a cut-short round leaves behind is marked. Nothing
 # downstream should mistake it for finished work, so it says so in the subject.
 SALVAGE_SUBJECT = "wip(review-loop): round {number} was cut short before the implementer committed"
+# The same, for a round whose implementer came back, left its work in the tree,
+# and did not commit it even when handed it back to finish. A different sentence
+# because it is a different failure: nothing was cut short, the round simply
+# never reached its own commit.
+STALL_SUBJECT = "wip(review-loop): round {number} left the implementer's work uncommitted"
+
+# Every implementer prompt carries this, because the stall it describes is the
+# one that cost a round. The transcript of that round has the agent announcing
+# that it was waiting for the test suite to notify it, and then nothing until the
+# timeout: the work was finished, and the `git commit` at the end of the round
+# never happened. Nothing here sends an agent a notification, so waiting for one
+# is waiting for the whole `--timeout`.
+FOREGROUND_ONLY = """
+FOREGROUND ONLY
+Run every command in the foreground and wait for its own output. Do not put a
+command in the background, and do not wait on a notification, a monitor, or a
+completion event: nothing in this harness delivers one, so an agent that waits
+for one waits until --timeout kills the round with its work uncommitted. That
+includes the long ones. Wait for the command itself.
+"""
 
 # Codex turns network access on for `workspace-write` through this one setting,
 # so a run that has it does not need to be told the reviewer is offline.
@@ -158,6 +183,17 @@ class RoundRecord:
     # implementer never got that far. A reader of run.json has to be able to tell
     # that commit from one an agent stood behind.
     salvaged: str | None = None
+    # Set when the round produced no commit and left work in the tree: an
+    # implementer that stopped between its last edit and its `git commit`, which
+    # is a different round from one that looked and declined, and has to be
+    # readable as such afterwards.
+    stalled: bool = False
+    # What it left there. Named in the run summary as well as on the console,
+    # because the reader deciding whether the recovery caught the whole round is
+    # usually reading run.json days later.
+    uncommitted_paths: list[str] = field(default_factory=list)
+    # Set when that work was handed back to the implementer to finish.
+    retried: bool = False
 
 
 class AgentError(RuntimeError):
@@ -472,6 +508,32 @@ def excluding(repo: Path, paths: tuple[Path, ...]) -> list[str]:
     return pathspecs
 
 
+def uncommitted(repo: Path, paperwork: tuple[Path, ...] = ()) -> str:
+    """What a round left in the working tree, the loop's own paperwork aside.
+
+    `git status` takes the same pathspecs `salvage_commit` commits with, so a run
+    whose review documents and transcripts sit in a repository that ignores
+    nothing does not read its own paperwork as the implementer's work. Empty
+    means the round left nothing behind.
+
+    A git that will not answer is reported as empty, which is the reading that
+    changes nothing: the round is then handled as the declined round it has
+    always been handled as, and no tree is touched on the strength of a question
+    that could not be asked.
+    """
+    with contextlib.suppress(AgentError):
+        return git(repo, "status", "--porcelain", *excluding(repo, paperwork))
+    return ""
+
+
+def listed(entries: str, limit: int) -> str:
+    """`entries` as at most `limit` lines, with a count standing in for the rest."""
+    lines = entries.splitlines()
+    if len(lines) <= limit:
+        return "\n".join(lines)
+    return "\n".join([*lines[:limit], f"... and {len(lines) - limit} more"])
+
+
 def in_work_tree(repo: Path, path: Path) -> str | None:
     """`path` as a pathspec relative to the work tree, or None when it is outside it.
 
@@ -534,7 +596,15 @@ def paperwork_dir(repo: Path, root: Path, run_id: str) -> Path:
     return directory
 
 
-def salvage_commit(repo: Path, number: int, error: AgentError, paperwork: tuple[Path, ...] = ()) -> str | None:
+def salvage_commit(
+    repo: Path,
+    number: int,
+    error: AgentError,
+    paperwork: tuple[Path, ...] = (),
+    *,
+    subject: str = SALVAGE_SUBJECT,
+    cause: str | None = None,
+) -> str | None:
     """Commit what a round left in the tree when the round is not going to finish.
 
     A round commits once, at the end. An implementer stopped before it got there
@@ -550,6 +620,13 @@ def salvage_commit(repo: Path, number: int, error: AgentError, paperwork: tuple[
     an incomplete commit says that plainly and the next run can build on it,
     where a discarded working tree says nothing and cannot be built on at all.
 
+    `subject` and `cause` are the two sentences that say which unfinished thing
+    this is. They are overridden for the round that ends with the implementer
+    back from a second attempt and its work still uncommitted: nothing was cut
+    short there, so the default wording would describe a failure that did not
+    happen. Everything else about the commit is the same, because the thing being
+    committed is the same: a round's work nobody stood behind.
+
     Returns the one-line description of the commit, or None when there was
     nothing to commit or git refused it. A refusal is reported and not raised:
     this runs while another failure is already on its way out, and replacing that
@@ -561,12 +638,12 @@ def salvage_commit(repo: Path, number: int, error: AgentError, paperwork: tuple[
         git(repo, "add", "-A", *excluding(repo, paperwork))
         if not git(repo, "diff", "--cached", "--name-only"):
             return None  # nothing but ignored files and this run's own paperwork
-        cause = "the agent ran out of time" if isinstance(error, AgentTimeout) else "the agent stopped"
+        cause = cause or ("the agent ran out of time" if isinstance(error, AgentTimeout) else "the agent stopped")
         git(
             repo,
             "commit",
             "-m",
-            SALVAGE_SUBJECT.format(number=number),
+            subject.format(number=number),
             "-m",
             f"{cause}, so this is a round's work part-way through rather than a finished change. "
             "Nothing in it has been reviewed and the checks the round would have run may never have run. "
@@ -760,7 +837,7 @@ Repository branch: {branch}
 
 TASK
 {task}
-{scratch_block(scratch)}
+{scratch_block(scratch)}{FOREGROUND_ONLY}
 RULES
 1. Implement the task in this repository. Follow the repository's own conventions
    and the instructions in AGENTS.md / CLAUDE.md if present.
@@ -787,7 +864,7 @@ ORIGINAL TASK
 
 REVIEW DOCUMENT
 {review_path.as_posix()}
-{scratch_block(scratch)}
+{scratch_block(scratch)}{FOREGROUND_ONLY}
 RULES
 1. Read the review document first. Address every finding in it.
 2. If a finding is wrong or not worth acting on, do not silently skip it: say so
@@ -799,6 +876,71 @@ RULES
 5. Do not edit the review document and do not write into its directory.
 6. Finish by printing a short summary: finding addressed, how, and anything you
    deliberately rejected.
+"""
+
+
+def finish_prompt(
+    task: str,
+    review_path: Path | None,
+    round_number: int,
+    branch: str,
+    scratch: Path,
+    leftover: str,
+) -> str:
+    """The prompt for an implementer that has to finish work it already wrote.
+
+    Handing it the round's original prompt again would be asking for a second
+    implementation on top of the first: the findings it was answering may already
+    be answered in the files it would overwrite, and the round would lose the work
+    it was started to rescue. So this one says what is in the tree, forbids
+    discarding it, and asks for the one step that was missing.
+    """
+    findings = (
+        f"""
+REVIEW DOCUMENT
+{review_path.as_posix()}
+The uncommitted work below was an answer to it; read both before you judge what
+is left to do."""
+        if review_path is not None
+        else ""
+    )
+    return f"""You are the implementer in an automated implement-then-review loop.
+This is round {round_number}, and it has already run once. That attempt ended
+without committing, and the work it wrote is still here, uncommitted, in the
+working tree.
+
+Repository branch: {branch}
+
+ORIGINAL TASK
+{task}
+{findings}
+
+UNCOMMITTED WORK
+{listed(leftover, 50)}
+
+That is `git status --porcelain` in the repository root; `git diff` and
+`git diff --stat` show what is in those files.
+{scratch_block(scratch)}{FOREGROUND_ONLY}
+RULES
+1. Read that work first, with `git status` and `git diff`. It is a previous
+   attempt's and it may already be complete. Do not start the task again from the
+   beginning, and do not overwrite any of those files before you have read them.
+2. Never discard it: no `git checkout --`, `git restore`, `git reset --hard`,
+   `git stash` or `git clean` over those paths.
+3. Finish whatever is unfinished, run the repository's lint and test commands for
+   the code it touches, and fix what you break.
+4. Commit it with `git commit`. At least one commit is mandatory: committing is
+   the only thing that gets this round's work into the review, and it is the step
+   the previous attempt never reached.
+5. If what is in the tree is not work worth keeping, remove exactly those files
+   (the one exception to rule 2) and say so explicitly in your final summary with
+   your reasoning. Leaving them and committing nothing is not a way to reject
+   them: the loop commits a tree left dirty as unfinished work.
+6. Do not push, do not amend commits that already existed, do not create
+   branches, do not open pull requests, and do not write into the review
+   directory.
+7. Finish by printing a short summary: what the previous attempt had done, what
+   you added, and which checks you ran.
 """
 
 
@@ -1142,7 +1284,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--continue-on-no-commit",
         action="store_true",
-        help="Keep looping when an implementation round produces no commit instead of stopping as stalled.",
+        help=(
+            "Keep looping when an implementation round produces no commit and leaves nothing in the working "
+            "tree, instead of stopping as stalled. A round that left uncommitted work behind is recovered "
+            "rather than reported as no commit, whatever this is set to."
+        ),
     )
     parser.add_argument("--dry-run", action="store_true", help="Print the agent commands without running them.")
     options = parser.parse_args(argv)
@@ -1244,6 +1390,142 @@ class ReviewSetup:
     schema_path: Path
     scratch_root: Path
     has_network: bool
+
+
+def implement_round(
+    setup: ReviewSetup,
+    record: RoundRecord,
+    number: int,
+    prompt: str,
+    scratch: Path,
+    paperwork: tuple[Path, ...],
+    stage: str = "",
+) -> None:
+    """Run the implementer once, and commit what it leaves behind if it does not come back.
+
+    A round commits once, at the end, so an implementer that raised never got
+    there and the tree holds the whole round's work while the run is already on
+    its way out. `salvage_commit` puts it in history first and the round records
+    that the commit is the loop's own rather than one an agent stood behind.
+
+    `stage` names a second invocation inside one round, so its transcript and its
+    scratch directory do not land on the first one's. The first transcript is the
+    evidence of what the stalled attempt did before it stopped, and overwriting it
+    would destroy the record of the very thing being recovered from.
+    """
+    options = setup.options
+    prefix = f"[claude r{number} {stage}]" if stage else f"[claude r{number}]"
+    log_name = f"round-{number:02d}-claude-{stage}.log" if stage else f"round-{number:02d}-claude.log"
+    try:
+        run_agent(
+            claude_command(options),
+            prompt,
+            setup.repo,
+            prefix,
+            setup.log_dir / log_name,
+            options.timeout,
+            options.dry_run,
+            env=agent_env(scratch),
+            heartbeat=options.heartbeat,
+        )
+    except CleanupUnconfirmed as error:
+        # The killed agent's shells and test processes were not confirmed gone, so
+        # they may still be writing to the tree. Salvage would `git add -A` and
+        # commit underneath them, capturing a half-written tree as if it were the
+        # round's work -- the race salvage exists to avoid, arriving through
+        # cleanup that could not finish. Touch nothing: end the run with the tree
+        # as it is and let an operator resolve the survivors.
+        print(
+            f"\nround {number}: {error}. The working tree was left untouched -- a killed "
+            f"agent's processes may still be running in {setup.repo}; stop them and inspect the tree "
+            "by hand before starting another run.",
+            file=sys.stderr,
+        )
+        raise
+    except AgentError as error:
+        # This ends the run, and the round's work is uncommitted: a round commits
+        # once, at the end, and the implementer never got there. Commit it before
+        # the run leaves it behind. Safe here and not above because the tree is
+        # quiescent: the agent's process tree was confirmed gone before this
+        # raised (`_terminate_tree`).
+        salvaged = salvage_commit(setup.repo, number, error, paperwork)
+        if salvaged is not None:
+            record.commits = [salvaged]
+            record.salvaged = salvaged
+        raise
+
+
+def recover_stalled_round(
+    setup: ReviewSetup,
+    record: RoundRecord,
+    number: int,
+    task: str,
+    branch: str,
+    previous_review: Path | None,
+    paperwork: tuple[Path, ...],
+) -> None:
+    """Get the work of a round that produced no commit but left a dirty tree into history.
+
+    "The implementer produced no commit" is two rounds, not one, and the working
+    tree is what tells them apart. A clean tree is an implementer that looked at
+    the findings and declined the round; that is the caller's business and this is
+    never reached. A dirty tree is a round that was finished and never committed,
+    because the implementer stopped between its last edit and its `git commit` --
+    an agent waiting on a notification its harness never delivered, which was
+    watched happening and cost a hand salvage the next morning.
+
+    Recovery is the round's own step, not a new mechanism: the implementer is
+    handed its own uncommitted work and asked for the commit it never made. Only
+    if it comes back a second time without one is the tree committed here, marked
+    as the unreviewed work in progress it is, so the review round has something to
+    read and the next run starts from a commit rather than from a working tree
+    nobody can explain.
+
+    Nothing here cleans, resets or stashes: whatever the round produced is on
+    disk, and every path out of this leaves it there or commits it.
+    """
+    repo = setup.repo
+    leftover = uncommitted(repo, paperwork)
+    print(
+        f"\nround {number}: implementer stalled with uncommitted work. It produced no commit and left "
+        f"{len(leftover.splitlines())} path(s) in the working tree:"
+    )
+    for line in listed(leftover, 20).splitlines():
+        print(f"  {line}")
+    print("handing it back to be finished and committed; the work stays exactly where it is.")
+
+    record.stalled = True
+    record.uncommitted_paths = leftover.splitlines()
+    record.retried = True
+    before = git(repo, "rev-parse", "HEAD")
+    scratch = round_scratch(setup.scratch_root, number, "claude-finish")
+    implement_round(
+        setup,
+        record,
+        number,
+        finish_prompt(task, previous_review, number, branch, scratch, leftover),
+        scratch,
+        paperwork,
+        stage="finish",
+    )
+    if git(repo, "rev-parse", "HEAD") != before:
+        return  # it finished the job; the round has its commits and goes to review
+    if not uncommitted(repo, paperwork):
+        # It read its own leftovers and took them back out. That is the declined
+        # round the caller was about to report, arrived at deliberately.
+        print(f"\nround {number}: the implementer removed what it had left behind rather than commit it.")
+        return
+    salvaged = salvage_commit(
+        repo,
+        number,
+        AgentError(f"the implementer left round {number}'s work uncommitted twice"),
+        paperwork,
+        subject=STALL_SUBJECT,
+        cause="the agent produced the work and never committed it, twice",
+    )
+    if salvaged is not None:
+        record.commits = [salvaged]
+        record.salvaged = salvaged
 
 
 def perform_review(
@@ -1382,6 +1664,14 @@ def under(repo: Path, path: Path) -> Path:
     return path if path.is_absolute() else repo / path
 
 
+def commits_since(repo: Path, previous: str) -> tuple[str, list[str]]:
+    """HEAD, and the one-line log of everything committed since `previous`."""
+    head = git(repo, "rev-parse", "HEAD")
+    if head == previous:
+        return head, []
+    return head, git(repo, "log", "--oneline", f"{previous}..{head}").splitlines()
+
+
 def rounds_without_progress(findings: list[int]) -> int:
     """How many of the most recent rounds failed to get below the fewest findings before them.
 
@@ -1447,6 +1737,10 @@ def main(argv: list[str] | None = None) -> int:
     # tree that is about to be committed, and `git add -A` in salvage_commit
     # would otherwise be the thing that swept it in.
     scratch_root = Path(tempfile.gettempdir()) / "agentic-loop-scratch" / f"{repo.name}-{run_id}"
+    # The directories that are the loop's own rather than the round's work. Every
+    # question this run asks about the working tree, and every commit it makes of
+    # one, leaves them out: a review of a round is not part of that round.
+    paperwork = (review_root, log_root, checkout_dir)
     has_network = reviewer_network(options.codex_sandbox, options.codex_arg)
 
     print(f"repository : {repo}")
@@ -1536,48 +1830,27 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 prompt = fix_prompt(task, previous_review, number, branch, scratch)
             try:
-                run_agent(
-                    claude_command(options),
-                    prompt,
-                    repo,
-                    f"[claude r{number}]",
-                    log_dir / f"round-{number:02d}-claude.log",
-                    options.timeout,
-                    options.dry_run,
-                    env=agent_env(scratch),
-                    heartbeat=options.heartbeat,
-                )
-            except CleanupUnconfirmed as error:
-                # The killed agent's shells and test processes were not confirmed
-                # gone, so they may still be writing to the tree. Salvage would
-                # `git add -A` and commit underneath them, capturing a half-written
-                # tree as if it were the round's work -- the race salvage exists to
-                # avoid, arriving through cleanup that could not finish. Touch
-                # nothing: end the run with the tree as it is and let an operator
-                # resolve the survivors.
-                print(
-                    f"\nround {number}: {error}. The working tree was left untouched -- a killed "
-                    f"agent's processes may still be running in {repo}; stop them and inspect the tree "
-                    "by hand before starting another run.",
-                    file=sys.stderr,
-                )
-                raise
-            except AgentError as error:
-                # This ends the run, and the round's work is uncommitted: a round
-                # commits once, at the end, and the implementer never got there.
-                # Commit it before the run leaves it behind. Safe here and not
-                # above because the tree is quiescent: the agent's process tree was
-                # confirmed gone before this raised (`_terminate_tree`).
-                salvaged = salvage_commit(repo, number, error, (review_root, log_root, checkout_dir))
-                if salvaged is not None:
-                    record.commits = [salvaged]
-                    record.salvaged = salvaged
+                implement_round(setup, record, number, prompt, scratch, paperwork)
+            except AgentError:
+                # A salvage commit is the run's last commit, and the summary about
+                # to be written reports the range that ends at it.
+                if record.salvaged is not None:
                     last_head = git(repo, "rev-parse", "HEAD")
                 raise
 
-            head = last_head if options.dry_run else git(repo, "rev-parse", "HEAD")
-            new_commits = [] if head == last_head else git(repo, "log", "--oneline", f"{last_head}..{head}").splitlines()
+            head, new_commits = (last_head, []) if options.dry_run else commits_since(repo, last_head)
             record.commits = new_commits
+            if not new_commits and not options.dry_run and uncommitted(repo, paperwork):
+                # Not a round that was declined: a round whose work is sitting in
+                # the tree because the implementer never reached its own commit.
+                try:
+                    recover_stalled_round(setup, record, number, task, branch, previous_review, paperwork)
+                except AgentError:
+                    if record.salvaged is not None:
+                        last_head = git(repo, "rev-parse", "HEAD")
+                    raise
+                head, new_commits = commits_since(repo, last_head)
+                record.commits = new_commits
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
