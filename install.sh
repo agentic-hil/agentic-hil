@@ -156,6 +156,22 @@ version_at_least() {
     return 0
 }
 
+# Every one of the three numeric fields equal: the proof, for an explicit
+# --version pin, that a reported version is the pinned release and not merely a
+# newer one that happens to sit at least as high.
+version_exactly() {
+    index=1
+    while [ "$index" -le 3 ]; do
+        found_part=$(version_part "$1" "$index")
+        want_part=$(version_part "$2" "$index")
+        if [ "$found_part" -ne "$want_part" ]; then
+            return 1
+        fi
+        index=$((index + 1))
+    done
+    return 0
+}
+
 python_is_new_enough() {
     "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
 }
@@ -181,15 +197,17 @@ package_spec() {
     printf '%s' "$spec"
 }
 
-# The lowest version a freshly installed copy may report and still be accepted as
-# the one this run installed: the pin when one was asked for, the floor otherwise.
-# A copy older than this in a candidate directory is a stale one left behind, not
-# what the manager just wrote, so it does not get to answer for the install.
-required_version() {
+# Does a freshly installed copy's reported version answer what this run asked
+# for: exactly the pin when one was given, at least the floor otherwise. The pin
+# must match exactly -- a newer copy left in the manager's bin is not the pinned
+# release this run wrote, and the documented --version contract is an exact
+# release, not a floor. Without a pin the manager only ever writes the newest, so
+# any copy at or above the floor is the one just installed.
+version_matches_request() {
     if [ -n "$PINNED" ]; then
-        printf '%s' "$PINNED"
+        version_exactly "$1" "$PINNED"
     else
-        printf '%s' "$FLOOR"
+        version_at_least "$1" "$FLOOR"
     fi
 }
 
@@ -239,27 +257,24 @@ install_with_pip() {
 PACKAGE_MANAGER=""
 
 manager_bin_dir() {
-    # uv's own executable directory, straight from uv. This is authoritative: it
-    # honours UV_TOOL_BIN_DIR and the XDG data directory, neither of which the
-    # guessed user bins below can name, and it is where `uv tool install` just
-    # wrote the console script. pip --user writes its scripts into the
-    # interpreter's user scripts path, which candidate_bin_dirs already probes,
-    # so only the uv branch needs naming here.
-    if [ "${PACKAGE_MANAGER:-}" = "uv" ]; then
-        uv tool dir --bin 2>/dev/null || true
-    fi
-}
-
-candidate_bin_dirs() {
-    # The manager's own executable directory first, so an install whose copy
-    # landed outside the default user bin is still found there; the guessed user
-    # bins follow as a fallback for a uv too old to report its bin directory.
-    manager_bin_dir
-    printf '%s\n' "${XDG_BIN_HOME:-$HOME/.local/bin}"
-    printf '%s\n' "$HOME/.local/bin"
-    if [ -n "${DISCOVERED_PYTHON:-}" ]; then
-        "$DISCOVERED_PYTHON" -c 'import sysconfig; print(sysconfig.get_path("scripts", "posix_user"))' 2>/dev/null || true
-    fi
+    # The one directory the manager step 2 used just wrote the console script
+    # into, asked of that manager itself and nothing guessed. For uv that is
+    # `uv tool dir --bin`, which honours UV_TOOL_BIN_DIR and the XDG data
+    # directory, neither of which a guessed user bin can name; for pip --user it
+    # is the selected interpreter's own user scripts path. A copy in any other
+    # directory cannot answer for this install, so when the manager cannot name
+    # its destination this prints nothing and the caller fails rather than
+    # scanning a directory that may hold a stale copy earlier on PATH.
+    case "${PACKAGE_MANAGER:-}" in
+        uv)
+            uv tool dir --bin 2>/dev/null || true
+            ;;
+        pip)
+            if [ -n "${DISCOVERED_PYTHON:-}" ]; then
+                "$DISCOVERED_PYTHON" -c 'import sysconfig; print(sysconfig.get_path("scripts", "posix_user"))' 2>/dev/null || true
+            fi
+            ;;
+    esac
 }
 
 # The exact agentic-hil the machine half calls. It stays the bare name only when
@@ -269,23 +284,21 @@ candidate_bin_dirs() {
 AGENTIC_HIL_CMD="agentic-hil"
 
 installed_executable_dir() {
-    # The first candidate bin directory that now holds an agentic-hil which
-    # answers and is at least the version this run asked for. The version check is
-    # the proof that this is the copy the manager just wrote and not an older one
-    # left in a candidate directory; the manager's own bin directory is tried
-    # first, so a copy that landed outside the default user bin is still found.
-    minimum=$(required_version)
-    while IFS= read -r directory; do
-        [ -n "$directory" ] || continue
-        [ -x "$directory/agentic-hil" ] || continue
-        found_version=$("$directory/agentic-hil" --version 2>/dev/null) || continue
-        if version_at_least "$found_version" "$minimum"; then
-            printf '%s\n' "$directory"
-            return 0
-        fi
-    done <<EOF
-$(candidate_bin_dirs)
-EOF
+    # The manager's own destination directory, and only that. The copy there must
+    # answer and match what this run asked for -- exactly the pin, or at least the
+    # floor -- which is the proof it is the one the manager just wrote and not an
+    # older or unrelated one elsewhere on PATH. If the manager cannot name its
+    # destination, or the copy there does not answer at the required version, this
+    # returns failure: the machine half is refused rather than run against a
+    # guessed, possibly stale copy.
+    directory=$(manager_bin_dir)
+    [ -n "$directory" ] || return 1
+    [ -x "$directory/agentic-hil" ] || return 1
+    found_version=$("$directory/agentic-hil" --version 2>/dev/null) || return 1
+    if version_matches_request "$found_version"; then
+        printf '%s\n' "$directory"
+        return 0
+    fi
     return 1
 }
 

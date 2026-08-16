@@ -136,11 +136,11 @@ def _docker() -> str:
         pytest.skip("Docker is not installed on this machine")
     try:
         probe = subprocess.run(
-            [docker, "version", "--format", "{{.Server.Version}}"],
+            [docker, "version", "--format", "{{.Server.Os}}"],
             capture_output=True,
             text=True,
-        encoding="utf-8",
-        errors="replace",
+            encoding="utf-8",
+            errors="replace",
             timeout=DOCKER_PROBE_TIMEOUT_S,
             check=False,
         )
@@ -148,6 +148,11 @@ def _docker() -> str:
         pytest.skip("the Docker daemon did not answer; start Docker and run this again")
     if probe.returncode != 0:
         pytest.skip("the Docker daemon did not answer; start Docker and run this again")
+    # GitHub's Windows runners answer with a healthy daemon that runs Windows
+    # containers, and a Linux image is simply not pullable there. That machine
+    # skips the same way a machine without Docker does.
+    if probe.stdout.strip() != "linux":
+        pytest.skip(f"the Docker daemon runs {probe.stdout.strip() or 'unknown'} containers and {CONTAINER_IMAGE} needs linux")
     return docker
 
 
@@ -397,10 +402,15 @@ def test_a_newer_install_answers_agent_install_over_an_older_copy_earlier_on_pat
     )
     # A stub claude, so agent detection has a claude-code to register for.
     _stub_executable(early_bin / "claude", "exit 0\n")
-    # A fake uv whose `tool install` writes the fresh copy into the user bin, the
-    # way the real one lands a console script there.
+    # A fake uv whose bin directory is the default user bin: it reports that with
+    # `tool dir --bin`, the way the real one does, and `tool install` writes the
+    # fresh console script there.
     _stub_executable(
         early_bin / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        f'  echo "{user_bin}"\n'
+        "  exit 0\n"
+        "fi\n"
         'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
         f'  cat > "{user_bin}/agentic-hil" <<STUB\n'
         "#!/bin/sh\n"
@@ -539,6 +549,204 @@ def test_a_uv_install_outside_the_user_bin_answers_over_an_older_path_copy(tmp_p
     # The fresh copy landed off PATH, so the script says so rather than pretending
     # it resolves, and still routes the machine half through it.
     assert f"landed in {uv_bin}" in transcript, transcript
+
+
+def test_a_pip_install_answers_over_a_newer_stale_copy_in_a_guessed_bin(tmp_path: Path) -> None:
+    """The pip/candidate-order defect, run end to end through a POSIX shell.
+
+    pip --user writes the fresh copy into the interpreter's own user scripts path.
+    A newer, unrelated agentic-hil already sits in `XDG_BIN_HOME`, a directory the
+    earlier candidate scan consulted before that scripts path. With `--version
+    0.5.0` asked for, that scan accepted the 9.9.9 copy there -- it was "at least
+    0.5.0" -- and the stale copy answered `agent-install` while the script reported
+    success, though it was never on PATH. The fix asks pip, through the interpreter,
+    where it actually wrote the copy, consults only that directory, and requires the
+    pinned version exactly, so the fresh 0.5.0 copy is the one that registers.
+
+    Driven end to end on the POSIX half, where these mechanics live. It takes the
+    pip branch, so no uv may resolve on the test PATH.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    early_bin = tmp_path / "early-bin"  # the fake python and claude
+    xdg_bin = tmp_path / "xdg-bin"  # a newer stale copy, scanned first by the old code
+    scripts_dir = tmp_path / "py-scripts"  # what the interpreter reports as its scripts path
+    for directory in (project, early_bin, xdg_bin, scripts_dir):
+        directory.mkdir(parents=True)
+
+    marker = tmp_path / "who-ran-agent-install"
+
+    # The newer, unrelated copy in XDG_BIN_HOME: reachable only through the old
+    # candidate scan, which looked here before the interpreter's scripts path and
+    # accepted it for being at least the pin. It is not on PATH at all.
+    _stub_executable(
+        xdg_bin / "agentic-hil",
+        'case "$1" in\n'
+        '  --version) echo "9.9.9" ;;\n'
+        f'  agent-install) echo "stale" > "{marker}" ;;\n'
+        "esac\n"
+        "exit 0\n",
+    )
+    # A stub claude, so agent detection has a claude-code to register for.
+    _stub_executable(early_bin / "claude", "exit 0\n")
+    # A fake python that is new enough, whose `-m pip install --user` writes the
+    # fresh pinned copy into its reported scripts path, and that reports that path
+    # with sysconfig -- the three questions the installer asks the interpreter.
+    _stub_executable(
+        early_bin / "python3",
+        'case "$*" in\n'
+        "  *version_info*) exit 0 ;;\n"
+        f'  *posix_user*) echo "{scripts_dir}"; exit 0 ;;\n'
+        '  *"pip install"*)\n'
+        f'    cat > "{scripts_dir}/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "0.5.0" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        f'    chmod +x "{scripts_dir}/agentic-hil"\n'
+        "    exit 0 ;;\n"
+        "esac\n"
+        "exit 0\n",
+    )
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{early_bin}:{scripts_dir}:/usr/bin:/bin",
+        "XDG_BIN_HOME": str(xdg_bin),
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--version", "0.5.0", "--no-can"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+
+
+def test_an_exact_version_pin_refuses_a_mismatched_copy_in_the_managers_bin(tmp_path: Path) -> None:
+    """An exact `--version` pin is proven by exact equality, not by "at least".
+
+    The manager's own bin holds an agentic-hil whose version is newer than the pin,
+    not the pinned release this run asked for. A floor comparison would accept it;
+    the documented `--version` contract is an exact release, so the installer
+    refuses to hand `agent-install` to a copy it cannot prove is the pinned one it
+    installed. It exits non-zero through the same guard that fires when the fresh
+    copy cannot be located, and never runs the machine half.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    early_bin = tmp_path / "early-bin"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    for directory in (project, early_bin, uv_bin):
+        directory.mkdir(parents=True)
+
+    marker = tmp_path / "who-ran-agent-install"
+
+    # A stub claude, so agent detection has a claude-code that would be registered
+    # if the guard let step 4 run.
+    _stub_executable(early_bin / "claude", "exit 0\n")
+    # A fake uv that reports its bin with `tool dir --bin`, but whose `tool install`
+    # writes a copy reporting 9.9.9 -- newer than the 0.5.0 pin, and so not the
+    # pinned release this run asked for.
+    _stub_executable(
+        early_bin / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "9.9.9" ;;\n'
+        f'  agent-install) echo "ran" > "{marker}" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{early_bin}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--version", "0.5.0", "--no-can"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode != 0, transcript
+    assert not marker.exists(), transcript
+    assert "does not resolve here" in transcript, transcript
+
+
+def test_both_scripts_locate_the_fresh_copy_only_in_the_managers_own_bin() -> None:
+    """The fresh copy is version-checked in the manager's own destination, nothing
+    guessed. uv is asked with `uv tool dir --bin` and pip through the interpreter's
+    user scripts path; a scan of guessed user bins (`XDG_BIN_HOME`, `~/.local/bin`)
+    accepting the first copy at or above the floor let a newer, unrelated copy in an
+    earlier directory answer for the install, so no such scan remains. The
+    PowerShell side has no interpreter in every checkout, so this static check is
+    its regression guard alongside the POSIX end-to-end tests.
+    """
+    shell = _code_only(_shell_source())
+    assert "manager_bin_dir" in shell
+    assert "candidate_bin_dirs" not in shell
+    assert "posix_user" in shell
+    powershell = _code_only(_powershell_source())
+    assert "Get-ManagerBinDirectory" in powershell
+    assert "Get-CandidateBinDirectories" not in powershell
+    assert "nt_user" in powershell
+
+
+def test_both_scripts_require_an_exact_match_for_a_version_pin() -> None:
+    """A `--version` pin is proven by exact equality, not a floor comparison.
+
+    The documented `--version` installs an exact release, so a copy in the manager's
+    own bin whose version merely exceeds the pin is not the one this run wrote. Both
+    scripts gate the fresh copy on an exact-equality check when a pin is present and
+    fall back to the floor otherwise; the PowerShell side cannot run end to end in
+    every checkout, so this pins that both carry such a check.
+    """
+    shell = _code_only(_shell_source())
+    assert "version_exactly" in shell
+    assert "version_matches_request" in shell
+    powershell = _code_only(_powershell_source())
+    assert "Test-VersionExactly" in powershell
+    assert "Test-VersionMatchesRequest" in powershell
 
 
 # The container run, end to end: a machine with nothing on it, the real package

@@ -148,13 +148,30 @@ function Get-PackageSpec {
     return $spec
 }
 
-function Get-RequiredVersion {
-    # The lowest version a freshly installed copy may report and still be accepted
-    # as the one this run installed: the pin when one was asked for, the floor
-    # otherwise. A copy older than this in a candidate directory is a stale one
-    # left behind, not what the manager just wrote.
-    if ($Version) { return $Version }
-    return $Floor
+function Test-VersionExactly {
+    param([string]$Found, [string]$Wanted)
+    # Every one of the three numeric fields equal: the proof, for an explicit
+    # --version pin, that a reported version is the pinned release and not merely a
+    # newer one that happens to sit at least as high.
+    $pattern = '(\d+)\.(\d+)\.(\d+)'
+    $left = [regex]::Match($Found, $pattern)
+    $right = [regex]::Match($Wanted, $pattern)
+    if (-not $left.Success -or -not $right.Success) { return $false }
+    for ($index = 1; $index -le 3; $index++) {
+        if ([int]$left.Groups[$index].Value -ne [int]$right.Groups[$index].Value) { return $false }
+    }
+    return $true
+}
+
+function Test-VersionMatchesRequest {
+    param([string]$Found)
+    # Does a freshly installed copy's reported version answer what this run asked
+    # for: exactly the pin when one was given, at least the floor otherwise. The
+    # pin must match exactly -- a newer copy left in the manager's bin is not the
+    # pinned release this run wrote, and the documented --version contract is an
+    # exact release, not a floor.
+    if ($Version) { return (Test-VersionExactly -Found $Found -Wanted $Version) }
+    return (Test-VersionAtLeast -Found $Found -Floor $Floor)
 }
 
 function Get-UvBinDirectory {
@@ -195,26 +212,25 @@ function Add-UserBinToPath {
     if (Test-Path $userBin) { $env:Path = "$userBin;$env:Path" }
 }
 
-function Get-CandidateBinDirectories {
+function Get-ManagerBinDirectory {
     param([string]$PythonCommand, [string]$PackageManager)
-    # uv's own executable directory first, so an install whose copy landed outside
-    # the default user bin is still found there; the guessed user bin and the
-    # interpreter's user scripts path follow. pip --user writes its scripts into
-    # that nt_user path, so the pip branch is covered without a separate lookup.
-    $directories = @()
+    # The one directory the manager step 2 used just wrote agentic-hil.exe into,
+    # asked of that manager itself and nothing guessed: `uv tool dir --bin` for uv,
+    # the selected interpreter's own nt_user scripts path for pip --user. A copy in
+    # any other directory cannot answer for this install, so when the manager
+    # cannot name its destination this returns '' and the caller fails rather than
+    # scanning a directory that may hold a stale copy.
     if ($PackageManager -eq 'uv') {
-        $uvBin = Get-UvBinDirectory
-        if ($uvBin) { $directories += $uvBin }
+        return Get-UvBinDirectory
     }
-    $directories += (Join-Path $env:USERPROFILE '.local\bin')
-    if ($PythonCommand) {
+    if ($PackageManager -eq 'pip' -and $PythonCommand) {
         $probe = Invoke-Captured -File $PythonCommand -Arguments @(
             '-c',
             'import sysconfig; print(sysconfig.get_path("scripts", "nt_user"))'
         )
-        if ($probe.ExitCode -eq 0) { $directories += $probe.Output.Trim() }
+        if ($probe.ExitCode -eq 0) { return $probe.Output.Trim() }
     }
-    return $directories
+    return ''
 }
 
 function Get-AgentIdForCli {
@@ -305,18 +321,22 @@ if (-not $needsPackage) {
     # the one the machine half uses, and it already resolves here.
     Write-Step 3 "PATH: agentic-hil $installed is already here and was kept, nothing to add"
 } else {
+    # The manager's own destination directory, and only that: the copy there must
+    # answer and match what this run asked for (exactly the pin, or at least the
+    # floor), which is the proof it is the one the manager just wrote and not an
+    # older or unrelated one elsewhere. If the manager cannot name its destination,
+    # or the copy there does not match, $found stays empty and the machine half is
+    # refused rather than run against a guessed copy.
     $found = ''
-    $minimum = Get-RequiredVersion
-    foreach ($directory in (Get-CandidateBinDirectories -PythonCommand $pythonCommand -PackageManager $packageManager)) {
-        if (-not $directory) { continue }
-        if ($found) { continue }
+    $directory = Get-ManagerBinDirectory -PythonCommand $pythonCommand -PackageManager $packageManager
+    if ($directory) {
         $executable = Join-Path $directory 'agentic-hil.exe'
-        if (-not (Test-Path $executable)) { continue }
-        # Version-check the copy: this is the proof that it is the one the manager
-        # just wrote and not an older one left in a candidate directory.
-        $probe = Invoke-Captured -File $executable -Arguments @('--version')
-        if ($probe.ExitCode -ne 0) { continue }
-        if (Test-VersionAtLeast -Found $probe.Output.Trim() -Floor $minimum) { $found = $directory }
+        if (Test-Path $executable) {
+            $probe = Invoke-Captured -File $executable -Arguments @('--version')
+            if ($probe.ExitCode -eq 0 -and (Test-VersionMatchesRequest -Found $probe.Output.Trim())) {
+                $found = $directory
+            }
+        }
     }
     if ($found) {
         # Call this exact copy for the machine half, and put its directory first
