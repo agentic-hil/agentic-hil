@@ -72,7 +72,7 @@ INSTALLER_URL = re.compile(
     r"https://(?:raw\.githubusercontent\.com/agentic-hil/agentic-hil/master"
     r"|agentic-hil\.github\.io"
     r"|github\.com/agentic-hil/agentic-hil/releases/latest/download)"
-    r"/([^\s\"'`)]+)"
+    r"/([^\s\"'`)|]+)"
 )
 
 
