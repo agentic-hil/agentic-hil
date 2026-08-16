@@ -31,6 +31,7 @@ from agentic_hil.config import (
     CONFIG_ENV,
     DEFAULT_CONFIG_TEMPLATE,
     OPENOCD_SCRIPT_SEARCH_NAME,
+    PROJECT_CONFIG_FILENAME,
     ConfigError,
     absolute_without_symlinks,
     atomic_write_text,
@@ -44,6 +45,7 @@ from agentic_hil.config import (
     load_config,
     openocd_script_kind,
     permission_summary,
+    project_config_directory,
     project_config_path,
     safe_directory,
     secure_atomic_write_bytes,
@@ -53,6 +55,7 @@ from agentic_hil.config import (
     secure_remove_file,
     secure_user_file_lock,
     tighten_owned_writable_ancestors,
+    tool_owned_user_roots,
     trusted_persistent_executable,
     user_file_lock_path,
     user_state_root,
@@ -601,10 +604,33 @@ def _agent_permission_config_path(agent_id: str) -> Path | None:
     return _external_user_path(paths[agent_id], "Agent permission configuration")
 
 
+def _workspace_boundary() -> Path | None:
+    """The project directory the user-wide half must stay out of, or None.
+
+    The boundary is the working directory, and what it protects is a project: a
+    repository is untrusted content, so the files that govern the agent may
+    neither be written inside one nor launched out of one. The home directory is
+    not such a project. Run from home itself, or from a directory above it (the
+    filesystem root is the everyday one, and an operator typing the install
+    one-liner is standing in one or the other), a boundary drawn at the working
+    directory swallows the home directory whole: every user-level target and
+    every uv- or pipx-installed launcher then reads as "inside the workspace",
+    and a half whose entire output is user-level files has nothing left it may
+    write. There is no workspace to keep out of there, so this reports none, and
+    every directory that is not home or above it keeps the strict boundary. A
+    host that cannot name a home directory keeps it too.
+    """
+    workspace = absolute_without_symlinks(Path.cwd())
+    with suppress(RuntimeError):
+        if is_path_within_frozen(absolute_without_symlinks(Path.home()), workspace):
+            return None
+    return workspace
+
+
 def _external_user_path(path: Path, label: str) -> Path:
     absolute = absolute_without_symlinks(path)
-    workspace = absolute_without_symlinks(Path.cwd())
-    if is_path_within_frozen(absolute, workspace):
+    workspace = _workspace_boundary()
+    if workspace is not None and is_path_within_frozen(absolute, workspace):
         raise ConfigError("unsafe_configured_path", f"{label} must be stored outside the project workspace.", {"field": "user_config", "path": str(absolute), "workspace_root": str(workspace)})
     return absolute
 
@@ -1790,7 +1816,11 @@ def _mcp_cache_roots() -> list[Path]:
 
 
 def _trusted_mcp_command(command: str) -> str:
-    return trusted_persistent_executable(command, workspace=Path.cwd(), disallowed_roots=_mcp_cache_roots())
+    # The same boundary the user-level files are checked against: from home or
+    # above it the launcher a package manager just installed under `~/.local/bin`
+    # would otherwise be refused for coming "from the workspace", which is the
+    # one thing agent-install is there to register.
+    return trusted_persistent_executable(command, workspace=_workspace_boundary(), disallowed_roots=_mcp_cache_roots())
 
 
 def _mcp_command_candidates() -> list[str]:
@@ -1887,8 +1917,8 @@ def _posix_filesystem_path(path: PurePath) -> str:
     return posix
 
 
-def _stale_claude_code_deny_rules(config_path: Path, state_root: Path) -> set[str]:
-    """What earlier releases wrote here and this one has to take back.
+def _superseded_claude_code_deny_rules(config_path: Path, state_root: Path) -> set[str]:
+    """What earlier releases wrote for *these* trees and this one has to take back.
 
     Earlier releases built both rules straight from the absolute path: a
     `Write(...)` that Claude Code never consults, and an `Edit(...)` whose single
@@ -1900,8 +1930,157 @@ def _stale_claude_code_deny_rules(config_path: Path, state_root: Path) -> set[st
     project's config path and state root, so a rule is ours exactly when its text
     is one of these few strings. An operator's own `Write(...)` or `Edit(...)`
     rule names some other path and is therefore never one of them.
+
+    Both are replaced in the same run, which is what makes taking them back safe
+    here and what `_abandoned_claude_code_deny_rule` cannot assume: it answers
+    for trees no configuration names any more, where there is nothing to write
+    back.
     """
     return {f"{form}({glob})" for form in ("Edit", "Write") for glob in _protected_write_globs(config_path, state_root)}
+
+
+_DENIED_TREE = re.compile(r"^(?:Edit|Write)\((?P<tree>.+)/\*\*\)$")
+
+
+def _deny_pattern_spellings(tree: PurePath) -> tuple[str, ...]:
+    """Every text this tool has written for one directory.
+
+    The plain POSIX path is what releases up to 0.7.0 wrote; the `//`-anchored
+    form is what the host actually resolves against the filesystem root, and what
+    is written now. A rule in either spelling is this tool's, and has to stay
+    recognisable as this tool's after the tree it names is gone.
+    """
+    return (tree.as_posix(), f"/{_posix_filesystem_path(tree)}")
+
+
+def _deny_tree_key(tree: str) -> str:
+    """Compare two deny patterns the way the filesystem underneath them compares.
+
+    `os.path.normcase` is the usual spelling of this and would also rewrite the
+    separators; these are POSIX texts on both platforms, so only its case half
+    applies.
+    """
+    return tree.lower() if os.name == "nt" else tree
+
+
+def _tool_written_deny_tree(rule: str) -> str | None:
+    """The tree a deny rule protects, when the rule is one this tool wrote.
+
+    Provenance without a marker. A Claude Code deny rule is a bare string in a
+    file another program owns, with nowhere to carry a comment or a version, so
+    what identifies ours is where it points: `Edit(<tree>/**)` (or the superseded
+    `Write` form) for a `<tree>` at or under one of the per-user roots this tool
+    creates for itself. Nothing but Agentic HIL puts a directory there, so a rule
+    about one is Agentic HIL's own, whichever release wrote it and whichever
+    `state_root` the configuration named at the time. That is the whole of the
+    claim: an operator's rule about their own repository, their own home, or a
+    directory that merely reads like ours (`~/work/agentic-hil`) is not under any
+    of those roots and is not ours.
+
+    The shape has to match too. `/**` is the only suffix this tool has ever
+    written, so `Edit(<state_root>)` and `Write(<config directory>/*.yaml)` stay
+    the operator's even inside our own roots, which is what #201's pinned test
+    asks for. A pattern that navigates back out of the tree it starts in is not
+    one of ours either, whatever it starts with.
+
+    A tree outside those roots (a config location `AGENTIC_HIL_CONFIG` names, a
+    `state_root` an operator put on another volume) is never claimed. That half
+    still needs the exact text of the current configuration, and a rule for a
+    location like that which the configuration has since left stays behind: it
+    cannot be told from the operator's own rule for the same directory, and the
+    invariant that this never removes an operator's rule outranks the tidying.
+    """
+    match = _DENIED_TREE.match(rule)
+    if match is None or ".." in match.group("tree").split("/"):
+        return None
+    tree = _deny_tree_key(match.group("tree"))
+    owned = (_deny_tree_key(spelling) for root in tool_owned_user_roots() for spelling in _deny_pattern_spellings(root))
+    return tree if any(tree == root or tree.startswith(f"{root}/") for root in owned) else None
+
+
+def _protected_trees_still_wanted(config_path: Path, state_root: Path) -> set[str] | None:
+    """Every tree a configuration of this user's still asks to have denied.
+
+    The pair this run was given is only part of the answer. `init --agent` runs
+    per project and writes a rule for that project's own configuration directory,
+    so the rules of every other project this user set up sit in the same deny
+    list; reading the set as "this run's two trees" would make each project's
+    setup take back the previous project's protection.
+
+    `None` means the answer could not be established, and then nothing is taken
+    back at all. One unreadable project configuration is not a reason to drop
+    another project's rule.
+
+    What it cannot see is a project bound by `AGENTIC_HIL_CONFIG`: that
+    configuration is wherever the operator put it and nothing on disk records
+    where. Its configuration directory is outside these roots and so is never
+    claimed either way, but a `state_root` of its own that does lie inside them
+    is kept only while some visible project names that tree as well. It is the
+    one case where a rule can be taken back from a bench that still wants it, and
+    that project's next `init --agent` writes it again.
+    """
+    wanted = {config_path.parent, state_root}
+    directory = project_config_directory()
+    if directory.is_dir():
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            return None
+        for entry in entries:
+            candidate = entry / PROJECT_CONFIG_FILENAME
+            if not candidate.is_file():
+                continue  # a leftover directory with no configuration in it asks for nothing
+            configured = _configured_state_root(candidate)
+            if configured is None:
+                return None
+            wanted |= {entry, configured}
+    return {_deny_tree_key(spelling) for tree in wanted for spelling in _deny_pattern_spellings(tree)}
+
+
+def _configured_state_root(config_path: Path) -> Path | None:
+    """The `state_root` one project's configuration names, or None if unreadable.
+
+    A plain read rather than `load_config`: this needs one string out of a file
+    that belongs to another project, and a full load would refuse that file for
+    reasons which have nothing to do with the question (a probe that is not
+    attached, a workspace that has moved, a permission shape from another
+    release). Normalised the way the loader normalises it, so the answer is the
+    text the rule for that project was written from.
+
+    Nothing is trusted out of this file. Its only effect is to *keep* a deny
+    rule, so a document that lies about its state root buys whoever wrote it a
+    rule that stays.
+    """
+    try:
+        document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+    value = document.get("state_root") if isinstance(document, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        requested = Path(value).expanduser()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    # The loader refuses a relative one, so a document carrying one names no tree
+    # that could have produced a rule, and resolving it here against this
+    # process's working directory would invent one.
+    return absolute_without_symlinks(requested) if requested.is_absolute() else None
+
+
+def _abandoned_claude_code_deny_rule(rule: str, wanted: set[str] | None) -> bool:
+    """A rule this tool wrote for a tree no configuration of this user's names.
+
+    It denies writes on a tree the bench has left, which is inert where the tree
+    is merely unused and confusing where it has been deleted; #206 was reported
+    from an uninstall that left two of them pointing at directories that were
+    gone. Removing one takes protection off nothing: what it covered is either
+    not this bench's any more, or not there.
+    """
+    if wanted is None:
+        return False
+    tree = _tool_written_deny_tree(rule)
+    return tree is not None and tree not in wanted
 
 
 _OPENCODE_UNRESTRICTED = "Agentic HIL writes no write restriction for opencode; whether its file tools may reach the authoritative config and state root is the operator's to set, in ~/.config/opencode/opencode.json."
@@ -1924,10 +2103,17 @@ def _stale_opencode_deny_patterns(config_path: Path, state_root: Path) -> set[st
     A rule that reads as protection and is not is worse than none, which is the
     same silent failure over again.
 
-    Identifying them needs the same argument as `_stale_claude_code_deny_rules`:
-    the text is derived from this project's own paths, so an operator's own
-    pattern is never one of them, and one of ours they have since set to
-    something other than `deny` is theirs now and stays.
+    Identifying them needs the same argument as
+    `_superseded_claude_code_deny_rules`: the text is derived from this project's
+    own paths, so an operator's own pattern is never one of them, and one of ours
+    they have since set to something other than `deny` is theirs now and stays.
+
+    The namespace recognition #206 added for Claude Code is deliberately not
+    repeated here. There it takes back a live denial on a tree the bench has
+    left; here every absolute pattern matches nothing whatever tree it names, so
+    one for an abandoned tree denies exactly as little as one for the current
+    tree, and reaching further into a file this tool no longer writes to would
+    buy that nothing.
     """
     return set(_protected_write_globs(config_path, state_root))
 
@@ -1946,6 +2132,14 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
 
     Which rule form a host actually evaluates is read out of that host's own
     documentation rather than expected — see `_claude_code_deny_patterns`.
+
+    It refreshes rather than only adds. Every run takes back the rules this tool
+    wrote that no configuration of this user's still asks for, so a `state_root`
+    an operator moved away from, and a project that was uninstalled, stop leaving
+    a denial behind on a tree nothing uses. Which rules are this tool's own is
+    `_tool_written_deny_tree`, and which are still wanted is
+    `_protected_trees_still_wanted`; between them the operator's own rules are
+    never touched, and neither is another project's.
 
     Only claude-code gets a rule written. On opencode the operator decides for
     themselves, and nothing is written on their behalf: its permission model
@@ -1976,10 +2170,16 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
         deny = permissions.setdefault("deny", [])
         if not isinstance(deny, list):
             return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-list deny entry; left untouched.", "path": str(path)}
-        stale = _stale_claude_code_deny_rules(config_path, state_root)
-        removed = [rule for rule in deny if rule in stale]
+        superseded = _superseded_claude_code_deny_rules(config_path, state_root)
+        wanted = _protected_trees_still_wanted(config_path, state_root)
+        # `isinstance` first: the list belongs to another program, and an entry
+        # that is not a string is not a rule anybody wrote here. Membership of a
+        # set is also where an unhashable one raised `TypeError` out of a
+        # hand-edited file.
+        removed = [rule for rule in deny if isinstance(rule, str) and (rule in superseded or _abandoned_claude_code_deny_rule(rule, wanted))]
         if removed:
-            deny = permissions["deny"] = [rule for rule in deny if rule not in stale]
+            taken_back = set(removed)
+            deny = permissions["deny"] = [rule for rule in deny if rule not in taken_back]
         # `Edit`, `//`-anchored, and nothing else. See _claude_code_deny_patterns.
         added = [f"Edit({pattern})" for pattern in _claude_code_deny_patterns(config_path, state_root) if f"Edit({pattern})" not in deny]
         deny.extend(added)
@@ -2002,10 +2202,14 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
     # Not sorted, so an operator's own file comes back in the order they wrote it
     # — which for opencode is also the order its rules are evaluated in.
     secure_atomic_write_text(path, json.dumps(document, indent=2) + "\n")
-    if added:
+    # On the agent rather than on `added`: since #206 a claude-code run that takes
+    # back a rule for a tree no configuration names any more has nothing left to
+    # add, and reading that as the opencode case reported the opposite of what it
+    # had just done.
+    if agent_id == "claude-code":
         summary = f"{agent_id} will refuse its own write tools on the authoritative config and state root."
         if removed:
-            summary += " The inert deny rules an earlier setup wrote were dropped."
+            summary += " Deny rules an earlier setup wrote that this one replaces or no longer needs were dropped."
     else:
         summary = f"{_OPENCODE_UNRESTRICTED} The inert deny patterns an earlier setup wrote were dropped."
     return {"ok": True, "mode": mode, "summary": summary, "path": str(path), "added": added, "removed": removed}
@@ -2104,6 +2308,11 @@ def _replaceable_agentic_hil_command(configured: object) -> bool:
     replaceable by definition, and anything else must pass the same trust check
     as a new command. An operator's own absolute path satisfies neither and is
     reported as a conflict instead of being silently repointed.
+
+    Run from home or above it there is no workspace (`_workspace_boundary`), so
+    nothing is workspace-local and the trust check decides alone. Reading every
+    path under home as workspace-local there would hand an entry an operator
+    installed system-wide to whatever this run found.
     """
     if not isinstance(configured, str):
         return False
@@ -2111,7 +2320,8 @@ def _replaceable_agentic_hil_command(configured: object) -> bool:
     if not path.is_absolute():
         return False
     with suppress(OSError, ValueError):
-        if is_path_within_frozen(path, Path.cwd().resolve()):
+        workspace = _workspace_boundary()
+        if workspace is not None and is_path_within_frozen(path, workspace):
             return True
     try:
         _trusted_mcp_command(str(path))

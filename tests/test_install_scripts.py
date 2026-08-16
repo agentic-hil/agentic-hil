@@ -65,7 +65,15 @@ CALM_LINE = (
 # Neither script may reach them, in any spelling, in code or in prose.
 PROJECT_COMMAND = re.compile(r"agentic-hil[^\n]*\b(init|setup)\b")
 
-RAW_URL = re.compile(r"https://raw\.githubusercontent\.com/agentic-hil/agentic-hil/master/([^\s\"'`)]+)")
+# The three hosts a shipped document may take an installer from: the raw file on
+# the default branch, the short mirror that serves the same bytes, and the
+# release assets. Each resolves to a name this repository must actually hold.
+INSTALLER_URL = re.compile(
+    r"https://(?:raw\.githubusercontent\.com/agentic-hil/agentic-hil/master"
+    r"|agentic-hil\.github\.io"
+    r"|github\.com/agentic-hil/agentic-hil/releases/latest/download)"
+    r"/([^\s\"'`)|]+)"
+)
 
 
 def _shell_source() -> str:
@@ -310,18 +318,26 @@ def test_an_unknown_flag_is_refused_by_both_scripts() -> None:
 
 
 def test_the_documented_one_liner_urls_point_at_files_that_are_here() -> None:
-    """A raw URL in a shipped document is a promise about the default branch."""
+    """An installer URL in a shipped document is a promise this repository keeps.
+
+    Whichever host a document names, the raw default branch, the mirror that
+    serves the same bytes, or a release asset, the name resolves to a file that
+    exists here: the mirror copies these files verbatim, and a release asset is
+    uploaded from the tagged tree, so a `.sha256` suffix vouches for the file it
+    is named after.
+    """
     documents = [
         REPOSITORY_ROOT / "README.md",
         REPOSITORY_ROOT / "docs" / "installation.md",
     ]
     for document in documents:
         text = document.read_text(encoding="utf-8")
-        referenced = set(RAW_URL.findall(text))
+        referenced = set(INSTALLER_URL.findall(text))
         assert "install.sh" in referenced, document
         assert "install.ps1" in referenced, document
         for relative in sorted(referenced):
-            assert (REPOSITORY_ROOT / relative).is_file(), f"{document} points at a missing {relative}"
+            name = relative.removesuffix(".sha256")
+            assert (REPOSITORY_ROOT / name).is_file(), f"{document} points at a missing {name}"
 
 
 def test_the_scripts_are_reachable_from_the_repository_root() -> None:
@@ -761,8 +777,9 @@ chmod +x /work/bin/claude
 export PATH="/work/bin:$HOME/.local/bin:$PATH"
 
 # The line is typed in a firmware project, not in the home directory or at the
-# filesystem root: from those, the user-file safety check reads every path as
-# inside the working directory and refuses (its own issue, filed separately).
+# filesystem root: the release this pulls from the index still reads every
+# user-level path as inside the working directory there and refuses (#235). The
+# two lines below go once a release carries the fix.
 mkdir -p "$HOME/project"
 cd "$HOME/project"
 

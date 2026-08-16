@@ -250,7 +250,7 @@ class DebuggerDevice(Device):
             "debugger_info", "debugger_probes_list", "probe_target", "flash_firmware", "reset_target",
             "debug_start_session", "debug_stop_session", "debug_get_session_status", "debug_set_breakpoint",
             "debug_list_breakpoints", "debug_clear_breakpoints", "debug_continue", "debug_halt",
-            "debug_get_stop_reason", "debug_symbol_info", "debug_dump_symbol_ihex",
+            "debug_get_stop_reason", "debug_symbol_info", "debug_symbol_value", "debug_dump_symbol_ihex",
         }
     )
     actions: ClassVar[dict[str, str]] = {

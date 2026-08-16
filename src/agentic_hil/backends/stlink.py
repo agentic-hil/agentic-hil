@@ -29,6 +29,7 @@ from agentic_hil.config import (
     safe_configured_directory,
     safe_write_text,
 )
+from agentic_hil.elfsymbols import read_elf_symbol
 from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
 from agentic_hil.report import (
     classify_failure_report,
@@ -254,6 +255,16 @@ class STLinkBackend:
     def debug_symbol_info(self, symbol: str = "") -> JsonObject:
         return self._unsupported_debug_tool("debug_symbol_info")
 
+    def debug_symbol_value(self, symbol: str = "") -> JsonObject:
+        # Not served here, unlike the dump beside it. STM32CubeProgrammer reads
+        # target memory into a file, which is exactly what `-r` produces and
+        # exactly what `debug_dump_symbol_ihex` promises; returning the bytes
+        # instead would mean writing a temporary file, parsing it back and
+        # calling the result a memory read. That is a second reading of the same
+        # bytes through a format that was never in the question, so this backend
+        # says what it does not do rather than approximating it.
+        return self._unsupported_debug_tool("debug_symbol_value")
+
     def debug_dump_symbol_ihex(self, symbol: str = "", output: JsonObject | None = None, symbol_elf: JsonObject | None = None) -> JsonObject:
         """Read one allowed symbol out of target memory and write Intel HEX.
 
@@ -297,7 +308,7 @@ class STLinkBackend:
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "output_write_failed", "summary": "Intel HEX output directory could not be prepared.", "backend_error": str(error), "symbol": symbol, **NOT_CONTACTED}
         address_value = int(resolved["address_value"])
         result = self._run_stlink(tool, [*self._connection_args("NORMAL"), "-r", hex(address_value), str(size_bytes), str(output_path)])
-        result.update({"symbol": symbol, "address": resolved["address"], "size_bytes": size_bytes, "output": output, "symbol_source": resolved["symbol_source"]})
+        result.update({"symbol": symbol, "address": resolved["address"], "size_bytes": size_bytes, "resolved_from": resolved["resolved_from"], "output": output, "symbol_source": resolved["symbol_source"]})
         if not result.get("ok") and "side_effect_status" not in result:
             # The reset family's answer to the same question. A read drives no
             # write, but it is still a probe attached to a live core: an
@@ -554,19 +565,24 @@ class STLinkBackend:
             output = f"{completed.stdout}{completed.stderr}"
             address_value = gdb_symbol_marker_value(output, GDB_SYMBOL_ADDRESS_MARKER)
             size_value = gdb_symbol_marker_value(output, GDB_SYMBOL_SIZE_MARKER)
-            if address_value is None or size_value is None:
-                lower = output.lower()
-                error_type = "symbol_not_found" if contains_any(lower, GDB_SYMBOL_MISSING_MARKERS) else "symbol_resolution_failed"
-                summary = "Symbol was not found in the flashed ELF." if error_type == "symbol_not_found" else "GDB returned no usable symbol address or size for the flashed ELF."
-                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "summary": summary, "symbol": symbol, **NOT_CONTACTED}
-            return {
-                "ok": True,
-                "symbol": symbol,
-                "address": hex(address_value),
-                "address_value": address_value,
-                "size_bytes": size_value,
-                "symbol_source": {"path": symbol_elf.get("path"), "sha256": symbol_elf.get("sha256")},
-            }
+            source = {"path": symbol_elf.get("path"), "sha256": symbol_elf.get("sha256")}
+            if address_value is not None and size_value is not None:
+                return {"ok": True, "symbol": symbol, "address": hex(address_value), "address_value": address_value, "size_bytes": size_value, "resolved_from": "debug_info", "symbol_source": source}
+            # Both markers come from expressions that need a typed symbol, and an
+            # assembly-defined object carries no type for them, while its
+            # address and size sit in the symbol table of this same staged ELF,
+            # which is the digest-verified copy of the image on the board (#187).
+            # Read from that copy rather than from the caller's path, so the
+            # fallback answers out of exactly the bytes the flashed digest
+            # covers, as the marker query does.
+            table = read_elf_symbol(staged_elf, symbol)
+            if table["ok"]:
+                address = int(table["address"])
+                return {"ok": True, "symbol": symbol, "address": hex(address), "address_value": address, "size_bytes": int(table["size_bytes"]), "resolved_from": "elf_symbol_table", "symbol_source": source}
+            lower = output.lower()
+            error_type = "symbol_not_found" if contains_any(lower, GDB_SYMBOL_MISSING_MARKERS) else "symbol_resolution_failed"
+            summary = "Symbol was not found in the flashed ELF." if error_type == "symbol_not_found" else "GDB returned no usable symbol address or size for the flashed ELF."
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "summary": summary, "symbol": symbol, "symbol_table_lookup": table["reason"], **NOT_CONTACTED}
         finally:
             if staging_dir is not None:
                 shutil.rmtree(staging_dir, ignore_errors=True)

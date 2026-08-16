@@ -8,13 +8,32 @@ does not start.
 
 ## One line
 
+Linux and macOS, in any shell:
+
 ```bash
-curl -LsSf https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh | sh
+curl -LsSf https://agentic-hil.github.io/install.sh | sh
 ```
 
+Windows, in PowerShell:
+
 ```powershell
-irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 | iex
+irm https://agentic-hil.github.io/install.ps1 | iex
 ```
+
+Windows, from `cmd.exe` or the Run box, where the line has to start the
+interpreter it needs first:
+
+```cmd
+powershell -c "irm https://agentic-hil.github.io/install.ps1|iex"
+```
+
+No execution policy stands in the way of either spelling: a policy governs
+script *files*, and a command read from a pipe is not one.
+
+That host serves nothing but these two scripts, mirrored from this repository's
+default branch by a workflow that copies them and commits only what changed, so
+what it serves is byte for byte what is here. The section below takes the
+canonical copy straight from the repository and checks it.
 
 The script installs the package user-local (`uv tool install` where `uv` exists,
 `python -m pip install --user` otherwise, and it fetches Astral's uv installer
@@ -36,26 +55,50 @@ prints all of them. Piped, `sh` takes them after `-s --`:
 curl -LsSf https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh | sh -s -- --agent claude-code
 ```
 
+A PowerShell script read from a pipe takes no arguments at all, so on Windows a
+run that needs a flag downloads the file first and passes it there. PowerShell
+also spells the same flags `-Agent`, `-NoAgentInstall`, `-Version`, `-Can`,
+`-NoCan` and `-Help`; both spellings bind to the same options:
+
+```powershell
+irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 -OutFile install.ps1
+powershell -NoProfile -File .\install.ps1 --agent claude-code
+```
+
 ### Reading the script before you run it
 
 PyPI is the trust anchor for the package itself: everything the script installs
 comes from the index under the `agentic-hil` name, and the uv installer it may
 fetch is Astral's own, which verifies its published checksums itself. For the
-script, each release carries `install.sh.sha256` and `install.ps1.sha256` as
-release assets, so the verify-first variant is download, check, then run the
-file you checked:
+script, each release carries `install.sh` and `install.ps1` themselves as release
+assets beside their `install.sh.sha256` and `install.ps1.sha256`, so the
+verify-first variant takes both halves from the same release, checks one against
+the other, and runs the file it checked:
 
 ```bash
-curl -LsSfO https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh
+curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh
 curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh.sha256
 sha256sum -c install.sh.sha256 && sh install.sh
 ```
 
 ```powershell
-irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 -OutFile install.ps1
+irm https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1 -OutFile install.ps1
 irm https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1.sha256 -OutFile install.ps1.sha256
 (Get-FileHash install.ps1 -Algorithm SHA256).Hash -eq (Get-Content install.ps1.sha256).Split()[0]
 ```
+
+Both halves come from the release on purpose. The one-line form installs the
+default branch, where a fix lands first and where the script can therefore have
+moved since the last release; a checksum published with a release can only speak
+for the file published with it, and pairing the two across that gap is a check
+that fails for a reason that is not an attack. The default branch is also what
+[the short host](https://agentic-hil.github.io) mirrors, so the two convenient
+routes agree with each other and this one is the one that is verifiable.
+
+The raw file on the default branch stays readable at
+`https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh`
+and `.../install.ps1` for anyone who wants to read what the one-liner runs
+before running it.
 
 ## The two commands
 

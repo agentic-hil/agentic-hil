@@ -370,6 +370,14 @@ class AgenticHILToolService:
             return tool_error("debug_symbol_info", "invalid_argument", "symbol must be a non-empty string.")
         return self.backend.debug_symbol_info(symbol.strip())
 
+    def debug_symbol_value(self, payload: JsonObject | None = None) -> JsonObject:
+        if self._dispatch_depth == 0:
+            return self.call("debug_symbol_value", payload)
+        symbol = (payload or {}).get("symbol")
+        if not isinstance(symbol, str) or not symbol.strip():
+            return tool_error("debug_symbol_value", "invalid_argument", "symbol must be a non-empty string.")
+        return self.backend.debug_symbol_value(symbol.strip())
+
     def debug_dump_symbol_ihex(self, payload: JsonObject | None = None) -> JsonObject:
         if self._dispatch_depth == 0:
             return self.call("debug_dump_symbol_ihex", payload)
@@ -527,6 +535,7 @@ class AgenticHILToolService:
             "debug_halt": lambda: self.debug_halt(args),
             "debug_get_stop_reason": lambda: self.debug_get_stop_reason(),
             "debug_symbol_info": lambda: self.debug_symbol_info(args),
+            "debug_symbol_value": lambda: self.debug_symbol_value(args),
             "debug_dump_symbol_ihex": lambda: self.debug_dump_symbol_ihex(args),
             "get_last_report": lambda: self.get_last_report(),
             "classify_last_error": lambda: self.classify_last_error(),
@@ -1852,7 +1861,7 @@ def audited_hardware_tools() -> set[str]:
     # standard structured hardware failure rather than escaping the service.
     return {
         "debugger_probes_list", "probe_target", "flash_firmware", "reset_target", "debug_start_session",
-        "debug_set_breakpoint", "debug_continue", "debug_symbol_info", "debug_dump_symbol_ihex",
+        "debug_set_breakpoint", "debug_continue", "debug_symbol_info", "debug_symbol_value", "debug_dump_symbol_ihex",
         "com_session_start", "com_write", "com_read", "can_session_start", "can_send", "can_read",
         PROJECT_CONFIG_ADOPT, PROJECT_CONFIG_CREATE,
     }
@@ -1878,7 +1887,7 @@ IMPLICIT_RUN_LABEL = "implicit:"
 # among them, and for the reason contracts.py gives at length: it connects, and
 # an SWD attach halts a running core, so it is an effect on the target and its
 # own failure path treats it as one.
-_READ_ONLY_HARDWARE_TOOLS = frozenset({"debugger_probes_list", "com_read", "can_read", "debug_symbol_info"})
+_READ_ONLY_HARDWARE_TOOLS = frozenset({"debugger_probes_list", "com_read", "can_read", "debug_symbol_info", "debug_symbol_value"})
 # Session starts are deliberately outside the implicit run. The hold one takes
 # outlives the call that opened it — that is what a session is — so a
 # single-action run around a session start would end, and release, while the
@@ -2085,7 +2094,7 @@ def prominent_config_status_tools() -> set[str]:
 def debugger_effect_tools() -> set[str]:
     return {
         "debugger_probes_list", "probe_target", "flash_firmware", "reset_target", "debug_start_session",
-        "debug_set_breakpoint", "debug_continue", "debug_halt", "debug_clear_breakpoints", "debug_symbol_info", "debug_dump_symbol_ihex",
+        "debug_set_breakpoint", "debug_continue", "debug_halt", "debug_clear_breakpoints", "debug_symbol_info", "debug_symbol_value", "debug_dump_symbol_ihex",
     }
 
 

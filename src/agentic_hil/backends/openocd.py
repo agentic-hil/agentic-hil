@@ -236,6 +236,9 @@ class OpenOCDBackend:
     def debug_symbol_info(self, symbol: str) -> JsonObject:
         return self._debug.symbol_info(symbol)
 
+    def debug_symbol_value(self, symbol: str) -> JsonObject:
+        return self._debug.symbol_value(symbol)
+
     def debug_dump_symbol_ihex(self, symbol: str, output: JsonObject, symbol_elf: JsonObject | None = None) -> JsonObject:
         # `symbol_elf` is the service's offer of an ELF to resolve a symbol
         # against, for a backend with no loaded image to ask. This one has one:

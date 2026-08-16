@@ -25,7 +25,12 @@ from jsonschema import Draft202012Validator, SchemaError
 from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
-from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS, remediation_fields, safe_state_root_suggestion
+from agentic_hil.knowledge import (
+    EXCLUSIVE_FLASH_PERMISSIONS,
+    remediation_fields,
+    safe_state_root_suggestion,
+    safe_user_root,
+)
 from agentic_hil.types import (
     COM_PORT_IDENTITY_SOURCES,
     IDENTIFIED_COM_PORT_CONFIG_VERSION,
@@ -541,6 +546,9 @@ def validate_debuggers(debuggers: dict[str, DebuggerConfig], *, after_pinning: b
         resource_owner[identity] = name
 
 
+PROJECT_CONFIG_FILENAME = "config.yaml"
+
+
 def project_config_directory() -> Path:
     if os.name == "nt":
         config_root = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
@@ -554,7 +562,39 @@ def project_config_path(workspace: str | Path) -> Path:
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", resolved.name).strip(".-") or "workspace"
     identity = os.path.normcase(str(resolved))
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
-    return project_config_directory() / f"{safe_name}-{digest}" / "config.yaml"
+    return project_config_directory() / f"{safe_name}-{digest}" / PROJECT_CONFIG_FILENAME
+
+
+def tool_owned_user_roots() -> tuple[Path, ...]:
+    """Every per-user tree this tool creates for itself, named rather than opened.
+
+    ``project_config_directory`` and ``user_state_root`` answer where *this*
+    process writes. This answers what belongs to Agentic HIL whatever the
+    environment said when a directory was created, which is the question a path
+    written by an earlier run has to be measured against: both the location the
+    environment selects now and the one a profile with that variable unset falls
+    back to, plus ``~/.agentic-hil``, the root every path refusal recommends and
+    the machine-wide device locks live under.
+
+    Only this platform's layouts are listed. A Windows profile never wrote an
+    XDG path and a POSIX one never wrote an AppData path, so carrying the other
+    system's answers would widen the claim without ever recognising anything.
+
+    It creates nothing and validates nothing, deliberately. It is asked about
+    directories that may well have been deleted, which is the whole point of
+    having it.
+    """
+    home = Path(os.path.expanduser("~"))
+    if os.name == "nt":
+        bases: list[str | Path | None] = [os.environ.get("APPDATA"), home / "AppData" / "Roaming", os.environ.get("LOCALAPPDATA"), home / "AppData" / "Local"]
+    else:
+        bases = [os.environ.get("XDG_CONFIG_HOME"), home / ".config", os.environ.get("XDG_STATE_HOME"), home / ".local" / "state"]
+    candidates = [Path(base).expanduser() / "agentic-hil" for base in bases if base] + [Path(safe_user_root())]
+    roots: dict[str, Path] = {}
+    for candidate in candidates:
+        absolute = absolute_without_symlinks(candidate)
+        roots.setdefault(os.path.normcase(str(absolute)), absolute)
+    return tuple(roots.values())
 
 
 def user_state_root() -> Path:
@@ -1748,7 +1788,7 @@ def untrusted_launcher_directory(info: os.stat_result, *, final: bool, trusted_u
 def trusted_persistent_executable(
     executable: str | Path,
     *,
-    workspace: str | Path,
+    workspace: str | Path | None,
     disallowed_roots: list[str | Path] | None = None,
 ) -> str:
     """Pin a stable executable outside the workspace and cache/temp roots.
@@ -1756,18 +1796,22 @@ def trusted_persistent_executable(
     One owner-controlled POSIX launcher symlink is supported for pipx-style
     ``~/.local/bin`` installs. Both the link and its direct target are pinned and
     validated; nested links and changing links fail closed.
+
+    ``workspace`` is ``None`` where the caller has no project directory for this
+    launcher to be refused for coming out of; the cache and temporary roots are
+    refused either way.
     """
     requested = Path(executable).expanduser()
     if not requested.is_absolute():
         raise ConfigError("mcp_command_untrusted", "The MCP server command must resolve to an absolute path.", {"path": str(requested)})
     path = absolute_without_symlinks(requested)
-    workspace_path = absolute_without_symlinks(Path(workspace))
+    workspace_roots = [] if workspace is None else [Path(workspace)]
     # Both shapes of every root: macOS reports its temporary directory as
     # /var/folders while a path under it resolves to /private/var/folders, and a
     # root that only matches in one shape is a root that can be walked around.
     # Widening a refusal is always safe; narrowing one is not.
-    forbidden = [workspace_path]
-    for root in [Path(workspace), *(disallowed_roots or [])]:
+    forbidden = [absolute_without_symlinks(root) for root in workspace_roots]
+    for root in [*workspace_roots, *(disallowed_roots or [])]:
         expanded = Path(root).expanduser()
         forbidden.append(absolute_without_symlinks(expanded))
         with suppress(OSError):

@@ -64,6 +64,7 @@ from agentic_hil.comports import ComPortService
 from agentic_hil.config import (
     ConfigError,
     load_config,
+    project_config_directory,
     project_config_path,
     tighten_owned_writable_ancestors,
     trusted_persistent_executable,
@@ -1389,6 +1390,35 @@ def test_agent_install_needs_no_workspace_and_writes_nothing_project_local(
     assert not _default_state_root().exists()
 
 
+@pytest.mark.parametrize("where", ["home", "filesystem-root"])
+def test_agent_install_runs_where_the_install_line_is_typed(
+    where: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The half that writes only user-level files has to run from home.
+
+    Its entire output lives under the home directory, and the check that keeps
+    those files out of a repository read the working directory as the
+    repository: from home, and from the filesystem root above it, every one of
+    its own targets was "inside the workspace" and the command refused with
+    `unsafe_configured_path` in the two places an install one-liner is actually
+    typed. The one-liner's container proof had to `mkdir` a project directory to
+    get past it. (#235)
+    """
+    home = Path.home()
+    monkeypatch.chdir(home if where == "home" else Path(home.anchor))
+    command = _trusted_test_mcp_command(monkeypatch)
+
+    result = install_agent(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["scope"] == "user"
+    assert result["steps"]["skill_install"]["ok"] is True
+    assert result["steps"]["mcp_config"]["ok"] is True
+    assert _claude_skill_path().is_file()
+    assert _registered_claude_command() == command
+
+
 def test_agent_install_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     elsewhere = tmp_path / "not-a-project"
     elsewhere.mkdir()
@@ -1595,14 +1625,21 @@ def test_init_with_an_agent_on_an_existing_config_takes_back_the_inert_rules(
     assert config_directory.is_dir()
 
 
-def test_init_with_an_agent_writes_the_rule_for_a_state_root_the_operator_moved(
+def test_init_with_an_agent_takes_back_the_rule_for_a_state_root_the_operator_moved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The rules follow the config, and the config is still not rewritten.
 
     Moving `state_root` is an operator's edit to their own file. The next
-    `init --agent` reads it back and denies the tree the config names now.
+    `init --agent` reads it back, denies the tree the config names now, and takes
+    back the rule for the tree it left.
+
+    That second half is #206. Until then a rule could only be recognised as this
+    tool's by the text of the current configuration, and #204 pinned the old
+    state root's rule as one this command must not touch; the default state root
+    it names sits inside a root this tool creates for itself, which identifies it
+    as ours whatever the configuration says today.
     """
     workspace = _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
@@ -1620,12 +1657,45 @@ def test_init_with_an_agent_writes_the_rule_for_a_state_root_the_operator_moved(
     assert result["ok"] is True, result
     assert config_path.read_bytes() == before
     moved = f"Edit(/{_posix_filesystem_path(tmp_path / 'moved-state')}/**)"
-    assert result["steps"]["agent_write_restriction"]["added"] == [moved]
-    assert moved in _claude_deny_rules(home)
-    # The rule for the tree it left is not identifiable as ours by its text
-    # alone, so it is not this command's to delete. See
-    # `_stale_claude_code_deny_rules`.
-    assert f"Edit(/{_posix_filesystem_path(first_state_root)}/**)" in _claude_deny_rules(home)
+    left = f"Edit(/{_posix_filesystem_path(first_state_root)}/**)"
+    restriction = result["steps"]["agent_write_restriction"]
+    assert restriction["added"] == [moved]
+    assert restriction["removed"] == [left]
+    assert _claude_deny_rules(home) == _expected_deny_rules(config_path)
+    # The tree the bench left keeps no denial of its own...
+    assert left not in _claude_deny_rules(home)
+    # ...and the configuration directory, which did not move, keeps its rule.
+    assert f"Edit(/{_posix_filesystem_path(config_path.parent)}/**)" in _claude_deny_rules(home)
+
+
+def test_a_second_projects_setup_leaves_the_first_projects_rules_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every project on this machine has a rule for its own config directory.
+
+    They share one deny list and they are all this tool's own by the namespace
+    argument, so a cleanup that read "ours and not this run's pair" as abandoned
+    would quietly unprotect every other project the operator has set up. What
+    decides is whether a configuration still names the tree, not which run is
+    writing.
+    """
+    first = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert init_project(agent="claude-code")["ok"] is True
+    first_rules = _expected_deny_rules(initialized_config_path(first))
+    second = tmp_path / "second-workspace"
+    second.mkdir()
+    monkeypatch.chdir(second)
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["steps"]["agent_write_restriction"]["removed"] == []
+    rules = _claude_deny_rules(home)
+    assert all(rule in rules for rule in first_rules), rules
+    assert all(rule in rules for rule in _expected_deny_rules(initialized_config_path(second))), rules
 
 
 def test_init_without_an_agent_on_an_existing_config_writes_no_rule_and_names_the_flag(
@@ -2701,6 +2771,131 @@ def test_the_deny_rule_cleanup_leaves_an_operators_own_write_rule_alone(
     assert _deny_rules(settings)[: len(theirs)] == theirs
 
 
+def _tool_state_namespace() -> Path:
+    """The state root this tool creates for itself on this profile.
+
+    Read off the environment the suite's own isolation sets, which is where
+    `user_state_root` reads it from as well; asking that function instead would
+    create the directory, and these tests are about trees that are gone.
+    """
+    return Path(os.environ["LOCALAPPDATA" if os.name == "nt" else "XDG_STATE_HOME"]) / "agentic-hil"
+
+
+def test_a_refresh_takes_back_the_rule_for_a_tree_no_configuration_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#206: an abandoned tree keeps no denial, in either spelling.
+
+    Both state roots here are inside the root this tool creates for itself under
+    `%LOCALAPPDATA%`/`$XDG_STATE_HOME`, and that is the whole of the provenance:
+    nothing but Agentic HIL puts a directory there, so a rule about one is this
+    tool's own however long ago it was written and whatever the configuration
+    named at the time. The reported case was an uninstall that left two rules
+    denying writes on directories that no longer existed, removable only by hand.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    abandoned = _tool_state_namespace() / "state-of-a-bench-that-is-gone"
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", _tool_state_namespace() / "state"
+    # The `//`-anchored rule this release writes, and the plain one 0.7.0 wrote.
+    left_behind = [f"Edit(/{_posix_filesystem_path(abandoned)}/**)", f"Write({abandoned.as_posix()}/**)"]
+    settings = _claude_settings(home, ["Bash(curl *)", *left_behind])
+
+    restriction = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert restriction["removed"] == left_behind
+    assert _deny_rules(settings) == ["Bash(curl *)", *[f"Edit(/{_posix_filesystem_path(tree)}/**)" for tree in (config_path.parent, state_root)]]
+    assert "no longer needs were dropped" in restriction["summary"]
+
+
+def test_the_deny_rule_cleanup_claims_nothing_outside_this_tools_own_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The namespace is the claim, and it stops at its own edge.
+
+    A checkout that happens to be called `agentic-hil`, a directory whose name
+    merely starts with the root's, and a rule about one of the tool's own trees
+    in a shape the tool has never written are the operator's, and come back
+    exactly as they were written.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    namespace = _tool_state_namespace()
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", namespace / "state"
+    theirs = [
+        "Bash(curl *)",
+        f"Edit(/{_posix_filesystem_path(Path.home() / 'work' / 'agentic-hil')}/**)",
+        f"Edit(/{_posix_filesystem_path(namespace.parent / 'agentic-hil-backup')}/**)",
+        f"Edit(/{_posix_filesystem_path(namespace / 'reports')})",
+        f"Write(/{_posix_filesystem_path(namespace)}/reports/*.json)",
+    ]
+    settings = _claude_settings(home, theirs)
+
+    restriction = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert restriction["removed"] == []
+    assert _deny_rules(settings)[: len(theirs)] == theirs
+
+
+def test_the_deny_rule_cleanup_leaves_an_entry_that_is_not_a_rule_where_it_found_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`~/.claude/settings.json` belongs to another program.
+
+    A deny entry that is not a string at all, and a pattern that navigates back
+    out of the tree it starts in, are both things this tool has never written.
+    Reading the first as one of ours would be a crash on somebody's hand-edited
+    file, and the second a claim on a tree outside the namespace that justifies
+    the claim.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    namespace = _tool_state_namespace()
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", namespace / "state"
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    theirs = [{"tool": "Edit"}, f"Edit(/{_posix_filesystem_path(namespace)}/../elsewhere/**)"]
+    settings.write_text(json.dumps({"permissions": {"deny": theirs}}) + "\n", encoding="utf-8")
+
+    restriction = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert restriction["removed"] == []
+    assert _deny_rules(settings)[: len(theirs)] == theirs
+
+
+def test_a_project_configuration_that_will_not_read_costs_no_other_project_its_rule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown is not abandoned.
+
+    Which trees are still wanted is read out of the configurations this user has,
+    so one that cannot be read leaves the answer incomplete, and an incomplete
+    answer takes nothing back rather than guessing.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    namespace = _tool_state_namespace()
+    unreadable = project_config_directory() / "other-project-0123456789"
+    unreadable.mkdir(parents=True)
+    (unreadable / "config.yaml").write_text("state_root: [not a path\n", encoding="utf-8")
+    config_path, state_root = tmp_path / "cfg" / "config.yaml", namespace / "state"
+    abandoned = f"Edit(/{_posix_filesystem_path(namespace / 'state-of-a-bench-that-is-gone')}/**)"
+    settings = _claude_settings(home, [abandoned])
+
+    restriction = restrict_agent_write_access("claude-code", config_path, state_root)
+
+    assert restriction["ok"] is True
+    assert restriction["removed"] == []
+    assert abandoned in _deny_rules(settings)
+
+
 def test_the_deny_rule_cleanup_settles_after_one_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3342,21 +3537,63 @@ def test_register_agent_mcp_rejects_temp_and_uv_cache_injected_commands(
     assert not (Path.home() / ".claude.json").exists()
 
 
-def test_default_mcp_path_is_rejected_when_home_is_inside_workspace(
-    tmp_path: Path,
+def test_default_mcp_path_is_written_when_the_working_directory_is_home(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    monkeypatch.setenv("HOME", str(workspace))
-    monkeypatch.setenv("USERPROFILE", str(workspace))
+    """The registration's own home is not a workspace it has to stay out of.
+
+    The check that keeps user-level files out of a repository read the working
+    directory as the repository, so standing in the home directory made
+    `~/.claude.json` "inside the workspace" and refused the one place that file
+    is supposed to be. (#235)
+    """
+    monkeypatch.chdir(Path.home())
+
+    result = register_agent_mcp("claude-code", command=str(trusted_launcher()))
+
+    assert result["ok"] is True, result
+    assert (Path.home() / ".claude.json").is_file()
+
+
+def test_default_skill_path_is_rejected_from_a_workspace_below_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Home and the directories above it are the whole of the exception.
+
+    The boundary collapses only where it would otherwise swallow the home
+    directory whole. A working directory below home is a project like any other,
+    and a user-level target inside its tree is still refused.
+    """
+    inside = Path.home() / ".claude"
+    inside.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(inside)
 
     with pytest.raises(ConfigError) as excinfo:
-        register_agent_mcp("claude-code", command=str(trusted_launcher()))
+        install_skill("claude-code")
 
     assert excinfo.value.error_type == "unsafe_configured_path"
-    assert not (workspace / ".claude.json").exists()
+    assert not _claude_skill_path().exists()
+
+
+def test_the_pinned_launcher_may_live_in_the_directory_the_command_runs_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """uv and pipx install the launcher under home, and home is where it is typed.
+
+    The launcher trust check draws its boundary at the working directory too, so
+    from home the copy `install.sh` had just written to `~/.local/bin` was
+    refused for coming "from the workspace" and the registration had nothing
+    left to register. A launcher inside a real project workspace stays refused,
+    which `test_register_agent_mcp_rejects_workspace_injected_command` pins. (#235)
+    """
+    launcher = trusted_launcher()
+    home = launcher.parent.parent
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(home)
+    monkeypatch.setattr("agentic_hil.cli._mcp_command_candidates", lambda: [str(launcher)])
+
+    assert mcp_server_command() == str(launcher)
 
 
 def test_register_agent_mcp_rejects_hardlinked_user_config_without_changes(
@@ -4496,8 +4733,8 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 42
-    assert len(set(MCP_TOOL_NAMES)) == 42
+    assert len(MCP_TOOL_NAMES) == 43
+    assert len(set(MCP_TOOL_NAMES)) == 43
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
     # The install eval asserts the live tools/list against this snapshot, so a
     # tool added or removed here has to reach it or every eval run fails on a

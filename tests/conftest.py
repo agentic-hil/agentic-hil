@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import struct
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -176,6 +177,91 @@ logs:
         encoding="utf-8",
     )
     return config_path
+
+
+# A real ELF, small enough to write by hand, for the tests that exercise the
+# symbol-table fallback. The rest of the suite hands the fakes a four-byte magic
+# and nothing more, which is all the artifact validator inspects and all the fake
+# GDB needs; a fallback that reads `st_value` and `st_size` out of a section
+# table has to be proven against a file that really has one.
+ELF_HEADER_SIZES = {32: 52, 64: 64}
+ELF_SECTION_HEADER_SIZES = {32: 40, 64: 64}
+ELF_SYMBOL_SIZES = {32: 16, 64: 24}
+# Section indices in the file this builds: a .text for symbols to be defined
+# against, the symbol table, and the strings its names live in.
+ELF_TEXT_SECTION = 1
+ELF_SYMTAB_SECTION = 2
+ELF_STRTAB_SECTION = 3
+
+
+def elf_with_symbols(entries, *, bits: int = 32, big_endian: bool = False, trailer: bytes = b"") -> bytes:
+    """A minimal ELF whose symbol table carries exactly `entries`.
+
+    Each entry is `(name, address, size)` or `(name, address, size, shndx)`; the
+    section index defaults to the .text this builds, and passing 0 writes the
+    undefined symbol a fallback must not answer from. A name repeated with a
+    different address or size is how an ambiguous lookup is expressed.
+
+    `trailer` is appended after the last section, where the fake GDB looks for
+    its behaviour marker: bytes past everything the section table describes are
+    invisible to a reader that seeks by offset, which is exactly what makes the
+    marker and a valid ELF able to share one file.
+    """
+    order = ">" if big_endian else "<"
+    names = bytearray(b"\x00")
+    symbols = bytearray(_elf_symbol(order, bits, 0, 0, 0, 0))
+    for entry in entries:
+        name, address, size = entry[0], entry[1], entry[2]
+        section_index = entry[3] if len(entry) > 3 else ELF_TEXT_SECTION
+        symbols += _elf_symbol(order, bits, len(names), address, size, section_index)
+        names += name.encode("utf-8") + b"\x00"
+    header_size = ELF_HEADER_SIZES[bits]
+    symbols_offset = header_size
+    names_offset = symbols_offset + len(symbols)
+    sections_offset = names_offset + len(names)
+    sections = b"".join(
+        _elf_section(order, bits, section_type, offset, size, link, entry_size)
+        for section_type, offset, size, link, entry_size in [
+            (0, 0, 0, 0, 0),
+            (1, sections_offset, 0, 0, 0),
+            (2, symbols_offset, len(symbols), ELF_STRTAB_SECTION, ELF_SYMBOL_SIZES[bits]),
+            (3, names_offset, len(names), 0, 0),
+        ]
+    )
+    return _elf_header(order, bits, sections_offset) + bytes(symbols) + bytes(names) + sections + trailer
+
+
+def _elf_header(order: str, bits: int, sections_offset: int) -> bytes:
+    identification = b"\x7fELF" + bytes([1 if bits == 32 else 2, 2 if order == ">" else 1, 1]) + b"\x00" * 9
+    address_format = "I" if bits == 32 else "Q"
+    return identification + struct.pack(
+        f"{order}HHI{address_format}{address_format}{address_format}IHHHHHH",
+        2,
+        40 if bits == 32 else 183,
+        1,
+        0,
+        0,
+        sections_offset,
+        0,
+        ELF_HEADER_SIZES[bits],
+        0,
+        0,
+        ELF_SECTION_HEADER_SIZES[bits],
+        4,
+        0,
+    )
+
+
+def _elf_section(order: str, bits: int, section_type: int, offset: int, size: int, link: int, entry_size: int) -> bytes:
+    if bits == 32:
+        return struct.pack(f"{order}IIIIIIIIII", 0, section_type, 0, 0, offset, size, link, 0, 1, entry_size)
+    return struct.pack(f"{order}IIQQQQIIQQ", 0, section_type, 0, 0, offset, size, link, 0, 1, entry_size)
+
+
+def _elf_symbol(order: str, bits: int, name_offset: int, address: int, size: int, section_index: int) -> bytes:
+    if bits == 32:
+        return struct.pack(f"{order}IIIBBH", name_offset, address, size, 0x11, 0, section_index)
+    return struct.pack(f"{order}IBBHQQ", name_offset, 0x11, 0, section_index, address, size)
 
 
 # The old flat permission names stay the vocabulary of the test helper: a test

@@ -14,12 +14,27 @@ ASYNC_STOP_DELAY_S = 0.02
 
 CTC_ARRAY_ADDRESS = 0x200006F0
 CTC_ARRAY_SIZE = 408
+BOOT_COUNTER_ADDRESS = 0x20000080
+BOOT_COUNTER_SIZE = 4
 BATCH_ADDRESS_PATTERN = re.compile(r'^printf\s+"(?P<marker>[A-Za-z_]+=)%lu\\n",\s*\(unsigned long\)&(?P<symbol>\w+)$')
 BATCH_SIZE_PATTERN = re.compile(r'^printf\s+"(?P<marker>[A-Za-z_]+=)%lu\\n",\s*\(unsigned long\)sizeof\((?P<symbol>\w+)\)$')
-# What the ELF's symbol table holds, for the offline query. Address and size
+# What the ELF's debug information holds, for the offline query. Address and size
 # match the values this fake answers over MI, so a dump resolves to the same
 # place whether it went through a session or through the batch query.
-BATCH_SYMBOLS = {"CTC_array": (CTC_ARRAY_ADDRESS, CTC_ARRAY_SIZE), "big_buffer": (0x20001000, 4096)}
+BATCH_SYMBOLS = {
+    "CTC_array": (CTC_ARRAY_ADDRESS, CTC_ARRAY_SIZE),
+    "big_buffer": (0x20001000, 4096),
+    "boot_counter": (BOOT_COUNTER_ADDRESS, BOOT_COUNTER_SIZE),
+}
+# Symbols the linker placed and the compiler never described: an assembly object
+# with `.global`/`.type`/`.size` and no DWARF behind it. Real GDB answers both
+# `&symbol` and `sizeof(symbol)` for one of these with this message, on stderr in
+# batch mode and as an MI `^error` in a session, and it is the whole reason the
+# resolution falls back to the ELF's symbol table (#187). This fake therefore
+# refuses them exactly as GDB does and carries no address or size for them: what
+# a test then resolves came out of the ELF the test built, not out of here.
+UNTYPED_SYMBOLS = {"g_pfnVectors"}
+UNKNOWN_TYPE_MESSAGE = "'{symbol}' has unknown type; cast it to its declared type"
 BEHAVIOR_MARKER = b"FAKE_GDB_BEHAVIOR="
 behavior_override = ""
 EXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="1",frame={addr="0x08000200",func="test_done",args=[],file="tests.c",fullname="/work/tests.c",line="123"},thread-id="1",stopped-threads="all"'
@@ -51,10 +66,17 @@ def continue_stop_line() -> str:
 
 
 def evaluate_expression(token: str, expression: str) -> None:
+    untyped = next((symbol for symbol in UNTYPED_SYMBOLS if symbol in expression), None)
     if expression == "(unsigned long)&CTC_array":
         emit(f'{token}^done,value="{hex(CTC_ARRAY_ADDRESS)}"')
     elif expression == "sizeof(CTC_array)":
         emit(f'{token}^done,value="{CTC_ARRAY_SIZE}"')
+    elif expression == "(unsigned long)&boot_counter":
+        emit(f'{token}^done,value="{hex(BOOT_COUNTER_ADDRESS)}"')
+    elif expression == "sizeof(boot_counter)":
+        emit(f'{token}^done,value="{BOOT_COUNTER_SIZE}"')
+    elif untyped is not None:
+        emit(f'{token}^error,msg="{UNKNOWN_TYPE_MESSAGE.format(symbol=untyped)}"')
     elif "missing_symbol" in expression:
         emit(f'{token}^error,msg="No symbol \\"missing_symbol\\" in current context."')
     else:
@@ -88,9 +110,13 @@ def batch_query(args: list[str]) -> int:
         if match is None:
             print(f'Undefined command: "{command}".', file=sys.stderr)
             continue
-        entry = BATCH_SYMBOLS.get(match.group("symbol"))
+        symbol = match.group("symbol")
+        if symbol in UNTYPED_SYMBOLS:
+            print(UNKNOWN_TYPE_MESSAGE.format(symbol=symbol), file=sys.stderr)
+            continue
+        entry = BATCH_SYMBOLS.get(symbol)
         if entry is None:
-            print(f'No symbol "{match.group("symbol")}" in current context.', file=sys.stderr)
+            print(f'No symbol "{symbol}" in current context.', file=sys.stderr)
             continue
         value = entry[0] if BATCH_ADDRESS_PATTERN.match(command) else entry[1]
         emit(f"{match.group('marker')}{value}")

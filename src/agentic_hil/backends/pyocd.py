@@ -248,6 +248,9 @@ class PyOCDBackend:
     def debug_symbol_info(self, symbol: str = "") -> JsonObject:
         return self._unsupported_debug_tool("debug_symbol_info")
 
+    def debug_symbol_value(self, symbol: str = "") -> JsonObject:
+        return self._unsupported_debug_tool("debug_symbol_value")
+
     def debug_dump_symbol_ihex(self, symbol: str = "", output: JsonObject | None = None, symbol_elf: JsonObject | None = None) -> JsonObject:
         return self._unsupported_debug_tool("debug_dump_symbol_ihex")
 

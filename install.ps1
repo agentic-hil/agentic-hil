@@ -34,7 +34,7 @@ function Write-Step {
 function Write-Usage {
     Write-Host @'
 Usage: install.ps1 [options]
-       irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 | iex
+       powershell -c "irm https://agentic-hil.github.io/install.ps1|iex"
        powershell -NoProfile -File .\install.ps1 --agent claude
 
 Installs Agentic HIL user-local and registers the skill and the MCP server for

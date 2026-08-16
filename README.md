@@ -11,6 +11,53 @@
 
 Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, reports, and logs, all without giving an agent arbitrary host or debugger access. Each project has exactly one authoritative configuration stored outside the repository, out of reach of the agent's own file tools.
 
+## Install
+
+**Linux / macOS** (any shell):
+
+```bash
+curl -LsSf https://agentic-hil.github.io/install.sh | sh
+```
+
+**Windows**, in PowerShell:
+
+```powershell
+irm https://agentic-hil.github.io/install.ps1 | iex
+```
+
+**Windows**, from `cmd.exe` or the Run box:
+
+```cmd
+powershell -c "irm https://agentic-hil.github.io/install.ps1|iex"
+```
+
+One line installs the package user-local (through `uv` where it exists, `pip --user` otherwise) and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository: no project configuration is written, no shell profile is edited. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
+
+Prefer to read before you run? Take the script and its SHA-256 from the same release, check one against the other, and run the file you checked:
+
+```bash
+curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh
+curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh.sha256
+sha256sum -c install.sh.sha256 && sh install.sh
+```
+
+```powershell
+iwr -OutFile install.ps1 https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1
+iwr -OutFile install.ps1.sha256 https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1.sha256
+if ((Get-FileHash install.ps1).Hash -eq (-split (Get-Content install.ps1.sha256))[0]) { .\install.ps1 }
+```
+
+The one-line form above installs from the default branch, which is where a fix lands first; this form installs the release, which is the pair a checksum can speak for.
+
+Pass `--agent claude-code` (or `codex`, `opencode`) to register one agent instead of all of them, `--help` for the rest; piped, that reads `| sh -s -- --agent claude-code`. If you would rather drive your own package manager, the same two halves by hand:
+
+```bash
+uv tool install "agentic-hil[can]"               # or: pip install --user "agentic-hil[can]"
+agentic-hil agent-install --agent claude-code    # or: codex / opencode
+```
+
+[Installation](docs/installation.md) has `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend; [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
+
 ## Why
 
 A green build is not enough in embedded development: firmware has to behave correctly on the real board. Classic tools automate single steps (flash here, read a log there), but the moment real hardware has to respond, a human is back in the loop. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible. Agentic HIL closes the gap with a small, auditable gate:
@@ -33,35 +80,6 @@ One YAML plan drives the whole bench: flash, reset, write, read with a comparato
 ## Security by construction
 
 Deny-by-default permissions per device, every hardware action validated, leased machine-wide, and written to a SHA-256 audit chain. The authoritative configuration lives outside the workspace, where the agent cannot edit it. Enforcement sits in the tool rather than in the agent host on purpose: a host's permission system judges shell strings and differs per host, while the bench's permissions judge the hardware action itself and travel with the bench, so the CLI, pytest, CI and the test reactor all walk the same gate. A failed run still gives the bench back: it aborts with its verdict, the recovery action resets and re-reads the target, and the standing quarantine is kept for the one state no later contact can rebuild, a broken audit trail. [The safety model](docs/safety-model.md) is the short version, [the security design](docs/security-design.md) the long one.
-
-## Install
-
-```bash
-curl -LsSf https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh | sh
-```
-
-```powershell
-irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 | iex
-```
-
-One line installs the package user-local (through `uv` where it exists, `pip --user` otherwise) and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository: no project configuration is written, no shell profile is edited. To read it before you run it, download the script, verify it against the `install.sh.sha256` (or `install.ps1.sha256`) asset published with the release, and run the file you checked:
-
-```bash
-curl -LsSfO https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh
-curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh.sha256
-sha256sum -c install.sh.sha256 && sh install.sh
-```
-
-Pass `--agent claude-code` (or `codex`, `opencode`) to register one agent instead of all of them, `--help` for the rest; piped, that reads `| sh -s -- --agent claude-code`. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
-
-If you would rather drive your own package manager, the same two halves by hand:
-
-```bash
-uv tool install "agentic-hil[can]"               # or: pip install --user "agentic-hil[can]"
-agentic-hil agent-install --agent claude-code    # or: codex / opencode
-```
-
-[Installation](docs/installation.md) has `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend; [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
 
 ## Quickstart: one real run
 
