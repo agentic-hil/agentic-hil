@@ -89,6 +89,7 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "debug_halt", "description": "Halt the target in the active debug session.", "inputSchema": object_schema({"timeout_s": TIMEOUT})},
     {"name": "debug_get_stop_reason", "description": "Return the last structured stop reason.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "debug_symbol_info", "description": "Resolve an allowed debug symbol.", "inputSchema": object_schema({"symbol": SYMBOL_NAME}, required=["symbol"])},
+    {"name": "debug_symbol_value", "description": "Read an allowed symbol's current bytes out of target memory and return them, as hex and, at 1, 2, 4 or 8 bytes, as an unsigned and a signed integer. Use this instead of reading a variable through a raw gdb print.", "inputSchema": object_schema({"symbol": SYMBOL_NAME}, required=["symbol"])},
     {"name": "debug_dump_symbol_ihex", "description": "Read an allowed symbol from target memory and write Intel HEX.", "inputSchema": object_schema({"symbol": SYMBOL_NAME, "output_path": NONEMPTY_STRING}, required=["symbol", "output_path"])},
     {"name": "get_last_report", "description": "Return the most recent structured Agentic HIL report.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "classify_last_error", "description": "Classify the most recent Agentic HIL/debugger failure.", "inputSchema": EMPTY_OBJECT_SCHEMA},
@@ -489,6 +490,13 @@ TOOL_ANNOTATIONS: dict[str, JsonObject] = {
     # target memory is read and nothing is written, so this is a read even
     # though it needs a live session to ask through.
     "debug_symbol_info": {"title": "Resolve a debug symbol", "readOnlyHint": True, "openWorldHint": False},
+    # Reads target memory and returns it. A read changes nothing on the board,
+    # and unlike the dump below it writes no file either, so nothing anywhere
+    # is replaced, and this is the one memory-reading tool that is read-only in
+    # the full sense. Repeating it is free in the same way `com_read` is:
+    # the bytes may differ because the firmware moved on, which is the target's
+    # doing and not the call's.
+    "debug_symbol_value": {"title": "Read a symbol's value", "readOnlyHint": True, "openWorldHint": False},
     # Reads target memory, which changes nothing, and then writes the Intel HEX
     # file at `output_path` — an atomic replace of whatever was at that path
     # inside the workspace. That replacement is the destructive part, and it is

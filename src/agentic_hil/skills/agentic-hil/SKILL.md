@@ -26,7 +26,7 @@ directly.
 | Reset or reboot the target | `reset_target` |
 | Is the board connected, which probe, what target | `probe_target`, `debugger_info`, `debugger_probes_list` |
 | Halt, continue, breakpoints, stop reason | `debug_start_session`, `debug_halt`, `debug_continue`, `debug_set_breakpoint`, `debug_list_breakpoints`, `debug_clear_breakpoints`, `debug_get_stop_reason`, `debug_get_session_status`, `debug_stop_session` |
-| Read a variable, symbol, or memory region | `debug_symbol_info`, `debug_dump_symbol_ihex` |
+| Read a variable, symbol, or memory region | `debug_symbol_info`, `debug_symbol_value`, `debug_dump_symbol_ihex` |
 | Serial console, boot log, UART traffic | `com_ports_list`, `com_session_start`, `com_read`, `com_write`, `com_session_stop` |
 | CAN frames | `can_buses_list`, `can_read`, `can_send`, `can_session_start`, `can_session_stop` |
 | Hand a build artifact to the target workflow | `artifact_upload` |
