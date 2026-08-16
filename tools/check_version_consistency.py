@@ -484,13 +484,18 @@ def version_problems(root: Path, release_tag: str | None = None) -> list[str]:
 def is_pytest_temporary_root(directory: Path) -> bool:
     """Whether this directory is a pytest temporary root rather than content.
 
-    By name for the conventional in-clone basetemp, and otherwise by the shape
-    pytest leaves in a root of its own making, so one under any other name is
-    still recognised: a name ending in digits (`make_numbered_dir`'s own
-    `<prefix><number>`) that either carries pytest's cleanup lock or has a
+    By name for the conventional in-clone basetemp and pytest's own default
+    root, and otherwise by the one shape a directory `tmp_path_factory.mktemp`
+    makes directly under an explicit `--basetemp` actually carries: a name
+    ending in digits (`make_numbered_dir`'s own `<prefix><number>`) with a
     `<prefix>current` symlink beside it, in the same parent, resolving back to
-    this exact directory. Nothing in this repository is called `.pytest-tmp`,
-    sits under a `pytest-of-` root, or matches that numbered shape, so this can
+    this exact directory. Pytest's own cleanup lock is not evidence here --
+    `create_cleanup_lock` only ever marks a numbered root under pytest's
+    default `pytest-of-*` temp directory, already caught by name above, so a
+    `.lock` beside a numbered directory anywhere else says nothing about who
+    made it and would exempt an ordinary tracked directory that merely ends in
+    digits. Nothing in this repository is called `.pytest-tmp`, sits under a
+    `pytest-of-` root, or matches that numbered-plus-symlink shape, so this can
     only ever exclude a temporary root.
     """
     if directory.name in PYTEST_TEMPORARY_NAMES or directory.name.startswith("pytest-of-"):
@@ -498,8 +503,6 @@ def is_pytest_temporary_root(directory: Path) -> bool:
     match = _PYTEST_NUMBERED_DIR.match(directory.name)
     if match is None:
         return False
-    if (directory / ".lock").is_file():
-        return True
     current_link = directory.parent / f"{match.group('prefix')}current"
     if not current_link.is_symlink():
         return False

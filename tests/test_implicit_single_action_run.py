@@ -91,6 +91,9 @@ class FakeBackend:
     def close(self) -> None:
         return None
 
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        return frozenset()
+
 
 class FakeSerialHandle:
     def __init__(self) -> None:

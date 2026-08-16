@@ -1017,6 +1017,9 @@ def uninstall_agent_integration(agents: list[str] | None = None) -> JsonObject:
             + (
                 f"If `import agentic_hil` still succeeds after that, a `__pycache__` left under {package_directory} is why; "
                 f"remove only `{package_directory}/__pycache__`, never the rest of {package_directory}. "
+                f"Python still imports the now-empty `{package_directory}` itself as a namespace package after that; "
+                f"finish with a non-recursive empty-directory removal such as `rmdir {package_directory}`, which "
+                f"succeeds only once nothing else is left there. "
                 if package_directory
                 else ""
             )
@@ -3545,7 +3548,12 @@ def remove_legacy_skills(target_path: Path) -> list[str]:
         # directory chain, which would plant the very directory being removed.
         if not path.is_file():
             continue
-        text = secure_optional_read_text(path)
+        try:
+            text = secure_optional_read_text(path)
+        except UnicodeDecodeError:
+            # Not text this project wrote, so not ours to manage: leave a
+            # foreign legacy-named file untouched and keep uninstalling.
+            continue
         if text is None or not is_agentic_hil_setup_skill(text, path.parent.name):
             continue
         path.unlink()

@@ -43,6 +43,8 @@ class DebuggerBackend(Protocol):
 
     def debug_dump_symbol_ihex(self, symbol: str, output: JsonObject, symbol_elf: JsonObject | None = None) -> JsonObject: ...
 
+    def sessionless_debug_tools(self) -> frozenset[str]: ...
+
     def target_support(self) -> JsonObject: ...
 
     def classify_last_error(self) -> JsonObject: ...
@@ -65,6 +67,15 @@ class UnboundDebuggerBackend:
 
     def close(self) -> None:
         return None
+
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        """No probe is bound, so no tool runs as a standalone debugger read here.
+
+        Answered rather than left to ``__getattr__`` — which would turn a set
+        membership test in the coordination layer into a refusal dict — so the
+        one-shot classification reads the same empty answer it reads from a bound
+        session backend."""
+        return frozenset()
 
     def target_support(self) -> JsonObject:
         """Undetermined rather than refused: with no probe bound there is no

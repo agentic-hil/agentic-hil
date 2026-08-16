@@ -908,6 +908,64 @@ def test_installed_package_directory_is_none_when_the_located_path_does_not_exis
     assert installed_package_directory() is None
 
 
+def test_removing_only_pycache_leaves_the_stale_import_succeeding(tmp_path: Path) -> None:
+    """The gap in the old `next_step` wording, proven against a clean interpreter.
+
+    A `pip uninstall` that leaves `__pycache__` behind leaves an
+    `agentic_hil` directory with nothing else in it. Removing only that
+    `__pycache__` — what `next_step` used to say was the whole fix — leaves the
+    directory itself, and Python still imports that as a PEP 420 namespace
+    package: `import agentic_hil` succeeds with `__spec__.origin` of `None`.
+    """
+    site_packages = tmp_path / "site-packages"
+    package_directory = site_packages / "agentic_hil"
+    pycache = package_directory / "__pycache__"
+    pycache.mkdir(parents=True)
+    (pycache / "stale.pyc").write_bytes(b"")
+
+    shutil.rmtree(pycache)
+
+    result = _import_agentic_hil_in_a_clean_interpreter(site_packages)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "None"
+
+
+def test_pycache_then_rmdir_together_finish_what_next_step_now_advises(tmp_path: Path) -> None:
+    """The complete `next_step` instruction, proven to actually stop the import.
+
+    Following it to the end — remove `__pycache__`, then `rmdir` the now-empty
+    `agentic_hil` directory itself — leaves nothing for a namespace package to
+    form around, so the stale `import agentic_hil` this whole hint exists for
+    fails instead of quietly continuing to succeed.
+    """
+    site_packages = tmp_path / "site-packages"
+    package_directory = site_packages / "agentic_hil"
+    pycache = package_directory / "__pycache__"
+    pycache.mkdir(parents=True)
+    (pycache / "stale.pyc").write_bytes(b"")
+
+    shutil.rmtree(pycache)
+    package_directory.rmdir()
+
+    result = _import_agentic_hil_in_a_clean_interpreter(site_packages)
+    assert result.returncode != 0
+    assert "ModuleNotFoundError" in result.stderr
+
+
+def _import_agentic_hil_in_a_clean_interpreter(site_packages: Path) -> subprocess.CompletedProcess:
+    """`import agentic_hil` with only `site_packages` offered, `-S` and a bare
+    environment so this suite's own editable install (found via `PYTHONPATH`,
+    not a `.pth` file, in this project's dev container) cannot shadow it."""
+    script = f"import sys; sys.path.insert(0, {str(site_packages)!r}); import agentic_hil; print(agentic_hil.__spec__.origin)"
+    return subprocess.run(
+        [sys.executable, "-S", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ.get("PATH", "")},
+        check=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # What an upgrade leaves behind outside the package: the agent skills and the
 # MCP registrations this installation wrote. Neither is inside the package, so
@@ -3176,6 +3234,34 @@ def test_uninstall_removes_a_legacy_skill_even_with_no_current_skill_installed(
     assert not current.parent.exists()
 
 
+def test_uninstall_leaves_a_legacy_skill_that_is_not_text_with_no_current_skill_installed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A decode error at the legacy path is not a licence to delete either.
+
+    `remove_legacy_skills` now runs even with no current skill installed
+    (previous test above), and it stats each candidate before reading it. Bytes
+    that are not UTF-8 cannot carry the managed frontmatter it looks for, so a
+    binary file sitting at a superseded skill name is foreign, not superseded,
+    and letting the decode out as an internal error would abort the rest of
+    uninstall instead of leaving the file alone.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    legacy = Path.home() / ".claude" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"\xff\xfe\x00binary\x00")
+    current = _claude_skill_path()
+    assert not current.exists()
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert legacy.read_bytes() == b"\xff\xfe\x00binary\x00"
+    assert result["removed"] == []
+
+
 def test_uninstall_leaves_a_codex_table_that_carries_no_markers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3399,6 +3485,30 @@ def test_uninstall_never_tells_an_operator_to_remove_the_whole_package_directory
     assert result["package_removal"]["package_directory"] == "/opt/venv/site-packages/agentic_hil"
     assert "remove only `/opt/venv/site-packages/agentic_hil/__pycache__`" in result["next_step"]
     assert "never the rest of /opt/venv/site-packages/agentic_hil" in result["next_step"]
+
+
+def test_uninstall_names_rmdir_to_finish_the_pycache_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `__pycache__` hint alone does not finish the cleanup it promises.
+
+    Removing `__pycache__` leaves an empty directory Python still imports as a
+    namespace package (proven in `test_pycache_then_rmdir_together_finish_what_next_step_now_advises`),
+    so `next_step` must also name the `rmdir` step that actually stops it —
+    non-recursive, so it only succeeds once nothing else is left in the
+    directory.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: "pipx")
+    monkeypatch.setattr("agentic_hil.upgrade.removal_command", lambda: "pipx uninstall agentic-hil")
+    monkeypatch.setattr("agentic_hil.upgrade.installed_package_directory", lambda: "/opt/venv/site-packages/agentic_hil")
+
+    result = uninstall_agent_integration()
+
+    assert result["ok"] is True, result
+    assert "rmdir /opt/venv/site-packages/agentic_hil" in result["next_step"]
 
 
 def test_uninstall_takes_back_only_the_agent_it_was_given(

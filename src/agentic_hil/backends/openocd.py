@@ -249,6 +249,15 @@ class OpenOCDBackend:
         # any other file could describe a build the target is not running.
         return self._debug.dump_symbol_ihex(symbol, output)
 
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        """None: every typed-debug read here runs through the session lease.
+
+        This backend answers `debug_symbol_value` and `debug_dump_symbol_ihex`
+        out of the session a caller opened, so the coordination layer must keep
+        treating them as session-scoped and never take a one-shot lease for
+        them."""
+        return frozenset()
+
     def target_support(self) -> JsonObject:
         """OpenOCD has no target type to check.
 

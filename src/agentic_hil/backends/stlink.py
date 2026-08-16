@@ -95,6 +95,11 @@ STLINK_SUCCESS_CONFIRMATION = {
     "debug_dump_symbol_ihex": STLINK_MEMORY_READ_CONFIRMATION,
     "debug_symbol_value": STLINK_MEMORY_READ_CONFIRMATION,
 }
+# The typed-debug reads this backend answers with no session behind them, and so
+# the ones the coordination layer must lease as one-shots rather than run on a
+# session lease that does not exist here. The same `-r` command, so the same
+# pair the confirmation table above carries.
+SESSIONLESS_DEBUG_READS = frozenset({"debug_dump_symbol_ihex", "debug_symbol_value"})
 # One row per reset mode, holding the argument that goes on the wire and the
 # lines STM32CubeProgrammer prints when that argument did what it says. The two
 # belong to the same command and are kept together for that reason: `-rst` and
@@ -294,6 +299,8 @@ class STLinkBackend:
         is a failed read rather than a short answer.
         """
         tool = "debug_symbol_value"
+        if not self.config.probe_allowed():
+            return self._permission_denied(tool, "Symbol reads require allow_probe in the authoritative config.")
         validated = self._validate_symbol(tool, symbol)
         if not validated["ok"]:
             return validated
@@ -356,6 +363,8 @@ class STLinkBackend:
         sha256 travels in the result.
         """
         tool = "debug_dump_symbol_ihex"
+        if not self.config.probe_allowed():
+            return self._permission_denied(tool, "Symbol dumps require allow_probe in the authoritative config.")
         validated = self._validate_symbol(tool, symbol)
         if not validated["ok"]:
             return validated
@@ -408,6 +417,17 @@ class STLinkBackend:
 
     def close(self) -> None:
         return None
+
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        """The two reads this backend serves with no debug session behind them.
+
+        `-r` attaches to a live core the same way a reset does, so a symbol read
+        here is a standalone hardware interaction, not a call inside a session
+        that already holds the lease. The coordination layer takes a one-shot
+        debugger lease for exactly these — machine-wide ownership, run
+        declaration and the incident path for an unconfirmed read — where a
+        session backend's own lease would carry them instead."""
+        return SESSIONLESS_DEBUG_READS
 
     def target_support(self) -> JsonObject:
         """STM32CubeProgrammer identifies the part itself.

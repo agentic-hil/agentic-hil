@@ -76,6 +76,9 @@ class FakeBackend:
     def close(self) -> None:
         return None
 
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        return frozenset()
+
 
 def config_for(workspace: Path, *, auto_recover: str | None = None, com_ports_yaml: str | None = None):
     extra = {"com_ports_yaml": com_ports_yaml} if com_ports_yaml is not None else {}
