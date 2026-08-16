@@ -8,13 +8,28 @@ does not start.
 
 ## One line
 
+Linux and macOS, in any shell:
+
 ```bash
-curl -LsSf https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh | sh
+curl -LsSf https://agentic-hil.github.io/i.sh | sh
 ```
 
+Windows, in any shell (PowerShell, `cmd.exe`, or the Run box), because the line
+starts the interpreter it needs rather than assuming you are already in one:
+
 ```powershell
-irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 | iex
+powershell -c "irm https://agentic-hil.github.io/i.ps1|iex"
 ```
+
+Inside an already open PowerShell, `irm <url>|iex` on its own does the same
+thing. No execution policy stands in the way of either spelling: a policy
+governs script *files*, and a command read from a pipe is not one.
+
+That host serves nothing but these two scripts, mirrored from this repository's
+default branch by a workflow that copies them and commits only what changed, so
+`i.sh` and `i.ps1` there are the same bytes as `install.sh` and `install.ps1`
+here, which it also serves under their full names. The section below takes the
+canonical copy straight from the repository and checks it.
 
 The script installs the package user-local (`uv tool install` where `uv` exists,
 `python -m pip install --user` otherwise, and it fetches Astral's uv installer
@@ -34,6 +49,16 @@ prints all of them. Piped, `sh` takes them after `-s --`:
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh | sh -s -- --agent claude-code
+```
+
+A PowerShell script read from a pipe takes no arguments at all, so on Windows a
+run that needs a flag downloads the file first and passes it there. PowerShell
+also spells the same flags `-Agent`, `-NoAgentInstall`, `-Version`, `-Can`,
+`-NoCan` and `-Help`; both spellings bind to the same options:
+
+```powershell
+irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 -OutFile install.ps1
+powershell -NoProfile -File .\install.ps1 --agent claude-code
 ```
 
 ### Reading the script before you run it

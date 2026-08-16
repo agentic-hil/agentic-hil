@@ -16,13 +16,13 @@ Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes boun
 **Linux / macOS** (any shell):
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh | sh
+curl -LsSf https://agentic-hil.github.io/i.sh | sh
 ```
 
-**Windows** (in PowerShell — the line does not work in the old `cmd.exe` command prompt):
+**Windows** (any shell: PowerShell, `cmd.exe`, or the Run box):
 
 ```powershell
-irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 | iex
+powershell -c "irm https://agentic-hil.github.io/i.ps1|iex"
 ```
 
 One line installs the package user-local (through `uv` where it exists, `pip --user` otherwise) and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository: no project configuration is written, no shell profile is edited. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
