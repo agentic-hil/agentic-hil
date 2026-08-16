@@ -19,9 +19,15 @@ Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes boun
 curl -LsSf https://agentic-hil.github.io/install.sh | sh
 ```
 
-**Windows** (any shell: PowerShell, `cmd.exe`, or the Run box):
+**Windows**, in PowerShell:
 
 ```powershell
+irm https://agentic-hil.github.io/install.ps1 | iex
+```
+
+**Windows**, from `cmd.exe` or the Run box:
+
+```cmd
 powershell -c "irm https://agentic-hil.github.io/install.ps1|iex"
 ```
 

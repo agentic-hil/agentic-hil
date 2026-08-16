@@ -14,16 +14,21 @@ Linux and macOS, in any shell:
 curl -LsSf https://agentic-hil.github.io/install.sh | sh
 ```
 
-Windows, in any shell (PowerShell, `cmd.exe`, or the Run box), because the line
-starts the interpreter it needs rather than assuming you are already in one:
+Windows, in PowerShell:
 
 ```powershell
+irm https://agentic-hil.github.io/install.ps1 | iex
+```
+
+Windows, from `cmd.exe` or the Run box, where the line has to start the
+interpreter it needs first:
+
+```cmd
 powershell -c "irm https://agentic-hil.github.io/install.ps1|iex"
 ```
 
-Inside an already open PowerShell, `irm <url>|iex` on its own does the same
-thing. No execution policy stands in the way of either spelling: a policy
-governs script *files*, and a command read from a pipe is not one.
+No execution policy stands in the way of either spelling: a policy governs
+script *files*, and a command read from a pipe is not one.
 
 That host serves nothing but these two scripts, mirrored from this repository's
 default branch by a workflow that copies them and commits only what changed, so
