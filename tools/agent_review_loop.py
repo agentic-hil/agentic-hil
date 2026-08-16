@@ -1509,13 +1509,21 @@ def recover_stalled_round(
         paperwork,
         stage="finish",
     )
-    if git(repo, "rev-parse", "HEAD") != before:
+    moved = git(repo, "rev-parse", "HEAD") != before
+    still_uncommitted = uncommitted(repo, paperwork)
+    if moved and not still_uncommitted:
         return  # it finished the job; the round has its commits and goes to review
-    if not uncommitted(repo, paperwork):
+    if not moved and not still_uncommitted:
         # It read its own leftovers and took them back out. That is the declined
         # round the caller was about to report, arrived at deliberately.
         print(f"\nround {number}: the implementer removed what it had left behind rather than commit it.")
         return
+    # Uncommitted work remains either way: a moved `HEAD` must never stand in for
+    # a finished round while non-paperwork changes are still sitting in the tree
+    # -- an agent that committed part of the fix and left the rest dirty would
+    # otherwise send only the partial commit to review and lose the remainder
+    # exactly as if this recovery path did not exist. Salvage whatever is left,
+    # on top of any commit the second attempt already made.
     salvaged = salvage_commit(
         repo,
         number,

@@ -1157,6 +1157,47 @@ def test_work_the_implementer_will_not_commit_twice_is_committed_by_the_loop(
     assert record["salvaged"] is not None and record["commits"] == [record["salvaged"]]
 
 
+_COMMITS_PART_AND_LEAVES_MORE_DIRTY = (
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: finish what the stalled attempt wrote'], check=True)\n"
+    "pathlib.Path('extra.py').write_text('# more of the round, never committed\\n', encoding='utf-8')\n"
+    "sys.stdout.write('committed part of it and left the rest in the tree\\n')\n"
+)
+
+
+def test_a_partial_second_commit_does_not_hide_the_rest_still_left_uncommitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`HEAD` moving is not the same as the round being finished.
+
+    The second attempt commits `fix.py` -- moving `HEAD` -- and leaves `extra.py`
+    sitting dirty in the tree. A recovery that stops at "HEAD moved" would send
+    only the partial commit to review and lose `extra.py` exactly as if this
+    recovery path did not exist; it must be swept into history instead.
+    """
+    repository = _repository(tmp_path)
+
+    exit_code = _one_round(repository, _stalling_agent(tmp_path, then=_COMMITS_PART_AND_LEAVES_MORE_DIRTY), monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_CLEAN
+    # Two commits: the partial one the agent stood behind, and the salvage that
+    # picked up what it still left dirty.
+    subject = _in(repository, "log", "-1", "--format=%s").strip()
+    assert subject == "wip(review-loop): round 1 left the implementer's work uncommitted"
+    assert _in(repository, "log", "-2", "--format=%s").splitlines() == [
+        "wip(review-loop): round 1 left the implementer's work uncommitted",
+        "fix: finish what the stalled attempt wrote",
+    ]
+    assert _in(repository, "show", "HEAD:fix.py") == FIX
+    assert _in(repository, "show", "HEAD:extra.py") == "# more of the round, never committed\n"
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["retried"]) == (True, True)
+    assert record["salvaged"] is not None
+    # Both commits reached the review, not just the partial one.
+    assert len(record["commits"]) == 2
+
+
 def test_a_recovery_attempt_that_is_cut_short_still_leaves_the_stalled_work_in_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

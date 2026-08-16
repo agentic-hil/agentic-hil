@@ -350,18 +350,39 @@ def installed_package_directory() -> str | None:
     a working command. Naming the directory lets an operator look, once the
     manager has run and this process is gone.
 
-    Only a directory that is there right now. An editable installation imports
-    from the checkout and has nothing at this location, and naming a path that
-    was never occupied would send a reader to look for a leftover that cannot
-    arrive.
+    None for an editable or source installation, whatever `locate_file`
+    answers. Contrary to what a first read of `locate_file` suggests, that is
+    not empty ground for one: `locate_file("agentic_hil")` resolves straight to
+    the checkout's own source directory for an editable install and
+    `Path(...).is_dir()` is true of it, exactly this project's own dev
+    container included. Checked against where this interpreter's site-packages
+    actually are rather than against `direct_url.json`'s `dir_info.editable`,
+    because that field is a PEP 660 marker and this project's own editable
+    install is the older `setup.py develop` / `.egg-info` form, which writes no
+    `direct_url.json` at all: the checkout sits directly on `sys.path` with
+    nothing copied anywhere. A location outside every site-packages directory
+    is not a wheel's installed copy under either scheme, so naming it here
+    would point an operator's removal at their project source instead of a
+    leftover cache.
     """
     with suppress(Exception):
         from importlib.metadata import distribution
 
         located = distribution("agentic-hil").locate_file("agentic_hil")
-        if located is not None and Path(located).is_dir():
+        if located is not None and Path(located).is_dir() and _inside_site_packages(located):
             return str(located)
     return None
+
+
+def _inside_site_packages(location: str | Path) -> bool:
+    site_dirs = []
+    for scheme_key in ("purelib", "platlib"):
+        with suppress(KeyError, OSError):
+            site_dirs.append(sysconfig.get_path(scheme_key))
+    with suppress(KeyError, OSError):
+        site_dirs.append(sysconfig.get_path("purelib", f"{os.name}_user"))
+    normalized = _normalized_location(location)
+    return any(site_dir and normalized.startswith(_normalized_location(site_dir) + "/") for site_dir in site_dirs)
 
 
 # Which declared extra a configured capability needs, and which entries need it.

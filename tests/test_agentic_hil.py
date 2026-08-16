@@ -853,6 +853,61 @@ def test_a_virtual_environment_is_never_called_a_per_user_installation(
     assert _user_site_installation() is False
 
 
+def _installed_at(monkeypatch: pytest.MonkeyPatch, *, distribution_at: Path, site_packages: Path) -> None:
+    monkeypatch.setattr("importlib.metadata.distribution", lambda _name: SimpleNamespace(locate_file=lambda _relative: distribution_at))
+    monkeypatch.setattr("sysconfig.get_path", lambda name, scheme=None, *_args, **_kwargs: str(site_packages) if name in {"purelib", "platlib"} else "")
+
+
+def test_installed_package_directory_names_a_real_copy_inside_site_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wheel's installed copy, sitting where `locate_file` and the site scheme agree."""
+    from agentic_hil.upgrade import installed_package_directory
+
+    site_packages = tmp_path / "site-packages"
+    package_directory = site_packages / "agentic_hil"
+    package_directory.mkdir(parents=True)
+    _installed_at(monkeypatch, distribution_at=package_directory, site_packages=site_packages)
+
+    assert installed_package_directory() == str(package_directory)
+
+
+def test_installed_package_directory_never_names_a_checkout_outside_site_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An editable install's checkout must never be handed back as a cleanup path.
+
+    `locate_file("agentic_hil")` resolves to the checkout itself for an editable
+    install, and the directory is really there, so `.is_dir()` alone cannot tell
+    it apart from a wheel's installed copy: this project's own dev container
+    hits exactly this, since its `setup.py develop`-style install writes no
+    `direct_url.json` at all. Only sitting outside every site-packages directory
+    tells the two apart, and a checkout is never inside one.
+    """
+    from agentic_hil.upgrade import installed_package_directory
+
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    checkout = tmp_path / "checkout" / "src" / "agentic_hil"
+    checkout.mkdir(parents=True)
+    _installed_at(monkeypatch, distribution_at=checkout, site_packages=site_packages)
+
+    assert installed_package_directory() is None
+
+
+def test_installed_package_directory_is_none_when_the_located_path_does_not_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing to clean up if the directory `locate_file` names was never occupied."""
+    from agentic_hil.upgrade import installed_package_directory
+
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    _installed_at(monkeypatch, distribution_at=site_packages / "agentic_hil", site_packages=site_packages)
+
+    assert installed_package_directory() is None
+
+
 # ---------------------------------------------------------------------------
 # What an upgrade leaves behind outside the package: the agent skills and the
 # MCP registrations this installation wrote. Neither is inside the package, so
@@ -3092,6 +3147,35 @@ def test_uninstall_leaves_bytes_at_the_skill_path_that_are_not_text(
     assert _uninstall_paths(result, "left_alone") == [str(skill)]
 
 
+def test_uninstall_removes_a_legacy_skill_even_with_no_current_skill_installed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine that never moved past the superseded skill name still gets taken back.
+
+    `remove_legacy_skills` used to run only inside the branch where the current
+    `agentic-hil/SKILL.md` target exists. A user who still has only the older
+    managed `agentic-hil-config-setup/SKILL.md` has no current target, so
+    uninstall used to remove the other integration pieces, report success, and
+    leave the legacy skill discoverable by the agent.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    legacy = _legacy_skill("agentic-hil-config-setup", managed=True)
+    current = _claude_skill_path()
+    assert not current.exists()
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert not legacy.exists()
+    assert not legacy.parent.exists()
+    assert [item["what"] for item in result["removed"]] == ["superseded agent skill"]
+    # Never planted just to check: the current skill's own directory is not
+    # created as a side effect of taking the legacy one back.
+    assert not current.parent.exists()
+
+
 def test_uninstall_leaves_a_codex_table_that_carries_no_markers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3113,6 +3197,36 @@ def test_uninstall_leaves_a_codex_table_that_carries_no_markers(
     assert result["ok"] is True, result
     assert config.read_text(encoding="utf-8") == '[mcp_servers.agentic-hil]\ncommand = "/opt/mine/agentic-hil"\n'
     assert [item["what"] for item in result["left_alone"]] == ["MCP registration"]
+
+
+def test_uninstall_reports_invalid_utf8_in_a_json_mcp_config_instead_of_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A binary or truncated `~/.claude.json` must not abort the rest of uninstall.
+
+    `_remove_json_mcp` used to call `_load_json_object`, whose guarded read
+    raises `UnicodeDecodeError` uncaught, unlike the Codex and skill removal
+    paths. The exception used to propagate past `_release_lock_sidecar` and end
+    the whole command; it now comes back as the same `config_invalid` refusal a
+    file this tool cannot decode already gets everywhere else.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    registrations = home / ".claude.json"
+    registrations.write_bytes(b"\xff\xfe\x00binary\x00")
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is False, result
+    assert registrations.read_bytes() == b"\xff\xfe\x00binary\x00"
+    agent_report = next(report for report in result["agents"] if report["agent"] == "claude-code")
+    assert agent_report["steps"]["mcp_config"]["error_type"] == "config_invalid"
+    # The lock sidecar is still released even though the read failed, and the
+    # other steps for this agent still ran rather than the whole call raising.
+    assert not user_file_lock_path(registrations).exists()
+    assert agent_report["steps"]["skill"]["ok"] is True
+    assert agent_report["steps"]["agent_write_restriction"]["ok"] is True
 
 
 def test_uninstall_takes_back_the_write_refusals_and_nothing_else_in_the_file(
@@ -3260,6 +3374,31 @@ def test_uninstall_names_the_removal_line_because_it_cannot_run_it(
     assert result["package_removal"] == {"manager": "pipx", "command": "pipx uninstall agentic-hil"}
     assert "pipx uninstall agentic-hil" in result["summary"]
     assert "pipx uninstall agentic-hil" in result["next_step"]
+
+
+def test_uninstall_never_tells_an_operator_to_remove_the_whole_package_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `__pycache__` cleanup hint must name only the cache, never the tree around it.
+
+    `package_directory` can be a wheel's genuine installed copy, and "removing
+    that directory" read as removing all of it rather than the leftover
+    `__pycache__` inside it would delete the package itself instead of a stale
+    bytecode cache.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: "pipx")
+    monkeypatch.setattr("agentic_hil.upgrade.removal_command", lambda: "pipx uninstall agentic-hil")
+    monkeypatch.setattr("agentic_hil.upgrade.installed_package_directory", lambda: "/opt/venv/site-packages/agentic_hil")
+
+    result = uninstall_agent_integration()
+
+    assert result["ok"] is True, result
+    assert result["package_removal"]["package_directory"] == "/opt/venv/site-packages/agentic_hil"
+    assert "remove only `/opt/venv/site-packages/agentic_hil/__pycache__`" in result["next_step"]
+    assert "never the rest of /opt/venv/site-packages/agentic_hil" in result["next_step"]
 
 
 def test_uninstall_takes_back_only_the_agent_it_was_given(

@@ -374,8 +374,10 @@ def test_a_new_home_for_the_version_cannot_appear_unnoticed(tree: Path) -> None:
         # root, both recognised without pytest having left anything behind.
         pytest.param(".pytest-tmp", False, id="the-conventional-name"),
         pytest.param("pytest-of-someone", False, id="the-automatic-root"),
-        # A root under any other name, recognised by pytest's own cleanup lock.
-        pytest.param("scratch", True, id="marked-by-pytest"),
+        # A numbered root under any other name, recognised by pytest's own
+        # cleanup lock -- the shape a numbered root under pytest's own default
+        # temp directory actually carries (`create_cleanup_lock`).
+        pytest.param("scratch5", True, id="marked-by-pytest"),
     ],
 )
 def test_a_pytest_temporary_root_in_the_tree_is_scratch_and_not_a_position(tree: Path, name: str, marked: bool) -> None:
@@ -399,6 +401,22 @@ def test_a_pytest_temporary_root_in_the_tree_is_scratch_and_not_a_position(tree:
     assert uncovered_files(tree) == []
 
 
+def test_a_numbered_root_with_pytests_own_current_symlink_is_scratch_with_no_lock_at_all(tree: Path) -> None:
+    """`--basetemp`'s own numbered roots carry no `.lock` -- only the symlink `make_numbered_dir` leaves.
+
+    `create_cleanup_lock` runs only for a numbered root under pytest's default,
+    unmarked temp directory (already caught by the `pytest-of-` name), never for
+    one `tmp_path_factory.mktemp` creates directly under a given `--basetemp`.
+    The `<prefix>current` symlink beside it is what actually marks that shape.
+    """
+    root = tree / "scratch7"
+    root.mkdir()
+    (root / "config.yaml").write_text(f"# written by a fixture at {package_version(tree)}\n", encoding="utf-8")
+    (tree / "scratchcurrent").symlink_to(root, target_is_directory=True)
+
+    assert uncovered_files(tree) == []
+
+
 def test_a_scratch_directory_pytest_never_marked_is_still_swept(tree: Path) -> None:
     """The skip is narrow: only a root pytest named or marked is left out.
 
@@ -414,6 +432,47 @@ def test_a_scratch_directory_pytest_never_marked_is_still_swept(tree: Path) -> N
 
     assert found
     assert "scratch/installation.md" in found[0]
+
+
+def test_a_lock_file_alone_does_not_hide_an_ordinary_tracked_directory(tree: Path) -> None:
+    """`.lock` is not pytest-specific, so it cannot stand in for pytest's own shape.
+
+    A directory some unrelated tool marked with a `.lock` of its own -- and
+    whose name does not even end in the digits `make_numbered_dir` always
+    appends -- is not the numbered-root shape pytest actually leaves. Accepting
+    a bare `.lock` used to exclude the whole directory from this scan, silently,
+    version strings under it included.
+    """
+    directory = tree / "vendor" / "some-tool"
+    directory.mkdir(parents=True)
+    (directory / ".lock").write_text("", encoding="utf-8")
+    (directory / "installation.md").write_text(
+        f'pip install "agentic-hil=={package_version(tree)}"\n', encoding="utf-8"
+    )
+
+    found = uncovered_files(tree)
+
+    assert found
+    assert "vendor/some-tool/installation.md" in found[0]
+
+
+def test_a_numbered_looking_directory_with_no_lock_and_no_current_symlink_is_still_swept(tree: Path) -> None:
+    """A name ending in digits is necessary but not sufficient on its own.
+
+    Nothing here proves pytest made this directory without the cleanup lock or
+    the matching `current` symlink beside it, so a release directory that simply
+    happens to be named like a version number must still be covered.
+    """
+    directory = tree / "release2"
+    directory.mkdir()
+    (directory / "installation.md").write_text(
+        f'pip install "agentic-hil=={package_version(tree)}"\n', encoding="utf-8"
+    )
+
+    found = uncovered_files(tree)
+
+    assert found
+    assert "release2/installation.md" in found[0]
 
 
 def test_a_new_home_for_the_development_version_cannot_appear_either(development_tree: Path) -> None:

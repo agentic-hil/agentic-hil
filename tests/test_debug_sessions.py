@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,9 @@ from conftest import (
 
 from agentic_hil.backends.common import command_for_log
 from agentic_hil.backends.gdbdebug import decode_symbol_value, image_byte_order
+from agentic_hil.bench import BenchMutex
 from agentic_hil.config import ConfigError, load_config
+from agentic_hil.devices import debugger_device
 from agentic_hil.elfsymbols import read_elf_byte_order, read_elf_symbol
 from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, read_intel_hex_file, write_intel_hex_file
 from agentic_hil.report import overall_success, read_last_report
@@ -1705,6 +1708,27 @@ def test_elf_symbol_table_reports_a_missing_file_rather_than_raising(tmp_path: P
     assert read_elf_symbol(tmp_path / "nothing.elf", "g_pfnVectors") == {"ok": False, "reason": "unreadable"}
 
 
+def test_elf_symbol_table_rejects_a_string_table_size_the_file_cannot_hold(tmp_path: Path) -> None:
+    """A hostile `sh_size` on the linked string table must never reach `read()`.
+
+    CPython raises `OverflowError` for a `read()` size past `sys.maxsize`, and a
+    smaller-but-still-enormous size can force a process-sized allocation before
+    the file is even found too short to hold it. `sh_size` is ELF-controlled — a
+    64-bit field can claim up to 2**64-1 — so the bound has to sit before the
+    read, not in the exception it would otherwise raise.
+    """
+    table = elf_with_symbols([("g_pfnVectors", 0x08000000, 428)], bits=64)
+    # The string table is the last of the four section headers this helper
+    # writes (null, .text, .symtab, .strtab); a 64-bit entry is 64 bytes wide
+    # and `sh_size` is the fourth 8-byte field in it, at offset 32.
+    strtab_entry_offset = len(table) - 64
+    size_field_offset = strtab_entry_offset + 32
+    hostile = struct.pack("<Q", 2**64 - 1)
+    hostile_table = table[:size_field_offset] + hostile + table[size_field_offset + 8 :]
+
+    assert read_elf_symbol_from_bytes(tmp_path, hostile_table, "g_pfnVectors") == {"ok": False, "reason": "unreadable"}
+
+
 @pytest.mark.parametrize(
     ("data", "declared"),
     [
@@ -2314,3 +2338,93 @@ def test_stlink_symbol_value_still_refuses_the_rest_of_the_typed_family(tmp_path
     assert refused["ok"] is False, refused
     assert refused["error_type"] == "not_supported"
     assert refused["summary"] == "Typed debug sessions require the OpenOCD backend."
+
+
+# --- the sessionless read takes a real one-shot debugger lease ---------------
+#
+# `-r` attaches to a live core with no session behind it, so the read is a
+# standalone hardware interaction and coordination has to treat it as one: it
+# holds the machine-wide probe lock while another owner has it, it is declared
+# by a run that touches the probe or refused, and a read it could not confirm
+# raises the incident a session read would. On OpenOCD the same tool runs on the
+# session's own lease instead, and that stays true; here there is none to run on.
+
+
+def test_stlink_symbol_value_refuses_while_another_owner_holds_the_probe(tmp_path: Path) -> None:
+    """The machine-wide lock, taken for the read the way it is for a flash.
+
+    A stranger — another MCP server, another project's run — holds the probe, so
+    the read must answer `device_busy` and name the holder rather than attaching
+    underneath it. Before this the read reached the board with no lease at all.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+        stranger.acquire(list(debugger_device(service.config).lock_keys))
+        try:
+            refused = stlink_symbol_value(service)
+        finally:
+            stranger.release_all()
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "device_busy"
+    assert refused["holder"]["label"] == "other-bench-session"
+    assert refused["side_effect_committed"] is False
+    # It never reached the probe: no lease, no read, no log of one.
+    assert "hex" not in refused
+    assert "log_path" not in refused
+
+
+def test_stlink_symbol_value_inside_a_run_that_did_not_declare_the_probe_is_refused(tmp_path: Path) -> None:
+    """The read is inside the run model now, so it obeys the run's declaration.
+
+    A run that holds only some other board has not declared this probe, and a
+    read that reached it anyway would be touching hardware the run never named.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        service.coordinator.begin_run(["physical:unrelated-board"], label="unrelated-plan")
+        try:
+            refused = stlink_symbol_value(service)
+        finally:
+            service.coordinator.end_run()
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "undeclared_device"
+    assert refused["side_effect_committed"] is False
+    assert "hex" not in refused
+
+
+def test_stlink_symbol_value_unconfirmed_read_enters_the_incident_path(tmp_path: Path) -> None:
+    """A read that attached and never confirmed is an incident, not a bare error.
+
+    The CLI opened the probe, printed its banner and never said `Data read
+    successfully`, so where the core stopped is unknown. The read now runs on a
+    one-shot lease, so that unknown state raises the same incident a session read
+    would — recorded here even as it stands down, because the target's state is
+    what the next reset into halt and probe will say. Before this the same result
+    came back with no lease and no incident behind it at all.
+    """
+    service = stlink_dump_service(tmp_path, debugger_executable=FAKE_STLINK_READ_UNCONFIRMED)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        refused = stlink_symbol_value(service)
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "memory_read_failed"
+        assert refused["side_effect_status"] == "unknown"
+        # The incident the lease raised, and the stand-down that ends it: the
+        # read is read-only, so its unconfirmed target state settles at the next
+        # reset and probe rather than padlocking the bench for a person.
+        assert refused["cleanup_reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert refused["incident_stood_down"]["reasons"] == ["debugger_readonly_target_state_unconfirmed"]
+        assert refused["quarantined"] is False
+        assert service.coordinator.blocked is False
+    finally:
+        service.close()

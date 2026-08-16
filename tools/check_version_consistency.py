@@ -126,15 +126,26 @@ SKIPPED_PATHS = frozenset({".agentic-hil", ".agentic-loop", ".claude", "evals/in
 # A pytest temporary root, wherever it landed. `--basetemp` may be pointed
 # anywhere, and inside the clone is where a developer points it on Windows, to
 # keep a deep scratch path off MAX_PATH; `PYTEST_DEBUG_TEMPROOT` lands the
-# automatic root in the same place. Everything below either one is a fixture's
-# scratch file (a configuration a test wrote, a report it read back), so a
-# version string in one of them is test data and not a position that tracks the
-# release. Recognised by the conventional name and by the marker files pytest
-# itself leaves, so a root under a different name is still recognised by what is
-# in it: `.lock` is a numbered root's cleanup lock and `pytest-current` the link
-# to the newest one.
+# automatic root in the same place, always one level inside a `pytest-of-*`
+# directory (`_pytest.tmpdir.TempPathFactory.getbasetemp`), which the name check
+# below already catches. Everything below either one is a fixture's scratch file
+# (a configuration a test wrote, a report it read back), so a version string in
+# one of them is test data and not a position that tracks the release.
+#
+# Recognised by the conventional name and, for a root under a different name,
+# by the numbered-directory shape `make_numbered_dir` actually leaves: a name
+# ending in digits with a `<prefix>current` symlink beside it in the same
+# parent, pointing back at this exact directory -- what `--basetemp`'s own
+# `tmp_path` roots carry (`_pytest.pathlib.make_numbered_dir`). A bare `.lock`
+# file used to be accepted as a standalone marker and was dropped: `.lock` is
+# not pytest-specific, so a tracked directory that happened to hold one for an
+# unrelated reason would silently drop out of this scan, version strings under
+# it included. `.lock` is still asked for as an alternative to the symlink --
+# it is what a numbered root under pytest's own default temp directory carries
+# instead (`_pytest.pathlib.create_cleanup_lock`) -- but only once the
+# numbered-directory name already holds, never standing in for it.
 PYTEST_TEMPORARY_NAMES = frozenset({".pytest-tmp", ".pytest_tmp", "pytest-tmp"})
-PYTEST_TEMPORARY_MARKERS = (".lock", "pytest-current")
+_PYTEST_NUMBERED_DIR = re.compile(r"^(?P<prefix>.+?)(?P<number>[0-9]+)$")
 SKIPPED_NAMES = frozenset({"package-lock.json", "uv.lock", "poetry.lock"})
 SKIPPED_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".ico", ".whl", ".gz", ".zip"})
 MAX_SWEPT_BYTES = 4_000_000
@@ -473,14 +484,29 @@ def version_problems(root: Path, release_tag: str | None = None) -> list[str]:
 def is_pytest_temporary_root(directory: Path) -> bool:
     """Whether this directory is a pytest temporary root rather than content.
 
-    By name for the conventional in-clone basetemp, and otherwise by the marker
-    files pytest leaves in a root of its own making, so one under any name is
-    still recognised. Nothing in this repository is called `.pytest-tmp`, sits
-    under a `pytest-of-` root, or carries pytest's cleanup lock, so this can
-    only ever exclude a temporary root."""
+    By name for the conventional in-clone basetemp, and otherwise by the shape
+    pytest leaves in a root of its own making, so one under any other name is
+    still recognised: a name ending in digits (`make_numbered_dir`'s own
+    `<prefix><number>`) that either carries pytest's cleanup lock or has a
+    `<prefix>current` symlink beside it, in the same parent, resolving back to
+    this exact directory. Nothing in this repository is called `.pytest-tmp`,
+    sits under a `pytest-of-` root, or matches that numbered shape, so this can
+    only ever exclude a temporary root.
+    """
     if directory.name in PYTEST_TEMPORARY_NAMES or directory.name.startswith("pytest-of-"):
         return True
-    return any((directory / marker).exists() for marker in PYTEST_TEMPORARY_MARKERS)
+    match = _PYTEST_NUMBERED_DIR.match(directory.name)
+    if match is None:
+        return False
+    if (directory / ".lock").is_file():
+        return True
+    current_link = directory.parent / f"{match.group('prefix')}current"
+    if not current_link.is_symlink():
+        return False
+    try:
+        return current_link.resolve() == directory.resolve()
+    except OSError:
+        return False
 
 
 def _swept_files(root: Path) -> list[Path]:

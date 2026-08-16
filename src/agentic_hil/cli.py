@@ -1015,7 +1015,8 @@ def uninstall_agent_integration(agents: list[str] | None = None) -> JsonObject:
         "next_step": (
             f"Run `{command}` at your shell; nothing running out of the installation can remove it. "
             + (
-                f"If `import agentic_hil` still succeeds after that, a `__pycache__` left under {package_directory} is why, and removing that directory finishes it. "
+                f"If `import agentic_hil` still succeeds after that, a `__pycache__` left under {package_directory} is why; "
+                f"remove only `{package_directory}/__pycache__`, never the rest of {package_directory}. "
                 if package_directory
                 else ""
             )
@@ -1231,12 +1232,18 @@ def _remove_agent_skill(agent: SkillAgent) -> JsonObject:
             if ours and existing is not None:
                 secure_remove_file(target)
                 removed.append(_removed_entry("agent skill", target))
-            removed.extend(_removed_entry("superseded agent skill", path) for path in remove_legacy_skills(target))
         _release_lock_sidecar(target)
         if ours:
             _remove_skill_directory(target)
         else:
             left_alone.append(_left_entry("agent skill", target, "This file is not the Agentic HIL setup skill, and --force never replaces a foreign skill either."))
+    # Independent of whether the current target exists: a user who still has
+    # only an older managed skill (`agentic-hil-config-setup/SKILL.md` and
+    # nothing at the current name) must have it taken back too, not silently
+    # left discoverable because there was no current file to gate this on.
+    # `remove_legacy_skills` stats each legacy path itself before touching it,
+    # so nothing here plants the current target's directory just to look.
+    removed.extend(_removed_entry("superseded agent skill", path) for path in remove_legacy_skills(target))
     registration = _remove_skill_registration(agent, target)
     removed.extend(registration["removed"])
     left_alone.extend(registration["left_alone"])
@@ -2957,8 +2964,20 @@ def _register_claude_mcp(command: str, force: bool) -> JsonObject:
 
 def _load_json_object(path: Path) -> dict | None:
     """{} when missing, the parsed mapping when valid, None when the file exists
-    but is not a JSON object (so callers never clobber unparseable config)."""
-    text = secure_optional_read_text(path)
+    but is not a JSON object (so callers never clobber unparseable config).
+
+    Bytes that are not UTF-8 are the same "not a JSON object" as bytes that
+    parse to something else: no caller here can act on either, and every caller
+    already treats None as a `config_invalid`/`agent_permissions_unreadable`
+    refusal that leaves the file untouched. Caught once, here, rather than
+    separately in each caller that reaches this: a caller that forgot to catch
+    it would otherwise let the decode error out as an internal error instead of
+    that structured refusal.
+    """
+    try:
+        text = secure_optional_read_text(path)
+    except UnicodeDecodeError:
+        return None
     if text is None:
         return {}
 
