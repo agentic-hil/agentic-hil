@@ -63,14 +63,6 @@ agentic-hil agent-install --agent claude-code    # or: codex / opencode
 
 [Installation](docs/installation.md) has `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend; [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
 
-### It proves itself on the board
-
-The same agent after that restart, making the board say it and proving the board said it:
-
-<!-- demo-video-part-2: drop the recorded proof demo here (drag the .mp4 into this file in GitHub's web editor; the uploaded attachment renders as an inline player) -->
-
-Nothing in that run is staged: the firmware is written on the spot, `flash_firmware` and `com_read` go through the gate, the twelve bytes come back off the wire, and the plan it writes afterwards is run once green and once against the wrong expectation, because a test that cannot fail proves nothing.
-
 ## Quickstart: one real run
 
 The worked example is a firmware project of its own. Plug the board in, build it, and point Agentic HIL at it from that directory:
