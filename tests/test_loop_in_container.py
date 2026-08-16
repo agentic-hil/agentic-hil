@@ -1121,6 +1121,31 @@ def test_work_the_implementer_will_not_commit_twice_is_committed_by_the_loop(
     assert record["salvaged"] is not None and record["commits"] == [record["salvaged"]]
 
 
+def test_a_recovery_attempt_that_is_cut_short_still_leaves_the_stalled_work_in_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rescue can hit the wall the round hit, and it must not take the work down with it."""
+    repository = _repository(tmp_path)
+    # Attempt one stalls; attempt two runs into --timeout, which is the failure
+    # that left the work uncommitted in the first place.
+    script = _stalling_agent(tmp_path, then="import time\ntime.sleep(120)\n")
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(script)])
+
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "1", "--timeout", "2", "--heartbeat", "0"]
+        + ["--review-checkout", "none"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_FAILED
+    # The run ends, but not with the only copy of the round in a working tree.
+    assert _in(repository, "log", "-1", "--format=%s").startswith("wip(review-loop): round 1")
+    assert _in(repository, "show", "HEAD:fix.py") == FIX
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["retried"]) == (True, True)
+    assert record["salvaged"] is not None
+
+
 def test_an_implementer_that_takes_its_own_leftovers_back_out_ends_the_round_declined(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
