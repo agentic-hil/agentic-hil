@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from contextlib import ExitStack, suppress
@@ -18,8 +19,10 @@ from agentic_hil import __version__, upgrade
 from agentic_hil.adopt import project_config_adopt_hardware
 from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import (
+    BOOTSTRAP_BACKEND,
     DEFAULT_PROJECT_PROFILE,
     apply_discovery_to_template,
+    enumerate_attached_probes,
     load_project_profile,
 )
 from agentic_hil.comports import list_available_com_ports, port_identity_fields
@@ -27,6 +30,7 @@ from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
     CONFIG_ENV,
     DEFAULT_CONFIG_TEMPLATE,
+    OPENOCD_SCRIPT_SEARCH_NAME,
     ConfigError,
     absolute_without_symlinks,
     atomic_write_text,
@@ -38,6 +42,7 @@ from agentic_hil.config import (
     is_path_within_frozen,
     load_authoritative_config,
     load_config,
+    openocd_script_kind,
     permission_summary,
     project_config_path,
     safe_directory,
@@ -72,17 +77,12 @@ from agentic_hil.knowledge import (
     RUNNING_SERVER_COMPARISON,
     remediation_fields,
 )
+from agentic_hil.reactorrun import run_plan, start_plan_detached
 from agentic_hil.redact import redact_sensitive
-from agentic_hil.report import overall_success, write_report
-from agentic_hil.runlifecycle import (
-    RunRegistration,
-    new_run_handle,
-    request_run_stop,
-    run_status,
-    start_detached_run,
-)
+from agentic_hil.report import overall_success
+from agentic_hil.runlifecycle import request_run_stop, run_status
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestConfig, TestReactor, load_test_config, plan_devices
+from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH
 from agentic_hil.tools import (
     AgenticHILToolService,
     UnprovisionedToolService,
@@ -90,7 +90,7 @@ from agentic_hil.tools import (
     narrowed_permissions,
     unbound_debugger_error,
 )
-from agentic_hil.types import AgenticHILConfig, JsonObject
+from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
 from agentic_hil.upgrade import CLI_UPGRADE_TOOL, missing_configured_extras, replace_installation
 
 SKILL_NAME = "agentic-hil"
@@ -250,7 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     config_reload_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
-    subparsers.add_parser("debugger-probes", help="list connected probe IDs for the configured debugger backend")
+    subparsers.add_parser("debugger-probes", help="list connected probe IDs for the configured debugger backend; on a project that has no configuration yet, through the same read-only discovery setup's bootstrap runs, labelled source: bootstrap")
 
     subparsers.add_parser("com-ports", help="list host serial/COM ports")
 
@@ -320,8 +320,8 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--agent", default="claude-code")
     setup_parser.add_argument("--force", action="store_true")
 
-    upgrade_parser = subparsers.add_parser("upgrade", help="upgrade this Agentic HIL installation and refresh agent skills")
-    upgrade_parser.add_argument("--agent", action="append", default=[], help="refresh this agent's skill after upgrading; repeat for multiple agents")
+    upgrade_parser = subparsers.add_parser("upgrade", help="upgrade this Agentic HIL installation and refresh the agent skills and MCP registrations it wrote")
+    upgrade_parser.add_argument("--agent", action="append", default=[], help="refresh only this agent, instead of every agent this installation had already set up; repeat for multiple agents. An agent that has neither a skill nor a registration is never installed for.")
 
     return parser
 
@@ -402,48 +402,178 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
 
     result = replace_installation(tool=CLI_UPGRADE_TOOL)
     if not result.get("upgraded_on_disk"):
-        # Nothing was replaced, so refreshing the skills out of it would be work
+        # Nothing was replaced, so refreshing anything out of it would be work
         # with no effect, and reporting it would put a list of things that
-        # happened under a result whose whole content is that nothing did.
+        # happened under a result whose whole content is that nothing did. This
+        # covers the already-current answer as well, which now comes back
+        # without a package manager having run at all.
         return result
 
     previous_version = str(result["previous_version"])
     current_version = str(result["version"])
-    skill_results: JsonObject = {}
-    with tempfile.TemporaryDirectory(prefix="agentic-hil-upgrade-") as maintenance_cwd:
-        for agent in requested_agents:
-            skill_command = [sys.executable, "-m", "agentic_hil", "skill-install", "--agent", agent]
-            # Through the module rather than a name imported above: `upgrade` is
-            # the one place a test replaces the subprocess runner, and a second
-            # binding here would be the copy that kept running the real thing.
-            refreshed = upgrade._run_upgrade_process(skill_command, cwd=maintenance_cwd)
-            child = upgrade._process_result(refreshed)
-            if refreshed.stdout.strip():
-                with suppress(json.JSONDecodeError):
-                    child["result"] = json.loads(refreshed.stdout)
-            skill_results[agent] = child
-
-    skills_ok = all(child.get("returncode") == 0 for child in skill_results.values())
+    refreshed = _refresh_agent_integrations(requested_agents)
+    rewritten = [entry["agent"] for entry in refreshed if entry["registration_rewritten"]]
+    failed = [entry["agent"] for entry in refreshed if not entry["ok"]]
     # One more way an installation stops matching its own configuration, on the
     # path the release notes actually send an operator down: an upgrade that
     # came back without the extra this bench's configuration needs. Best effort
-    # by design — `upgrade` has to work on a machine that has no project
+    # by design, since `upgrade` has to work on a machine that has no project
     # configured yet, so a configuration that will not load is a reason to say
     # nothing here rather than to fail the upgrade that just succeeded.
     extras_warning = None
     with suppress(ConfigError, OSError):
         extras_warning = missing_configured_extras(load_cli_authoritative_config(None))
+    summary = f"Agentic HIL upgraded from {previous_version} to {current_version}; restart agent hosts to load the new MCP server."
+    if rewritten:
+        # An agent host reads its MCP registration at startup, so the agent
+        # whose entry moved is the one that has to be restarted before it uses
+        # the launcher this upgrade resolved.
+        hosts = _named_agents(rewritten)
+        summary += f" The MCP registration was rewritten for {hosts}, so restart {hosts} to load it."
+    if failed:
+        # Not a failed upgrade. The package moved; what did not is a file this
+        # command maintains for somebody else's program, and each entry carries
+        # the one line that finishes it by hand.
+        summary += f" The agent integration could not be refreshed for {_named_agents(failed)}; `refreshed` names the command that does it."
     return {
         **result,
-        "ok": skills_ok,
         **({"extras_warning": extras_warning} if extras_warning is not None else {}),
-        "summary": (
-            f"Agentic HIL upgraded from {previous_version} to {current_version}; restart agent hosts to load the new MCP server."
-            if skills_ok
-            else f"Agentic HIL package upgraded from {previous_version} to {current_version}, but one or more agent skills could not be refreshed."
-        ),
-        "skills": skill_results,
+        "summary": summary,
+        "refreshed": refreshed,
     }
+
+
+def _named_agents(agent_ids: list[str]) -> str:
+    display = {agent.id: agent.display_name for agent in skill_agents()}
+    return ", ".join(display.get(agent_id, agent_id) for agent_id in agent_ids)
+
+
+def _installed_agent_integration(agent: SkillAgent) -> tuple[bool, bool]:
+    """What this installation has already written for one agent: skill, registration.
+
+    Read only, and forgiving of everything: a home directory that refuses the
+    ancestor trust check, a configuration file that is no longer JSON, a path
+    component that is not a directory any more. None of those is a reason to
+    fail an upgrade that has already succeeded, and each of them answers the
+    question the same way, which is that there is nothing here to refresh.
+    """
+    skill = False
+    with suppress(ConfigError, OSError, ValueError):
+        skill = _path_entry_exists(_agent_skill_target(agent))
+    registration = False
+    with suppress(ConfigError, OSError, ValueError):
+        path = _agent_mcp_config_path(agent.id)
+        if agent.id == "codex":
+            registration = AGENTIC_HIL_MCP_START in (secure_optional_read_text(path) or "")
+        else:
+            data = _load_json_object(path) or {}
+            servers = data.get("mcpServers" if agent.id == "claude-code" else "mcp")
+            registration = isinstance(servers, dict) and "agentic-hil" in servers
+    return skill, registration
+
+
+def _refresh_agent_integrations(requested_agents: list[str]) -> list[JsonObject]:
+    """Rewrite, out of the new package, the two things the old one had written.
+
+    The skill file carries the release's own text, and the MCP registration
+    names the launcher this installation resolves, which an upgrade is entitled
+    to move. Neither is inside the package, so replacing the package leaves both
+    behind, describing a release that is no longer installed.
+
+    Only for an agent that already has one of the two. An upgrade that
+    registered an agent nobody had set up would be adding an MCP server to a
+    machine on the strength of a maintenance command, and `--agent` narrows this
+    set rather than widening it: naming an agent that has nothing still installs
+    nothing, and says so.
+
+    Through a subprocess and never in process. This interpreter imported the
+    release that was just replaced and goes on executing it, so a refresh run
+    here would write the old package's skill text and resolve the old launcher,
+    which is the exact opposite of the point.
+    """
+    wanted = {resolved.id for name in requested_agents if (resolved := resolve_skill_agent(name)) is not None}
+    outcomes: list[JsonObject] = []
+    with tempfile.TemporaryDirectory(prefix="agentic-hil-upgrade-") as maintenance_cwd:
+        for agent in skill_agents():
+            if wanted and agent.id not in wanted:
+                continue
+            skill, registration = _installed_agent_integration(agent)
+            if not (skill or registration):
+                outcomes.append(
+                    {
+                        "agent": agent.id,
+                        "ok": True,
+                        "skill": False,
+                        "registration": False,
+                        "registration_rewritten": False,
+                        "summary": f"Nothing to refresh for {agent.display_name}: this installation had written neither its skill nor its MCP registration.",
+                    }
+                )
+                continue
+            outcomes.append(_refresh_one_agent(agent, maintenance_cwd))
+    return outcomes
+
+
+def _refresh_one_agent(agent: SkillAgent, maintenance_cwd: str) -> JsonObject:
+    """One `agent-install --force`, run out of the new package, reported per half.
+
+    `--force` because that is the documented repair route for a managed skill or
+    MCP entry: it rewrites what this program wrote and still refuses an entry an
+    operator wrote, which is the distinction that has to survive an upgrade.
+
+    A failure here is reported and never raised. The package moved, which is
+    what `agentic-hil upgrade` promises; a skill file that could not be written
+    is one command away and that command is on the result.
+    """
+    # Through the module rather than a name imported above: `upgrade` is the one
+    # place a test replaces the subprocess runner, and a second binding here
+    # would be the copy that kept running the real thing.
+    command = [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", agent.id, "--force"]
+    outcome: JsonObject = {"agent": agent.id, "command": command}
+    try:
+        completed = upgrade._run_upgrade_process(command, cwd=maintenance_cwd)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {
+            **outcome,
+            "ok": False,
+            "skill": False,
+            "registration": False,
+            "registration_rewritten": False,
+            "exception_type": type(error).__name__,
+            "detail": str(error),
+            "summary": f"The agent integration for {agent.display_name} could not be refreshed; run `command` by hand to finish it.",
+        }
+    child = upgrade._process_result(completed)
+    if completed.stdout.strip():
+        with suppress(json.JSONDecodeError):
+            child["result"] = json.loads(completed.stdout)
+    reported = child.get("result")
+    steps = reported.get("steps") if isinstance(reported, dict) else None
+    steps = steps if isinstance(steps, dict) else {}
+    mcp_step = steps.get("mcp_config")
+    skill = completed.returncode == 0 and _step_succeeded(steps.get("skill_install"))
+    registration = completed.returncode == 0 and _step_succeeded(mcp_step)
+    ok = skill and registration
+    return {
+        **outcome,
+        "ok": ok,
+        "skill": skill,
+        "registration": registration,
+        # An entry that already named this launcher is in place and current, so
+        # it counts as refreshed. It was not rewritten, and only a rewrite is
+        # something an agent host has to be restarted to pick up.
+        "registration_rewritten": registration and not (isinstance(mcp_step, dict) and mcp_step.get("skipped") is True),
+        "install": child,
+        "summary": (
+            f"Agentic HIL's skill and MCP registration for {agent.display_name} were refreshed from the new release."
+            if ok
+            else f"The agent integration for {agent.display_name} was not fully refreshed; run `command` by hand to finish it."
+        ),
+    }
+
+
+def _step_succeeded(step: object) -> bool:
+    return isinstance(step, dict) and overall_success(step)
 
 
 def _agent_mcp_config_path(agent_id: str) -> Path:
@@ -618,6 +748,45 @@ def _unsupported_agent(agent: str, summary: str) -> JsonObject:
     return {"ok": False, "error_type": "unsupported_agent", "summary": summary, "agent": normalize_agent(agent), "allowed_agents": supported_skill_agents()}
 
 
+def _registration_restart(agent: SkillAgent, mcp_result: JsonObject) -> JsonObject:
+    """Whether a registration was just written, and the sentence that says so.
+
+    A host reads its MCP registrations once, when the session starts, so the
+    session that writes one cannot see the tools it registered however long it
+    waits for them. That news belongs on this result and nowhere else: the
+    session that ran the command reads this and reports it in the same breath as
+    `ok: true`, instead of both sides discovering it by waiting.
+
+    It is claimed only for a registration that was actually written. A second
+    `agent-install` that finds its own entry already there reports `skipped`, and
+    a conflict or a failure wrote nothing at all; asking for a restart on any of
+    those would be asking for one that reloads what is already loaded.
+    """
+    if mcp_result.get("ok") is not True or mcp_result.get("skipped") is True:
+        return {"restart_required": False}
+    return {
+        "restart_required": True,
+        "restart_notice": (
+            f"The {agent.display_name} session that ran this must be restarted before the agentic-hil MCP tools "
+            "appear; it read its registrations when it started and this one is newer. `agentic-hil doctor` at a "
+            "shell works now and needs no restart."
+        ),
+    }
+
+
+def _with_restart_notice(result: JsonObject) -> JsonObject:
+    """Put the restart sentence where a person reading the terminal sees it.
+
+    The CLI prints one JSON document and that is its human output, so a field
+    nobody reads first is a field a person scrolls past. `summary` is the line
+    both a person and an agent read, so the sentence goes there as well as into
+    its own key."""
+    notice = result.get("restart_notice")
+    if isinstance(notice, str) and isinstance(result.get("summary"), str):
+        result["summary"] = f"{result['summary']} {notice}"
+    return result
+
+
 def install_agent(agent: str, force: bool = False) -> JsonObject:
     """Install what is user-wide, once per user and agent.
 
@@ -674,6 +843,7 @@ def install_agent(agent: str, force: bool = False) -> JsonObject:
             "scope": "user",
             "summary": "Agentic HIL agent integration installed for this user account." if ok else "Agentic HIL agent installation failed; committed file changes were rolled back.",
             "agent": agent,
+            **_registration_restart(resolved_agent, mcp_result),
             "command": command,
             "permission_changes": permission_changes,
             "rollback": {"attempted": not ok, "ok": not rollback_errors, "errors": rollback_errors},
@@ -688,7 +858,7 @@ def install_agent(agent: str, force: bool = False) -> JsonObject:
             surviving = _skill_rollback_did_not_own(snapshots, _agent_skill_target(resolved_agent))
             if surviving is not None:
                 result["left_behind"] = surviving
-        return result
+        return _with_restart_notice(result)
 
 
 _NO_AGENT_NAMED = "No agent was named, so no agent write restriction was applied. Pass --agent to have that agent refuse its own write tools on the policy files."
@@ -867,6 +1037,10 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
         "tool": "agentic_hil_setup",
         "summary": summary,
         "agent": agent,
+        # Read off the user-wide half rather than decided again: that half is the
+        # one that writes the registration, and a second reading of the same
+        # step is a second answer waiting to differ from the first.
+        **{key: user_result[key] for key in ("restart_required", "restart_notice") if key in user_result},
         "state_root_changes": project_result["state_root_changes"],
         "permission_changes": [*user_result["permission_changes"], *project_result["permission_changes"]],
         "rollback": {
@@ -892,7 +1066,7 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
         )
     if "left_behind" in user_result:
         result["left_behind"] = user_result["left_behind"]
-    return result
+    return _with_restart_notice(result)
 
 
 def _skill_rollback_did_not_own(snapshots: list[FileSnapshot], skill_target: Path) -> JsonObject | None:
@@ -1501,162 +1675,19 @@ def initialized_config_path(workspace: Path) -> Path:
 
 
 def start_detached_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0) -> JsonObject:
-    """Start a run in its own process and answer at once.
-
-    The plan is loaded here as well as in the worker, and deliberately: a plan
-    that does not load is a fault in the file, and answering it with a handle to
-    go and ask about would put a refusal a caller could have had immediately
-    behind a second command."""
-    config = load_authoritative_config(Path.cwd())
-    load_test_config(test_config_path, config.work_dir)
-    return start_detached_run(config, test_config_path or DEFAULT_TEST_CONFIG_PATH, wait_s=wait_s)
+    """Start a run in its own process and answer at once, for this working directory."""
+    return start_plan_detached(load_authoritative_config(Path.cwd()), test_config_path, wait_s=wait_s)
 
 
 def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0, run_handle: str | None = None) -> JsonObject:
-    """Run a plan to its end and answer with the report.
+    """Run a plan to its end and answer with the report, for this working directory.
 
-    Registered under a run handle either way. A detached worker is handed the
-    handle its start command printed; a synchronous run mints its own, so a
-    plan running in one terminal can still be asked to stop from another
-    instead of being killed, which is the dead-owner route."""
-    config = load_authoritative_config(Path.cwd())
-    test_config = load_test_config(test_config_path, config.work_dir)
-    registration = RunRegistration.take(
-        config,
-        run_handle or new_run_handle(),
-        name=test_config.name,
-        test_config_path=test_config.path,
-        detached=run_handle is not None,
-    )
-    with registration:
-        result = run_registered_test_reactor(config, test_config, wait_s=wait_s, registration=registration)
-        registration.finish(result)
-    return result
-
-
-def run_registered_test_reactor(config: AgenticHILConfig, test_config: TestConfig, *, wait_s: float, registration: RunRegistration) -> JsonObject:
-    service = AgenticHILToolService(config, frontend="reactor")
-    # The plan's devices are held from before its first step to after its last,
-    # not around each call: between two steps there would otherwise be no lock at
-    # all, and an observation from outside could reach the board exactly where
-    # the plan assumes nothing moved. The same declaration fixes what this run
-    # may touch, so a step reaching past the plan is refused rather than
-    # silently widening what the plan says it does.
-    plan = plan_devices(config, test_config)
-    devices = plan.lock_keys
-    if devices:
-        try:
-            service.coordinator.begin_run(plan, label=test_config.name, wait_s=wait_s)
-        except CoordinationError as error:
-            service.close()
-            return write_report(
-                config,
-                {
-                    "tool": "test_reactor",
-                    "name": test_config.name,
-                    "test_config_path": test_config.path,
-                    "steps": [],
-                    "cleanup": [],
-                    "cleanup_ok": True,
-                    "declared_devices": devices,
-                    **error.result,
-                    "summary": str(error.result.get("summary", "A device this plan declares is unavailable.")) + " No step ran.",
-                    "run": registration.handle,
-                },
-            )
-    # Published only now: a run says it is running once it holds the devices it
-    # declared, so a handle reported as running is a handle that has the bench.
-    # A run refused the bench above never reaches this and is answered as the
-    # finished run it is.
-    registration.running()
-    # A step naming another probe gets its own service driving that debugger,
-    # sharing the base coordinator so the whole project stays one owner.
-    def debugger_service_factory(bound_config: AgenticHILConfig) -> AgenticHILToolService:
-        return AgenticHILToolService(bound_config, coordinator=service.coordinator, frontend="reactor")
-
-    # Construction happens inside the guarded block: the factory builds real
-    # per-probe services while the plan runs, so a failure there must still
-    # produce a JSON error result and fall through to service.close() below.
-    reactor: TestReactor | None = None
-    primary_error: BaseException | None = None
-    try:
-        reactor = TestReactor(
-            service.config,
-            service,
-            service_factory=debugger_service_factory,
-            stop_requested=registration.stop_requested,
-            on_progress=registration.progress,
-        )
-        result = reactor.run(test_config)
-    except BaseException as error:
-        primary_error = error
-        result = {
-            "ok": False,
-            "tool": "test_reactor",
-            "name": test_config.name,
-            "test_config_path": test_config.path,
-            "error_type": "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "reactor_exception",
-            "exception_type": type(error).__name__,
-            "summary": "Test reactor was interrupted; all containment steps were attempted.",
-            "steps": [],
-            "cleanup": getattr(error, "agentic_hil_cleanup", []),
-            "cleanup_ok": False,
-        }
-    try:
-        if reactor is not None:
-            reactor.close()
-    except BaseException as error:
-        cleanup_error = {
-            "device": "reactor",
-            "action": "close",
-            "result": {
-                "ok": False,
-                "tool": "test_reactor",
-                "error_type": "cleanup_exception",
-                "summary": "Per-device service cleanup raised an exception.",
-                "exception_type": type(error).__name__,
-                "backend_error": str(error),
-            },
-        }
-        result["ok"] = False
-        result["cleanup_ok"] = False
-        result.setdefault("cleanup", []).append(cleanup_error)
-        result.setdefault("cleanup_errors", []).append(cleanup_error)
-        result.setdefault("step_error_type", result.get("error_type"))
-        result["error_type"] = "cleanup_failed"
-        result["summary"] = "Test reactor sequence failed during cleanup."
-        if primary_error is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
-            primary_error = error
-    try:
-        service.close()
-    except BaseException as error:
-        cleanup_error = {
-            "device": "service",
-            "action": "close",
-            "result": {
-                "ok": False,
-                "tool": "test_reactor",
-                "error_type": "cleanup_exception",
-                "summary": "Agentic HIL service cleanup raised an exception.",
-                "exception_type": type(error).__name__,
-                "backend_error": str(error),
-            },
-        }
-        result["ok"] = False
-        result["cleanup_ok"] = False
-        result.setdefault("cleanup", []).append(cleanup_error)
-        result.setdefault("cleanup_errors", []).append(cleanup_error)
-        result.setdefault("step_error_type", result.get("error_type"))
-        result["error_type"] = "cleanup_failed"
-        result["summary"] = "Test reactor sequence failed during cleanup."
-        if primary_error is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
-            primary_error = error
-    written = write_report(config, {**result, "run": registration.handle})
-    if primary_error is not None:
-        if written.get("audit_ok") is False:
-            primary_error.args = (*primary_error.args, "Final reactor audit failed.")
-        raise primary_error
-    return written
+    The command's whole contribution is which configuration the run is bound to:
+    an operator at a shell means the project they are standing in, and the MCP
+    tools mean the one their server was started on. What a run then is lives in
+    `reactorrun.py`, where both frontends read it from.
+    """
+    return run_plan(load_authoritative_config(Path.cwd()), test_config_path, wait_s=wait_s, run_handle=run_handle)
 
 
 def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
@@ -1683,9 +1714,10 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narro
         # rather than picking up whatever `openocd` happens to be on PATH.
         next_steps.append(
             "Your debuggers entry names no toolchain yet, so it drives no board however its permissions read. Set "
-            "`executable` to the absolute path of your OpenOCD, STM32CubeProgrammer or pyOCD binary; for OpenOCD also "
-            "set interface_cfg and target_cfg to absolute script paths outside the workspace. `agentic-hil doctor` "
-            "checks the entry from the moment it names one."
+            "`executable` to the absolute path of your OpenOCD, STM32CubeProgrammer or pyOCD binary; for OpenOCD keep "
+            "interface_cfg and target_cfg as OpenOCD script names such as `interface/stlink.cfg`, or give them "
+            "absolute paths to scripts outside the workspace. `agentic-hil doctor` checks the entry from the moment it "
+            "names one."
         )
     next_steps.append(granted_step)
     next_steps.extend([
@@ -2278,6 +2310,30 @@ def config_reload(config_path: str | None = None) -> JsonObject:
     }
 
 
+def _doctor_debugger_scripts(entry: DebuggerConfig) -> JsonObject:
+    """Say what each OpenOCD script field is, rather than what it is not.
+
+    `interface/stlink.cfg` names no file on this host and is not meant to: it is
+    the name OpenOCD resolves against its own script tree. Reported as a missing
+    file it reads as a broken bench, and the first answer an install found for
+    that reading was to fabricate the file under `/tmp` and point the
+    authoritative configuration there. So the report labels the kind, and only a
+    value that claims to be a path on this host is answered with whether it is
+    one.
+    """
+    report: JsonObject = {}
+    for field, value in (("interface_cfg", entry.interface_cfg), ("target_cfg", entry.target_cfg)):
+        kind = openocd_script_kind(value)
+        detail: JsonObject = {"value": value, "kind": kind}
+        if kind == OPENOCD_SCRIPT_SEARCH_NAME:
+            detail["resolved_by"] = "openocd"
+            detail["note"] = "An OpenOCD search name, resolved against OpenOCD's own script path when it runs. It does not name a file on this host and does not have to exist here."
+        else:
+            detail["exists"] = Path(value).is_file()
+        report[field] = detail
+    return report
+
+
 def _section_preview(config: AgenticHILConfig, section: str) -> object:
     if section == "target":
         return asdict(config.target)
@@ -2315,7 +2371,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         "ok": True,
         "tool": "debugger_info",
         "skipped": True,
-        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission it can, so what is missing is the toolchain, not a grant — set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary, and for OpenOCD its two scripts as absolute paths outside the workspace.",
+        "summary": "Debugger check skipped: no configured debugger pins a toolchain, so there is nothing to check yet. A generated configuration already grants every permission it can, so what is missing is the toolchain, not a grant: set `debuggers.<name>.executable` to your OpenOCD, STM32CubeProgrammer or pyOCD binary. For OpenOCD its two scripts are either OpenOCD's own script names, which it resolves itself, or absolute paths outside the workspace.",
     }
     # Only a definite negative is a failure. A target-support check that could
     # not run said nothing about this configuration, and reporting it as broken
@@ -2387,6 +2443,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
                 "probe_id": entry.probe_id,
                 "bound": name == config.debugger_id,
                 "permissions": asdict(entry.permissions),
+                **({"scripts": _doctor_debugger_scripts(entry)} if entry.type == "openocd" else {}),
                 **({"check": checks[name]} if name in checks else {}),
                 **({"target_support": target_support[name]} if name in target_support else {}),
             }
@@ -2462,14 +2519,60 @@ def _doctor_mcp_report() -> JsonObject:
     }
 
 
+def bootstrap_probe_listing() -> JsonObject:
+    """The probe listing a project with no configuration can still be given.
+
+    `setup`'s bootstrap already enumerates probes before any configuration
+    exists, with the fixed read-only command package code owns, so this reuses
+    that discovery rather than growing a second one beside it. The answer says
+    what it is: `source: bootstrap` and the backend that ran, so nobody reads it
+    as the configured bench speaking.
+
+    Refusing here was the wrong answer to the right question. The one moment an
+    operator genuinely wants a probe listing with nothing else in place is right
+    before the first `setup`: is the board visible, is there one of it, which
+    serial. `config_file_not_found` withheld an answer this tool could already
+    give, for a configuration the question does not need."""
+    listed = enumerate_attached_probes()
+    result: JsonObject = {
+        "ok": listed["ok"],
+        "tool": "debugger_probes_list",
+        "source": "bootstrap",
+        "backend": BOOTSTRAP_BACKEND,
+        **{key: value for key, value in listed.items() if key not in {"ok", "tool", "backend"}},
+    }
+    if listed["ok"]:
+        result["summary"] = (
+            f"{len(listed['probes'])} connected debugger probe(s) detected by bootstrap discovery. This project has no "
+            "authoritative configuration yet, so the fixed read-only setup commands answered and no configured "
+            "debugger backend was involved."
+        )
+    result["next_step"] = (
+        "Write this project's configuration with `agentic-hil setup --agent <agent>` from its root. After that this "
+        "command answers through the configured backend instead."
+    )
+    return result
+
+
 def debugger_probes() -> JsonObject:
     """Enumerate connected probes for every configured debugger that may probe.
 
     Probe discovery is how an operator finds the serial numbers a multi-board
     config needs, so it has to work in exactly the multi-probe project where no
     single debugger is bound. Each backend enumerates all attached probes, so
-    binding one entry at a time is only about which toolchain to invoke."""
-    config = load_authoritative_config(Path.cwd())
+    binding one entry at a time is only about which toolchain to invoke.
+
+    With no configuration at all, the answer comes from `setup`'s own bootstrap
+    instead of a refusal; see `bootstrap_probe_listing`. Only the missing file
+    takes that route. A configuration that is there and will not load is a
+    different fact about a bench somebody has already set up, and it still
+    refuses with what is wrong with it."""
+    try:
+        config = load_authoritative_config(Path.cwd())
+    except ConfigError as error:
+        if error.error_type != "config_file_not_found":
+            raise
+        return bootstrap_probe_listing()
     if config.debugger is not None:
         service = AgenticHILToolService(config)
         try:

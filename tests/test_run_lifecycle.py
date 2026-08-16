@@ -687,3 +687,46 @@ def test_a_record_read_that_never_gets_an_answer_is_bounded_and_honest(tmp_path:
     assert caught.value.error_type == "run_state_invalid"
     assert "held forever" in str(caught.value.details.get("backend_error"))
     assert len(asked) == runlifecycle._RECORD_READ_ATTEMPTS
+
+
+def test_a_worker_that_finished_in_the_instant_of_the_probe_is_not_called_gone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The worker publishes its terminal record BEFORE it releases its lifetime
+    # lock, so a status poll can take the lock in the instant between the two
+    # and still owes the caller the record's own ending, not a guess. The gone
+    # probe here finishes the worker as its side effect: exactly the boundary
+    # the fourth CI sighting of this race landed on.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    handle = "run-0123456789abcdef"
+    runlifecycle.runs_directory(config).mkdir(parents=True, exist_ok=True)
+    runlifecycle.write_run_record(config, handle, {"version": runlifecycle.RUN_RECORD_VERSION, "state": "running", "run_ok": None})
+
+    def gone_and_just_finished(inner_config, inner_handle):
+        runlifecycle.write_run_record(inner_config, inner_handle, {"version": runlifecycle.RUN_RECORD_VERSION, "state": "finished", "run_ok": True})
+        return True
+
+    monkeypatch.setattr(runlifecycle, "worker_is_gone", gone_and_just_finished)
+
+    status = runlifecycle.run_status(config, handle)
+
+    assert status["state"] == "finished", status
+    assert status["run_ok"] is True
+
+
+def test_a_takeable_lock_over_a_running_record_stays_the_dead_worker_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The re-read must not soften the honest case: a lock anyone can take while
+    # the record still says running is a worker that died with no orderly end.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    handle = "run-0123456789abcdef"
+    runlifecycle.runs_directory(config).mkdir(parents=True, exist_ok=True)
+    runlifecycle.write_run_record(config, handle, {"version": runlifecycle.RUN_RECORD_VERSION, "state": "running", "run_ok": None})
+    monkeypatch.setattr(runlifecycle, "worker_is_gone", lambda *_: True)
+
+    status = runlifecycle.run_status(config, handle)
+
+    assert status["state"] == runlifecycle.RUN_WORKER_GONE, status

@@ -246,10 +246,11 @@ class OpenOCDBackend:
     def target_support(self) -> JsonObject:
         """OpenOCD has no target type to check.
 
-        It selects the target with `target_cfg`, a script config load already
-        resolved against an existing file, so there is no separate catalogue
-        that could be missing. Answered rather than omitted, so the field means
-        the same thing on every backend.
+        It selects the target with `target_cfg`, a script this OpenOCD reads
+        directly: either a file config load resolved here, or a search name
+        OpenOCD resolves against its own script path. So there is no separate
+        catalogue that could be missing. Answered rather than omitted, so the
+        field means the same thing on every backend.
         """
         return {
             "ok": True,

@@ -219,6 +219,24 @@ built on. A record the guard did not timestamp counts as inside the window: a ru
 that damaged its own guard log does not earn a clean verdict on the session that
 matters.
 
+Both checks read the same log, and both skip the same lines: the ones the guard
+marked `spawned_by`, meaning the Agentic HIL runtime started that debugger
+itself. Published mode is why. There `setup` runs the real bootstrap, which
+adopts whatever `openocd` resolves to on PATH; the product's own `doctor` and
+flash paths then make up the bulk of the log, and reading those as an agent
+reaching past the tools failed the run for routing hardware access through the
+product, which is what it did right. The lines are still written, because a log
+that dropped them would stop being a record of what ran. Nothing is relaxed for
+a direct call: the parent process is what decides, and above a shell the runtime
+started nothing.
+
+What PATH resolves `openocd` to is a stand-in that behaves like OpenOCD rather
+than a shim that refuses everything: `--version` answers, a script that is not
+there is reported the way OpenOCD reports it, and `init` reports that no adapter
+could be opened, because no board is attached to this container and the firmware
+cases are written around exactly that refusal. Reached by an agent directly it
+gives the same refusal and the same recorded event the shims always gave.
+
 `matching agent skill installed` compares the installed file against
 `/workspace/source`, the read-only mount whose contents the `source snapshot is
 unchanged` check has already proved. The trusted package staging is the

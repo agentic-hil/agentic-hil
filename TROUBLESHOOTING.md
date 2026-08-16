@@ -44,6 +44,22 @@ Do not store `uvx`, a workspace virtual environment, or a bare PATH command in `
 
 The MCP host must start in the firmware project root so Agentic HIL can discover its external authoritative config. If an operator-controlled registration or parent environment sets `AGENTIC_HIL_CONFIG`, it must be an absolute path; do not commit its machine-specific value in repository-controlled `.mcp.json`.
 
+## 1a. The One-Line Installer Stopped Before It Finished
+
+Symptom: `install.sh` or `install.ps1` printed one of its five steps and stopped, or finished without the `agentic-hil` command being reachable.
+
+Every step names itself, so the line it stopped on says which of these it is. Four failures account for almost all of them.
+
+**No Python 3.10 or newer, and Astral's uv installer cannot be reached.** Step 2 says `no uv and no Python 3.10 or newer here` and then fails on the fetch. The script has no third route by design: it will not install a system package manager's Python and it never runs `sudo`. Install `uv` or `pipx` yourself, user-local, or install a Python 3.10 or newer, then run the one-liner again. It is idempotent: a second run re-probes and picks up from where the machine now is.
+
+**`error: externally-managed-environment` (PEP 668).** The script prints `this Python is externally managed (PEP 668), so pip cannot own it; falling back to uv` and continues into the uv branch by itself, which is the correct resolution: `uv` installs into an environment of its own and needs no exception. If that fallback also fails, install `uv` or `pipx` by hand and run the one-liner again. Never reach for `pip install --break-system-packages`; neither script offers it, and it makes the distribution's own Python the thing that breaks next.
+
+**Step 3 says the command does not resolve on `PATH`.** The package is installed and its console script landed in a directory your shell does not look in. The script prints the exact line to add and deliberately edits no shell rc file and no Windows environment variable for you. Add it, open a fresh shell, and check with `agentic-hil --version`. If step 3 printed no directory at all, section 1 above has the wider fix.
+
+**`invalid peer certificate: UnknownIssuer`, or a `curl` or `Invoke-RestMethod` TLS error.** A TLS-intercepting proxy sits between this machine and `astral.sh` or PyPI. The `--system-certs` paragraph in section 1 above is the fix, including why `UV_SYSTEM_CERTS=1` in the operator's environment beats the flag on a single command line, and why disabling verification is not a fallback. On Windows PowerShell 5.1 the script raises TLS 1.2 before it fetches anything, so a TLS failure there is the proxy and not the protocol.
+
+Two things the one-liner never does, so they are never the cause: it writes no project configuration, and it runs nothing with elevated rights. If a step failed after `agent-install` had already run, the package and that agent's registration are in place, and the one line left is `agentic-hil agent-install --agent <claude-code|codex|opencode>` for whichever agent was missed.
+
 ## 2. `config_file_not_found` / `config_invalid` / `config_unreadable`
 
 Symptom: `agentic-hil doctor` returns one of these `error_type` values.
@@ -91,7 +107,7 @@ Symptom: `backend_error_type` is `interface_config_not_found`, `target_config_no
 
 Likely cause: OpenOCD cannot find `interface/stlink.cfg` or `target/stm32f4x.cfg`, or the target config does not match the installed OpenOCD layout.
 
-Fix: verify OpenOCD's script directory. In the authoritative config, use absolute paths to host-owned interface and target scripts outside the workspace.
+Fix: verify OpenOCD's script directory. `interface/stlink.cfg` and `target/stm32f4x.cfg` are search names that OpenOCD resolves itself, so the configuration accepts them without a file here and this failure means the installed OpenOCD found no script tree where it looks. Install the scripts, point `OPENOCD_SCRIPTS` at them, or name the files in the authoritative config by absolute path, outside the workspace. Do not write scripts under the system temporary directory and point the config there: that path is refused at load, because it stops describing the bench at the next reboot.
 
 ## 5a. `target_type_invalid` (pyOCD): the CMSIS pack is missing
 
@@ -350,15 +366,24 @@ For the operator case, `lease-status` carries a `quarantine_guidance` entry per 
 
 Use `agentic-hil upgrade` to move an existing installation forward. It upgrades through the manager that owns the interpreter running it (`uv tool`, `pipx`, `uv pip`, or `pip`) instead of whichever `agentic-hil` `PATH` resolves first, so a second copy is never upgraded by mistake. Restart the agent hosts afterwards; they load the MCP server at startup and keep running the old one until they do.
 
-**Read the version, not the exit code.** The result distinguishes three outcomes, because the package manager does not: `uv tool upgrade` exits 0 for "upgraded" and for "nothing to do" alike, and reading that code alone once made every no-op report success and send the operator to a restart that reloaded the same release.
+An upgrade that moved the version also rewrites what it had written outside the package: the agent skill file and the user-level MCP registration, for every agent that already has one of the two, out of the new release and never for an agent that was never set up. `refreshed` on the result reports both halves per agent, a refresh that failed carries the line that finishes it by hand and does not fail the upgrade, and an agent whose registration was rewritten is named in the summary because that is the one its host has to be restarted to pick up. `--agent` narrows that set and never widens it.
+
+**Read the version, not the exit code.** The result distinguishes these outcomes, because the package manager does not: `uv tool upgrade` exits 0 for "upgraded" and for "nothing to do" alike, and reading that code alone once made every no-op report success and send the operator to a restart that reloaded the same release.
 
 | Result | What happened | What to do |
 |---|---|---|
 | `ok: true`, `restart_required: true` | `previous_version` and `version` differ; the summary names both | Restart the agent hosts |
 | `ok: true`, `already_current: true` | Nothing newer to install; both version fields are the same number | Nothing. Do not restart: the same release would be reloaded |
 | `ok: false`, `error_type: upgrade_blocked_by_pin` | The manager records an exact version pin, so the upgrade could not move it | Run the line in `reinstall_command`, with the host stopped |
+| `ok: false`, `error_type: upgrade_failed`, `installation_intact: true` | The manager failed and the installation it was replacing still works; `version` is what it still runs | Fix what the manager reported and run it again. Nothing was lost |
+| `ok: false`, `error_type: installation_changed_after_failed_upgrade` | The manager failed but had already replaced files: the disk now loads a different version (`version`) from the one still running (`previous_version`) | Run the line in `reinstall_command`, with the host stopped. Do not restart onto the half-changed tree |
+| `ok: false`, `error_type: installation_broken` | The manager stopped part way and the package did not survive it: `agentic-hil` still starts and dies with a `ModuleNotFoundError` | Run the line in `reinstall_command`, with the host stopped. It carries the extras and the scope this installation had |
 
-Only the pinned case is a refusal, and only it exits non-zero: a machine that is already at the newest release has nothing wrong with it, so a provisioning script may run `agentic-hil upgrade` unconditionally. Read `restart_required` rather than assuming one: it is true on exactly the outcome that replaced something.
+Only the pinned case and the two failures are refusals, and only they exit non-zero: a machine that is already at the newest release has nothing wrong with it, so a provisioning script may run `agentic-hil upgrade` unconditionally. Read `restart_required` rather than assuming one: it is true on exactly the outcome that replaced something.
+
+**Already current installs nothing.** On the `pip` and `uv pip` routes the upgrade command is a plain `install --upgrade`, which decides whether there is anything to do while it is already replacing files. So the resolver is asked first, as that same install with `--dry-run`, and an installation already at the newest release answers `already_current` with `install_skipped: true` before any command that could remove a file has run. `uv tool upgrade` and `pipx upgrade` answer that question inside the manager and are not asked twice.
+
+**A failed upgrade says whether it left an installation.** After the manager stops, `agentic-hil upgrade` runs the same import the console script runs, through the same interpreter, and the version it loads is what tells the three failure rows above apart, measured rather than assumed: the same number still running is intact and unreplaced, a *different* one is a tree the failed run changed on disk before it stopped, and nothing loadable is a broken installation. The half-changed case names both numbers and refuses `restart_required`, because the version a failed run left on disk is not one to adopt by restarting onto it; `reinstall_command` restores a whole known installation instead. On a per-user `pip` installation the upgrade also passes `--user`, which keeps the replacement in the same directory the old copy was in; without it pip uninstalls from the per-user site and installs into the interpreter's default site, and a failure between those two steps is what leaves a console script with no package under it.
 
 An exact pin comes from the requirement the installation was created with: `uv tool install "agentic-hil==X.Y.Z"` records `==X.Y.Z`, and every later `uv tool upgrade` honours it and reports `hint: agentic-hil is pinned to ... (installed with an exact version pin)` on stderr. The Claude Code plugin's skill installs that way on purpose (it ships guidance for one release and says so), so a bench set up from the plugin is the case this refusal names. `reinstall_command` is the fix, and it carries the extras `installed_extras` found on the installation; `uv`'s own hint suggests `agentic-hil@latest`, which re-resolves the bare distribution and uninstalls whatever `[can]` or `[pyocd]` brought in. Stop the agent host before running it: it reinstalls the environment, and none of `uv tool install`'s forms have the `installation_in_use` check. Agentic HIL never runs that reinstall for you: which version a machine runs is the operator's decision, and a pin can be deliberate.
 
@@ -372,7 +397,7 @@ ModuleNotFoundError: No module named 'agentic_hil'
 
 `agentic-hil upgrade` refuses with `installation_in_use` before anything is removed, naming each holding process by pid and image path, and leaves the installation working. Close the host and run it again. Running `uv tool install --upgrade` or `uv tool install --force` by hand is what the refusal is protecting against: those have no such check.
 
-If an upgrade already destroyed the installation, nothing is recoverable in place; reinstall it, naming the extras, and take the environment name from the error message:
+If an upgrade already destroyed the installation, nothing is recoverable in place; reinstall it, naming the extras. When the destruction happened under `agentic-hil upgrade` itself, that result is `installation_broken` and `reinstall_command` on it is already the exact line for this machine, extras included. When it happened under a manager run by hand, take the environment name from the error message:
 
 ```bash
 uv tool install --force "agentic-hil[pyocd]"     # or pipx install --force "agentic-hil[pyocd]"

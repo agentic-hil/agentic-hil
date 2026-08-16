@@ -32,7 +32,7 @@ from agentic_hil import __version__
 from agentic_hil import process as process_module
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends import openocd as openocd_backend
-from agentic_hil.backends.common import command_for_log
+from agentic_hil.backends.common import CompletedCommand, command_for_log
 from agentic_hil.backends.pyocd import parse_pyocd_probes
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids
 from agentic_hil.can import CanFrame, ProcessCanAdapterSession, open_python_can_adapter
@@ -52,6 +52,7 @@ from agentic_hil.cli import (
     mcp_config,
     mcp_server_command,
     register_agent_mcp,
+    resolve_skill_agent,
     restrict_agent_write_access,
     schema,
     setup_project,
@@ -163,6 +164,10 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     assert claude_json["mcpServers"]["agentic-hil"]["command"] == command
     assert (home / ".claude" / "skills" / "agentic-hil" / "SKILL.md").is_file()
     assert config_path.is_file()
+    # This run wrote a registration, so the session that ran it is looking at
+    # tools that cannot appear until it restarts, and the result says so.
+    assert result["restart_required"] is True
+    assert "Claude Code" in result["restart_notice"]
 
 
 def test_setup_force_preserves_existing_authoritative_config_byte_for_byte(
@@ -296,22 +301,88 @@ def test_doctor_calls_a_copied_installation_what_it_is(monkeypatch: pytest.Monke
     assert "summary" not in report
 
 
-def test_upgrade_uses_running_python_and_refreshes_skill_from_updated_package(
+# The four subprocesses one `agentic-hil upgrade` can run, and canned answers
+# for each. The resolution query is first and is the one that decides whether
+# any of the others happen at all: pip's own `--dry-run --report -`, whose
+# `install` list is empty exactly when pip would install nothing.
+PIP_UPGRADE_COMMAND = [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]
+UV_PIP_UPGRADE_COMMAND = ["uv.exe", "pip", "install", "--python", sys.executable, "--upgrade", "agentic-hil"]
+PIP_WOULD_INSTALL_NOTHING = subprocess.CompletedProcess[str]([], 0, json.dumps({"version": "1", "install": []}), "")
+PIP_WOULD_INSTALL_A_RELEASE = subprocess.CompletedProcess[str]([], 0, json.dumps({"version": "1", "install": [{"metadata": {"name": "agentic-hil", "version": "9.9.9"}}]}), "")
+UV_PIP_WOULD_CHANGE_NOTHING = subprocess.CompletedProcess[str]([], 0, "Resolved 8 packages in 12ms\nChecked 8 packages in 1ms\nWould make no changes\n", "")
+MANAGER_INSTALLED = subprocess.CompletedProcess[str]([], 0, "installed\n", "")
+AGENT_INSTALL_DONE = subprocess.CompletedProcess[str]([], 0, json.dumps({"ok": True, "steps": {"skill_install": {"ok": True}, "mcp_config": {"ok": True}}}), "")
+
+
+def _version_answer(version: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess[str]([], 0, f"{version}\n", "")
+
+
+def _recording_manager(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    *,
+    answers: dict[str, subprocess.CompletedProcess[str]],
+    manager: str = "pip",
+    command: list[str] | None = None,
+) -> list[tuple[list[str], str | None]]:
+    """Every subprocess this upgrade runs, recorded, with one canned answer per kind.
+
+    The kinds are `resolution` (the non-mutating `--dry-run` query),
+    `install` (the one command that can replace this installation),
+    `version` (the import check) and `agent-install` (the refresh). A kind with
+    no answer fails the test where it is run rather than defaulting to
+    something, which is what lets a test assert that a mutating command was
+    never reached by simply not offering an answer for it.
+    """
     calls: list[tuple[list[str], str | None]] = []
 
-    def run(command: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
-        calls.append((command, cwd))
-        if command[-1] == "--version":
-            return subprocess.CompletedProcess(command, 0, "9.9.9\n", "")
-        if "skill-install" in command:
-            return subprocess.CompletedProcess(command, 0, '{"ok": true}\n', "")
-        return subprocess.CompletedProcess(command, 0, "installed\n", "")
+    def kind_of(invoked: list[str]) -> str:
+        if "--dry-run" in invoked:
+            return "resolution"
+        if invoked[-1] == "--version":
+            return "version"
+        if "agent-install" in invoked:
+            return "agent-install"
+        return "install"
 
-    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: ("pip", [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]))
+    def run(invoked: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append((invoked, cwd))
+        kind = kind_of(invoked)
+        if kind not in answers:
+            pytest.fail(f"the upgrade ran a {kind} subprocess it was not supposed to reach: {invoked}")
+        return answers[kind]
+
+    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: (manager, command or PIP_UPGRADE_COMMAND))
     monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", list)
     monkeypatch.setattr("agentic_hil.upgrade._run_upgrade_process", run)
+    return calls
+
+
+def _place_agent_skill(agent_id: str) -> Path:
+    """The skill file a previous `agentic-hil agent-install` left for this agent."""
+    from agentic_hil.cli import _agent_skill_target
+
+    agent = resolve_skill_agent(agent_id)
+    assert agent is not None
+    target = _agent_skill_target(agent)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# installed by an earlier release\n", encoding="utf-8")
+    return target
+
+
+def test_upgrade_uses_running_python_and_refreshes_the_agent_it_had_set_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _place_agent_skill("opencode")
+    calls = _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": MANAGER_INSTALLED,
+            "version": _version_answer("9.9.9"),
+            "agent-install": AGENT_INSTALL_DONE,
+        },
+    )
 
     result = upgrade_installation(["opencode"])
 
@@ -320,23 +391,33 @@ def test_upgrade_uses_running_python_and_refreshes_skill_from_updated_package(
     assert result["restart_required"] is True
     # The one outcome that may claim an upgrade, and it says which two numbers
     # it moved between rather than asserting movement in the abstract.
-    assert result["summary"] == f"Agentic HIL upgraded from {__version__} to 9.9.9; restart agent hosts to load the new MCP server."
+    assert result["summary"].startswith(f"Agentic HIL upgraded from {__version__} to 9.9.9; restart agent hosts to load the new MCP server.")
     assert "error_type" not in result
-    assert calls[0][0][:3] == [sys.executable, "-m", "pip"]
-    assert calls[1] == ([sys.executable, "-m", "agentic_hil", "--version"], None)
-    assert calls[2][0] == [sys.executable, "-m", "agentic_hil", "skill-install", "--agent", "opencode"]
-    assert calls[2][1] is not None
+    # The resolution query comes first and is not a command that could replace
+    # anything; only then the manager, the import check, and the refresh.
+    assert calls[0][0][:3] == [sys.executable, "-m", "pip"] and "--dry-run" in calls[0][0]
+    assert calls[1][0] == PIP_UPGRADE_COMMAND
+    assert calls[2] == ([sys.executable, "-m", "agentic_hil", "--version"], None)
+    assert calls[3][0] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]
+    assert calls[3][1] is not None
 
 
-def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
+def test_upgrade_stops_before_the_agent_refresh_when_the_package_manager_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    command = [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]
-    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: ("pip", command))
-    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", list)
-    monkeypatch.setattr(
-        "agentic_hil.upgrade._run_upgrade_process",
-        lambda invoked, **_kwargs: subprocess.CompletedProcess(invoked, 1, "", "network failed"),
+    """A manager that failed on the network, over an installation that survived it.
+
+    The refresh is not reached, because there is no new package to refresh out
+    of, and the result says the installation is intact rather than leaving a
+    reader to assume it either way."""
+    _place_agent_skill("opencode")
+    _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": subprocess.CompletedProcess([], 1, "", "network failed"),
+            "version": _version_answer(__version__),
+        },
     )
 
     result = upgrade_installation(["opencode"])
@@ -344,6 +425,57 @@ def test_upgrade_stops_before_skill_refresh_when_package_manager_fails(
     assert result["ok"] is False
     assert result["error_type"] == "upgrade_failed"
     assert result["install"]["stderr"] == "network failed"
+    assert result["installation_intact"] is True
+    assert result["version"] == __version__
+    assert result["restart_required"] is False
+    assert "refreshed" not in result
+
+
+def test_a_manager_failure_that_changed_the_version_on_disk_is_reported_as_half_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed run that replaced files before it stopped is neither of the two it used to be.
+
+    `_failed_upgrade` measures what the installation loads after the manager
+    stops. The reported defect was reading any loadable version as intact and
+    `was not replaced`: with the manager failed and the on-disk package now a
+    different release, that states the opposite of what the probe found. Here the
+    post-failure import answers a version other than the running one, so the
+    result names both numbers, refuses the restart, and points at the same
+    known-good reinstall a broken installation gets.
+    """
+    from agentic_hil.knowledge import ERROR_CATALOGUE
+
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
+    _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": subprocess.CompletedProcess([], 1, "", "post-install step failed"),
+            "version": _version_answer("9.9.9"),
+        },
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "installation_changed_after_failed_upgrade"
+    assert result["installation_intact"] is False
+    assert result["changed_on_disk"] is True
+    assert result["previous_version"] == __version__
+    assert result["version"] == "9.9.9"
+    assert result["previous_version"] != result["version"]
+    assert result["restart_required"] is False
+    assert result["installed_extras"] == ["can"]
+    assert "agentic-hil[can]" in result["reinstall_command"]
+    assert result["reinstall_command"] in result["summary"]
+    assert "9.9.9" in result["summary"] and __version__ in result["summary"]
+    assert "was not replaced" not in result["summary"]
+    assert result["remediation"] == list(ERROR_CATALOGUE["installation_changed_after_failed_upgrade"].remediation)
+    # The refresh is never reached: there is no trustworthy new package to
+    # refresh out of, only a half-changed tree the reinstall has to replace.
+    assert "refreshed" not in result
 
 
 # The line `uv tool upgrade` wrote on the reporter's Linux box, beside the exit
@@ -456,6 +588,402 @@ def test_upgrade_that_finds_nothing_newer_succeeds_without_asking_for_a_restart(
     assert "reinstall_command" not in result
     assert "pinned_version" not in result
     assert not any("skill-install" in call for call in calls)
+
+
+# ---------------------------------------------------------------------------
+# Already current, decided before anything can be replaced.
+#
+# The reported defect, measured on a pip `--user` installation that was already
+# at the newest release: `agentic-hil upgrade` ran the manager anyway, the
+# manager failed, and the failure took the installation with it. The manager
+# ran because nothing had asked whether it needed to. `uv tool upgrade` and
+# `pipx upgrade` answer that question inside themselves and exit without
+# touching anything; the two pip-shaped routes answer it while they are already
+# replacing files, so it has to be put to them first, as the same install with
+# `--dry-run`.
+
+
+def test_an_already_current_pip_installation_runs_no_command_that_could_replace_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tooth of the idempotence half: no answer is offered for `install`.
+
+    `_recording_manager` fails the test on any subprocess kind it was not given
+    an answer for, so the assertion that the mutating command never ran is made
+    by its absence from the answers rather than by counting calls afterwards.
+    The refresh is absent for the same reason: nothing moved, so there is
+    nothing to rewrite anybody's skill file out of."""
+    _place_agent_skill("opencode")
+    calls = _recording_manager(monkeypatch, answers={"resolution": PIP_WOULD_INSTALL_NOTHING})
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["install_skipped"] is True
+    assert result["restart_required"] is False
+    assert result["previous_version"] == result["version"] == __version__
+    assert "upgraded_on_disk" not in result
+    assert "refreshed" not in result
+    assert "error_type" not in result
+    # One subprocess, and it is a question rather than an install.
+    assert len(calls) == 1
+    assert calls[0][0] == [*PIP_UPGRADE_COMMAND, "--dry-run", "--quiet", "--report", "-"]
+    # The summary is what an operator reads, so it carries the fact the fields
+    # carry: nothing was installed, and nothing needs restarting.
+    assert "no command that could replace it was run" in result["summary"]
+
+
+def test_the_uv_pip_route_is_short_circuited_by_its_own_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`uv pip install --upgrade` shares the shape and therefore the defect.
+
+    It is the other route that hands a bare requirement to a resolver, so it is
+    asked the same way. uv publishes no machine-readable report for `uv pip`, so
+    the answer is read out of the line it prints, exactly as the exact-pin hint
+    is. `uv tool upgrade` and `pipx upgrade` are not asked: both read the
+    requirement they recorded and exit without touching the environment, which
+    is the check itself, one level down."""
+    calls = _recording_manager(
+        monkeypatch,
+        answers={"resolution": UV_PIP_WOULD_CHANGE_NOTHING},
+        manager="uv",
+        command=UV_PIP_UPGRADE_COMMAND,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["already_current"] is True
+    assert result["install_skipped"] is True
+    assert calls[0][0] == [*UV_PIP_UPGRADE_COMMAND, "--dry-run"]
+
+
+@pytest.mark.parametrize(
+    "unreadable",
+    [
+        subprocess.CompletedProcess[str]([], 2, "", "no such option: --report"),
+        subprocess.CompletedProcess[str]([], 0, "not json at all", ""),
+        subprocess.CompletedProcess[str]([], 0, json.dumps({"version": "1"}), ""),
+    ],
+)
+def test_a_resolution_this_program_cannot_read_upgrades_exactly_as_before(
+    unreadable: subprocess.CompletedProcess[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An old pip, a changed report, a query that failed: none of them is an answer.
+
+    The check exists to stop an upgrade that has nothing to do, never to invent
+    one. Anything it cannot read falls through to the upgrade this command
+    always ran, so a machine with a pip too old for `--report` is slower to
+    answer and never wrong."""
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": unreadable, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+    )
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    assert result["version"] == "9.9.9"
+
+
+# ---------------------------------------------------------------------------
+# A failed upgrade, and whether it left an installation behind.
+
+
+def test_an_upgrade_that_destroyed_the_installation_names_the_command_that_repairs_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second half of the report: the shim survived and the package did not.
+
+    An `upgrade_failed` on its own told the operator that a package manager
+    returned non-zero. It did not tell them that `agentic-hil` would now die
+    with a ModuleNotFoundError on the next call, and it named no way back. The
+    difference is measured rather than assumed: the same import the console
+    script performs, run after the manager stopped.
+
+    The extras are read before the manager runs, which is what the fading fake
+    below pins. By the time this result is written the distribution metadata
+    that names them is part of what is missing, so a repair command built then
+    would name the bare distribution and take `[can]` off a bench that had it.
+    """
+    from agentic_hil.knowledge import ERROR_CATALOGUE
+
+    seen: list[int] = []
+
+    def fading_extras() -> tuple[str, ...]:
+        seen.append(1)
+        return ("can",) if len(seen) == 1 else ()
+
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", fading_extras)
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
+    _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": subprocess.CompletedProcess([], 1, "", "could not install"),
+            "version": subprocess.CompletedProcess([], 1, "", "ModuleNotFoundError: No module named 'agentic_hil'"),
+        },
+    )
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "installation_broken"
+    assert result["installation_broken"] is True
+    assert result["installed_extras"] == ["can"]
+    assert "agentic-hil[can]" in result["reinstall_command"]
+    assert result["reinstall_command"] in result["summary"]
+    assert "installation is now broken" in result["summary"]
+    assert result["restart_required"] is False
+    assert "installation_intact" not in result
+    assert result["remediation"] == list(ERROR_CATALOGUE["installation_broken"].remediation)
+    assert result["verification"]["stderr"].startswith("ModuleNotFoundError")
+
+
+def test_a_manager_that_exited_zero_and_left_nothing_loadable_is_the_same_broken_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other door to the same end state, and it used to have its own name.
+
+    `upgrade_verification_failed` said something could not be loaded and
+    stopped there. The fact is the installation is gone and the fix is one
+    command, so it is reported as the one thing it is."""
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
+    _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": MANAGER_INSTALLED,
+            "version": subprocess.CompletedProcess([], 1, "", "ModuleNotFoundError: No module named 'agentic_hil.cli'"),
+        },
+    )
+
+    result = upgrade_installation([])
+
+    assert result["error_type"] == "installation_broken"
+    assert result["installation_broken"] is True
+    assert result["install"]["returncode"] == 0
+    assert result["reinstall_command"]
+    assert "-m pip install --upgrade" in result["reinstall_command"]
+
+
+def test_a_per_user_pip_installation_is_upgraded_inside_its_own_scheme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--user` is what keeps pip replacing in place instead of moving the package.
+
+    Without it, pip uninstalls the distribution from the per-user site and
+    installs the replacement into the interpreter's default site: two
+    directories, so a failure between them leaves the console script in the
+    per-user Scripts directory with no package under it. That is the reported
+    end state, reached without this program asking for a reinstall or an
+    uninstall of its own, and the flag is the whole of the difference."""
+    from agentic_hil.upgrade import _upgrade_command, reinstall_command_with_extras
+
+    monkeypatch.setattr(sys, "prefix", "C:/Python313")
+    monkeypatch.setattr(sys, "executable", "PYTHON")
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    monkeypatch.setattr("agentic_hil.upgrade._user_site_installation", lambda: True)
+
+    assert _upgrade_command() == ("pip", ["PYTHON", "-m", "pip", "install", "--upgrade", "--user", "agentic-hil"])
+    # And the line this program prints for a person to run says the same thing,
+    # because a repair that puts the package back somewhere else is not one.
+    assert reinstall_command_with_extras(("can",)) == '"PYTHON" -m pip install --upgrade --user "agentic-hil[can]"'
+
+
+def _installation_located_at(monkeypatch: pytest.MonkeyPatch, *, distribution_at: Path, user_site: Path) -> None:
+    """One per-user site, and one place the distribution sits, both stated.
+
+    Stated rather than read off whichever interpreter the suite happens to be
+    running under. The first version of this asked the running one and asserted
+    that it was a virtual environment, which is true under `.venv` and false in
+    the Linux CI container, where the suite runs against the system Python at
+    `/usr/local`: an assertion about the test host rather than about the code,
+    and the container is where it was caught.
+    """
+    monkeypatch.setattr("sysconfig.get_path", lambda name, scheme=None, *_args, **_kwargs: str(user_site) if name == "purelib" else "")
+    monkeypatch.setattr("importlib.metadata.distribution", lambda _name: SimpleNamespace(locate_file=lambda _relative: distribution_at))
+
+
+def test_a_distribution_in_the_per_user_site_is_the_one_that_keeps_its_scheme(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--user` is earned by the location, and by nothing else.
+
+    Adding it to a system-wide installation would scatter the package into a
+    per-user directory nothing on PATH points at, which is the same class of
+    damage from the other side, so the flag follows where the distribution
+    actually is."""
+    from agentic_hil.upgrade import _user_site_installation
+
+    user_site = tmp_path / "user-site"
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "python"))
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "python"))
+
+    _installation_located_at(monkeypatch, distribution_at=user_site, user_site=user_site)
+    assert _user_site_installation() is True
+
+    _installation_located_at(monkeypatch, distribution_at=tmp_path / "python" / "site-packages", user_site=user_site)
+    assert _user_site_installation() is False
+
+
+def test_a_virtual_environment_is_never_called_a_per_user_installation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pip refuses `--user` inside a virtual environment, so the check does too.
+
+    Decided by the two prefixes differing and nothing else: a distribution
+    sitting exactly where the per-user site is still answers False here,
+    because the command the flag would be added to fails outright there."""
+    from agentic_hil.upgrade import _user_site_installation
+
+    user_site = tmp_path / "user-site"
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "python"))
+    _installation_located_at(monkeypatch, distribution_at=user_site, user_site=user_site)
+
+    assert _user_site_installation() is False
+
+
+# ---------------------------------------------------------------------------
+# What an upgrade leaves behind outside the package: the agent skills and the
+# MCP registrations this installation wrote. Neither is inside the package, so
+# replacing the package leaves both describing a release that is gone, and the
+# registration names a launcher an upgrade is entitled to move.
+
+
+def _upgrade_with_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    agent_install: subprocess.CompletedProcess[str] = AGENT_INSTALL_DONE,
+) -> list[tuple[list[str], str | None]]:
+    return _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": MANAGER_INSTALLED,
+            "version": _version_answer("9.9.9"),
+            "agent-install": agent_install,
+        },
+    )
+
+
+def test_a_successful_upgrade_refreshes_only_the_agents_this_installation_had_set_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rule that keeps a maintenance command from registering MCP servers.
+
+    An agent with a skill or a registration already there had this installation
+    set up for it, and both files describe a release that has just been
+    replaced. An agent with neither was never set up, and an upgrade that
+    installed for it would be adding a server to somebody's machine on the
+    strength of `agentic-hil upgrade`."""
+    _place_agent_skill("opencode")
+    calls = _upgrade_with_refresh(monkeypatch)
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    refreshed = {entry["agent"]: entry for entry in result["refreshed"]}
+    assert set(refreshed) == {"opencode", "claude-code", "codex"}
+    assert refreshed["opencode"]["skill"] is True
+    assert refreshed["opencode"]["registration"] is True
+    for untouched in ("claude-code", "codex"):
+        assert refreshed[untouched]["skill"] is False
+        assert refreshed[untouched]["registration"] is False
+        assert "Nothing to refresh" in refreshed[untouched]["summary"]
+    # Exactly one refresh, run out of the new package rather than in this
+    # process, which still holds the release that was just replaced.
+    invocations = [command for command, _cwd in calls if "agent-install" in command]
+    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]]
+
+
+def test_a_registration_that_exists_without_a_skill_is_refreshed_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Either half being present is what marks an agent as one of ours.
+
+    A registration alone is the state an operator reaches by removing a skill
+    file, and it is the half that names the launcher, so it is the one an
+    upgrade most has to rewrite."""
+    registration = Path.home() / ".claude.json"
+    registration.write_text(json.dumps({"mcpServers": {"agentic-hil": {"type": "stdio", "command": "agentic-hil", "args": ["mcp-stdio"]}}}), encoding="utf-8")
+    calls = _upgrade_with_refresh(monkeypatch)
+
+    result = upgrade_installation([])
+
+    invocations = [command for command, _cwd in calls if "agent-install" in command]
+    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "claude-code", "--force"]]
+    assert result["summary"].endswith("The MCP registration was rewritten for Claude Code, so restart Claude Code to load it.")
+
+
+def test_naming_an_agent_narrows_the_refresh_and_never_widens_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--agent` selects among the agents that are set up, and adds none.
+
+    Naming an agent that has neither half still installs nothing for it and
+    says so, which is the same rule the unnamed case follows: an upgrade does
+    not decide that somebody wants a new agent integration."""
+    _place_agent_skill("opencode")
+    calls = _upgrade_with_refresh(monkeypatch)
+
+    result = upgrade_installation(["codex"])
+
+    assert [entry["agent"] for entry in result["refreshed"]] == ["codex"]
+    assert result["refreshed"][0]["registration"] is False
+    assert not [command for command, _cwd in calls if "agent-install" in command]
+
+
+def test_a_refresh_that_failed_is_reported_and_does_not_fail_the_upgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The package moved, which is what this command promises.
+
+    What did not is a file maintained for somebody else's program, so it is
+    reported per agent with the exact line that finishes it, and the upgrade
+    that did succeed is not turned into a failure by it."""
+    _place_agent_skill("opencode")
+    _upgrade_with_refresh(monkeypatch, agent_install=subprocess.CompletedProcess([], 1, "", "could not write the skill"))
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    entry = result["refreshed"][0]
+    assert entry["agent"] == "opencode"
+    assert entry["ok"] is False
+    assert entry["skill"] is False
+    assert entry["registration"] is False
+    assert entry["command"] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]
+    assert "could not be refreshed for opencode" in result["summary"]
+
+
+def test_a_registration_that_was_already_current_asks_for_no_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a rewrite is something an agent host has to be restarted to pick up.
+
+    `agent-install` reports an entry that already named this launcher as
+    skipped. It is in place and current, so the refresh succeeded; nothing
+    changed in the file, so naming the agent in a restart sentence would send
+    an operator to close a host for no reason."""
+    _place_agent_skill("opencode")
+    already = subprocess.CompletedProcess[str]([], 0, json.dumps({"ok": True, "steps": {"skill_install": {"ok": True}, "mcp_config": {"ok": True, "skipped": True}}}), "")
+    _upgrade_with_refresh(monkeypatch, agent_install=already)
+
+    result = upgrade_installation([])
+
+    entry = result["refreshed"][0]
+    assert entry["ok"] is True
+    assert entry["registration"] is True
+    assert entry["registration_rewritten"] is False
+    assert "restart opencode" not in result["summary"]
 
 
 @pytest.mark.parametrize(
@@ -876,6 +1404,41 @@ def test_agent_install_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert again["steps"]["skill_install"]["installed"] is False
     assert _claude_skill_path().read_bytes() == skill_before
     assert (Path.home() / ".claude.json").read_bytes() == registration_before
+
+
+def test_agent_install_asks_for_a_restart_only_when_it_registered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The result is the one place the session that ran the command will look.
+
+    A host reads its MCP registrations when the session starts, so the session
+    that just wrote one waits on tools that cannot appear however long it waits.
+    That has to arrive with `ok: true`, naming the agent, and it has to be
+    absent when nothing was written: a second run that found its own entry
+    already there gives nobody a reason to restart anything.
+    """
+    elsewhere = tmp_path / "not-a-project"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    _trusted_test_mcp_command(monkeypatch)
+
+    first = install_agent(agent="claude-code")
+
+    assert first["ok"] is True, first
+    assert first["restart_required"] is True
+    assert "Claude Code" in first["restart_notice"]
+    # The CLI prints one JSON document and that is its human output, so the
+    # sentence has to reach the line a person reads first.
+    assert first["restart_notice"] in first["summary"]
+
+    again = install_agent(agent="claude-code")
+
+    assert again["ok"] is True, again
+    assert again["steps"]["mcp_config"]["skipped"] is True
+    assert again["restart_required"] is False
+    assert "restart_notice" not in again
+    assert "restart" not in again["summary"]
 
 
 def test_the_user_half_hands_back_the_project_line_that_carries_the_agent(
@@ -2482,7 +3045,7 @@ def _documented_tools(text: str, header: str) -> list[str]:
 
     Verbatim because a token that is not a tool name has to be visible to the
     caller. Matching the shape of a name here would drop `debug_*` on the floor
-    and report a table that names 26 of 39 tools as complete.
+    and report a table that names 26 of 42 tools as complete.
     """
     return [token for cell in _table_column(text, header) for token in re.findall(r"`([^`]+)`", cell)]
 
@@ -3288,6 +3851,49 @@ def test_debugger_probes_cli_uses_authoritative_config(
     result = json.loads(capsys.readouterr().out)
     assert exit_code == 0
     assert result["probes"] == [{"probe_id": "STLINK123"}, {"probe_id": "STLINK456"}]
+    # A configured bench answers through its own backend and says so by not
+    # claiming otherwise: the bootstrap fallback labels every answer it gives,
+    # so this label appearing here would mean the configured path had been
+    # rerouted through discovery that knows nothing about this file.
+    assert "source" not in result
+
+
+def test_debugger_probes_answers_through_bootstrap_without_a_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The listing is wanted exactly where the configuration is not there yet.
+
+    Before the first `setup` an operator wants to know whether the board is
+    visible and whether there is one of it, and `setup`'s own bootstrap already
+    enumerates without a configuration. So this answers, out of that same fixed
+    read-only command, and labels where the answer came from rather than
+    letting it pass for the configured bench.
+    """
+    workspace = tmp_path / "unconfigured"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    commands: list[list[str]] = []
+
+    def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        commands.append(command)
+        return CompletedCommand("ST-LINK SN : STLINK123\n", "", 0, False, False)
+
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: str(Path("C:/ST/STM32_Programmer_CLI.exe")))
+    monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
+
+    exit_code = entrypoint(["debugger-probes"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 0, result
+    assert result["ok"] is True
+    assert result["probes"] == [{"probe_id": "STLINK123"}]
+    assert result["source"] == "bootstrap"
+    assert result["backend"] == "stlink"
+    # One command, the read-only enumeration and nothing else: no HOTPLUG
+    # connect follows it here, because nothing is being adopted.
+    assert [command[-3:] for command in commands] == [["-q", "-l", "st-link-only"]]
 
 
 def test_openocd_flash_defaults_to_no_reset_and_can_reset_explicitly(tmp_path: Path) -> None:
@@ -3890,8 +4496,8 @@ def test_load_config_reports_non_utf8_file_as_config_error(tmp_path: Path) -> No
 
 def test_mcp_tool_registry_is_consistent(tmp_path: Path) -> None:
     assert [tool["name"] for tool in MCP_TOOLS] == MCP_TOOL_NAMES
-    assert len(MCP_TOOL_NAMES) == 39
-    assert len(set(MCP_TOOL_NAMES)) == 39
+    assert len(MCP_TOOL_NAMES) == 42
+    assert len(set(MCP_TOOL_NAMES)) == 42
     assert all(not name.startswith("agentic_hil_") for name in MCP_TOOL_NAMES)
     # The install eval asserts the live tools/list against this snapshot, so a
     # tool added or removed here has to reach it or every eval run fails on a

@@ -6,9 +6,61 @@ the agent's copy of this and carries the complete fallback chain;
 [TROUBLESHOOTING.md](https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md) covers what to do when something
 does not start.
 
+## One line
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 | iex
+```
+
+The script installs the package user-local (`uv tool install` where `uv` exists,
+`python -m pip install --user` otherwise, and it fetches Astral's uv installer
+where there is neither `uv` nor a Python 3.10 or newer) and then runs
+`agentic-hil agent-install` for every agent CLI it finds on `PATH`. That is the
+machine half and nothing else: it writes no project configuration, edits no
+shell profile, and asks for no admin rights. After one restart of your agent,
+the agent itself creates this project's configuration over MCP at the first
+hardware question, which is the same file `init` would have written.
+
+Its flags are the same in both scripts: `--agent <claude-code|codex|opencode>`
+registers one agent instead of every one it finds, `--no-agent-install` stops
+after the package, `--version <x.y.z>` installs exactly that release (later
+upgrades go through `agentic-hil upgrade`, not through a second run with a new
+pin), `--no-can` drops the `[can]` extra that is on by default, and `--help`
+prints all of them. Piped, `sh` takes them after `-s --`:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh | sh -s -- --agent claude-code
+```
+
+### Reading the script before you run it
+
+PyPI is the trust anchor for the package itself: everything the script installs
+comes from the index under the `agentic-hil` name, and the uv installer it may
+fetch is Astral's own, which verifies its published checksums itself. For the
+script, each release carries `install.sh.sha256` and `install.ps1.sha256` as
+release assets, so the verify-first variant is download, check, then run the
+file you checked:
+
+```bash
+curl -LsSfO https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh
+curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh.sha256
+sha256sum -c install.sh.sha256 && sh install.sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 -OutFile install.ps1
+irm https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1.sha256 -OutFile install.ps1.sha256
+(Get-FileHash install.ps1 -Algorithm SHA256).Hash -eq (Get-Content install.ps1.sha256).Split()[0]
+```
+
 ## The two commands
 
-Install the package user-locally, then set up the project from its root.
+Driving it by hand is two commands: install the package user-locally, then set
+up the project from its root.
 
 ```bash
 pip install --user agentic-hil

@@ -1052,17 +1052,17 @@ steps:
     assert [name for name, _ in built[0].calls] == ["debug_start_session", "debug_stop_session"]
 
 
-def test_cli_reports_reactor_construction_failure_and_closes_service(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_registered_run_reports_reactor_construction_failure_and_closes_service(monkeypatch: pytest.MonkeyPatch) -> None:
     # If building the per-device services fails inside TestReactor.__init__, the
-    # CLI must still write a structured report, close the base service, and only
+    # run must still write a structured report, close the base service, and only
     # then re-raise the constructor error.
-    # Asked of `run_registered_test_reactor` rather than of `run_test_reactor`:
-    # a run handle is real coordination state and this test's config double is
-    # one field wide on purpose. What is pinned is unchanged, and it is still
-    # the whole of what the entry point does with a plan once a handle exists.
+    # Asked of `run_registered_plan` rather than of the entry points above it: a
+    # run handle is real coordination state and this test's config double is one
+    # field wide on purpose. What is pinned is unchanged, and it is still the
+    # whole of what a frontend does with a plan once a handle exists.
     from types import SimpleNamespace
 
-    from agentic_hil.cli import run_registered_test_reactor
+    from agentic_hil.reactorrun import run_registered_plan
 
     class FakeRegistration:
         """A run handle that records nothing. What a registration does has its
@@ -1101,13 +1101,13 @@ def test_cli_reports_reactor_construction_failure_and_closes_service(monkeypatch
     def fake_reactor(config, service, service_factory=None, **kwargs):
         raise RuntimeError("device service failed to build")
 
-    monkeypatch.setattr("agentic_hil.cli.AgenticHILToolService", lambda config, frontend: make_service(config, frontend=frontend))
-    monkeypatch.setattr("agentic_hil.cli.TestReactor", fake_reactor)
-    monkeypatch.setattr("agentic_hil.cli.write_report", lambda config, result: written.append(result) or result)
+    monkeypatch.setattr("agentic_hil.reactorrun.AgenticHILToolService", lambda config, frontend: make_service(config, frontend=frontend))
+    monkeypatch.setattr("agentic_hil.reactorrun.TestReactor", fake_reactor)
+    monkeypatch.setattr("agentic_hil.reactorrun.write_report", lambda config, result: written.append(result) or result)
 
     plan = SimpleNamespace(name="plan", path="plan.yaml", steps=[])
     with pytest.raises(RuntimeError, match="device service failed to build"):
-        run_registered_test_reactor(SimpleNamespace(work_dir="."), plan, wait_s=0.0, registration=FakeRegistration())
+        run_registered_plan(SimpleNamespace(work_dir="."), plan, wait_s=0.0, registration=FakeRegistration())
 
     assert len(services) == 1
     assert services[0].closed is True

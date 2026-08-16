@@ -58,8 +58,9 @@ Before creating a release:
 7. Let the workflow verify the PyPI ownership marker and publish the matching `server.json` through GitHub OIDC.
 8. Verify: uvx --from agentic-hil agentic-hil --version resolves the new version from PyPI.
 9. Verify the release appears as `io.github.agentic-hil/agentic-hil` in the MCP Registry API.
-10. Start from GitHub auto-generated release notes, then edit for clarity.
-11. Move the tree to the next development version in pyproject.toml and src/agentic_hil/__init__.py, in the first commit after the release. Every other position keeps naming the release just published.
+10. Attach the one-line installers' checksums to the release: `sha256sum install.sh > install.sh.sha256` and `sha256sum install.ps1 > install.ps1.sha256` at the tagged commit, uploaded under those names, in that format, because the verify-first path in docs/installation.md feeds them straight to `sha256sum -c`.
+11. Start from GitHub auto-generated release notes, then edit for clarity.
+12. Move the tree to the next development version in pyproject.toml and src/agentic_hil/__init__.py, in the first commit after the release. Every other position keeps naming the release just published.
 ```
 
 ## What the Release Gate Checks, and When
