@@ -5,13 +5,20 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_GDB, FAKE_STLINK, FAKE_STLINK_READ_UNCONFIRMED, elf_with_symbols, write_config
+from conftest import (
+    FAKE_GDB,
+    FAKE_STLINK,
+    FAKE_STLINK_READ_UNCONFIRMED,
+    FAKE_STLINK_SHORT_READ,
+    elf_with_symbols,
+    write_config,
+)
 
 from agentic_hil.backends.common import command_for_log
-from agentic_hil.backends.gdbdebug import decode_symbol_value
+from agentic_hil.backends.gdbdebug import decode_symbol_value, image_byte_order
 from agentic_hil.config import ConfigError, load_config
-from agentic_hil.elfsymbols import read_elf_symbol
-from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, write_intel_hex_file
+from agentic_hil.elfsymbols import read_elf_byte_order, read_elf_symbol
+from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, read_intel_hex_file, write_intel_hex_file
 from agentic_hil.report import overall_success, read_last_report
 from agentic_hil.tools import AgenticHILToolService
 
@@ -28,6 +35,14 @@ BOOT_COUNTER_SIZE = 4
 VECTOR_TABLE_ADDRESS = 0x08000000
 VECTOR_TABLE_SIZE = 8
 UNTYPED_SYMBOL_TABLE = [("g_pfnVectors", VECTOR_TABLE_ADDRESS, VECTOR_TABLE_SIZE)]
+# A real ELF carrying the typed symbol the fake GDB also answers for, so a test
+# can vary the one thing this table exists to vary: the EI_DATA byte in its
+# header, which is where a value's integer readings get their byte order (#249).
+BOOT_COUNTER_SYMBOL_TABLE = [("boot_counter", BOOT_COUNTER_ADDRESS, BOOT_COUNTER_SIZE)]
+# What `image_byte_order` answers for an image that declares each order, for the
+# tests that decode bytes without building a file to read it out of.
+LITTLE_ENDIAN_IMAGE = {"byte_order": "little", "byte_order_from": "elf_header"}
+BIG_ENDIAN_IMAGE = {"byte_order": "big", "byte_order_from": "elf_header"}
 START_TIMEOUT_S = 10.0
 # The fake gdb answers a hang by never replying, so any cap detects it. What the
 # cap must not do is mistake a healthy reply for one, and at 0.1 s it did: on a
@@ -37,26 +52,27 @@ START_TIMEOUT_S = 10.0
 TIMEOUT_TEST_CAP_S = 2.0
 
 
-def artifact_bytes(fake_gdb_behavior: str | None = None, elf_symbols: list[tuple] | None = None) -> bytes:
+def artifact_bytes(fake_gdb_behavior: str | None = None, elf_symbols: list[tuple] | None = None, big_endian: bool = False) -> bytes:
     """The ELF a test hands the bench.
 
     Four bytes of magic by default, which is everything the artifact validator
     inspects and everything the fake GDB needs to answer from its own tables.
     `elf_symbols` builds a real one instead, for the tests that make the
-    resolution read a symbol table rather than ask GDB (#187); the behaviour
+    resolution read a symbol table rather than ask GDB (#187) and for the ones
+    that need a real EI_DATA to decode a value against (#249); the behaviour
     marker rides along in both, past everything a section header describes.
     """
     trailer = b"" if fake_gdb_behavior is None else f"\nFAKE_GDB_BEHAVIOR={fake_gdb_behavior}\n".encode()
     if elf_symbols is None:
         return b"\x7fELF" + b"\x00" * 12 + trailer
-    return elf_with_symbols(elf_symbols, trailer=trailer)
+    return elf_with_symbols(elf_symbols, big_endian=big_endian, trailer=trailer)
 
 
-def debug_service(tmp_path: Path, fake_gdb_behavior: str | None = None, elf_symbols: list[tuple] | None = None, **config_kwargs) -> AgenticHILToolService:
+def debug_service(tmp_path: Path, fake_gdb_behavior: str | None = None, elf_symbols: list[tuple] | None = None, big_endian: bool = False, **config_kwargs) -> AgenticHILToolService:
     config_path = write_config(tmp_path, gdb_executable=FAKE_GDB, **config_kwargs)
     elf_path = tmp_path / "build" / "app.elf"
     elf_path.parent.mkdir(parents=True, exist_ok=True)
-    elf_path.write_bytes(artifact_bytes(fake_gdb_behavior, elf_symbols))
+    elf_path.write_bytes(artifact_bytes(fake_gdb_behavior, elf_symbols, big_endian))
     return AgenticHILToolService(load_config(str(config_path)))
 
 
@@ -687,6 +703,71 @@ def test_write_intel_hex_file_refuses_a_path_outside_the_workspace(tmp_path: Pat
     assert not escaped.exists()
 
 
+# --- reading a dump back ----------------------------------------------------
+#
+# STM32CubeProgrammer's only memory read writes a file, so the backend that has
+# no debug session answers `debug_symbol_value` by parsing its own dump (#249).
+# What these pin is that the parse is held to the window that was asked for:
+# every record carries an address, so the bytes are taken by address, and a file
+# that does not cover the window is a failed read rather than a short answer.
+
+
+def test_a_dump_reads_back_as_exactly_the_bytes_it_was_written_from(tmp_path: Path) -> None:
+    """Round trip through the writer beside it, across the 64 KiB boundary the
+    extended-address record exists for."""
+    output = tmp_path / "memory.hex"
+    data = bytes((0x5A + index) & 0xFF for index in range(300))
+    write_intel_hex_file(output, 0x0800FF00, data, workspace=tmp_path)
+
+    assert read_intel_hex_file(output, 0x0800FF00, len(data)) == data
+
+
+def test_a_dump_answers_the_window_that_was_asked_for_and_not_the_file(tmp_path: Path) -> None:
+    """A CLI that rounds a one-byte read up to a word has still read that byte.
+
+    Bytes outside the requested window are somebody else's business, so they are
+    ignored rather than refused; what may not be ignored is a byte inside it.
+    """
+    output = tmp_path / "memory.hex"
+    write_intel_hex_file(output, 0x20000080, b"\xde\xad\xbe\xef", workspace=tmp_path)
+
+    assert read_intel_hex_file(output, 0x20000081, 2) == b"\xad\xbe"
+    assert read_intel_hex_file(output, 0x20000080, 8) is None
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [":00000001FF"],
+        # A hole in the middle: the first and last bytes of the window arrive and
+        # the one between them never does.
+        [":020000042000DA", intel_hex_record(0x0080, 0x00, b"\x01"), intel_hex_record(0x0082, 0x00, b"\x03"), ":00000001FF"],
+        # The same records, with the base record that puts them at 0x2000xxxx
+        # dropped, so the whole window is missing rather than misread.
+        [intel_hex_record(0x0080, 0x00, b"\x01\x02\x03"), ":00000001FF"],
+        # One byte claimed twice, with two different values.
+        [":020000042000DA", intel_hex_record(0x0080, 0x00, b"\x01\x02\x03"), intel_hex_record(0x0081, 0x00, b"\xff"), ":00000001FF"],
+        # A record type that is none of the ones this understands: it may be
+        # carrying the very bytes that were asked for, so it is refused rather
+        # than skipped.
+        [":020000042000DA", intel_hex_record(0x0080, 0x00, b"\x01\x02\x03"), ":0100000600F9", ":00000001FF"],
+        # A checksum that does not add up, on the record holding the window.
+        [":020000042000DA", ":03008000010203FF", ":00000001FF"],
+        ["not a record at all"],
+    ],
+    ids=["empty", "hole", "wrong_address", "conflicting_bytes", "unknown_record_type", "bad_checksum", "not_intel_hex"],
+)
+def test_a_dump_that_is_not_the_whole_window_is_no_answer_at_all(tmp_path: Path, lines: list[str]) -> None:
+    output = tmp_path / "memory.hex"
+    output.write_text("\n".join(lines) + "\n", encoding="ascii")
+
+    assert read_intel_hex_file(output, 0x20000080, 3) is None
+
+
+def test_a_dump_that_is_not_there_is_no_answer_either(tmp_path: Path) -> None:
+    assert read_intel_hex_file(tmp_path / "nothing.hex", 0x20000080, 4) is None
+
+
 def record_mi_commands(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     from agentic_hil.gdbmi import GdbMiClient
 
@@ -1172,7 +1253,7 @@ def test_direct_debug_call_reenters_validation_for_invalid_timeout(tmp_path: Pat
 # confirmation line never printed says so.
 
 
-def stlink_dump_service(tmp_path: Path, *, debugger_executable: Path = FAKE_STLINK, elf_symbols: list[tuple] | None = None, **config_kwargs) -> AgenticHILToolService:
+def stlink_dump_service(tmp_path: Path, *, debugger_executable: Path = FAKE_STLINK, elf_symbols: list[tuple] | None = None, big_endian: bool = False, **config_kwargs) -> AgenticHILToolService:
     config_path = write_config(
         tmp_path,
         debugger_type="stlink",
@@ -1182,7 +1263,7 @@ def stlink_dump_service(tmp_path: Path, *, debugger_executable: Path = FAKE_STLI
     )
     elf_path = tmp_path / "build" / "app.elf"
     elf_path.parent.mkdir(parents=True, exist_ok=True)
-    elf_path.write_bytes(artifact_bytes(elf_symbols=elf_symbols))
+    elf_path.write_bytes(artifact_bytes(elf_symbols=elf_symbols, big_endian=big_endian))
     return AgenticHILToolService(load_config(str(config_path)))
 
 
@@ -1624,6 +1705,52 @@ def test_elf_symbol_table_reports_a_missing_file_rather_than_raising(tmp_path: P
     assert read_elf_symbol(tmp_path / "nothing.elf", "g_pfnVectors") == {"ok": False, "reason": "unreadable"}
 
 
+@pytest.mark.parametrize(
+    ("data", "declared"),
+    [
+        (elf_with_symbols([("main", 0x080001C0, 64)]), "little"),
+        (elf_with_symbols([("main", 0x080001C0, 64)], big_endian=True), "big"),
+        (elf_with_symbols([("main", 0x080001C0, 64)], bits=64, big_endian=True), "big"),
+        # EI_DATA zero is ELFDATANONE, which is not a third order but the absence
+        # of one, and it is what the four-byte stand-in this suite writes carries.
+        (b"\x7fELF" + b"\x00" * 12, None),
+        (b"\x7fELF", None),
+        (b"not an elf at all", None),
+    ],
+    ids=["lsb", "msb", "msb_64_bit", "no_encoding", "truncated", "not_elf"],
+)
+def test_the_image_is_asked_which_order_its_integers_are_read_in(tmp_path: Path, data: bytes, declared: str | None) -> None:
+    """EI_DATA, in the words `int.from_bytes` takes.
+
+    A file that declares neither LSB nor MSB declares nothing, and is refused
+    here exactly as the symbol table refuses it: an image that states no order
+    cannot be made to state one."""
+    path = tmp_path / "image.elf"
+    path.write_bytes(data)
+
+    assert read_elf_byte_order(path) == declared
+
+
+def test_a_missing_image_declares_no_order_rather_than_raising(tmp_path: Path) -> None:
+    assert read_elf_byte_order(tmp_path / "nothing.elf") is None
+
+
+def test_the_order_a_value_is_decoded_in_says_where_it_came_from(tmp_path: Path) -> None:
+    """Read off the image, or assumed. Both are the answer; only one is a reading.
+
+    Nothing with a firmware image in front of it reaches the default, because a
+    file that declares no order is one the symbol-table parser refuses outright,
+    so the field exists to keep the fallback from ever passing itself off as the
+    image's own statement."""
+    declared = tmp_path / "declared.elf"
+    declared.write_bytes(elf_with_symbols([("main", 0x080001C0, 64)], big_endian=True))
+    silent = tmp_path / "silent.elf"
+    silent.write_bytes(b"\x7fELF" + b"\x00" * 12)
+
+    assert image_byte_order(declared) == {"byte_order": "big", "byte_order_from": "elf_header"}
+    assert image_byte_order(silent) == {"byte_order": "little", "byte_order_from": "default"}
+
+
 def test_symbol_info_falls_back_to_the_symbol_table_for_an_untyped_symbol(tmp_path: Path) -> None:
     """The issue's own case, end to end through a session.
 
@@ -1787,6 +1914,10 @@ def test_symbol_value_returns_the_bytes_and_both_integer_readings(tmp_path: Path
     assert value["resolved_from"] == "debug_info"
     assert value["hex"] == expected.hex()
     assert value["byte_order"] == "little"
+    # The four-byte stand-in this service flashes declares no EI_DATA at all, so
+    # the order is the supported Cortex-M one and the result says it was assumed
+    # rather than read off the image.
+    assert value["byte_order_from"] == "default"
     # This width has one integer reading and the two signs disagree about it,
     # which is the whole reason both are returned instead of one.
     assert value["value_unsigned"] == int.from_bytes(expected, "little", signed=False)
@@ -1825,7 +1956,7 @@ def test_symbol_value_states_when_a_width_has_no_integer_reading(tmp_path: Path)
     ids=["one_byte", "two_bytes", "four_bytes", "eight_bytes"],
 )
 def test_symbol_value_decoding_covers_every_integer_width(data: bytes, unsigned: int, signed: int) -> None:
-    decoded = decode_symbol_value(data)
+    decoded = decode_symbol_value(data, LITTLE_ENDIAN_IMAGE)
 
     assert decoded["hex"] == data.hex()
     assert decoded["byte_order"] == "little"
@@ -1835,11 +1966,60 @@ def test_symbol_value_decoding_covers_every_integer_width(data: bytes, unsigned:
 
 @pytest.mark.parametrize("size", [0, 3, 5, 6, 7, 9, 408], ids=str)
 def test_symbol_value_decoding_offers_no_number_at_any_other_width(size: int) -> None:
-    decoded = decode_symbol_value(bytes(size))
+    decoded = decode_symbol_value(bytes(size), LITTLE_ENDIAN_IMAGE)
 
     assert decoded["hex"] == bytes(size).hex()
     assert "value_unsigned" not in decoded and "value_signed" not in decoded
     assert "value_not_decoded" in decoded
+
+
+def test_symbol_value_decoding_reads_the_order_it_was_handed() -> None:
+    """The same four bytes, two images, two numbers, and one hex string.
+
+    The raw bytes are memory order on every target, so they are the reading that
+    cannot change; the order decides only what number they spell, and the result
+    carries which order that was and where it came from."""
+    data = b"\x01\x02\x03\x04"
+
+    little = decode_symbol_value(data, LITTLE_ENDIAN_IMAGE)
+    big = decode_symbol_value(data, BIG_ENDIAN_IMAGE)
+
+    assert little["hex"] == big["hex"] == data.hex()
+    assert little["value_unsigned"] == 0x04030201
+    assert big["value_unsigned"] == 0x01020304
+    assert (little["byte_order"], little["byte_order_from"]) == ("little", "elf_header")
+    assert (big["byte_order"], big["byte_order_from"]) == ("big", "elf_header")
+
+
+@pytest.mark.parametrize("big_endian", [False, True], ids=["little_endian_image", "big_endian_image"])
+def test_symbol_value_decodes_in_the_order_the_image_declares(tmp_path: Path, big_endian: bool) -> None:
+    """A big-endian build's counter reads big-endian, with nothing configured.
+
+    The target cannot say which way its bytes are read (GDB answers a memory
+    read in memory order and stops there), while the ELF the session loaded
+    states it in EI_DATA the way every ELF must. So the image is asked, and the
+    same four bytes come back as two different numbers on two builds that differ
+    in nothing else (#249).
+    """
+    service = debug_service(tmp_path, elf_symbols=BOOT_COUNTER_SYMBOL_TABLE, big_endian=big_endian)
+    try:
+        assert start_debug_session(service)["ok"] is True
+        value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    order = "big" if big_endian else "little"
+    expected = fake_target_bytes(BOOT_COUNTER_ADDRESS, BOOT_COUNTER_SIZE)
+    assert value["ok"] is True, value
+    assert value["byte_order"] == order
+    assert value["byte_order_from"] == "elf_header"
+    # The bytes themselves are untouched by any of this.
+    assert value["hex"] == expected.hex()
+    assert value["value_unsigned"] == int.from_bytes(expected, order, signed=False)
+    assert value["value_signed"] == int.from_bytes(expected, order, signed=True)
+    # And the two orders really do disagree about this symbol, so the assertion
+    # above is not passing on a palindrome.
+    assert int.from_bytes(expected, "big") != int.from_bytes(expected, "little")
 
 
 def test_symbol_value_reads_a_symbol_only_the_symbol_table_describes(tmp_path: Path) -> None:
@@ -1917,14 +2097,217 @@ def test_symbol_value_requires_a_session_and_a_symbol(tmp_path: Path) -> None:
     assert without_symbol["summary"] == "Tool arguments failed schema validation."
 
 
-def test_symbol_value_is_not_served_where_there_is_no_typed_session(tmp_path: Path) -> None:
-    """The stlink backend serves the dump because STM32CubeProgrammer writes a
-    file, which is what the dump promises. It does not serve this one, and says
-    so in the words the rest of the typed family uses."""
+# --- the stlink backend's route to the same value ---------------------------
+#
+# The second tool of the typed family this backend serves. `-r` is a memory read
+# and this is that read, ending with the bytes instead of with a file the caller
+# asked for; the file it does write is this call's own, in a private directory,
+# and is gone before the result is built (#249). What these pin is the same
+# thing the dump's block pins: a caller cannot tell which backend answered.
+
+
+def stlink_symbol_value(service: AgenticHILToolService, symbol: str = "boot_counter") -> dict:
+    return service.call("debug_symbol_value", {"symbol": symbol})
+
+
+def logged_command(tmp_path: Path, result: dict) -> str:
+    return json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+
+
+def test_stlink_symbol_value_returns_the_bytes_the_openocd_path_would(tmp_path: Path) -> None:
+    """The whole route on the backend that has no debug session.
+
+    The ELF is flashed first for the reason the dump's own test gives: that is
+    what makes a symbol table describe the board. What comes back is the OpenOCD
+    path's result: the same fields, the same summary, the same readings of the
+    same bytes, plus the `symbol_source` that says which image answered, which
+    a session would not need.
+    """
     service = stlink_dump_service(tmp_path)
     try:
         assert flash_symbol_source(service)["ok"] is True
-        refused = service.call("debug_symbol_value", {"symbol": "CTC_array"})
+        value = stlink_symbol_value(service)
+    finally:
+        service.close()
+
+    expected = fake_target_bytes(BOOT_COUNTER_ADDRESS, BOOT_COUNTER_SIZE)
+    assert value["ok"] is True, value
+    assert value["backend"] == "stlink"
+    assert value["symbol"] == "boot_counter"
+    assert value["address"] == hex(BOOT_COUNTER_ADDRESS)
+    assert value["size_bytes"] == BOOT_COUNTER_SIZE
+    assert value["resolved_from"] == "debug_info"
+    assert value["hex"] == expected.hex()
+    assert value["value_unsigned"] == int.from_bytes(expected, "little", signed=False)
+    assert value["value_signed"] == int.from_bytes(expected, "little", signed=True)
+    assert value["summary"] == "Symbol value read from target memory."
+    assert value["symbol_source"]["path"] == "build/app.elf"
+    # The read was the measured `-r` invocation, behind the same connect block
+    # the dump uses: one command, two endings.
+    assert command_for_log(["-c", "port=SWD", "mode=NORMAL", "-r", hex(BOOT_COUNTER_ADDRESS), str(BOOT_COUNTER_SIZE)]) in logged_command(tmp_path, value)
+
+
+def test_stlink_symbol_value_leaves_no_file_and_names_none(tmp_path: Path) -> None:
+    """The objection this tool used to refuse over, answered.
+
+    A file is written, because `-r` writes one and there is no other way to read
+    this target's memory. It is not the caller's: it is created in a private
+    directory outside the workspace, it is removed before the result is built,
+    and nothing in the result names it. The log names it, because the log is
+    what was executed and that stays honest.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        value = stlink_symbol_value(service)
+    finally:
+        service.close()
+
+    assert value["ok"] is True, value
+    private_file = Path(logged_command(tmp_path, value).split()[-1].strip('"'))
+    assert private_file.name.endswith(".hex")
+    assert not private_file.exists()
+    assert not private_file.parent.exists()
+    assert tmp_path not in private_file.parents
+    assert private_file.name not in json.dumps(value)
+    # And the workspace still holds exactly what the test put there.
+    assert list((tmp_path / "build").iterdir()) == [tmp_path / "build" / "app.elf"]
+
+
+def test_stlink_symbol_value_decodes_in_the_order_the_flashed_image_declares(tmp_path: Path) -> None:
+    """The byte order comes off the digest-verified copy of the flashed ELF.
+
+    Same rule as the session path and the same reason: STM32CubeProgrammer's
+    upload is memory order and says nothing about how to read it, while the
+    image on the board states it. The copy is what is read, because the caller's
+    own path is one a rebuild may already have replaced.
+    """
+    service = stlink_dump_service(tmp_path, elf_symbols=BOOT_COUNTER_SYMBOL_TABLE, big_endian=True)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        value = stlink_symbol_value(service)
+    finally:
+        service.close()
+
+    expected = fake_target_bytes(BOOT_COUNTER_ADDRESS, BOOT_COUNTER_SIZE)
+    assert value["ok"] is True, value
+    assert value["byte_order"] == "big"
+    assert value["byte_order_from"] == "elf_header"
+    assert value["hex"] == expected.hex()
+    assert value["value_unsigned"] == int.from_bytes(expected, "big", signed=False)
+
+
+def test_stlink_symbol_value_reads_a_symbol_only_the_symbol_table_describes(tmp_path: Path) -> None:
+    """The offline fallback composes with this tool as it does with the dump: an
+    assembly-defined object's value is readable here too."""
+    service = stlink_dump_service(tmp_path, elf_symbols=UNTYPED_SYMBOL_TABLE)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        value = stlink_symbol_value(service, "g_pfnVectors")
+    finally:
+        service.close()
+
+    assert value["ok"] is True, value
+    assert value["resolved_from"] == "elf_symbol_table"
+    assert value["address"] == hex(VECTOR_TABLE_ADDRESS)
+    assert value["hex"] == fake_target_bytes(VECTOR_TABLE_ADDRESS, VECTOR_TABLE_SIZE).hex()
+
+
+@pytest.mark.parametrize(
+    ("config_kwargs", "summary"),
+    [
+        ({"allowed_symbols": ["other_symbol"]}, "Symbol is not allowed by debug.allowed_symbols."),
+        ({"max_dump_size_bytes": BOOT_COUNTER_SIZE - 1}, "Symbol read exceeds debug.max_dump_size_bytes."),
+    ],
+    ids=["allowlist", "size_cap"],
+)
+def test_stlink_symbol_value_is_held_to_the_same_gates_as_the_session_path(tmp_path: Path, config_kwargs: dict, summary: str) -> None:
+    """Both refusals word for word, and both before a probe is opened.
+
+    A new way of getting bytes off this bench must not be a way around what the
+    operator said may leave it, on any backend.
+    """
+    service = stlink_dump_service(tmp_path, **config_kwargs)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        refused = stlink_symbol_value(service)
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "permission_denied"
+    assert refused["summary"] == summary
+    assert "hex" not in refused
+    # Nothing was spawned for the read, so it never reached a log of its own.
+    assert "log_path" not in refused
+
+
+def test_stlink_symbol_value_refuses_before_a_symbol_table_describes_the_target(tmp_path: Path) -> None:
+    """No flashed ELF, no answer: the dump's refusal, unchanged."""
+    service = stlink_dump_service(tmp_path)
+    try:
+        refused = stlink_symbol_value(service)
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "symbol_source_not_available"
+    assert "flash_firmware" in refused["summary"]
+    assert refused["target_contacted"] is False
+
+
+def test_stlink_symbol_value_confirms_the_read_before_it_reads_the_file(tmp_path: Path) -> None:
+    """A CLI that connected, printed its banner and never confirmed the read.
+
+    The bytes are not asked for at all in that case: `Data read successfully` is
+    the only line that means they arrived, and a result that decoded whatever
+    was on disk would be reporting a number for a read that never happened.
+    """
+    service = stlink_dump_service(tmp_path, debugger_executable=FAKE_STLINK_READ_UNCONFIRMED)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        refused = stlink_symbol_value(service)
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "memory_read_failed"
+    assert refused["backend_error_type"] == "memory_read_unconfirmed"
+    assert refused["operation_result"] == {"confirmed": False, "expected_success_text": ["Data read successfully"], "matched_success_text": []}
+    assert refused["side_effect_status"] == "unknown"
+    assert refused["retry_safe"] is False
+    assert "hex" not in refused
+
+
+def test_stlink_symbol_value_refuses_a_confirmed_read_that_is_short(tmp_path: Path) -> None:
+    """The confirmation line is about the transfer; the file is its own question.
+
+    This fixture prints every line a successful read prints and writes half the
+    bytes. Half of a counter is a different number rather than a smaller one, so
+    the answer is a failed read and not a truncated value.
+    """
+    service = stlink_dump_service(tmp_path, debugger_executable=FAKE_STLINK_SHORT_READ)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        refused = stlink_symbol_value(service)
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "memory_read_failed"
+    assert refused["summary"] == "STM32CubeProgrammer confirmed the read but left no parseable Intel HEX covering the requested bytes."
+    assert refused["target_contacted"] is True
+    assert "success_confirmed" not in refused
+    assert "hex" not in refused
+
+
+def test_stlink_symbol_value_still_refuses_the_rest_of_the_typed_family(tmp_path: Path) -> None:
+    """Two tools have crossed over now. The family's refusal is unchanged for the
+    ones that need a session, and it is the same sentence as before."""
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        refused = service.call("debug_symbol_info", {"symbol": "boot_counter"})
     finally:
         service.close()
 

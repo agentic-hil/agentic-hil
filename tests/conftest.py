@@ -31,6 +31,7 @@ FAKE_OPENOCD_POST_INIT_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_openocd
 FAKE_STLINK = ROOT / "tests" / "fixtures" / "fake_stlink.py"
 FAKE_STLINK_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed.py"
 FAKE_STLINK_READ_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_read_unconfirmed.py"
+FAKE_STLINK_SHORT_READ = ROOT / "tests" / "fixtures" / "fake_stlink_short_read.py"
 FAKE_STLINK_HALT_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_halt_unconfirmed.py"
 FAKE_STLINK_PARTIAL_CONFIRMATION = ROOT / "tests" / "fixtures" / "fake_stlink_partial_confirmation.py"
 FAKE_STLINK_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_stlink_no_target.py"

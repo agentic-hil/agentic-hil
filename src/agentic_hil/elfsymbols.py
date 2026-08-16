@@ -22,6 +22,11 @@ relocations, no DWARF, no program headers, no section contents. Anything it
 cannot parse is `unreadable` rather than a guess, and every refusal leaves the
 caller's own GDB-based refusal standing, so a symbol that is genuinely absent
 is still reported absent.
+
+The one other answer here is `read_elf_byte_order`, which is the identification
+byte this module already has to read before it can unpack a single field. It is
+public because a caller that turns a symbol's bytes into a number needs exactly
+that byte and has nowhere else to get it (#249).
 """
 
 from __future__ import annotations
@@ -36,6 +41,13 @@ ELF_CLASS_32 = 1
 ELF_CLASS_64 = 2
 ELF_DATA_LSB = 1
 ELF_DATA_MSB = 2
+# What EI_DATA, the sixth identification byte, means, in the words
+# `int.from_bytes` takes. One table for the two readers below: the struct
+# prefixes this module unpacks with are derived from it, so an encoding that is
+# neither LSB nor MSB is the same "no answer" to both, and neither can start
+# recognising a third one without the other.
+ELF_DATA_BYTE_ORDER = {ELF_DATA_LSB: "little", ELF_DATA_MSB: "big"}
+STRUCT_BYTE_ORDER = {"little": "<", "big": ">"}
 SHT_SYMTAB = 2
 SHN_UNDEF = 0
 # Section header sizes, symbol record sizes and the offsets inside them, per
@@ -125,12 +137,33 @@ def _read_symbol(handle, symbol: str) -> JsonObject:
     return {"ok": True, "address": address, "size_bytes": size_bytes}
 
 
+def read_elf_byte_order(elf_path: str | Path) -> str | None:
+    """The byte order the image declares about itself, or None where it declares none.
+
+    EI_DATA is the file's own statement about how its multi-byte fields are
+    ordered, and for a firmware image that is the target's order: an Arm
+    Cortex-M build says LSB, a big-endian part's build says MSB. Answered as
+    "little" or "big" so it goes straight into `int.from_bytes`, which is the
+    one thing a caller wants it for.
+
+    None where the file cannot be read, is not an ELF, or declares an encoding
+    that is neither of the two, which is the same file `read_elf_symbol` calls
+    `unreadable`, refused here for the same reason: an image that states no
+    order cannot be made to state one.
+    """
+    try:
+        with Path(elf_path).open("rb") as handle:
+            identification = handle.read(16)
+    except OSError:
+        return None
+    if len(identification) < 16 or identification[:4] != ELF_MAGIC:
+        return None
+    return ELF_DATA_BYTE_ORDER.get(identification[5])
+
+
 def _byte_order(data_encoding: int) -> str | None:
-    if data_encoding == ELF_DATA_LSB:
-        return "<"
-    if data_encoding == ELF_DATA_MSB:
-        return ">"
-    return None
+    name = ELF_DATA_BYTE_ORDER.get(data_encoding)
+    return None if name is None else STRUCT_BYTE_ORDER[name]
 
 
 def _sections(handle, elf_class: int, byte_order: str) -> list[JsonObject] | None:
