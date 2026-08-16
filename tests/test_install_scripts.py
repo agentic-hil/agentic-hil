@@ -611,7 +611,7 @@ def test_a_newer_install_answers_agent_install_over_an_older_copy_earlier_on_pat
         early_bin / "agentic-hil",
         'case "$1" in\n'
         '  --version) echo "0.3.0" ;;\n'
-        f'  agent-install) echo "stale" > "{marker}" ;;\n'
+        f'  agent-install) echo "stale" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n",
     )
@@ -631,7 +631,7 @@ def test_a_newer_install_answers_agent_install_over_an_older_copy_earlier_on_pat
         "#!/bin/sh\n"
         'case "\\$1" in\n'
         '  --version) echo "9.9.9" ;;\n'
-        f'  agent-install) echo "fresh" > "{marker}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n"
         "STUB\n"
@@ -709,7 +709,7 @@ def test_a_uv_install_outside_the_user_bin_answers_over_an_older_path_copy(tmp_p
         early_bin / "agentic-hil",
         'case "$1" in\n'
         '  --version) echo "0.3.0" ;;\n'
-        f'  agent-install) echo "stale" > "{marker}" ;;\n'
+        f'  agent-install) echo "stale" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n",
     )
@@ -730,7 +730,7 @@ def test_a_uv_install_outside_the_user_bin_answers_over_an_older_path_copy(tmp_p
         "#!/bin/sh\n"
         'case "\\$1" in\n'
         '  --version) echo "9.9.9" ;;\n'
-        f'  agent-install) echo "fresh" > "{marker}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n"
         "STUB\n"
@@ -802,7 +802,7 @@ def test_a_pip_install_answers_over_a_newer_stale_copy_in_a_guessed_bin(tmp_path
         xdg_bin / "agentic-hil",
         'case "$1" in\n'
         '  --version) echo "9.9.9" ;;\n'
-        f'  agent-install) echo "stale" > "{marker}" ;;\n'
+        f'  agent-install) echo "stale" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n",
     )
@@ -821,7 +821,7 @@ def test_a_pip_install_answers_over_a_newer_stale_copy_in_a_guessed_bin(tmp_path
         "#!/bin/sh\n"
         'case "\\$1" in\n'
         '  --version) echo "0.5.0" ;;\n'
-        f'  agent-install) echo "fresh" > "{marker}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n"
         "STUB\n"
@@ -895,7 +895,7 @@ def test_an_exact_version_pin_refuses_a_mismatched_copy_in_the_managers_bin(tmp_
         "#!/bin/sh\n"
         'case "\\$1" in\n'
         '  --version) echo "9.9.9" ;;\n'
-        f'  agent-install) echo "ran" > "{marker}" ;;\n'
+        f'  agent-install) echo "ran" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n"
         "STUB\n"
