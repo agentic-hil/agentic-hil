@@ -990,6 +990,213 @@ def test_a_tree_with_nothing_in_it_produces_no_salvage_commit(tmp_path: Path) ->
     assert _in(repository, "rev-parse", "HEAD") == head
 
 
+# --- no commit is two rounds: one declined, one stalled with the work in the tree ---
+
+# What the stalled implementer wrote before it stopped. Asserted byte for byte
+# wherever the work is recovered: a recovery that rewrites the fix has lost it as
+# surely as one that discards it.
+FIX = "def fixed():\n    return 'the whole fix, written and never committed'\n"
+
+
+def _stalling_agent(tmp_path: Path, *, then: str) -> Path:
+    """An agent that writes a complete fix, never commits it, and does `then` next time.
+
+    The observed failure: the implementer finished, started the test suite, and
+    died waiting on a notification its harness never delivered. From the loop's
+    side that is an agent that exited without committing, with a working tree full
+    of finished work -- indistinguishable, until now, from one that read the
+    findings and declined the round.
+    """
+    script = tmp_path / "stalling_agent.py"
+    attempts = (tmp_path / "attempts.txt").as_posix()
+    script.write_text(
+        "import pathlib, subprocess, sys\n"
+        f"attempts = pathlib.Path({attempts!r})\n"
+        "seen = len(attempts.read_text(encoding='utf-8')) if attempts.exists() else 0\n"
+        "attempts.write_text('x' * (seen + 1), encoding='utf-8')\n"
+        "if seen == 0:\n"
+        f"    pathlib.Path('fix.py').write_text({FIX!r}, encoding='utf-8')\n"
+        "    sys.stdout.write('wrote the fix, then never came back to commit it\\n')\n"
+        "    raise SystemExit(0)\n"
+        f"{then}\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+_COMMITS = (
+    "subprocess.run(['git', 'add', '-A'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: finish what the stalled attempt wrote'], check=True)\n"
+)
+_STALLS_AGAIN = "sys.stdout.write('and did not commit it this time either\\n')\n"
+_REMOVES_IT = "pathlib.Path('fix.py').unlink()\nsys.stdout.write('that was not work worth keeping\\n')\n"
+
+
+def _one_round(repository: Path, script: Path, monkeypatch: pytest.MonkeyPatch) -> int:
+    """One implement round against a faked agent, with the review canned clean."""
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(script)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _clean_verdict)
+    return agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "1", "--heartbeat", "0"]
+        + ["--review-checkout", "none"]
+    )
+
+
+def _round_records(repository: Path) -> list[dict[str, object]]:
+    summary = next((repository / ".agentic-loop" / "logs").rglob("run.json")).read_text(encoding="utf-8")
+    return json.loads(summary)["rounds"]
+
+
+def test_a_no_commit_round_that_left_work_in_the_tree_is_finished_rather_than_called_declined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The round reported "produced no commit" while the whole fix lay in the tree; it was salvaged by hand."""
+    repository = _repository(tmp_path)
+
+    exit_code = _one_round(repository, _stalling_agent(tmp_path, then=_COMMITS), monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_CLEAN
+    # The retry committed, so the round has a commit an agent stood behind and the
+    # review ran on it -- rather than a stalled run and a hand salvage next morning.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: finish what the stalled attempt wrote"
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["fix.py"]
+    # Byte for byte what the stalled attempt wrote: the retry finishes that work,
+    # it does not reimplement the task over the top of it.
+    assert (repository / "fix.py").read_text(encoding="utf-8") == FIX
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    # The round is logged as the thing it was, not as a round nobody can explain.
+    out = capsys.readouterr().out
+    assert "round 1: implementer stalled with uncommitted work" in out
+    assert "fix.py" in out
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["retried"], record["salvaged"]) == (True, True, None)
+    # The run summary names what was in the tree, not just that something was.
+    assert record["uncommitted_paths"] == ["?? fix.py"]
+
+
+def test_a_no_commit_round_with_a_clean_tree_is_still_a_declined_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An implementer that looked and judged there was nothing to do is not a stall."""
+    repository = _repository(tmp_path)
+    declining = tmp_path / "declining_agent.py"
+    declining.write_text(
+        "import sys\nsys.stdout.write('the findings are wrong; changing nothing\\n')\n", encoding="utf-8"
+    )
+    head = _in(repository, "rev-parse", "HEAD")
+
+    exit_code = _one_round(repository, declining, monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _in(repository, "rev-parse", "HEAD") == head  # no retry, and nothing committed on its behalf
+    captured = capsys.readouterr()
+    assert "round 1: Claude Code produced no commit." in captured.out
+    assert "stopping as stalled" in captured.err
+    assert "stalled with uncommitted work" not in captured.out
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["retried"], record["salvaged"]) == (False, False, None)
+    # One implementer invocation, so one transcript: nothing was handed back.
+    assert not list((repository / ".agentic-loop" / "logs").rglob("*-finish.log"))
+
+
+def test_work_the_implementer_will_not_commit_twice_is_committed_by_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tree is the only copy of that round; the run must not end with it still only there."""
+    repository = _repository(tmp_path)
+
+    exit_code = _one_round(repository, _stalling_agent(tmp_path, then=_STALLS_AGAIN), monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_CLEAN
+    subject = _in(repository, "log", "-1", "--format=%s").strip()
+    assert subject == "wip(review-loop): round 1 left the implementer's work uncommitted"
+    assert "never committed it, twice" in _in(repository, "log", "-1", "--format=%b")
+    # Preserved exactly, and no longer only in a working tree.
+    assert (repository / "fix.py").read_text(encoding="utf-8") == FIX
+    assert _in(repository, "show", "HEAD:fix.py") == FIX
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["retried"]) == (True, True)
+    assert record["salvaged"] is not None and record["commits"] == [record["salvaged"]]
+
+
+def test_an_implementer_that_takes_its_own_leftovers_back_out_ends_the_round_declined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 5 of the finish prompt: reject the work by removing it, not by leaving it lying there."""
+    repository = _repository(tmp_path)
+    head = _in(repository, "rev-parse", "HEAD")
+
+    exit_code = _one_round(repository, _stalling_agent(tmp_path, then=_REMOVES_IT), monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _in(repository, "rev-parse", "HEAD") == head  # nothing to preserve, so nothing is committed
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["retried"], record["salvaged"]) == (True, True, None)
+
+
+def test_the_second_attempt_is_told_what_is_in_the_tree_and_keeps_the_first_ones_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-running the round's own prompt would invite a second implementation over the first."""
+    repository = _repository(tmp_path)
+
+    _one_round(repository, _stalling_agent(tmp_path, then=_COMMITS), monkeypatch)
+
+    logs = repository / ".agentic-loop" / "logs"
+    first = next(logs.rglob("round-01-claude.log")).read_text(encoding="utf-8")
+    second = next(logs.rglob("round-01-claude-finish.log")).read_text(encoding="utf-8")
+    # The evidence of what the stalled attempt did is not overwritten by the retry.
+    assert "wrote the fix, then never came back to commit it" in first
+    assert "UNCOMMITTED WORK" not in first
+    # And the retry is handed the work rather than the task again.
+    assert "UNCOMMITTED WORK" in second
+    assert "?? fix.py" in second
+    assert "it has already run once" in second
+    for forbidden in ("git reset --hard", "git clean", "git stash"):
+        assert forbidden in second
+
+
+def test_the_loops_own_paperwork_is_not_read_as_the_implementers_work(tmp_path: Path) -> None:
+    """A review document left in a tracked directory would make every declined round a stall."""
+    repository = _repository(tmp_path)
+    notes = repository / "notes"
+    notes.mkdir()
+    (notes / "index.md").write_text("mine\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "notes/index.md"], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-q", "-m", "notes"], check=True)
+    # Tracked, so paperwork_dir writes no .gitignore of its own: git reports this.
+    directory = agent_review_loop.paperwork_dir(repository, notes, "20260101-000000")
+    (directory / "round-01.md").write_text("four findings\n", encoding="utf-8")
+
+    assert "notes/" in _in(repository, "status", "--porcelain")
+    assert agent_review_loop.uncommitted(repository, (notes,)) == ""
+    # The round's own work is still seen through the same exclusion.
+    (repository / "fix.py").write_text(FIX, encoding="utf-8")
+    assert "fix.py" in agent_review_loop.uncommitted(repository, (notes,))
+
+
+def test_every_implementer_prompt_forbids_waiting_on_a_notification(tmp_path: Path) -> None:
+    """The round that stalled announced it was waiting for the test suite to notify it.
+
+    Nothing in this harness sends an agent anything, so that wait runs to
+    `--timeout` with the round's work finished and uncommitted. The rule belongs
+    in all three implementer prompts, the one that recovers from it included."""
+    scratch = tmp_path / "round-01-claude"
+    prompts = [
+        agent_review_loop.implement_prompt("task", tmp_path / "reviews", "main", scratch),
+        agent_review_loop.fix_prompt("task", tmp_path / "review.md", 2, "main", scratch),
+        agent_review_loop.finish_prompt("task", None, 2, "main", scratch, "?? fix.py"),
+    ]
+
+    for prompt in prompts:
+        flattened = " ".join(prompt.split())  # the block is wrapped; the rule is one sentence
+        assert "FOREGROUND ONLY" in flattened
+        assert "Run every command in the foreground and wait for its own output." in flattened
+        assert "do not wait on a notification, a monitor, or a completion event" in flattened
+
+
 def test_an_agent_that_says_nothing_for_minutes_still_reports_that_it_is_running(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
