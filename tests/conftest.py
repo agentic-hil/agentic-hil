@@ -32,9 +32,16 @@ from support import remove_trusted_launcher  # noqa: E402
 #
 # Per process, so two suites on one machine cannot meet here, and short, because
 # every sandbox path is derived from it and MAX_PATH is the reason a basetemp
-# gets moved in the first place.
+# gets moved in the first place. On POSIX the parent is /tmp itself rather than
+# gettempdir(): macOS answers gettempdir() with its /var/folders/... token path,
+# which is long enough that a per-test TMPDIR derived from it pushes the CAN
+# broker's AF_UNIX socket addresses past the platform's 104-byte limit, and the
+# whole macOS CI matrix failed on exactly that. /tmp is the shortest root every
+# POSIX platform has; the per-process directory under it is this user's own, and
+# everything below stays per-test as before.
 SANDBOX_PREFIX = "ahil-pt-"
-SANDBOX_ROOT = Path(tempfile.gettempdir()).resolve() / f"{SANDBOX_PREFIX}{os.getpid()}"
+_SANDBOX_PARENT = Path("/tmp") if os.name == "posix" else Path(tempfile.gettempdir()).resolve()
+SANDBOX_ROOT = _SANDBOX_PARENT / f"{SANDBOX_PREFIX}{os.getpid()}"
 # How long a sibling root may sit untouched before a later session sweeps it. A
 # live session creates and removes a sandbox inside its own root on every single
 # test, so a root this old is residue: a directory Windows refused to delete
