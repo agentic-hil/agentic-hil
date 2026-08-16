@@ -36,8 +36,8 @@ have() {
 usage() {
     cat <<'USAGE'
 Usage: install.sh [options]
-       curl -LsSf https://agentic-hil.github.io/i.sh | sh
-       curl -LsSf https://agentic-hil.github.io/i.sh | sh -s -- --agent claude
+       curl -LsSf https://agentic-hil.github.io/install.sh | sh
+       curl -LsSf https://agentic-hil.github.io/install.sh | sh -s -- --agent claude
 
 Installs Agentic HIL user-local and registers the skill and the MCP server for
 your AI agent. It writes no project configuration and asks for no admin rights.

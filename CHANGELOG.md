@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- **The install line the landing page leads with did not work where a Windows visitor stands.** `irm <url> | iex` assumes the reader is already inside PowerShell, and the shell a Windows user reaches first is still the command prompt, which answers that `irm` is not a recognized command: the one line the README exists to make effortless was the first thing that failed. It now starts the interpreter it needs, so a single line works from PowerShell, `cmd.exe` and the Run box alike, and each block carries the platform it is for rather than leaving a reader to infer it from a syntax-highlighting hint. The install section also moved above `## Why`, because it is the second question a landing page is asked. The URL was the other half of the length, at 76 characters of raw content host: `agentic-hil.github.io` now serves these two scripts and nothing else, mirrored from the default branch by a workflow that copies them and commits only what changed, which takes the Windows line from 100 characters to 64 and the POSIX one to 55. Reading the script before running it now takes both halves from the same release, because the recipe took the script from the default branch and the checksum from the release, which are the same file only until the first fix lands after a release: `install.sh` and `install.ps1` are release assets from now on, beside the `.sha256` files that were already there, and v0.14.0 has been given both. Both scripts print the short form in their own usage text. (#243)
+
 ## [0.14.0] - 2026-08-16
 
 ### Added

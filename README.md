@@ -16,30 +16,32 @@ Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes boun
 **Linux / macOS** (any shell):
 
 ```bash
-curl -LsSf https://agentic-hil.github.io/i.sh | sh
+curl -LsSf https://agentic-hil.github.io/install.sh | sh
 ```
 
 **Windows** (any shell: PowerShell, `cmd.exe`, or the Run box):
 
 ```powershell
-powershell -c "irm https://agentic-hil.github.io/i.ps1|iex"
+powershell -c "irm https://agentic-hil.github.io/install.ps1|iex"
 ```
 
 One line installs the package user-local (through `uv` where it exists, `pip --user` otherwise) and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository: no project configuration is written, no shell profile is edited. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
 
-Prefer to read before you run? Download the script, check it against the `install.sh.sha256` (or `install.ps1.sha256`) asset published with the release, and run the file you checked:
+Prefer to read before you run? Take the script and its SHA-256 from the same release, check one against the other, and run the file you checked:
 
 ```bash
-curl -LsSfO https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh
+curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh
 curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh.sha256
 sha256sum -c install.sh.sha256 && sh install.sh
 ```
 
 ```powershell
-iwr -OutFile install.ps1 https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1
+iwr -OutFile install.ps1 https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1
 iwr -OutFile install.ps1.sha256 https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1.sha256
 if ((Get-FileHash install.ps1).Hash -eq (-split (Get-Content install.ps1.sha256))[0]) { .\install.ps1 }
 ```
+
+The one-line form above installs from the default branch, which is where a fix lands first; this form installs the release, which is the pair a checksum can speak for.
 
 Pass `--agent claude-code` (or `codex`, `opencode`) to register one agent instead of all of them, `--help` for the rest; piped, that reads `| sh -s -- --agent claude-code`. If you would rather drive your own package manager, the same two halves by hand:
 

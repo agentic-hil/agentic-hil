@@ -11,14 +11,14 @@ does not start.
 Linux and macOS, in any shell:
 
 ```bash
-curl -LsSf https://agentic-hil.github.io/i.sh | sh
+curl -LsSf https://agentic-hil.github.io/install.sh | sh
 ```
 
 Windows, in any shell (PowerShell, `cmd.exe`, or the Run box), because the line
 starts the interpreter it needs rather than assuming you are already in one:
 
 ```powershell
-powershell -c "irm https://agentic-hil.github.io/i.ps1|iex"
+powershell -c "irm https://agentic-hil.github.io/install.ps1|iex"
 ```
 
 Inside an already open PowerShell, `irm <url>|iex` on its own does the same
@@ -27,8 +27,7 @@ governs script *files*, and a command read from a pipe is not one.
 
 That host serves nothing but these two scripts, mirrored from this repository's
 default branch by a workflow that copies them and commits only what changed, so
-`i.sh` and `i.ps1` there are the same bytes as `install.sh` and `install.ps1`
-here, which it also serves under their full names. The section below takes the
+what it serves is byte for byte what is here. The section below takes the
 canonical copy straight from the repository and checks it.
 
 The script installs the package user-local (`uv tool install` where `uv` exists,
@@ -66,21 +65,35 @@ powershell -NoProfile -File .\install.ps1 --agent claude-code
 PyPI is the trust anchor for the package itself: everything the script installs
 comes from the index under the `agentic-hil` name, and the uv installer it may
 fetch is Astral's own, which verifies its published checksums itself. For the
-script, each release carries `install.sh.sha256` and `install.ps1.sha256` as
-release assets, so the verify-first variant is download, check, then run the
-file you checked:
+script, each release carries `install.sh` and `install.ps1` themselves as release
+assets beside their `install.sh.sha256` and `install.ps1.sha256`, so the
+verify-first variant takes both halves from the same release, checks one against
+the other, and runs the file it checked:
 
 ```bash
-curl -LsSfO https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh
+curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh
 curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh.sha256
 sha256sum -c install.sh.sha256 && sh install.sh
 ```
 
 ```powershell
-irm https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.ps1 -OutFile install.ps1
+irm https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1 -OutFile install.ps1
 irm https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1.sha256 -OutFile install.ps1.sha256
 (Get-FileHash install.ps1 -Algorithm SHA256).Hash -eq (Get-Content install.ps1.sha256).Split()[0]
 ```
+
+Both halves come from the release on purpose. The one-line form installs the
+default branch, where a fix lands first and where the script can therefore have
+moved since the last release; a checksum published with a release can only speak
+for the file published with it, and pairing the two across that gap is a check
+that fails for a reason that is not an attack. The default branch is also what
+[the short host](https://agentic-hil.github.io) mirrors, so the two convenient
+routes agree with each other and this one is the one that is verifiable.
+
+The raw file on the default branch stays readable at
+`https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh`
+and `.../install.ps1` for anyone who wants to read what the one-liner runs
+before running it.
 
 ## The two commands
 
