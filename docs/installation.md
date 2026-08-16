@@ -36,8 +36,9 @@ what it serves is byte for byte what is here. The section below takes the
 canonical copy straight from the repository and checks it.
 
 The script installs the package user-local (`uv tool install` where `uv` exists,
-`python -m pip install --user` otherwise, and it fetches Astral's uv installer
-where there is neither `uv` nor a Python 3.10 or newer) and then runs
+`python -m pip install --user` otherwise, and it fetches one pinned release of
+Astral's uv installer where there is neither `uv` nor a Python 3.10 or newer) and
+then runs
 `agentic-hil agent-install` for every agent CLI it finds on `PATH`. That is the
 machine half and nothing else: it writes no project configuration, edits no
 shell profile, and asks for no admin rights. After one restart of your agent,
@@ -68,9 +69,17 @@ powershell -NoProfile -File .\install.ps1 --agent claude-code
 ### Reading the script before you run it
 
 PyPI is the trust anchor for the package itself: everything the script installs
-comes from the index under the `agentic-hil` name, and the uv installer it may
-fetch is Astral's own, which verifies its published checksums itself. For the
-script, each release carries `install.sh` and `install.ps1` themselves as release
+comes from the index under the `agentic-hil` name. The uv installer it may fetch
+is Astral's own, and it is taken from a versioned URL naming one uv release,
+checked against a SHA-256 the script carries as a constant, and executed only if
+those bytes match; a mismatch prints both digests and stops the install rather
+than running what arrived. Astral's POSIX installer then verifies the uv archive
+it downloads against its own published checksums, which is the layer below ours
+and the one covering the binary rather than the script. Their PowerShell
+installer does not, so on Windows the pin in `install.ps1` is the only check
+between `astral.sh` and an executed script. Refreshing that pin is a release
+chore, described in [Release Strategy](release-strategy.md). For the script
+itself, each release carries `install.sh` and `install.ps1` themselves as release
 assets beside their `install.sh.sha256` and `install.ps1.sha256`, so the
 verify-first variant takes both halves from the same release, checks one against
 the other, and runs the file it checked:
