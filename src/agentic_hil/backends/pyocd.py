@@ -248,11 +248,19 @@ class PyOCDBackend:
     def debug_symbol_info(self, symbol: str = "") -> JsonObject:
         return self._unsupported_debug_tool("debug_symbol_info")
 
-    def debug_symbol_value(self, symbol: str = "") -> JsonObject:
+    def debug_symbol_value(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
         return self._unsupported_debug_tool("debug_symbol_value")
 
     def debug_dump_symbol_ihex(self, symbol: str = "", output: JsonObject | None = None, symbol_elf: JsonObject | None = None) -> JsonObject:
         return self._unsupported_debug_tool("debug_dump_symbol_ihex")
+
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        """None: this backend serves no typed-debug read, one-shot or otherwise.
+
+        Every debug tool here refuses with `not_supported`, so classifying any of
+        them as a standalone one-shot would take a probe lease around a refusal
+        that never touches the board."""
+        return frozenset()
 
     def target_support(self) -> JsonObject:
         """Whether this pyOCD resolves the configured target_type, before anything is driven.

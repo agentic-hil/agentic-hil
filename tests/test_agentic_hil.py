@@ -5,10 +5,12 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -58,6 +60,7 @@ from agentic_hil.cli import (
     setup_project,
     skill_version,
     test_schema,
+    uninstall_agent_integration,
     upgrade_installation,
 )
 from agentic_hil.comports import ComPortService
@@ -851,6 +854,165 @@ def test_a_virtual_environment_is_never_called_a_per_user_installation(
     assert _user_site_installation() is False
 
 
+def _installed_at(monkeypatch: pytest.MonkeyPatch, *, distribution_at: Path, site_packages: Path) -> None:
+    monkeypatch.setattr("importlib.metadata.distribution", lambda _name: SimpleNamespace(locate_file=lambda _relative: distribution_at))
+    monkeypatch.setattr("sysconfig.get_path", lambda name, scheme=None, *_args, **_kwargs: str(site_packages) if name in {"purelib", "platlib"} else "")
+
+
+def test_installed_package_directory_names_a_real_copy_inside_site_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wheel's installed copy, sitting where `locate_file` and the site scheme agree."""
+    from agentic_hil.upgrade import installed_package_directory
+
+    site_packages = tmp_path / "site-packages"
+    package_directory = site_packages / "agentic_hil"
+    package_directory.mkdir(parents=True)
+    _installed_at(monkeypatch, distribution_at=package_directory, site_packages=site_packages)
+
+    assert installed_package_directory() == str(package_directory)
+
+
+def test_installed_package_directory_never_names_a_checkout_outside_site_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An editable install's checkout must never be handed back as a cleanup path.
+
+    `locate_file("agentic_hil")` resolves to the checkout itself for an editable
+    install, and the directory is really there, so `.is_dir()` alone cannot tell
+    it apart from a wheel's installed copy: this project's own dev container
+    hits exactly this, since its `setup.py develop`-style install writes no
+    `direct_url.json` at all. Only sitting outside every site-packages directory
+    tells the two apart, and a checkout is never inside one.
+    """
+    from agentic_hil.upgrade import installed_package_directory
+
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    checkout = tmp_path / "checkout" / "src" / "agentic_hil"
+    checkout.mkdir(parents=True)
+    _installed_at(monkeypatch, distribution_at=checkout, site_packages=site_packages)
+
+    assert installed_package_directory() is None
+
+
+def test_installed_package_directory_is_none_when_the_located_path_does_not_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing to clean up if the directory `locate_file` names was never occupied."""
+    from agentic_hil.upgrade import installed_package_directory
+
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    _installed_at(monkeypatch, distribution_at=site_packages / "agentic_hil", site_packages=site_packages)
+
+    assert installed_package_directory() is None
+
+
+def test_removing_only_pycache_leaves_the_stale_import_succeeding(tmp_path: Path) -> None:
+    """The gap in the old `next_step` wording, proven against a clean interpreter.
+
+    A `pip uninstall` that leaves `__pycache__` behind leaves an
+    `agentic_hil` directory with nothing else in it. Removing only that
+    `__pycache__` — what `next_step` used to say was the whole fix — leaves the
+    directory itself, and Python still imports that as a PEP 420 namespace
+    package: `import agentic_hil` succeeds with `__spec__.origin` of `None`.
+    """
+    site_packages = tmp_path / "site-packages"
+    package_directory = site_packages / "agentic_hil"
+    pycache = package_directory / "__pycache__"
+    pycache.mkdir(parents=True)
+    (pycache / "stale.pyc").write_bytes(b"")
+
+    shutil.rmtree(pycache)
+
+    result = _import_agentic_hil_in_a_clean_interpreter(site_packages)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "None"
+
+
+def test_pycache_then_rmdir_together_finish_what_next_step_now_advises(tmp_path: Path) -> None:
+    """The complete `next_step` instruction, proven to actually stop the import.
+
+    Following it to the end — remove `__pycache__`, then `rmdir` the now-empty
+    `agentic_hil` directory itself — leaves nothing for a namespace package to
+    form around, so the stale `import agentic_hil` this whole hint exists for
+    fails instead of quietly continuing to succeed.
+    """
+    site_packages = tmp_path / "site-packages"
+    package_directory = site_packages / "agentic_hil"
+    pycache = package_directory / "__pycache__"
+    pycache.mkdir(parents=True)
+    (pycache / "stale.pyc").write_bytes(b"")
+
+    shutil.rmtree(pycache)
+    package_directory.rmdir()
+
+    result = _import_agentic_hil_in_a_clean_interpreter(site_packages)
+    assert result.returncode != 0
+    assert "ModuleNotFoundError" in result.stderr
+
+
+def _import_agentic_hil_in_a_clean_interpreter(site_packages: Path) -> subprocess.CompletedProcess:
+    """`import agentic_hil` with only `site_packages` offered, `-S` and a bare
+    environment so this suite's own editable install (found via `PYTHONPATH`,
+    not a `.pth` file, in this project's dev container) cannot shadow it."""
+    script = f"import sys; sys.path.insert(0, {str(site_packages)!r}); import agentic_hil; print(agentic_hil.__spec__.origin)"
+    # A bare environment, but not barer than the interpreter itself can stand:
+    # on Windows, CPython's startup asks the CryptoAPI for hash randomization,
+    # and that call fails without SYSTEMROOT ("failed to get random numbers"),
+    # observed on the Python 3.10 CI runner.
+    environment = {"PATH": os.environ.get("PATH", "")}
+    for name in ("SYSTEMROOT", "SYSTEMDRIVE"):
+        if name in os.environ:
+            environment[name] = os.environ[name]
+    return subprocess.run(
+        [sys.executable, "-S", "-c", script],
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+    )
+
+
+def test_empty_directory_removal_command_quotes_a_posix_path_with_spaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unquoted path with spaces splits into several `rmdir` arguments and finishes nothing."""
+    from agentic_hil.upgrade import empty_directory_removal_command
+
+    monkeypatch.setattr("agentic_hil.upgrade._host_rmdir_refuses_nonempty_directories", lambda: True)
+
+    command = empty_directory_removal_command("/opt/my venv/site-packages/agentic_hil")
+
+    assert command == "rmdir '/opt/my venv/site-packages/agentic_hil'"
+    assert shlex.split(command) == ["rmdir", "/opt/my venv/site-packages/agentic_hil"]
+
+
+def test_empty_directory_removal_command_uses_dotnet_delete_where_rmdir_would_not_refuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where `rmdir` is PowerShell's `Remove-Item` in disguise, it does not refuse a non-empty directory
+    the way POSIX's does -- it can prompt to remove it and everything inside instead. The line for that
+    host must be one that actually refuses, `[System.IO.Directory]::Delete` with `recursive: false`."""
+    from agentic_hil.upgrade import empty_directory_removal_command
+
+    monkeypatch.setattr("agentic_hil.upgrade._host_rmdir_refuses_nonempty_directories", lambda: False)
+
+    command = empty_directory_removal_command(r"C:\Users\me\AppData\Local\Programs\agentic_hil")
+
+    assert command == r"[System.IO.Directory]::Delete('C:\Users\me\AppData\Local\Programs\agentic_hil', $false)"
+
+
+def test_empty_directory_removal_command_escapes_a_single_quote_for_powershell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A literal PowerShell string doubles an embedded `'` rather than ending the string early."""
+    from agentic_hil.upgrade import empty_directory_removal_command
+
+    monkeypatch.setattr("agentic_hil.upgrade._host_rmdir_refuses_nonempty_directories", lambda: False)
+
+    command = empty_directory_removal_command("C:\\Users\\o'brien\\agentic_hil")
+
+    assert command == "[System.IO.Directory]::Delete('C:\\Users\\o''brien\\agentic_hil', $false)"
+
+
 # ---------------------------------------------------------------------------
 # What an upgrade leaves behind outside the package: the agent skills and the
 # MCP registrations this installation wrote. Neither is inside the package, so
@@ -1055,6 +1217,41 @@ def test_upgrade_selects_manager_owning_running_installation(
 
     assert selected_manager == manager
     assert command == expected
+
+
+@pytest.mark.parametrize(
+    ("prefix", "installer", "expected"),
+    [
+        ("C:/Users/op/AppData/Roaming/uv/tools/agentic-hil", "uv", "uv tool uninstall agentic-hil"),
+        ("C:/Users/op/.local/pipx/venvs/agentic-hil", "pip", "pipx uninstall agentic-hil"),
+        ("C:/Users/op/venv", "uv", 'uv pip uninstall --python "PYTHON" agentic-hil'),
+        ("C:/Python313", "pip", '"PYTHON" -m pip uninstall agentic-hil'),
+    ],
+)
+def test_the_removal_line_comes_from_the_manager_that_owns_the_installation(
+    prefix: str,
+    installer: str,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`uninstall` ends on this line, and it has to name the same manager an
+    upgrade would have run.
+
+    The four branches are the upgrade's own, through `owning_manager`, so a
+    machine can never be told to empty an environment a different manager is
+    holding. No PATH lookup: this is a line to print, and a `uv` that is missing
+    right now says nothing about whether the operator will have one when they
+    run it. No extras either, because a removal takes the distribution whole.
+    """
+    from agentic_hil.upgrade import removal_command
+
+    monkeypatch.setattr(sys, "prefix", prefix)
+    monkeypatch.setattr(sys, "executable", "PYTHON")
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: installer)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can", "pyocd"))
+    monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda _name: pytest.fail("a line to print needs no manager on PATH"))
+
+    assert removal_command() == expected
 
 
 @pytest.mark.parametrize(
@@ -2913,6 +3110,609 @@ def test_the_deny_rule_cleanup_settles_after_one_run(
     assert settings.read_text(encoding="utf-8") == migrated
 
 
+def _uninstall_paths(result: dict, key: str) -> list[str]:
+    return [item["path"] for item in result[key]]
+
+
+def _uninstall_kept(result: dict) -> list[str]:
+    return [item["path"] for item in result["kept"]]
+
+
+def test_uninstall_takes_back_the_two_halves_the_machine_install_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reverse of `agent-install`, measured against a real one.
+
+    The skill file, its directory, and the MCP entry go; the file the entry was
+    in is another program's whole state and comes back holding everything else it
+    held. (#247)
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_agent(agent="claude-code")["ok"] is True
+    registrations = home / ".claude.json"
+    document = json.loads(registrations.read_text(encoding="utf-8"))
+    document["mcpServers"]["someone-elses"] = {"type": "stdio", "command": "/usr/bin/other", "args": []}
+    document["numStartups"] = 41
+    registrations.write_text(json.dumps(document) + "\n", encoding="utf-8")
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert result["scope"] == "user"
+    assert not _claude_skill_path().exists()
+    assert not _claude_skill_path().parent.exists()
+    after = json.loads(registrations.read_text(encoding="utf-8"))
+    assert "agentic-hil" not in after["mcpServers"]
+    assert after["mcpServers"]["someone-elses"] == {"type": "stdio", "command": "/usr/bin/other", "args": []}
+    assert after["numStartups"] == 41
+    assert result["left_alone"] == []
+    assert [item["what"] for item in result["removed"]] == ["MCP registration", "agent skill"]
+
+
+@pytest.mark.parametrize("where", ["home", "filesystem-root", "project"])
+def test_uninstall_runs_wherever_agent_install_runs(
+    where: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same boundary as the half it takes back, and for the same reason (#235).
+
+    Everything it writes is user-level, so the working directory that would
+    otherwise swallow the home directory whole imposes no boundary here either.
+    A project directory keeps the strict rule and is the other place an operator
+    types this.
+    """
+    project = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_agent(agent="claude-code")["ok"] is True
+    monkeypatch.chdir({"home": home, "filesystem-root": Path(home.anchor), "project": project}[where])
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert not _claude_skill_path().exists()
+    assert _registered_claude_command() is None
+
+
+def test_uninstall_leaves_an_mcp_entry_the_operator_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recognition that refuses to overwrite an entry also refuses to delete one.
+
+    A registration this tool did not write stays, and is named rather than
+    silently skipped: once the package is gone that entry points at a command
+    that is gone with it, and whether to edit a file another program owns is the
+    operator's decision.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    theirs = {"type": "stdio", "command": "/opt/hand-built/agentic-hil", "args": ["mcp-stdio"], "env": {"THEIRS": "1"}}
+    registrations = home / ".claude.json"
+    registrations.write_text(json.dumps({"mcpServers": {"agentic-hil": theirs}}) + "\n", encoding="utf-8")
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert json.loads(registrations.read_text(encoding="utf-8"))["mcpServers"]["agentic-hil"] == theirs
+    assert result["removed"] == []
+    assert [item["what"] for item in result["left_alone"]] == ["MCP registration"]
+    assert "left where they were" in result["summary"]
+
+
+def test_uninstall_leaves_a_skill_file_it_does_not_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`is_agentic_hil_setup_skill` is the whole of the claim, here as in install.
+
+    Somebody else's skill at this path is not this installation's to delete, and
+    its directory outlives the uninstall with it.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    skill = _claude_skill_path()
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: someone-elses\n---\n\nNot ours.\n", encoding="utf-8")
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert skill.read_text(encoding="utf-8") == "---\nname: someone-elses\n---\n\nNot ours.\n"
+    assert _uninstall_paths(result, "left_alone") == [str(skill)]
+
+
+def test_uninstall_leaves_bytes_at_the_skill_path_that_are_not_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A decode error is not a licence to delete.
+
+    Bytes that are not UTF-8 cannot carry this skill's frontmatter, so they are
+    not this installation's, and letting the decode out as an internal error
+    would be the wrong answer to a file somebody else put there.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    skill = _claude_skill_path()
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(b"\xff\xfe\x00binary\x00")
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert skill.read_bytes() == b"\xff\xfe\x00binary\x00"
+    assert _uninstall_paths(result, "left_alone") == [str(skill)]
+
+
+def test_uninstall_removes_a_legacy_skill_even_with_no_current_skill_installed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine that never moved past the superseded skill name still gets taken back.
+
+    `remove_legacy_skills` used to run only inside the branch where the current
+    `agentic-hil/SKILL.md` target exists. A user who still has only the older
+    managed `agentic-hil-config-setup/SKILL.md` has no current target, so
+    uninstall used to remove the other integration pieces, report success, and
+    leave the legacy skill discoverable by the agent.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    legacy = _legacy_skill("agentic-hil-config-setup", managed=True)
+    current = _claude_skill_path()
+    assert not current.exists()
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert not legacy.exists()
+    assert not legacy.parent.exists()
+    assert [item["what"] for item in result["removed"]] == ["superseded agent skill"]
+    # Never planted just to check: the current skill's own directory is not
+    # created as a side effect of taking the legacy one back.
+    assert not current.parent.exists()
+
+
+def test_uninstall_leaves_a_legacy_skill_that_is_not_text_with_no_current_skill_installed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A decode error at the legacy path is not a licence to delete either.
+
+    `remove_legacy_skills` now runs even with no current skill installed
+    (previous test above), and it stats each candidate before reading it. Bytes
+    that are not UTF-8 cannot carry the managed frontmatter it looks for, so a
+    binary file sitting at a superseded skill name is foreign, not superseded,
+    and letting the decode out as an internal error would abort the rest of
+    uninstall instead of leaving the file alone.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    legacy = Path.home() / ".claude" / "skills" / "agentic-hil-config-setup" / "SKILL.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"\xff\xfe\x00binary\x00")
+    current = _claude_skill_path()
+    assert not current.exists()
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert legacy.read_bytes() == b"\xff\xfe\x00binary\x00"
+    assert result["removed"] == []
+
+
+def test_uninstall_leaves_a_codex_table_that_carries_no_markers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The markers are the only provenance a TOML file carries.
+
+    An `mcp_servers.agentic-hil` outside them is what `_register_codex_mcp`
+    refuses to touch on the way in, so it is not this command's to delete on the
+    way out either.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    config = home / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('[mcp_servers.agentic-hil]\ncommand = "/opt/mine/agentic-hil"\n', encoding="utf-8")
+
+    result = uninstall_agent_integration(["codex"])
+
+    assert result["ok"] is True, result
+    assert config.read_text(encoding="utf-8") == '[mcp_servers.agentic-hil]\ncommand = "/opt/mine/agentic-hil"\n'
+    assert [item["what"] for item in result["left_alone"]] == ["MCP registration"]
+
+
+def test_uninstall_reports_invalid_utf8_in_a_json_mcp_config_instead_of_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A binary or truncated `~/.claude.json` must not abort the rest of uninstall.
+
+    `_remove_json_mcp` used to call `_load_json_object`, whose guarded read
+    raises `UnicodeDecodeError` uncaught, unlike the Codex and skill removal
+    paths. The exception used to propagate past `_release_lock_sidecar` and end
+    the whole command; it now comes back as the same `config_invalid` refusal a
+    file this tool cannot decode already gets everywhere else.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    registrations = home / ".claude.json"
+    registrations.write_bytes(b"\xff\xfe\x00binary\x00")
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is False, result
+    assert registrations.read_bytes() == b"\xff\xfe\x00binary\x00"
+    agent_report = next(report for report in result["agents"] if report["agent"] == "claude-code")
+    assert agent_report["steps"]["mcp_config"]["error_type"] == "config_invalid"
+    # The lock sidecar is still released even though the read failed, and the
+    # other steps for this agent still ran rather than the whole call raising.
+    assert not user_file_lock_path(registrations).exists()
+    assert agent_report["steps"]["skill"]["ok"] is True
+    assert agent_report["steps"]["agent_write_restriction"]["ok"] is True
+
+
+def test_uninstall_takes_back_the_write_refusals_and_nothing_else_in_the_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #206 recognition, reused rather than reinvented, with `wanted` dropped.
+
+    Three of these are this tool's: two inside the per-user root the namespace
+    claim covers, and one for a `state_root` an operator put on another volume,
+    which only the exact text a visible configuration still names can reach. The
+    installation that wrote all three is going away, so unlike a refresh nothing
+    weighs whether a tree is still wanted. The operator's own rules come back in
+    the order they wrote them.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    namespace = _tool_state_namespace()
+    elsewhere = tmp_path / "other-volume" / "hil-state"
+    project = project_config_directory() / "stepper-0123456789"
+    project.mkdir(parents=True)
+    (project / "config.yaml").write_text(f"state_root: {elsewhere.as_posix()!r}\n", encoding="utf-8")
+    ours = [
+        f"Edit(/{_posix_filesystem_path(project)}/**)",
+        f"Write({(namespace / 'state').as_posix()}/**)",
+        f"Edit(/{_posix_filesystem_path(elsewhere)}/**)",
+    ]
+    theirs = ["Bash(curl *)", f"Edit(/{_posix_filesystem_path(Path.home() / 'work' / 'agentic-hil')}/**)", {"tool": "Edit"}]
+    settings = _claude_settings(home, [*theirs, *ours])
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert _deny_rules(settings) == theirs
+    assert [item["what"] for item in result["removed"]] == ["write refusal"] * 3
+    assert all(rule in " ".join(_uninstall_paths(result, "removed")) for rule in ours)
+
+
+def test_uninstall_takes_back_the_lock_sidecars_it_left_in_other_programs_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sidecar is a file this tool wrote, named after this tool, in somebody
+    else's directory.
+
+    `user_file_lock_path` says the sidecar outlives its transaction, so an
+    uninstall that ignored them would leave a `.agentic-hil.lock` in `~/.claude`,
+    in `~/.codex`, in `~/.config/opencode` and in the home directory itself:
+    exactly the leftover this command exists to take back. Measured on a real
+    machine before it was fixed. (#247)
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    for agent in ("claude-code", "codex", "opencode"):
+        assert install_agent(agent=agent)["ok"] is True
+    assert list(home.rglob("*.agentic-hil.lock"))
+
+    assert uninstall_agent_integration()["ok"] is True
+
+    assert list(home.rglob("*.agentic-hil.lock")) == []
+
+
+def test_uninstall_leaves_a_write_refusal_it_cannot_attribute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim stops exactly where the evidence stops.
+
+    A `state_root` outside this tool's own per-user roots is recognisable only
+    through the text a configuration derives it from. With no configuration left
+    naming that tree, a rule for it cannot be told from one the operator wrote,
+    and the invariant that this never removes an operator's rule outranks the
+    tidying.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    unattributable = f"Edit(/{_posix_filesystem_path(tmp_path / 'other-volume' / 'hil-state')}/**)"
+    ours = f"Edit(/{_posix_filesystem_path(_tool_state_namespace() / 'state')}/**)"
+    settings = _claude_settings(home, [unattributable, ours])
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert _deny_rules(settings) == [unattributable]
+    assert len(result["removed"]) == 1
+
+
+def test_uninstall_keeps_the_configuration_and_the_state_root_and_names_both(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two trees an installation does not own, and no flag that empties them.
+
+    The state root is the audit trail and any incident standing over a board that
+    removing a package does not put back. The configuration is operator policy,
+    and permissions only ever narrow, so a purge followed by a reinstall would
+    put every one of them back to the template's out of a command an agent can be
+    asked to run. Both are reported with their paths and their reason.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    project = project_config_directory() / "stepper-0123456789"
+    project.mkdir(parents=True)
+    state_root = _tool_state_namespace() / "state"
+    (state_root / "coordination" / "records").mkdir(parents=True)
+    (project / "config.yaml").write_text(f"state_root: {state_root.as_posix()!r}\n", encoding="utf-8")
+    assert install_agent(agent="claude-code")["ok"] is True
+
+    result = uninstall_agent_integration()
+
+    assert result["ok"] is True, result
+    assert (project / "config.yaml").is_file()
+    assert (state_root / "coordination" / "records").is_dir()
+    assert str(project_config_directory()) in _uninstall_kept(result)
+    assert str(_tool_state_namespace()) in _uninstall_kept(result)
+    assert all(item["reason"] for item in result["kept"])
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["uninstall", "--purge-state"])
+
+
+def test_uninstall_names_the_removal_line_because_it_cannot_run_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process cannot delete the files it is executing out of.
+
+    So the last thing this command produces is a line for the operator's shell,
+    from the manager that owns the installation, and it reaches the one field a
+    person reading a terminal actually reads.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: "pipx")
+    monkeypatch.setattr("agentic_hil.upgrade.removal_command", lambda: "pipx uninstall agentic-hil")
+    # None on this suite's own editable installation, and a real directory on a
+    # wheel; pinned either way, because the field is the answer to a question
+    # only a machine that has one can ask.
+    monkeypatch.setattr("agentic_hil.upgrade.installed_package_directory", lambda: None)
+
+    result = uninstall_agent_integration()
+
+    assert result["ok"] is True, result
+    assert result["package_removal"] == {"manager": "pipx", "command": "pipx uninstall agentic-hil"}
+    assert "pipx uninstall agentic-hil" in result["summary"]
+    assert "pipx uninstall agentic-hil" in result["next_step"]
+
+
+def test_uninstall_never_tells_an_operator_to_remove_the_whole_package_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `__pycache__` cleanup hint must name only the cache, never the tree around it.
+
+    `package_directory` can be a wheel's genuine installed copy, and "removing
+    that directory" read as removing all of it rather than the leftover
+    `__pycache__` inside it would delete the package itself instead of a stale
+    bytecode cache.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: "pipx")
+    monkeypatch.setattr("agentic_hil.upgrade.removal_command", lambda: "pipx uninstall agentic-hil")
+    monkeypatch.setattr("agentic_hil.upgrade.installed_package_directory", lambda: "/opt/venv/site-packages/agentic_hil")
+
+    result = uninstall_agent_integration()
+
+    assert result["ok"] is True, result
+    assert result["package_removal"]["package_directory"] == "/opt/venv/site-packages/agentic_hil"
+    assert "remove only `/opt/venv/site-packages/agentic_hil/__pycache__`" in result["next_step"]
+    assert "never the rest of /opt/venv/site-packages/agentic_hil" in result["next_step"]
+
+
+def test_uninstall_names_rmdir_to_finish_the_pycache_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `__pycache__` hint alone does not finish the cleanup it promises.
+
+    Removing `__pycache__` leaves an empty directory Python still imports as a
+    namespace package (proven in `test_pycache_then_rmdir_together_finish_what_next_step_now_advises`),
+    so `next_step` must also name the `rmdir` step that actually stops it —
+    non-recursive, so it only succeeds once nothing else is left in the
+    directory. Pinned to the POSIX branch of `empty_directory_removal_command`
+    so this assertion holds on whichever host the suite runs on; the platform
+    split itself is `empty_directory_removal_command`'s own tests to make.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: "pipx")
+    monkeypatch.setattr("agentic_hil.upgrade.removal_command", lambda: "pipx uninstall agentic-hil")
+    monkeypatch.setattr("agentic_hil.upgrade.installed_package_directory", lambda: "/opt/venv/site-packages/agentic_hil")
+    monkeypatch.setattr("agentic_hil.upgrade._host_rmdir_refuses_nonempty_directories", lambda: True)
+
+    result = uninstall_agent_integration()
+
+    assert result["ok"] is True, result
+    assert "rmdir /opt/venv/site-packages/agentic_hil" in result["next_step"]
+
+
+def test_uninstall_takes_back_only_the_agent_it_was_given(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_agent(agent="claude-code")["ok"] is True
+    assert install_agent(agent="opencode")["ok"] is True
+    opencode_skill = home / ".config" / "opencode" / "skills" / "agentic-hil" / "SKILL.md"
+
+    result = uninstall_agent_integration(["opencode"])
+
+    assert result["ok"] is True, result
+    assert [report["agent"] for report in result["agents"]] == ["opencode"]
+    assert not opencode_skill.exists()
+    assert _claude_skill_path().is_file()
+    assert _registered_claude_command() is not None
+
+
+def test_uninstall_takes_back_the_codex_block_and_leaves_the_file_it_was_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex carries provenance in its markers, and in nothing else.
+
+    Both marked blocks go, the operator's own table and their own AGENTS.md
+    heading stay, and a file whose entire content was this tool's block is
+    removed rather than left as a zero-byte trace of an installation.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    config = home / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('[mcp_servers.other]\ncommand = "other"\n', encoding="utf-8")
+    agents_md = home / ".codex" / "AGENTS.md"
+    agents_md.write_text("# My notes\n\nKeep this.\n", encoding="utf-8")
+    assert install_agent(agent="codex")["ok"] is True
+    assert "[mcp_servers.agentic-hil]" in config.read_text(encoding="utf-8")
+
+    result = uninstall_agent_integration(["codex"])
+
+    assert result["ok"] is True, result
+    assert config.read_text(encoding="utf-8") == '[mcp_servers.other]\ncommand = "other"\n'
+    assert agents_md.read_text(encoding="utf-8") == "# My notes\n\nKeep this.\n"
+    assert not (home / ".codex" / "skills" / "agentic-hil").exists()
+    assert [item["what"] for item in result["removed"]] == ["MCP registration", "agent skill", "skill registration"]
+
+
+def test_uninstall_removes_a_codex_file_that_held_nothing_but_its_own_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_agent(agent="codex")["ok"] is True
+
+    assert uninstall_agent_integration(["codex"])["ok"] is True
+
+    assert not (home / ".codex" / "config.toml").exists()
+    assert not (home / ".codex" / "AGENTS.md").exists()
+
+
+def test_uninstall_on_a_machine_that_never_installed_creates_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every guarded read and every lock in this package builds its directory chain.
+
+    So a command whose whole job is removal has to answer an absent file without
+    opening it; probing one would plant `~/.codex` and `~/.config/opencode` on a
+    machine that has neither, which is the opposite of what was asked for.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    before = sorted(path.name for path in home.iterdir())
+
+    result = uninstall_agent_integration()
+
+    assert result["ok"] is True, result
+    assert result["removed"] == []
+    assert result["left_alone"] == []
+    assert sorted(path.name for path in home.iterdir()) == before
+    assert all("Nothing to take back" in report["summary"] for report in result["agents"])
+
+
+def test_uninstall_takes_the_registration_before_it_takes_the_lock_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Order inside one agent is load-bearing, not tidy.
+
+    The registration is what lets a host launch the server; the write refusals
+    are what stop that host editing the configuration the server reads. Taking
+    the refusals back first would leave a window with the lock already off and
+    the door still standing.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    order: list[str] = []
+
+    def record(name: str):
+        def step(_agent):
+            order.append(name)
+            return {"ok": True, "summary": name, "removed": [], "left_alone": []}
+
+        return step
+
+    monkeypatch.setattr("agentic_hil.cli._remove_agent_mcp", record("mcp"))
+    monkeypatch.setattr("agentic_hil.cli._remove_agent_skill", record("skill"))
+    monkeypatch.setattr("agentic_hil.cli._remove_agent_deny_rules", record("deny"))
+
+    assert uninstall_agent_integration(["claude-code"])["ok"] is True
+
+    assert order == ["mcp", "skill", "deny"]
+
+
+def test_uninstall_refuses_an_agent_it_does_not_know(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+
+    result = uninstall_agent_integration(["cursor"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "unsupported_agent"
+    assert result["agents"] == ["cursor"]
+
+
+def test_uninstall_is_reachable_from_the_command_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _isolated_workspace(tmp_path, monkeypatch)
+    _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    assert install_agent(agent="claude-code")["ok"] is True
+    capsys.readouterr()
+
+    assert entrypoint(["uninstall", "--agent", "claude"]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["tool"] == "agentic_hil_uninstall"
+    assert not _claude_skill_path().exists()
+
+
 def _opencode_wildcard_match(subject: str, pattern: str, *, windows: bool = False) -> bool:
     """`Wildcard.match` from opencode's `packages/core/src/util/wildcard.ts`.
 
@@ -3071,16 +3871,19 @@ def test_the_absolute_opencode_pattern_matched_nothing() -> None:
     assert _opencode_evaluate("edit", str(_OPENCODE_CONFIG_DIR / "config.yaml"), stale) == "deny"
 
 
-def test_initialize_carries_the_one_thing_said_before_the_agent_decides() -> None:
+def test_initialize_carries_the_one_thing_said_before_the_agent_decides(tmp_path: Path) -> None:
     """A refusal and a skill both arrive after the first decision.
 
     Measured: a small model ran st-flash before calling a single tool here, so
     nothing this server says at call time could have reached it. initialize is
     the only moment that precedes the decision.
     """
+    # In tmp_path rather than the working directory: this wrote a configuration
+    # into the clone, which is one fixed path two concurrent runs of this module
+    # share, and which the version gate then has to be told to ignore.
     response = handle_mcp_message(
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": MCP_PROTOCOL_VERSION}},
-        AgenticHILToolService(load_config(str(write_config(Path.cwd())))),
+        AgenticHILToolService(load_config(str(write_config(tmp_path / "workspace")))),
     )
     instructions = response["result"]["instructions"]
 
@@ -3522,10 +4325,13 @@ def test_register_agent_mcp_rejects_workspace_injected_command(
 
 
 def test_register_agent_mcp_rejects_temp_and_uv_cache_injected_commands(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    temp_command = tmp_path / "agentic-hil"
+    # From the temporary root this process actually names, not from `tmp_path`:
+    # what makes the first command untrusted is that it is in temporary storage,
+    # and tmp_path is only in temporary storage while nobody has moved
+    # `--basetemp`. The file need not exist; the refusal is about where it is.
+    temp_command = Path(tempfile.gettempdir()) / "agentic-hil"
     uv_cache = Path.home() / "uv-cache"
     monkeypatch.setenv("UV_CACHE_DIR", str(uv_cache))
 

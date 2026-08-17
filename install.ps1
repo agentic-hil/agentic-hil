@@ -105,12 +105,23 @@ function Invoke-Captured {
         A native command's output and exit code, with stderr folded in. Windows
         PowerShell 5.1 turns a native command's stderr into error records under
         a Stop preference, so the preference is lowered around the call alone.
+
+        The records are unwrapped to their message before Out-String sees them,
+        and that is not cosmetic. uv reports its progress on stderr, so a
+        completely successful `uv tool install` handed the first of those records
+        to Out-String, which rendered it the way 5.1 renders an error: the line
+        itself, then "In Zeile:113", then a CategoryInfo block naming
+        NativeCommandError. The install had worked. The transcript read like a
+        crash. Taking the message off the record leaves a stderr line as the line
+        it was and nothing else.
     #>
     param([string]$File, [string[]]$Arguments)
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $text = (& $File @Arguments 2>&1 | Out-String)
+        $text = (& $File @Arguments 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+        } | Out-String)
         $code = $LASTEXITCODE
         if ($null -eq $code) { $code = 0 }
         return [pscustomobject]@{ ExitCode = $code; Output = $text }
@@ -196,14 +207,66 @@ function Find-Python {
     return ''
 }
 
+# The one release of Astral's uv installer this script is allowed to run, and the
+# SHA-256 of exactly those bytes. They are one pair, and install.sh pins the same
+# uv release: bumping any one of the four alone breaks an install rather than
+# loosening it, which is the intended failure mode. Refreshing them is a release
+# chore, written down in docs/release-strategy.md, not something an install
+# decides on the operator's machine.
+$UvInstallerVersion = '0.12.5'
+$UvInstallerSha256 = 'ca1ad558c65d31e2d3a24464638aff90bfb81d6c72428b4e71d6f55944a68541'
+
+function Get-Sha256Hex {
+    param([byte[]]$Bytes)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ((($sha256.ComputeHash($Bytes)) | ForEach-Object { $_.ToString('x2') }) -join '')
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 function Install-Uv {
-    # Astral's own installer for uv. It downloads the release archive for this
-    # platform and verifies its published checksums itself, which is why nothing
-    # here adds a second, weaker check of its own around the pipe. It is read
-    # into this process rather than saved and started, so no execution policy is
-    # touched and nothing has to be elevated.
-    $installer = Invoke-RestMethod -Uri 'https://astral.sh/uv/install.ps1' -UseBasicParsing
-    Invoke-Expression $installer
+    # Astral's own installer for uv, pinned to one release and checked before a
+    # line of it runs. Three decisions are worth keeping visible here.
+    #
+    # Why the pin. The moving https://astral.sh/uv/install.ps1 serves whatever is
+    # current at the second it is asked, so piping it into iex executes bytes
+    # nobody here has ever read, on a machine that has just been told this script
+    # touches five things and nothing else. Every other hop in the chain is
+    # already pinned: this script is published with its own .sha256 beside it, and
+    # the package comes hash-checked from PyPI. The versioned URL names one
+    # release, the constant above names its exact bytes, and a download that is
+    # not those bytes is not run at all.
+    #
+    # Why their checksums are the second layer, and why that layer is thinner
+    # here than on the POSIX side. This pin vouches for the installer, not for the
+    # uv binaries it goes on to fetch. Astral's POSIX installer carries a SHA-256
+    # per release artifact and verifies the archive it downloaded against it;
+    # their PowerShell installer, as of the pinned 0.12.5, downloads the archive
+    # and unpacks it with no checksum step at all. So on Windows this pin is not a
+    # belt beside their braces, it is the only integrity check between astral.sh
+    # and an executed script, which is the strongest reason of all to keep it.
+    #
+    # Why bytes and not text. The digest has to speak for what is executed, so the
+    # bytes are hashed and the same bytes are decoded and run. Nothing is saved
+    # and started, so no execution policy is touched and nothing is elevated.
+    $url = "https://astral.sh/uv/$UvInstallerVersion/install.ps1"
+    $client = New-Object Net.WebClient
+    try {
+        $bytes = $client.DownloadData($url)
+    } finally {
+        $client.Dispose()
+    }
+    $foundHash = Get-Sha256Hex -Bytes $bytes
+    if ($foundHash -ne $UvInstallerSha256) {
+        Write-Say 'the pinned uv installer does not match its recorded hash, so it was not run.'
+        Write-Say "  url      $url"
+        Write-Say "  expected $UvInstallerSha256"
+        Write-Say "  found    $foundHash"
+        throw 'the pin in this script may be stale: check for a newer uv release, then refresh $UvInstallerVersion and $UvInstallerSha256 together. Until then, install uv or Python 3.10 or newer yourself and run this again.'
+    }
+    Invoke-Expression ([Text.Encoding]::UTF8.GetString($bytes))
     Add-UserBinToPath
 }
 
@@ -374,6 +437,25 @@ function Assert-ResolvedForAgentInstall {
     }
 }
 
+function Register-Agent {
+    # One agent registered, reported as a result rather than as a document.
+    # `agent-install` answers with a JSON report of every path it touched, and on
+    # a machine with three agent CLIs that is roughly a hundred and fifty lines of
+    # machine-readable detail inside a transcript whose whole job is to say five
+    # calm things. On success the operator needs one line. On failure the document
+    # is the diagnosis, so then it is printed whole and this stops. The top-level
+    # "ok" is read at its own indentation, so a true nested inside a failed report
+    # cannot stand in for the answer.
+    param([string]$AgentId)
+    $result = Invoke-Captured -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $AgentId)
+    if ($result.ExitCode -eq 0 -and $result.Output -match '(?m)^  "ok": true') {
+        Write-Say "agent: $AgentId registered (skill and MCP server, restart pending)"
+        return
+    }
+    Write-Host $result.Output.TrimEnd()
+    throw "agent-install failed for $AgentId; the report above says which half"
+}
+
 # Step 4: the machine half, and only the machine half.
 $configured = @()
 if (-not $WithAgentInstall) {
@@ -381,7 +463,7 @@ if (-not $WithAgentInstall) {
 } elseif ($Agent) {
     Assert-ResolvedForAgentInstall
     Write-Step 4 "agent: registering the skill and the MCP server for $Agent"
-    Invoke-Checked -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $Agent) -Failure "agent-install failed for $Agent"
+    Register-Agent -AgentId $Agent
     $configured = @($Agent)
 } else {
     $detected = @()
@@ -398,42 +480,53 @@ if (-not $WithAgentInstall) {
         Assert-ResolvedForAgentInstall
         foreach ($agentId in $detected) {
             Write-Step 4 "agent: registering the skill and the MCP server for $agentId"
-            Invoke-Checked -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $agentId) -Failure "agent-install failed for $agentId"
+            Register-Agent -AgentId $agentId
             $configured += $agentId
         }
     }
 }
 
-# Step 5: the one thing that stays the operator's.
-$runningName = ''
-$runningPid = ''
+# Step 5: the one thing that stays the operator's. Every running agent CLI is
+# named, not the first one found: an operator with two of them open restarts
+# both, and a warning that names one is read as clearing the other.
+$running = @()
 foreach ($agentId in $configured) {
-    if ($runningName) { continue }
     $processName = Get-ProcessNameForAgent $agentId
     $process = @(Get-Process -Name $processName -ErrorAction SilentlyContinue) | Select-Object -First 1
     if ($process) {
-        $runningName = $processName
-        $runningPid = $process.Id
+        $running += [pscustomobject]@{ Name = $processName; ProcessId = $process.Id }
     }
 }
-if (-not $runningName -and $env:CLAUDECODE) {
+if ($running.Count -eq 0 -and $env:CLAUDECODE) {
     # Running inside a Claude Code session, which is the only signal where the
     # process list has nothing to show. It speaks for claude-code alone: an
     # operator who asked for codex is not told to restart something else.
     foreach ($agentId in $configured) {
         if ($agentId -eq 'claude-code' -or $agentId -eq 'claude') {
-            $runningName = 'claude'
-            $runningPid = 'this session'
+            $running += [pscustomobject]@{ Name = 'claude'; ProcessId = 'this session' }
         }
     }
 }
 
-if ($runningName) {
-    Write-Step 5 "restart: $runningName is running right now, and that is the one step left"
+if ($running.Count -eq 1) {
+    Write-Step 5 "restart: $($running[0].Name) is running right now, and that is the one step left"
     Write-Host ''
     Write-Host '========================================================================'
-    Write-Host "  RESTART REQUIRED: $runningName is running right now (PID $runningPid)."
+    Write-Host "  RESTART REQUIRED: $($running[0].Name) is running right now (PID $($running[0].ProcessId))."
     Write-Host '  Quit that process and start it again once. An agent CLI reads its MCP'
+    Write-Host '  registrations when a session starts, so the agentic-hil tools appear in'
+    Write-Host '  the next session, not in this one.'
+    Write-Host '========================================================================'
+    Write-Host ''
+} elseif ($running.Count -gt 1) {
+    Write-Step 5 "restart: $($running.Count) of your agent CLIs are running right now, and that is the one step left"
+    Write-Host ''
+    Write-Host '========================================================================'
+    Write-Host '  RESTART REQUIRED: these agent CLIs are running right now:'
+    foreach ($entry in $running) {
+        Write-Host "    $($entry.Name) (PID $($entry.ProcessId))"
+    }
+    Write-Host '  Quit each process and start it again once. An agent CLI reads its MCP'
     Write-Host '  registrations when a session starts, so the agentic-hil tools appear in'
     Write-Host '  the next session, not in this one.'
     Write-Host '========================================================================'

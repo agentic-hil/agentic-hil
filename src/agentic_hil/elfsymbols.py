@@ -22,6 +22,11 @@ relocations, no DWARF, no program headers, no section contents. Anything it
 cannot parse is `unreadable` rather than a guess, and every refusal leaves the
 caller's own GDB-based refusal standing, so a symbol that is genuinely absent
 is still reported absent.
+
+The one other answer here is `read_elf_byte_order`, which is the identification
+byte this module already has to read before it can unpack a single field. It is
+public because a caller that turns a symbol's bytes into a number needs exactly
+that byte and has nowhere else to get it (#249).
 """
 
 from __future__ import annotations
@@ -36,6 +41,13 @@ ELF_CLASS_32 = 1
 ELF_CLASS_64 = 2
 ELF_DATA_LSB = 1
 ELF_DATA_MSB = 2
+# What EI_DATA, the sixth identification byte, means, in the words
+# `int.from_bytes` takes. One table for the two readers below: the struct
+# prefixes this module unpacks with are derived from it, so an encoding that is
+# neither LSB nor MSB is the same "no answer" to both, and neither can start
+# recognising a third one without the other.
+ELF_DATA_BYTE_ORDER = {ELF_DATA_LSB: "little", ELF_DATA_MSB: "big"}
+STRUCT_BYTE_ORDER = {"little": "<", "big": ">"}
 SHT_SYMTAB = 2
 SHN_UNDEF = 0
 # Section header sizes, symbol record sizes and the offsets inside them, per
@@ -60,6 +72,10 @@ SECTION_TABLE_FIELDS = {ELF_CLASS_32: (32, 4, 46), ELF_CLASS_64: (40, 8, 58)}
 # stays well inside these.
 MAX_SECTIONS = 65536
 MAX_SYMBOLS = 4_000_000
+# A string table sized beyond any realistic firmware build, rejected outright as
+# defense in depth alongside the file-length bound every read is already held
+# to below: a file actually this large would not be a firmware image either way.
+MAX_STRING_TABLE_BYTES = 64 * 1024 * 1024
 
 
 def read_elf_symbol(elf_path: str | Path, symbol: str) -> JsonObject:
@@ -79,11 +95,14 @@ def read_elf_symbol(elf_path: str | Path, symbol: str) -> JsonObject:
     try:
         with Path(elf_path).open("rb") as handle:
             return _read_symbol(handle, symbol)
-    except (OSError, struct.error, ValueError, MemoryError):
+    except (OSError, struct.error, ValueError, MemoryError, OverflowError):
         # Anything this file is that an ELF is not. Never raised onward: the
         # caller is already holding a GDB refusal it will report if this
         # fallback declines, and a broken image must not turn that structured
-        # refusal into a traceback.
+        # refusal into a traceback. `OverflowError` is defense in depth alongside
+        # the file-length bound every `_read_at` call is held to below, not a
+        # substitute for it: that bound is what keeps a hostile `sh_size` from
+        # ever reaching a `read()` call in the first place.
         return {"ok": False, "reason": "unreadable"}
 
 
@@ -95,7 +114,10 @@ def _read_symbol(handle, symbol: str) -> JsonObject:
     byte_order = _byte_order(identification[5])
     if elf_class not in SECTION_HEADER_FORMAT or byte_order is None:
         return {"ok": False, "reason": "unreadable"}
-    sections = _sections(handle, elf_class, byte_order)
+    file_size = _file_size(handle)
+    if file_size is None:
+        return {"ok": False, "reason": "unreadable"}
+    sections = _sections(handle, elf_class, byte_order, file_size)
     if sections is None:
         return {"ok": False, "reason": "unreadable"}
     wanted = symbol.encode("utf-8")
@@ -104,10 +126,10 @@ def _read_symbol(handle, symbol: str) -> JsonObject:
     for section in sections:
         if section["type"] != SHT_SYMTAB:
             continue
-        strings = _section_bytes(handle, sections, section["link"])
+        strings = _section_bytes(handle, sections, section["link"], file_size)
         if strings is None:
             return {"ok": False, "reason": "unreadable"}
-        for entry in _symbols(handle, section, elf_class, byte_order):
+        for entry in _symbols(handle, section, elf_class, byte_order, file_size):
             if entry["shndx"] == SHN_UNDEF or _symbol_name(strings, entry["name"]) != wanted:
                 continue
             defined = True
@@ -125,17 +147,38 @@ def _read_symbol(handle, symbol: str) -> JsonObject:
     return {"ok": True, "address": address, "size_bytes": size_bytes}
 
 
+def read_elf_byte_order(elf_path: str | Path) -> str | None:
+    """The byte order the image declares about itself, or None where it declares none.
+
+    EI_DATA is the file's own statement about how its multi-byte fields are
+    ordered, and for a firmware image that is the target's order: an Arm
+    Cortex-M build says LSB, a big-endian part's build says MSB. Answered as
+    "little" or "big" so it goes straight into `int.from_bytes`, which is the
+    one thing a caller wants it for.
+
+    None where the file cannot be read, is not an ELF, or declares an encoding
+    that is neither of the two, which is the same file `read_elf_symbol` calls
+    `unreadable`, refused here for the same reason: an image that states no
+    order cannot be made to state one.
+    """
+    try:
+        with Path(elf_path).open("rb") as handle:
+            identification = handle.read(16)
+    except OSError:
+        return None
+    if len(identification) < 16 or identification[:4] != ELF_MAGIC:
+        return None
+    return ELF_DATA_BYTE_ORDER.get(identification[5])
+
+
 def _byte_order(data_encoding: int) -> str | None:
-    if data_encoding == ELF_DATA_LSB:
-        return "<"
-    if data_encoding == ELF_DATA_MSB:
-        return ">"
-    return None
+    name = ELF_DATA_BYTE_ORDER.get(data_encoding)
+    return None if name is None else STRUCT_BYTE_ORDER[name]
 
 
-def _sections(handle, elf_class: int, byte_order: str) -> list[JsonObject] | None:
+def _sections(handle, elf_class: int, byte_order: str, file_size: int) -> list[JsonObject] | None:
     offset_position, offset_width, entry_size_position = SECTION_TABLE_FIELDS[elf_class]
-    header = _read_at(handle, 0, ELF_HEADER_SIZE[elf_class])
+    header = _read_at(handle, 0, ELF_HEADER_SIZE[elf_class], file_size)
     if header is None:
         return None
     offset_format = "I" if offset_width == 4 else "Q"
@@ -149,7 +192,7 @@ def _sections(handle, elf_class: int, byte_order: str) -> list[JsonObject] | Non
         # count is zero and the real count lives in section 0's sh_size. Rare in
         # firmware and cheap to honour; ignoring it would silently find no
         # symbol table in exactly the images that have the most symbols.
-        first = _section_at(handle, table_offset, entry_size, 0, elf_class, byte_order)
+        first = _section_at(handle, table_offset, entry_size, 0, elf_class, byte_order, file_size)
         if first is None:
             return None
         count = first["size"]
@@ -157,22 +200,22 @@ def _sections(handle, elf_class: int, byte_order: str) -> list[JsonObject] | Non
         return None
     sections = []
     for index in range(count):
-        section = _section_at(handle, table_offset, entry_size, index, elf_class, byte_order)
+        section = _section_at(handle, table_offset, entry_size, index, elf_class, byte_order, file_size)
         if section is None:
             return None
         sections.append(section)
     return sections
 
 
-def _section_at(handle, table_offset: int, entry_size: int, index: int, elf_class: int, byte_order: str) -> JsonObject | None:
-    raw = _read_at(handle, table_offset + index * entry_size, struct.calcsize(byte_order + SECTION_HEADER_FORMAT[elf_class]))
+def _section_at(handle, table_offset: int, entry_size: int, index: int, elf_class: int, byte_order: str, file_size: int) -> JsonObject | None:
+    raw = _read_at(handle, table_offset + index * entry_size, struct.calcsize(byte_order + SECTION_HEADER_FORMAT[elf_class]), file_size)
     if raw is None:
         return None
     fields = struct.unpack(byte_order + SECTION_HEADER_FORMAT[elf_class], raw)
     return {"type": fields[1], "offset": fields[4], "size": fields[5], "link": fields[6], "entry_size": fields[9]}
 
 
-def _symbols(handle, section: JsonObject, elf_class: int, byte_order: str):
+def _symbols(handle, section: JsonObject, elf_class: int, byte_order: str, file_size: int):
     record_size = struct.calcsize(byte_order + SYMBOL_FORMAT[elf_class])
     entry_size = int(section["entry_size"]) or record_size
     if entry_size < record_size:
@@ -182,18 +225,21 @@ def _symbols(handle, section: JsonObject, elf_class: int, byte_order: str):
         return
     fields = SYMBOL_FIELDS[elf_class]
     for index in range(count):
-        raw = _read_at(handle, int(section["offset"]) + index * entry_size, record_size)
+        raw = _read_at(handle, int(section["offset"]) + index * entry_size, record_size, file_size)
         if raw is None:
             return
         unpacked = struct.unpack(byte_order + SYMBOL_FORMAT[elf_class], raw)
         yield {name: unpacked[position] for name, position in fields.items()}
 
 
-def _section_bytes(handle, sections: list[JsonObject], index: int) -> bytes | None:
+def _section_bytes(handle, sections: list[JsonObject], index: int, file_size: int) -> bytes | None:
     if index >= len(sections):
         return None
     section = sections[index]
-    return _read_at(handle, int(section["offset"]), int(section["size"]))
+    size = int(section["size"])
+    if size > MAX_STRING_TABLE_BYTES:
+        return None
+    return _read_at(handle, int(section["offset"]), size, file_size)
 
 
 def _symbol_name(strings: bytes, offset: int) -> bytes:
@@ -203,9 +249,23 @@ def _symbol_name(strings: bytes, offset: int) -> bytes:
     return strings[offset:] if end < 0 else strings[offset:end]
 
 
-def _read_at(handle, offset: int, size: int) -> bytes | None:
-    if offset < 0 or size < 0:
+def _read_at(handle, offset: int, size: int, file_size: int) -> bytes | None:
+    # `size` and `offset` both come from ELF-controlled fields (a section's
+    # `sh_offset`/`sh_size`, an index into the section table): bounding both
+    # against the file's own length, checked once, is what keeps a hostile
+    # value — up to 2**64-1 for a 64-bit `sh_size` — from ever reaching
+    # `read()`, where CPython raises `OverflowError` past `sys.maxsize` and can
+    # attempt a process-sized allocation for smaller enormous values.
+    if offset < 0 or size < 0 or offset + size > file_size:
         return None
     handle.seek(offset)
     data = handle.read(size)
     return data if len(data) == size else None
+
+
+def _file_size(handle) -> int | None:
+    try:
+        handle.seek(0, 2)
+        return handle.tell()
+    except OSError:
+        return None

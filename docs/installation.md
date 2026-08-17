@@ -36,8 +36,9 @@ what it serves is byte for byte what is here. The section below takes the
 canonical copy straight from the repository and checks it.
 
 The script installs the package user-local (`uv tool install` where `uv` exists,
-`python -m pip install --user` otherwise, and it fetches Astral's uv installer
-where there is neither `uv` nor a Python 3.10 or newer) and then runs
+`python -m pip install --user` otherwise, and it fetches one pinned release of
+Astral's uv installer where there is neither `uv` nor a Python 3.10 or newer) and
+then runs
 `agentic-hil agent-install` for every agent CLI it finds on `PATH`. That is the
 machine half and nothing else: it writes no project configuration, edits no
 shell profile, and asks for no admin rights. After one restart of your agent,
@@ -68,9 +69,17 @@ powershell -NoProfile -File .\install.ps1 --agent claude-code
 ### Reading the script before you run it
 
 PyPI is the trust anchor for the package itself: everything the script installs
-comes from the index under the `agentic-hil` name, and the uv installer it may
-fetch is Astral's own, which verifies its published checksums itself. For the
-script, each release carries `install.sh` and `install.ps1` themselves as release
+comes from the index under the `agentic-hil` name. The uv installer it may fetch
+is Astral's own, and it is taken from a versioned URL naming one uv release,
+checked against a SHA-256 the script carries as a constant, and executed only if
+those bytes match; a mismatch prints both digests and stops the install rather
+than running what arrived. Astral's POSIX installer then verifies the uv archive
+it downloads against its own published checksums, which is the layer below ours
+and the one covering the binary rather than the script. Their PowerShell
+installer does not, so on Windows the pin in `install.ps1` is the only check
+between `astral.sh` and an executed script. Refreshing that pin is a release
+chore, described in [Release Strategy](release-strategy.md). For the script
+itself, each release carries `install.sh` and `install.ps1` themselves as release
 assets beside their `install.sh.sha256` and `install.ps1.sha256`, so the
 verify-first variant takes both halves from the same release, checks one against
 the other, and runs the file it checked:
@@ -185,6 +194,32 @@ there would be nothing new to load. Installing without an exact pin, as the
 lines above do, keeps the second one from arising at all; the Claude Code plugin
 pins on purpose and states the consequence where it does.
 
+## Uninstalling
+
+Removal is two lines, and the first one has to come first. `agentic-hil
+uninstall` takes back the user-wide half while there is still a command left to
+run it with: the agent skill files it wrote, the user-level MCP registrations it
+made, the Claude Code write refusals `init --agent` added, and the lock sidecars
+it left in those agents' directories, for every agent it set up or for the one
+`--agent` names. Each is taken back only where it is recognisably Agentic HIL's
+own, by the same checks that refuse to overwrite an operator's file, so an entry
+somebody else wrote is named on the result and left where it is. Then run the
+line the result ends on, which removes the package through the manager that owns
+this installation. It has to be a line rather than a step, because a process
+cannot delete the files it is executing out of.
+
+Doing it the other way round leaves everything above standing with no command
+left to clear it, which is what makes a leftover MCP registration point at a
+launcher that is gone.
+
+Two trees are left alone, and there is no flag that purges them. A state root
+holds the audit trail of every hardware action and any incident still standing
+over a board, which removing a package does not put back. A project
+configuration is operator policy, and its permissions only ever narrow, so
+deleting it would put every one of them back to the template's on the next
+install. Both are named with their paths on the result, so `rm -rf` at your own
+shell is one copy away once you have read what is in them.
+
 ## Platforms and debugger backends
 
 Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`agentic-hil[pyocd]`: covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debuggers.<name>.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
@@ -204,6 +239,8 @@ pyocd pack install stm32f446retx  # downloads it from the vendor index
 agentic-hil setup --agent <claude-code|codex|opencode>         # both halves, first run
 agentic-hil agent-install --agent <claude-code|codex|opencode> # user-wide half
 agentic-hil init [--agent <agent>]                             # project half
+agentic-hil upgrade [--agent <agent>]                          # upgrade the installation and refresh what it wrote
+agentic-hil uninstall [--agent <agent>]                        # take the user-wide half back, then run the removal line it names
 agentic-hil adopt-hardware [--dry-run]                         # board plugged in after init: fill in what is unset
 agentic-hil doctor
 agentic-hil config-reload                                      # what a running server's description reload would take from this file

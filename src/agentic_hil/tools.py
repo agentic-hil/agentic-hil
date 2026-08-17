@@ -376,7 +376,10 @@ class AgenticHILToolService:
         symbol = (payload or {}).get("symbol")
         if not isinstance(symbol, str) or not symbol.strip():
             return tool_error("debug_symbol_value", "invalid_argument", "symbol must be a non-empty string.")
-        return self.backend.debug_symbol_value(symbol.strip())
+        # The same offer the dump gets: an ELF a confirmed flash proved is on the
+        # target, for a backend with no session to ask. A backend that has one
+        # ignores it.
+        return self.backend.debug_symbol_value(symbol.strip(), self._symbol_elf)
 
     def debug_dump_symbol_ihex(self, payload: JsonObject | None = None) -> JsonObject:
         if self._dispatch_depth == 0:
@@ -1537,6 +1540,14 @@ class AgenticHILToolService:
             return self._invoke_dispatch(self.probe_target)
         if name == "debugger_probes_list" and not self.config.probe_allowed():
             return self._invoke_dispatch(self.debugger_probes_list)
+        # A symbol read the backend serves with no session behind it is a
+        # standalone probe contact the same way `probe_target` is, so it needs
+        # the same gate. A backend that instead answers it through a session
+        # (OpenOCD, pyOCD) names it in no `sessionless_debug_tools()` set, and
+        # `debug_start_session` below is where that permission was already
+        # checked.
+        if name in self.backend.sessionless_debug_tools() and not self.config.probe_allowed():
+            return self._invoke_dispatch(lambda: getattr(self, name)(args))
         if name == "debug_start_session":
             mode = args.get("mode", "attach")
             permissions = self.debugger_permissions
@@ -1551,7 +1562,16 @@ class AgenticHILToolService:
         return None
 
     def _coordinated_debug_call(self, name: str, callback) -> JsonObject:
-        one_shot = name in debugger_one_shot_tools()
+        # Backend-aware, because a symbol read is a one-shot on the backend that
+        # has no session to hold its lease and a session-scoped call on the one
+        # that does. Only the symbol reads are ever both, and only the backend
+        # knows which it is, so that is the one thing asked and only about those
+        # two: ST-Link names them so they take a real one-shot debugger lease,
+        # OpenOCD names neither so they keep running on the session lease. Every
+        # other debug tool's class is fixed, and a partial double standing in for
+        # one of them is never asked to answer this.
+        sessionless_read = name in sessionless_capable_debug_tools() and name in self.backend.sessionless_debug_tools()
+        one_shot = name in debugger_one_shot_tools() or sessionless_read
         starts_session = name == "debug_start_session"
         lease = self._debug_lease
         for_recovery = name in recovery_class_tools() and self.coordinator.blocked
@@ -1590,7 +1610,12 @@ class AgenticHILToolService:
             return result
         if one_shot:
             requires_quarantine = self._result_requires_quarantine(result)
-            read_only = name in {"debugger_probes_list", "probe_target"}
+            # A sessionless symbol read is a memory read: `-r` attaches and reads,
+            # so a failure the backend proved never reached the target leaves the
+            # board unchanged, and one it could not confirm leaves the target's
+            # state — not this host's bookkeeping — in question. It settles and
+            # quarantines exactly like `probe_target`.
+            read_only = name in {"debugger_probes_list", "probe_target"} or sessionless_read
             if requires_quarantine and read_only and self._readonly_failure_is_settled(result):
                 # A failed read whose backend named an abort point before the
                 # target is a failed call, not an unconfirmed board: the board is
@@ -1900,8 +1925,22 @@ def debugger_one_shot_tools() -> set[str]:
     """Debugger tools that take their own lease for one call and give it back.
 
     Everything else in `debugger_effect_tools` runs through a session somebody
-    already opened, on the lease that session holds."""
+    already opened, on the lease that session holds — except the reads in
+    `sessionless_capable_debug_tools`, whose class the backend decides."""
     return {"debugger_probes_list", "probe_target", "flash_firmware", "reset_target"}
+
+
+def sessionless_capable_debug_tools() -> frozenset[str]:
+    """The debug reads that are one-shot on a sessionless backend, session-scoped
+    otherwise.
+
+    A memory read is the one typed-debug operation a probe can serve with no GDB
+    session behind it, so `debug_symbol_value` and `debug_dump_symbol_ihex` are
+    the only tools whose one-shot-vs-session class is not fixed here but asked of
+    the backend (`DebuggerBackend.sessionless_debug_tools`). Nothing else is ever
+    leased as a one-shot on the strength of that answer, which is why it is the
+    only question put to the backend and only for these two."""
+    return frozenset({"debug_symbol_value", "debug_dump_symbol_ihex"})
 
 
 def implicit_run_tools() -> set[str]:

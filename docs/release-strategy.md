@@ -50,18 +50,63 @@ Before creating a release:
 
 ```text
 1. Bump the version in every position `python tools/check_version_consistency.py --list` prints, then run `python tools/check_version_consistency.py` until it is silent.
-2. Run ruff check src tests evals tools and pytest.
-3. Run python -m build (or uv build) and inspect the packaged files.
-4. Open a pull request and let Required CI pass; the same check runs there, so a forgotten position is red before a release exists.
-5. Create a GitHub Release with a strict SemVer vX.Y.Z tag that exactly matches pyproject.toml.
-6. Let the publish workflow re-run the same check with the release tag before it builds, checks, and publishes to PyPI.
-7. Let the workflow verify the PyPI ownership marker and publish the matching `server.json` through GitHub OIDC.
-8. Verify: uvx --from agentic-hil agentic-hil --version resolves the new version from PyPI.
-9. Verify the release appears as `io.github.agentic-hil/agentic-hil` in the MCP Registry API.
-10. Attach the one-line installers *and* their checksums to the release, all four taken from the tagged commit: `install.sh`, `install.ps1`, and `sha256sum install.sh > install.sh.sha256` and `sha256sum install.ps1 > install.ps1.sha256`, uploaded under those names, in that format, because the verify-first path in docs/installation.md feeds them straight to `sha256sum -c`. The scripts belong there because the checksum can only speak for the file published beside it: the default branch moves between releases, so a recipe that pairs a release checksum with a default-branch script fails on the first fix that lands after a release.
-11. Start from GitHub auto-generated release notes, then edit for clarity.
-12. Move the tree to the next development version in pyproject.toml and src/agentic_hil/__init__.py, in the first commit after the release. Every other position keeps naming the release just published.
+2. Refresh the pinned Astral uv bootstrap in both installers, as described under "The uv Installer Pin" below.
+3. Run ruff check src tests evals tools and pytest.
+4. Run python -m build (or uv build) and inspect the packaged files.
+5. Open a pull request and let Required CI pass; the same check runs there, so a forgotten position is red before a release exists.
+6. Create a GitHub Release with a strict SemVer vX.Y.Z tag that exactly matches pyproject.toml.
+7. Let the publish workflow re-run the same check with the release tag before it builds, checks, and publishes to PyPI.
+8. Let the workflow verify the PyPI ownership marker and publish the matching `server.json` through GitHub OIDC.
+9. Verify: uvx --from agentic-hil agentic-hil --version resolves the new version from PyPI.
+10. Verify the release appears as `io.github.agentic-hil/agentic-hil` in the MCP Registry API.
+11. Attach the one-line installers *and* their checksums to the release, all four taken from the tagged commit: `install.sh`, `install.ps1`, and `sha256sum install.sh > install.sh.sha256` and `sha256sum install.ps1 > install.ps1.sha256`, uploaded under those names, in that format, because the verify-first path in docs/installation.md feeds them straight to `sha256sum -c`. The scripts belong there because the checksum can only speak for the file published beside it: the default branch moves between releases, so a recipe that pairs a release checksum with a default-branch script fails on the first fix that lands after a release.
+12. Start from GitHub auto-generated release notes, then edit for clarity.
+13. Move the tree to the next development version in pyproject.toml and src/agentic_hil/__init__.py, in the first commit after the release. Every other position keeps naming the release just published.
 ```
+
+## The uv Installer Pin
+
+Both one-line installers can bootstrap Astral's `uv` on a machine that has
+neither `uv` nor a new-enough Python. They do not fetch that bootstrap from the
+moving `https://astral.sh/uv/install.sh`, which serves whatever is current at
+the second it is asked. Each script names one uv release in its URL, carries the
+SHA-256 of exactly those bytes as a constant, and refuses to execute a download
+that is not those bytes. `install.sh` holds `UV_INSTALLER_VERSION` and
+`UV_INSTALLER_SHA256`; `install.ps1` holds `$UvInstallerVersion` and
+`$UvInstallerSha256`. All four move together, and the two scripts pin the same
+uv release; a static test refuses a tree where they disagree.
+
+Refreshing the pin is a release chore and not an install-time one. An installer
+that went looking for a newer uv on the operator's machine would be back to
+executing bytes nobody here has read, which is the whole thing the pin exists to
+stop. So the pin ages deliberately between releases, and a release is where it
+is brought forward, by a person who can look at what changed:
+
+```text
+1. Read https://github.com/astral-sh/uv/releases and take the current stable tag.
+2. Download both installers at that version and hash them:
+     curl -LsSf -o uv-install.sh  https://astral.sh/uv/<version>/install.sh
+     curl -LsSf -o uv-install.ps1 https://astral.sh/uv/<version>/install.ps1
+     sha256sum uv-install.sh uv-install.ps1
+3. Put the version and the two digests into install.sh and install.ps1. Never one
+   without the other: a version without its digest fails every install, which is
+   the intended failure mode and not a thing to work around.
+4. Run pytest tests/test_install_scripts.py, which checks the URL shape, the
+   presence of the digest check in both scripts, and that both name the same uv.
+```
+
+A stale pin is safe, not broken: it installs an older uv, which then upgrades
+itself or is upgraded by the operator. The failure worth designing for is the
+other one, so a digest mismatch stops the install outright and prints the
+expected digest, the digest found, and the sentence that the pin may be stale.
+
+The pin covers the installer, not the uv binaries that installer goes on to
+fetch. Astral's POSIX installer carries a SHA-256 per release artifact and
+verifies the archive it downloaded, which is the second layer and the hop our
+pin cannot reach. Their PowerShell installer, as of the pinned release, has no
+checksum step at all, so on Windows our pin is the only integrity check between
+`astral.sh` and an executed script. If that ever changes on their side, the
+comment in `install.ps1` that says so is what needs correcting with it.
 
 ## What the Release Gate Checks, and When
 

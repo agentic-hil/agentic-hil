@@ -236,7 +236,10 @@ class OpenOCDBackend:
     def debug_symbol_info(self, symbol: str) -> JsonObject:
         return self._debug.symbol_info(symbol)
 
-    def debug_symbol_value(self, symbol: str) -> JsonObject:
+    def debug_symbol_value(self, symbol: str, symbol_elf: JsonObject | None = None) -> JsonObject:
+        # `symbol_elf` is ignored here for the reason it is ignored by the dump
+        # below: this backend has a session, and the image that session loaded is
+        # the one the target is running.
         return self._debug.symbol_value(symbol)
 
     def debug_dump_symbol_ihex(self, symbol: str, output: JsonObject, symbol_elf: JsonObject | None = None) -> JsonObject:
@@ -245,6 +248,15 @@ class OpenOCDBackend:
         # the session holds the artifact it started with, and answering out of
         # any other file could describe a build the target is not running.
         return self._debug.dump_symbol_ihex(symbol, output)
+
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        """None: every typed-debug read here runs through the session lease.
+
+        This backend answers `debug_symbol_value` and `debug_dump_symbol_ihex`
+        out of the session a caller opened, so the coordination layer must keep
+        treating them as session-scoped and never take a one-shot lease for
+        them."""
+        return frozenset()
 
     def target_support(self) -> JsonObject:
         """OpenOCD has no target type to check.

@@ -38,6 +38,18 @@ install. `Location.tracks` says which of the two each position carries, and that
 field is the whole of the rule: on a tree without a suffix the two versions are
 the same string and everything behaves exactly as it did.
 
+The sweep walks the working tree, which means it meets whatever else is sitting
+in it, and a temporary directory is the thing most likely to be. pytest's
+`--basetemp` can be pointed anywhere and on Windows it gets pointed inside the
+clone on purpose: the automatic root nests a per-user directory, a numbered run
+directory and a per-test directory before the fixture's own paths start, and
+that is how a suite runs into MAX_PATH. So `.pytest-tmp` and the roots pytest
+marks as its own are skipped here, not as a courtesy to the suite, but because
+a version string under one of them is a fixture's scratch file. A single
+focused run with `--basetemp=.pytest-tmp` used to fail this gate on a tree that
+agreed with itself perfectly, which is a gate reporting on the developer's
+command line rather than on the tree.
+
 tomllib is deliberately absent: it is stdlib only from 3.11 and this project
 still supports 3.10, so importing it would make the gate itself the thing that
 fails on a matrix leg the developer machine never runs. `packaging` is absent for
@@ -111,6 +123,29 @@ SKIPPED_DIRECTORIES = frozenset(
 # so one that mentions a version is reporting a conversation, not tracking the
 # release -- and running the loop in this tree used to fail this gate.
 SKIPPED_PATHS = frozenset({".agentic-hil", ".agentic-loop", ".claude", "evals/install/artifacts"})
+# A pytest temporary root, wherever it landed. `--basetemp` may be pointed
+# anywhere, and inside the clone is where a developer points it on Windows, to
+# keep a deep scratch path off MAX_PATH; `PYTEST_DEBUG_TEMPROOT` lands the
+# automatic root in the same place, always one level inside a `pytest-of-*`
+# directory (`_pytest.tmpdir.TempPathFactory.getbasetemp`), which the name check
+# below already catches. Everything below either one is a fixture's scratch file
+# (a configuration a test wrote, a report it read back), so a version string in
+# one of them is test data and not a position that tracks the release.
+#
+# Recognised by the conventional name and, for a root under a different name,
+# by the numbered-directory shape `make_numbered_dir` actually leaves: a name
+# ending in digits with a `<prefix>current` symlink beside it in the same
+# parent, pointing back at this exact directory -- what `--basetemp`'s own
+# `tmp_path` roots carry (`_pytest.pathlib.make_numbered_dir`). A bare `.lock`
+# file used to be accepted as a standalone marker and was dropped: `.lock` is
+# not pytest-specific, so a tracked directory that happened to hold one for an
+# unrelated reason would silently drop out of this scan, version strings under
+# it included. `.lock` is still asked for as an alternative to the symlink --
+# it is what a numbered root under pytest's own default temp directory carries
+# instead (`_pytest.pathlib.create_cleanup_lock`) -- but only once the
+# numbered-directory name already holds, never standing in for it.
+PYTEST_TEMPORARY_NAMES = frozenset({".pytest-tmp", ".pytest_tmp", "pytest-tmp"})
+_PYTEST_NUMBERED_DIR = re.compile(r"^(?P<prefix>.+?)(?P<number>[0-9]+)$")
 SKIPPED_NAMES = frozenset({"package-lock.json", "uv.lock", "poetry.lock"})
 SKIPPED_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".ico", ".whl", ".gz", ".zip"})
 MAX_SWEPT_BYTES = 4_000_000
@@ -446,6 +481,37 @@ def version_problems(root: Path, release_tag: str | None = None) -> list[str]:
     return found
 
 
+def is_pytest_temporary_root(directory: Path) -> bool:
+    """Whether this directory is a pytest temporary root rather than content.
+
+    By name for the conventional in-clone basetemp and pytest's own default
+    root, and otherwise by the one shape a directory `tmp_path_factory.mktemp`
+    makes directly under an explicit `--basetemp` actually carries: a name
+    ending in digits (`make_numbered_dir`'s own `<prefix><number>`) with a
+    `<prefix>current` symlink beside it, in the same parent, resolving back to
+    this exact directory. Pytest's own cleanup lock is not evidence here --
+    `create_cleanup_lock` only ever marks a numbered root under pytest's
+    default `pytest-of-*` temp directory, already caught by name above, so a
+    `.lock` beside a numbered directory anywhere else says nothing about who
+    made it and would exempt an ordinary tracked directory that merely ends in
+    digits. Nothing in this repository is called `.pytest-tmp`, sits under a
+    `pytest-of-` root, or matches that numbered-plus-symlink shape, so this can
+    only ever exclude a temporary root.
+    """
+    if directory.name in PYTEST_TEMPORARY_NAMES or directory.name.startswith("pytest-of-"):
+        return True
+    match = _PYTEST_NUMBERED_DIR.match(directory.name)
+    if match is None:
+        return False
+    current_link = directory.parent / f"{match.group('prefix')}current"
+    if not current_link.is_symlink():
+        return False
+    try:
+        return current_link.resolve() == directory.resolve()
+    except OSError:
+        return False
+
+
 def _swept_files(root: Path) -> list[Path]:
     found: list[Path] = []
 
@@ -457,7 +523,7 @@ def _swept_files(root: Path) -> list[Path]:
                 relative = entry.relative_to(root).as_posix()
                 if entry.name in SKIPPED_DIRECTORIES or entry.name.endswith(".egg-info"):
                     continue
-                if relative in SKIPPED_PATHS:
+                if relative in SKIPPED_PATHS or is_pytest_temporary_root(entry):
                     continue
                 walk(entry)
             elif entry.is_file():

@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from agentic_hil.config import ConfigError, display_path, safe_configured_directory
-from agentic_hil.elfsymbols import read_elf_symbol
+from agentic_hil.elfsymbols import read_elf_byte_order, read_elf_symbol
 from agentic_hil.gdbmi import (
     GdbMiClient,
     GdbMiStopResult,
@@ -49,10 +49,11 @@ ABNORMAL_STOP_REASONS = {"debugger_error", "exception", "fault", "timeout", "une
 TCP_POLL_INTERVAL_S = 0.05
 TCP_CONNECT_TIMEOUT_S = 0.2
 MEMORY_READ_CHUNK_BYTES = 1024
-# The widths a run of bytes has one integer reading at, and the order they are
-# read in. See decode_symbol_value for why both are stated rather than assumed.
+# The widths a run of bytes has one integer reading at, and the order it is read
+# in where the image names none. See decode_symbol_value and image_byte_order
+# for why both are stated rather than assumed.
 INTEGER_VALUE_WIDTHS = frozenset({1, 2, 4, 8})
-SYMBOL_VALUE_BYTE_ORDER = "little"
+DEFAULT_SYMBOL_VALUE_BYTE_ORDER = "little"
 GDB_COMMAND_TIMEOUT_CAP_S = 10.0
 CONTINUE_COMMAND_TIMEOUT_CAP_S = 5.0
 STOP_SESSION_TIMEOUT_CAP_S = 5.0
@@ -495,7 +496,7 @@ class GdbDebugSessions:
         `debug.max_dump_size_bytes` cap on the resolved size, same
         `_read_memory_bytes` path; what changes is that nothing is written
         anywhere and the bytes come back as `hex` plus, at an integer width, the
-        two readings of them.
+        two readings of them, in the order the session's own image declares.
         """
         tool = "debug_symbol_value"
         session_result = self._require_session(tool)
@@ -520,7 +521,9 @@ class GdbDebugSessions:
             "address": resolved["address"],
             "size_bytes": size_bytes,
             "resolved_from": resolved["resolved_from"],
-            **decode_symbol_value(memory["data"]),
+            # The session's own artifact, which is the image GDB loaded and the
+            # target is running, so its EI_DATA is the target's byte order.
+            **decode_symbol_value(memory["data"], image_byte_order(str(session.artifact["resolved_path"]))),
             "session": self._session_status(session),
             "log_path": display_path(self.config, session.log_path),
             "summary": "Symbol value read from target memory.",
@@ -1016,25 +1019,51 @@ def _is_missing_breakpoint_error(response: object) -> bool:
     return "no breakpoint number" in message
 
 
-def decode_symbol_value(data: bytes) -> JsonObject:
+def image_byte_order(elf_path: str | Path) -> JsonObject:
+    """Which byte order an image's integers are read in, and where that came from.
+
+    The image is asked, because it is the only party to a memory read that knows.
+    GDB's `-data-read-memory-bytes` and STM32CubeProgrammer's `-r` both answer in
+    memory order and the target has no way to say how to read it, while the ELF
+    behind the session states it in EI_DATA the way every ELF must. So a
+    big-endian build decodes big-endian with nothing configured anywhere, and the
+    field says which order was used rather than leaving a caller to assume the one
+    a Cortex-M has (#249).
+
+    `byte_order_from` is here because the fallback must be visible. A file that
+    declares neither LSB nor MSB is not an ELF this project can read at all (the
+    symbol-table parser refuses exactly that file), so nothing that has a
+    firmware image in front of it reaches the default; what does is a stub or a
+    truncated file, and a reader is then told the order was assumed rather than
+    read off the image.
+    """
+    declared = read_elf_byte_order(elf_path)
+    if declared is None:
+        return {"byte_order": DEFAULT_SYMBOL_VALUE_BYTE_ORDER, "byte_order_from": "default"}
+    return {"byte_order": declared, "byte_order_from": "elf_header"}
+
+
+def decode_symbol_value(data: bytes, order: JsonObject) -> JsonObject:
     """The bytes a symbol holds, as hex and, where the width allows it, as a number.
 
     `hex` is always there and is the answer: the bytes in memory order, which is
     what a caller comparing against a firmware structure needs and the only
-    reading that is right for every symbol. The two integer readings are an
-    interpretation on top of it, and they are offered only for the four widths
-    that have one: a 3-byte or 408-byte object is not a number, and inventing a
-    reading for it would be inventing the answer rather than returning it.
+    reading that is right for every symbol, on every target, whatever the image
+    declares. The two integer readings are an interpretation on top of it, and
+    they are offered only for the four widths that have one: a 3-byte or
+    408-byte object is not a number, and inventing a reading for it would be
+    inventing the answer rather than returning it.
 
-    Little-endian, which is the byte order of the Cortex-M targets this project
-    supports; the field says so rather than leaving a caller to assume it. A
-    big-endian target would need this to become configurable, and until then the
-    raw `hex` is the reading that stays correct there.
+    `order` is `image_byte_order`'s statement about the image the bytes were
+    read out of, and it travels into the result unchanged: the order is half of
+    what a number means, so a result that carries one carries where it came
+    from too.
     """
-    result: JsonObject = {"hex": data.hex(), "byte_order": SYMBOL_VALUE_BYTE_ORDER}
+    byte_order = str(order["byte_order"])
+    result: JsonObject = {"hex": data.hex(), **order}
     if len(data) in INTEGER_VALUE_WIDTHS:
-        result["value_unsigned"] = int.from_bytes(data, SYMBOL_VALUE_BYTE_ORDER, signed=False)
-        result["value_signed"] = int.from_bytes(data, SYMBOL_VALUE_BYTE_ORDER, signed=True)
+        result["value_unsigned"] = int.from_bytes(data, byte_order, signed=False)
+        result["value_signed"] = int.from_bytes(data, byte_order, signed=True)
     else:
         result["value_not_decoded"] = "size_bytes is not 1, 2, 4 or 8, so the bytes carry no single integer reading."
     return result

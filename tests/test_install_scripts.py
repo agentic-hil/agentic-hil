@@ -4,11 +4,12 @@
 before they have read a line of this repository. That makes every property here
 a promise rather than a preference: the scripts install user-local and never ask
 for administrator rights, they never reach for `--break-system-packages` when a
-distribution refuses `pip`, they never relax an execution policy, and they stop
-at the machine half. The project half is deliberately not theirs: after one
-restart the agent creates this project's configuration over MCP, so a script
-that ran `init` or `setup` would be doing the very shell setup the classifier
-blocks on a first run.
+distribution refuses `pip`, they never relax an execution policy, they execute
+nothing they have not first checked against a hash they carry, and they stop at
+the machine half. The project half is deliberately not theirs: after one restart
+the agent creates this project's configuration over MCP, so a script that ran
+`init` or `setup` would be doing the very shell setup the classifier blocks on a
+first run.
 
 The syntax checks and the container run cover what a static read cannot: a shell
 script that parses on the author's machine and nowhere else, and an installer
@@ -60,6 +61,13 @@ CALM_LINE = (
     "The next start of your agent has everything, and the first hardware question "
     "creates this project's configuration."
 )
+# The plural form of the restart block. Step 5 names every running agent CLI
+# rather than the first one found: a warning that names one is read as clearing
+# the others, and the operator who had two open restarted only one.
+MULTI_RESTART_LINES = (
+    "RESTART REQUIRED: these agent CLIs are running right now:",
+    "Quit each process and start it again once. An agent CLI reads its MCP",
+)
 
 # `agentic-hil init` and `agentic-hil setup` write a project's own configuration.
 # Neither script may reach them, in any spelling, in code or in prose.
@@ -74,6 +82,31 @@ INSTALLER_URL = re.compile(
     r"|github\.com/agentic-hil/agentic-hil/releases/latest/download)"
     r"/([^\s\"'`)|]+)"
 )
+
+# The moving Astral bootstrap URL, in either spelling. It serves whatever uv is
+# current at the second it is asked, so a script that fetches it executes bytes
+# nobody here has read. Neither installer may name it in code again.
+UNPINNED_UV_INSTALLER = re.compile(r"https://astral\.sh/uv/install\.(?:sh|ps1)")
+
+# The pinned shape: a version segment between `uv` and the file name, spelled as
+# a literal release or as the constant each script keeps for it. The segment is
+# not optional, which is what makes the bare URL above unreachable through this
+# pattern.
+PINNED_UV_INSTALLER = re.compile(r"https://astral\.sh/uv/(?:\d+\.\d+\.\d+|\$\{?[A-Za-z_]\w*\}?)/install\.(?:sh|ps1)")
+
+SHA256_HEX = r"[0-9a-f]{64}"
+SHELL_UV_VERSION = re.compile(r'UV_INSTALLER_VERSION="(\d+\.\d+\.\d+)"')
+SHELL_UV_SHA256 = re.compile(rf'UV_INSTALLER_SHA256="({SHA256_HEX})"')
+SHELL_UV_COMPARISON = re.compile(r'"\$found_hash"\s*!=\s*"\$UV_INSTALLER_SHA256"')
+SHELL_UV_EXECUTION = re.compile(r'\bsh "\$installer_path"')
+POWERSHELL_UV_VERSION = re.compile(r"\$UvInstallerVersion = '(\d+\.\d+\.\d+)'")
+POWERSHELL_UV_SHA256 = re.compile(rf"\$UvInstallerSha256 = '({SHA256_HEX})'")
+POWERSHELL_UV_COMPARISON = re.compile(r"\$foundHash\s*-ne\s*\$UvInstallerSha256")
+POWERSHELL_UV_EXECUTION = re.compile(r"Invoke-Expression \(\[Text\.Encoding\]::UTF8\.GetString\(\$bytes\)\)")
+
+# One line per agent on a successful registration, identical in both scripts,
+# because the operator reads whichever one their machine ran.
+REGISTERED_LINE = "registered (skill and MCP server, restart pending)"
 
 
 def _shell_source() -> str:
@@ -181,6 +214,116 @@ def test_neither_script_breaks_a_distribution_python() -> None:
         assert "externally" in code, name
 
 
+def test_neither_script_fetches_the_uv_bootstrap_unpinned() -> None:
+    """The Pinned-Dependencies finding, held shut from both sides.
+
+    Both installers can bootstrap Astral's uv on a machine with neither uv nor a
+    new-enough Python, and both used to take it from the moving
+    `https://astral.sh/uv/install.sh` and hand it straight to an interpreter.
+    That was the one unpinned hop in a chain where this script is published with
+    its own checksum beside it and the package comes hash-checked from PyPI. The
+    versioned URL is now the only shape either script may name: the bare one can
+    never come back, because the version segment is mandatory in the pattern that
+    has to match and absent from the pattern that must not.
+    """
+    for name, code in _both_code().items():
+        offender = UNPINNED_UV_INSTALLER.search(code)
+        assert offender is None, f"{name} fetches {offender.group(0) if offender else ''} unpinned"
+        assert PINNED_UV_INSTALLER.search(code) is not None, f"{name} names no versioned astral.sh installer URL"
+
+
+def test_neither_script_pipes_an_astral_download_into_an_interpreter() -> None:
+    """Fetched bytes reach an interpreter through a check, never through a pipe.
+
+    The documented one-liner for *this* project is still a pipe, and correctly so:
+    it is published with a `.sha256` beside it and the usage text keeps showing it.
+    What may not survive is a line that both names `astral.sh` and feeds what it
+    fetched into `sh`, `iex` or `Invoke-Expression`, because that is the shape
+    that leaves no room for a hash to be checked in between.
+    """
+    for name, code in _both_code().items():
+        for line in code.splitlines():
+            if "astral.sh" not in line:
+                continue
+            lowered = line.lower()
+            assert "| sh" not in lowered, f"{name} pipes an astral.sh download into sh: {line.strip()}"
+            assert "| iex" not in lowered, f"{name} pipes an astral.sh download into iex: {line.strip()}"
+            assert "invoke-expression" not in lowered, f"{name} expands an astral.sh download inline: {line.strip()}"
+
+
+def test_both_scripts_check_the_pinned_uv_installer_before_they_run_it() -> None:
+    """A hash the script carries, compared before anything is executed.
+
+    The constant is the whole mechanism: a download that is not those bytes is not
+    the pinned release, whatever the URL said, and it is refused rather than run.
+    The order matters as much as the presence, so the comparison is required to sit
+    ahead of the execution in the source of both scripts. The PowerShell side has no
+    interpreter in every checkout, so this static check is its regression guard.
+    """
+    shell = _code_only(_shell_source())
+    assert SHELL_UV_SHA256.search(shell) is not None, "install.sh carries no pinned uv installer digest"
+    comparison = SHELL_UV_COMPARISON.search(shell)
+    execution = SHELL_UV_EXECUTION.search(shell)
+    assert comparison is not None, "install.sh never compares the download against its pinned digest"
+    assert execution is not None, "install.sh no longer runs the downloaded installer from a file"
+    assert comparison.start() < execution.start(), "install.sh runs the uv installer before checking it"
+
+    powershell = _code_only(_powershell_source())
+    assert POWERSHELL_UV_SHA256.search(powershell) is not None, "install.ps1 carries no pinned uv installer digest"
+    comparison = POWERSHELL_UV_COMPARISON.search(powershell)
+    execution = POWERSHELL_UV_EXECUTION.search(powershell)
+    assert comparison is not None, "install.ps1 never compares the download against its pinned digest"
+    assert execution is not None, "install.ps1 no longer expands the downloaded installer from the bytes it hashed"
+    assert comparison.start() < execution.start(), "install.ps1 runs the uv installer before checking it"
+
+
+def test_both_scripts_pin_the_same_uv_release() -> None:
+    """Four constants, one release. A half-done bump is refused here, not on a bench.
+
+    `install.sh` and `install.ps1` fetch two different files from the same uv
+    release, so their digests differ and their versions must not. Bumping one
+    script and forgetting the other leaves two machines installing two different
+    uv versions from one commit, which no operator would ever see reported.
+    """
+    shell_version = SHELL_UV_VERSION.search(_code_only(_shell_source()))
+    powershell_version = POWERSHELL_UV_VERSION.search(_code_only(_powershell_source()))
+    assert shell_version is not None, "install.sh names no pinned uv version"
+    assert powershell_version is not None, "install.ps1 names no pinned uv version"
+    assert shell_version.group(1) == powershell_version.group(1), (
+        f"install.sh pins uv {shell_version.group(1)} and install.ps1 pins uv {powershell_version.group(1)}"
+    )
+
+
+def test_a_uv_digest_mismatch_names_both_hashes_and_says_the_pin_may_be_stale() -> None:
+    """The abort an operator has to act on, so it has to say what it saw.
+
+    A mismatch is either a stale pin or a substituted download, and the operator is
+    the only one who can tell those apart. Printing the digest expected, the digest
+    found, and the sentence that the pin may be stale is what makes that a decision
+    rather than a mystery, and the fix is a release chore documented in
+    docs/release-strategy.md rather than anything the install may decide by itself.
+    """
+    for name, code in _both_code().items():
+        assert "does not match its recorded hash" in code, name
+        assert "the pin in this script may be stale" in code, name
+    shell = _code_only(_shell_source())
+    assert "expected %s" in shell
+    assert "found    %s" in shell
+    powershell = _code_only(_powershell_source())
+    assert "expected $UvInstallerSha256" in powershell
+    assert "found    $foundHash" in powershell
+
+
+def test_the_pin_bump_is_written_down_as_a_release_chore() -> None:
+    """The pin ages on purpose, so the place it is brought forward is the release."""
+    strategy = (REPOSITORY_ROOT / "docs" / "release-strategy.md").read_text(encoding="utf-8")
+
+    assert "UV_INSTALLER_VERSION" in strategy
+    assert "UV_INSTALLER_SHA256" in strategy
+    assert "$UvInstallerVersion" in strategy
+    assert "$UvInstallerSha256" in strategy
+
+
 def test_the_shell_script_stops_on_a_failure_and_on_an_unset_variable() -> None:
     assert "set -eu" in _code_only(_shell_source())
 
@@ -214,6 +357,17 @@ def test_both_scripts_carry_the_same_restart_instruction() -> None:
     for name, source in _both_sources().items():
         for line in RESTART_LINES:
             assert line in source, f"{name} is missing the restart line: {line}"
+
+
+def test_both_scripts_name_every_running_agent_cli_not_the_first() -> None:
+    """Two open agent CLIs mean two restarts, and the block says so.
+
+    The first shape of step 5 stopped at the first running CLI it found, so an
+    operator with claude and codex both open was told about claude and read the
+    silence about codex as codex being fine. Measured on a real install."""
+    for name, source in _both_sources().items():
+        for line in MULTI_RESTART_LINES:
+            assert line in source, f"{name} is missing the plural restart line: {line}"
 
 
 def test_both_scripts_carry_the_same_calm_closing_sentence() -> None:
@@ -364,15 +518,60 @@ def test_the_powershell_installer_never_invokes_a_bare_agentic_hil_for_agent_ins
     """The same promise on the PowerShell side, where the call is an -File.
 
     Step 1 still probes a bare `agentic-hil --version` through `Invoke-Captured`
-    to read what is already on PATH, which is correct. Only the checked call that
-    runs the machine half must go through the resolved copy, so this targets
-    `Invoke-Checked` and leaves the probe alone.
+    to read what is already on PATH, which is correct. Only the call that runs the
+    machine half must go through the resolved copy. That call is now a capture
+    rather than a checked run, because step 4 reports a result instead of the
+    document, so both spellings are named here and the probe is left alone.
     """
     code = _code_only(_powershell_source())
     assert "agent-install" in code
-    assert "Invoke-Checked -File 'agentic-hil'" not in code
-    assert 'Invoke-Checked -File "agentic-hil"' not in code
+    for invocation in ("Invoke-Checked", "Invoke-Captured"):
+        assert f"{invocation} -File 'agentic-hil' -Arguments @('agent-install'" not in code
+        assert f'{invocation} -File "agentic-hil" -Arguments @(\'agent-install\'' not in code
     assert "-File $AgenticHilCmd" in code
+
+
+def test_step_four_reports_a_result_and_does_not_print_the_agent_install_document() -> None:
+    """One line per agent on success, the whole document only when it is the diagnosis.
+
+    `agent-install` answers with a JSON report of every path it touched. Streamed,
+    a machine with three agent CLIs turned a successful install into roughly a
+    hundred and fifty lines of machine-readable detail inside a five-step
+    transcript. Captured, the operator gets one line per agent and still gets the
+    document whole on a failure, where it is the only thing that says which half
+    broke. Both scripts read the top-level `ok` at its own indentation, so a `true`
+    nested inside a failed report cannot answer for the report.
+    """
+    shell = _code_only(_shell_source())
+    assert "register_agent" in shell
+    assert f'"agent: $registering_agent {REGISTERED_LINE}"' in shell
+    assert "agent_install_report=$(" in shell, "install.sh streams the document instead of capturing it"
+    assert '^  "ok": true' in shell, "install.sh does not read the top-level ok at its own indentation"
+    assert '"$agent_install_report" >&2' in shell, "install.sh does not print the document on a failure"
+
+    powershell = _code_only(_powershell_source())
+    assert "function Register-Agent" in powershell
+    assert f'"agent: $AgentId {REGISTERED_LINE}"' in powershell
+    assert "Invoke-Captured -File $AgenticHilCmd" in powershell, "install.ps1 streams the document instead of capturing it"
+    assert "Invoke-Checked -File $AgenticHilCmd" not in powershell
+    assert '(?m)^  "ok": true' in powershell, "install.ps1 does not read the top-level ok at its own indentation"
+
+
+def test_the_powershell_capture_unwraps_a_stderr_error_record() -> None:
+    """A successful command's stderr is a line, not an error block.
+
+    Windows PowerShell 5.1 wraps every native stderr line in an ErrorRecord, and
+    `2>&1 | Out-String` renders the first of those the way it renders a failure:
+    the line, then the source position, then a CategoryInfo block naming
+    NativeCommandError. uv reports its progress on stderr, so a completely
+    successful `uv tool install` printed what read like a crash. Taking the message
+    off the record before Out-String sees it is the fix, and the raw form is what
+    must not come back.
+    """
+    code = _code_only(_powershell_source())
+    assert "[System.Management.Automation.ErrorRecord]" in code
+    assert "$_.Exception.Message" in code
+    assert "2>&1 | Out-String" not in code, "install.ps1 renders error records into captured output again"
 
 
 def _stub_executable(path: Path, body: str) -> None:
@@ -412,7 +611,7 @@ def test_a_newer_install_answers_agent_install_over_an_older_copy_earlier_on_pat
         early_bin / "agentic-hil",
         'case "$1" in\n'
         '  --version) echo "0.3.0" ;;\n'
-        f'  agent-install) echo "stale" > "{marker}" ;;\n'
+        f'  agent-install) echo "stale" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n",
     )
@@ -432,7 +631,7 @@ def test_a_newer_install_answers_agent_install_over_an_older_copy_earlier_on_pat
         "#!/bin/sh\n"
         'case "\\$1" in\n'
         '  --version) echo "9.9.9" ;;\n'
-        f'  agent-install) echo "fresh" > "{marker}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n"
         "STUB\n"
@@ -510,7 +709,7 @@ def test_a_uv_install_outside_the_user_bin_answers_over_an_older_path_copy(tmp_p
         early_bin / "agentic-hil",
         'case "$1" in\n'
         '  --version) echo "0.3.0" ;;\n'
-        f'  agent-install) echo "stale" > "{marker}" ;;\n'
+        f'  agent-install) echo "stale" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n",
     )
@@ -531,7 +730,7 @@ def test_a_uv_install_outside_the_user_bin_answers_over_an_older_path_copy(tmp_p
         "#!/bin/sh\n"
         'case "\\$1" in\n'
         '  --version) echo "9.9.9" ;;\n'
-        f'  agent-install) echo "fresh" > "{marker}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n"
         "STUB\n"
@@ -603,7 +802,7 @@ def test_a_pip_install_answers_over_a_newer_stale_copy_in_a_guessed_bin(tmp_path
         xdg_bin / "agentic-hil",
         'case "$1" in\n'
         '  --version) echo "9.9.9" ;;\n'
-        f'  agent-install) echo "stale" > "{marker}" ;;\n'
+        f'  agent-install) echo "stale" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n",
     )
@@ -622,7 +821,7 @@ def test_a_pip_install_answers_over_a_newer_stale_copy_in_a_guessed_bin(tmp_path
         "#!/bin/sh\n"
         'case "\\$1" in\n'
         '  --version) echo "0.5.0" ;;\n'
-        f'  agent-install) echo "fresh" > "{marker}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n"
         "STUB\n"
@@ -696,7 +895,7 @@ def test_an_exact_version_pin_refuses_a_mismatched_copy_in_the_managers_bin(tmp_
         "#!/bin/sh\n"
         'case "\\$1" in\n'
         '  --version) echo "9.9.9" ;;\n'
-        f'  agent-install) echo "ran" > "{marker}" ;;\n'
+        f'  agent-install) echo "ran" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
         "esac\n"
         "exit 0\n"
         "STUB\n"
@@ -833,3 +1032,8 @@ def test_the_one_liner_installs_the_machine_half_in_a_fresh_container() -> None:
     assert "CONTAINER CHECKS PASSED" in transcript
     assert "sudo" not in transcript
     assert "step 4/5  agent: registering the skill and the MCP server for claude-code" in transcript
+    # Step 4 says what happened in one line, and the report it read stays unprinted
+    # on a success. The document's own tool name is the thing that would give a
+    # streamed dump away.
+    assert f"agent: claude-code {REGISTERED_LINE}" in transcript
+    assert "agentic_hil_agent_install" not in transcript

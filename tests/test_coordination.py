@@ -892,7 +892,7 @@ def test_cli_discovery_gate_blocks_before_backend(tmp_path: Path, monkeypatch: p
         called = True
         return {"ok": True, "probes": []}
 
-    backend = SimpleNamespace(list_probes=list_probes, close=lambda: None)
+    backend = SimpleNamespace(list_probes=list_probes, close=lambda: None, sessionless_debug_tools=lambda: frozenset())
     monkeypatch.setattr("agentic_hil.cli.load_authoritative_config", lambda workspace: config)
     monkeypatch.setattr("agentic_hil.tools.create_debugger_backend", lambda loaded: backend)
     try:

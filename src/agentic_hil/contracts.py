@@ -89,7 +89,7 @@ MCP_TOOLS: list[JsonObject] = [
     {"name": "debug_halt", "description": "Halt the target in the active debug session.", "inputSchema": object_schema({"timeout_s": TIMEOUT})},
     {"name": "debug_get_stop_reason", "description": "Return the last structured stop reason.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "debug_symbol_info", "description": "Resolve an allowed debug symbol.", "inputSchema": object_schema({"symbol": SYMBOL_NAME}, required=["symbol"])},
-    {"name": "debug_symbol_value", "description": "Read an allowed symbol's current bytes out of target memory and return them, as hex and, at 1, 2, 4 or 8 bytes, as an unsigned and a signed integer. Use this instead of reading a variable through a raw gdb print.", "inputSchema": object_schema({"symbol": SYMBOL_NAME}, required=["symbol"])},
+    {"name": "debug_symbol_value", "description": "Read an allowed symbol's current bytes out of target memory and return them, as hex in memory order and, at 1, 2, 4 or 8 bytes, as an unsigned and a signed integer read in the byte order the firmware image declares. Use this instead of reading a variable through a raw gdb print.", "inputSchema": object_schema({"symbol": SYMBOL_NAME}, required=["symbol"])},
     {"name": "debug_dump_symbol_ihex", "description": "Read an allowed symbol from target memory and write Intel HEX.", "inputSchema": object_schema({"symbol": SYMBOL_NAME, "output_path": NONEMPTY_STRING}, required=["symbol", "output_path"])},
     {"name": "get_last_report", "description": "Return the most recent structured Agentic HIL report.", "inputSchema": EMPTY_OBJECT_SCHEMA},
     {"name": "classify_last_error", "description": "Classify the most recent Agentic HIL/debugger failure.", "inputSchema": EMPTY_OBJECT_SCHEMA},

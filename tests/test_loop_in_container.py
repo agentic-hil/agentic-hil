@@ -1048,6 +1048,42 @@ def _round_records(repository: Path) -> list[dict[str, object]]:
     return json.loads(summary)["rounds"]
 
 
+class _FrozenClock:
+    """One second, for two runs that must still not share a directory."""
+
+    @staticmethod
+    def now() -> datetime:
+        return datetime(2026, 8, 16, 22, 52, 33)
+
+
+def test_two_runs_that_start_in_the_same_second_get_temporary_roots_of_their_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Shared temporary storage needs a name for the run, not for the second.
+
+    The scratch root was `<repo name>-<run id>` under the system temp, and the
+    run id names the second. A machine runs several clones of one project and a
+    suite builds fixture repositories that are all called the same thing, so two
+    runs starting together met in one directory: one created a round directory
+    the other had just removed, and the round died on the collision rather than
+    on anything it was reviewing.
+    """
+    monkeypatch.setattr(agent_review_loop, "datetime", _FrozenClock)
+    roots: list[str] = []
+    for name in ("first", "second"):
+        (tmp_path / name).mkdir()
+        repository = _repository(tmp_path / name)
+        agent = _stalling_agent(tmp_path / name, then=_COMMITS)
+
+        assert _one_round(repository, agent, monkeypatch) == agent_review_loop.EXIT_CLEAN
+
+        roots += [line for line in capsys.readouterr().out.splitlines() if line.startswith("scratch")]
+
+    # Same repository name, same second, and still two directories.
+    assert len(roots) == 2, roots
+    assert roots[0] != roots[1], roots
+
+
 def test_a_no_commit_round_that_left_work_in_the_tree_is_finished_rather_than_called_declined(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1119,6 +1155,47 @@ def test_work_the_implementer_will_not_commit_twice_is_committed_by_the_loop(
     record = _round_records(repository)[0]
     assert (record["stalled"], record["retried"]) == (True, True)
     assert record["salvaged"] is not None and record["commits"] == [record["salvaged"]]
+
+
+_COMMITS_PART_AND_LEAVES_MORE_DIRTY = (
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: finish what the stalled attempt wrote'], check=True)\n"
+    "pathlib.Path('extra.py').write_text('# more of the round, never committed\\n', encoding='utf-8')\n"
+    "sys.stdout.write('committed part of it and left the rest in the tree\\n')\n"
+)
+
+
+def test_a_partial_second_commit_does_not_hide_the_rest_still_left_uncommitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`HEAD` moving is not the same as the round being finished.
+
+    The second attempt commits `fix.py` -- moving `HEAD` -- and leaves `extra.py`
+    sitting dirty in the tree. A recovery that stops at "HEAD moved" would send
+    only the partial commit to review and lose `extra.py` exactly as if this
+    recovery path did not exist; it must be swept into history instead.
+    """
+    repository = _repository(tmp_path)
+
+    exit_code = _one_round(repository, _stalling_agent(tmp_path, then=_COMMITS_PART_AND_LEAVES_MORE_DIRTY), monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_CLEAN
+    # Two commits: the partial one the agent stood behind, and the salvage that
+    # picked up what it still left dirty.
+    subject = _in(repository, "log", "-1", "--format=%s").strip()
+    assert subject == "wip(review-loop): round 1 left the implementer's work uncommitted"
+    assert _in(repository, "log", "-2", "--format=%s").splitlines() == [
+        "wip(review-loop): round 1 left the implementer's work uncommitted",
+        "fix: finish what the stalled attempt wrote",
+    ]
+    assert _in(repository, "show", "HEAD:fix.py") == FIX
+    assert _in(repository, "show", "HEAD:extra.py") == "# more of the round, never committed\n"
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["retried"]) == (True, True)
+    assert record["salvaged"] is not None
+    # Both commits reached the review, not just the partial one.
+    assert len(record["commits"]) == 2
 
 
 def test_a_recovery_attempt_that_is_cut_short_still_leaves_the_stalled_work_in_history(

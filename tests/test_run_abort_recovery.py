@@ -89,6 +89,9 @@ class FakeBackend:
     def close(self) -> None:
         return None
 
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        return frozenset()
+
 
 def config_for(workspace: Path, *, auto_recover: str | None = None, allow_reset: bool = True):
     written = write_config(

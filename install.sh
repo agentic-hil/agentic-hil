@@ -211,17 +211,84 @@ version_matches_request() {
     fi
 }
 
-fetch_uv() {
-    # Astral's own installer for uv. It downloads the release archive for this
-    # platform and verifies its published checksums itself, which is why nothing
-    # here adds a second, weaker check of its own around the pipe.
-    if have curl; then
-        curl -LsSf https://astral.sh/uv/install.sh | sh
-    elif have wget; then
-        wget -qO- https://astral.sh/uv/install.sh | sh
+# The one release of Astral's uv installer this script is allowed to run, and
+# the SHA-256 of exactly those bytes. They are one pair: bumping the version
+# without the hash makes every install fail, bumping the hash without the version
+# makes every install fail, and that is the point. Refreshing them is a release
+# chore, written down in docs/release-strategy.md, not something an install
+# decides on the operator's machine.
+UV_INSTALLER_VERSION="0.12.5"
+UV_INSTALLER_SHA256="504511fbbbd811aeaba6738abc79408956b6c7da0ca35437b3dcc24a41efc111"
+
+sha256_of() {
+    # The first checksum tool this machine actually has. GNU coreutils spells it
+    # sha256sum, macOS ships shasum, and openssl answers where neither is
+    # installed. The first two print the digest first, openssl prints it last.
+    if have sha256sum; then
+        digest=$(sha256sum "$1") || return 1
+        printf '%s' "${digest%% *}"
+    elif have shasum; then
+        digest=$(shasum -a 256 "$1") || return 1
+        printf '%s' "${digest%% *}"
+    elif have openssl; then
+        digest=$(openssl dgst -sha256 "$1") || return 1
+        printf '%s' "${digest##* }"
     else
         return 1
     fi
+}
+
+fetch_uv() {
+    # Astral's own installer for uv, pinned to one release and checked before a
+    # line of it runs. Two decisions are worth keeping visible here.
+    #
+    # Why the pin. The moving https://astral.sh/uv/install.sh serves whatever is
+    # current at the second it is asked, so piping it into sh executes bytes
+    # nobody here has ever read, on a machine that has just been told this script
+    # touches five things and nothing else. Every other hop in the chain is
+    # already pinned: this script is published with its own .sha256 beside it,
+    # and the package comes hash-checked from PyPI. The versioned URL names one
+    # release, the constant above names its exact bytes, and a download that is
+    # not those bytes is not run at all.
+    #
+    # Why their checksums stay the second layer. This pin vouches for the
+    # installer, not for the uv binaries it goes on to fetch. Astral's POSIX
+    # installer carries a SHA-256 per release artifact and verifies the archive
+    # it downloaded against it, which is the hop this pin cannot reach. Neither
+    # layer replaces the other: ours proves the script, theirs proves the binary.
+    url="https://astral.sh/uv/${UV_INSTALLER_VERSION}/install.sh"
+    if ! have mktemp; then
+        say "package: no mktemp here, so the pinned uv installer cannot be downloaded to a private file"
+        return 1
+    fi
+    if ! have sha256sum && ! have shasum && ! have openssl; then
+        say "package: no sha256sum, shasum or openssl here, so the pinned uv installer cannot be verified"
+        return 1
+    fi
+    installer_path=$(mktemp) || return 1
+    if have curl; then
+        curl -LsSf "$url" -o "$installer_path" || { rm -f "$installer_path"; return 1; }
+    elif have wget; then
+        wget -qO "$installer_path" "$url" || { rm -f "$installer_path"; return 1; }
+    else
+        rm -f "$installer_path"
+        return 1
+    fi
+    found_hash=$(sha256_of "$installer_path") || { rm -f "$installer_path"; return 1; }
+    if [ "$found_hash" != "$UV_INSTALLER_SHA256" ]; then
+        rm -f "$installer_path"
+        printf 'agentic-hil install: the pinned uv installer does not match its recorded hash, so it was not run.\n' >&2
+        printf 'agentic-hil install:   url      %s\n' "$url" >&2
+        printf 'agentic-hil install:   expected %s\n' "$UV_INSTALLER_SHA256" >&2
+        printf 'agentic-hil install:   found    %s\n' "$found_hash" >&2
+        fail "the pin in this script may be stale: check for a newer uv release, then refresh UV_INSTALLER_VERSION and UV_INSTALLER_SHA256 together. Until then, install uv or Python 3.10 or newer yourself and run this again."
+    fi
+    if sh "$installer_path"; then
+        rm -f "$installer_path"
+        return 0
+    fi
+    rm -f "$installer_path"
+    return 1
 }
 
 user_bin_on_path() {
@@ -427,6 +494,25 @@ ensure_resolved_for_agent_install() {
     fi
 }
 
+# One agent registered, reported as a result rather than as a document.
+# `agent-install` answers with a JSON report of every path it touched, and on a
+# machine with three agent CLIs that is roughly a hundred and fifty lines of
+# machine-readable detail inside a transcript whose whole job is to say five calm
+# things. On success the operator needs one line. On failure the document is the
+# diagnosis, so then it is printed whole and this stops. The top-level "ok" is
+# read at its own indentation, so a true nested inside a failed report cannot
+# stand in for the answer.
+register_agent() {
+    registering_agent="$1"
+    if agent_install_report=$("$AGENTIC_HIL_CMD" agent-install --agent "$registering_agent" 2>&1) &&
+        printf '%s\n' "$agent_install_report" | grep -q '^  "ok": true'; then
+        say "agent: $registering_agent registered (skill and MCP server, restart pending)"
+        return 0
+    fi
+    printf '%s\n' "$agent_install_report" >&2
+    fail "agent: agent-install failed for $registering_agent; the report above says which half"
+}
+
 # Step 4: the machine half, and only the machine half.
 CONFIGURED=""
 if [ "$WITH_AGENT_INSTALL" -eq 0 ]; then
@@ -434,7 +520,7 @@ if [ "$WITH_AGENT_INSTALL" -eq 0 ]; then
 elif [ -n "$AGENT" ]; then
     ensure_resolved_for_agent_install
     step 4 "agent: registering the skill and the MCP server for $AGENT"
-    "$AGENTIC_HIL_CMD" agent-install --agent "$AGENT"
+    register_agent "$AGENT"
     CONFIGURED="$AGENT"
 else
     DETECTED=$(detect_agents)
@@ -446,24 +532,30 @@ else
         ensure_resolved_for_agent_install
         for agent_id in $DETECTED; do
             step 4 "agent: registering the skill and the MCP server for $agent_id"
-            "$AGENTIC_HIL_CMD" agent-install --agent "$agent_id"
+            register_agent "$agent_id"
             CONFIGURED="$CONFIGURED $agent_id"
         done
     fi
 fi
 
-# Step 5: the one thing that stays the operator's.
+# Step 5: the one thing that stays the operator's. Every running agent CLI is
+# named, not the first one found: an operator with two of them open restarts
+# both, and a warning that names one is read as clearing the other.
+RUNNING_LIST=""
+RUNNING_COUNT=0
 RUNNING_NAME=""
 RUNNING_PID=""
 for agent_id in $CONFIGURED; do
     process=$(process_name_for "$agent_id")
     pid=$(running_pid "$process")
-    if [ -n "$pid" ] && [ -z "$RUNNING_NAME" ]; then
+    if [ -n "$pid" ]; then
+        RUNNING_LIST="${RUNNING_LIST}    ${process} (PID ${pid})\n"
+        RUNNING_COUNT=$((RUNNING_COUNT + 1))
         RUNNING_NAME="$process"
         RUNNING_PID="$pid"
     fi
 done
-if [ -z "$RUNNING_NAME" ] && [ -n "${CLAUDECODE:-}" ]; then
+if [ "$RUNNING_COUNT" -eq 0 ] && [ -n "${CLAUDECODE:-}" ]; then
     # Running inside a Claude Code session, which is the only signal where there
     # is no pgrep. It speaks for claude-code alone: an operator who asked for
     # codex is not told to restart something else.
@@ -472,17 +564,29 @@ if [ -z "$RUNNING_NAME" ] && [ -n "${CLAUDECODE:-}" ]; then
             claude-code | claude)
                 RUNNING_NAME="claude"
                 RUNNING_PID="this session"
+                RUNNING_COUNT=1
                 ;;
         esac
     done
 fi
 
-if [ -n "$RUNNING_NAME" ]; then
+if [ "$RUNNING_COUNT" -eq 1 ]; then
     step 5 "restart: $RUNNING_NAME is running right now, and that is the one step left"
     printf '\n'
     printf '========================================================================\n'
     printf '  RESTART REQUIRED: %s is running right now (PID %s).\n' "$RUNNING_NAME" "$RUNNING_PID"
     printf '  Quit that process and start it again once. An agent CLI reads its MCP\n'
+    printf '  registrations when a session starts, so the agentic-hil tools appear in\n'
+    printf '  the next session, not in this one.\n'
+    printf '========================================================================\n'
+    printf '\n'
+elif [ "$RUNNING_COUNT" -gt 1 ]; then
+    step 5 "restart: $RUNNING_COUNT of your agent CLIs are running right now, and that is the one step left"
+    printf '\n'
+    printf '========================================================================\n'
+    printf '  RESTART REQUIRED: these agent CLIs are running right now:\n'
+    printf '%b' "$RUNNING_LIST"
+    printf '  Quit each process and start it again once. An agent CLI reads its MCP\n'
     printf '  registrations when a session starts, so the agentic-hil tools appear in\n'
     printf '  the next session, not in this one.\n'
     printf '========================================================================\n'

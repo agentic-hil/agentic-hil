@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -245,25 +246,47 @@ def _pip_upgrade_command() -> list[str]:
     return [*command, _upgrade_requirement()]
 
 
+def owning_manager() -> str:
+    """Which package manager holds the installation this process is running out of.
+
+    Asked once and answered here, because three commands act on the answer: the
+    upgrade that runs a manager, the reinstall line a pinned or broken
+    installation is handed, and the removal line `agentic-hil uninstall` ends on.
+    Two answers to it would send an operator to rebuild or empty an environment a
+    different manager is holding.
+
+    The prefix decides first, because a uv tool environment and a pipx venv are
+    recognisable from the path this interpreter lives in whatever any receipt
+    says. Only then the receipt, which is what tells a `uv pip` installation from
+    a plain `pip` one inside an ordinary environment. It reads no PATH: whether
+    the manager is reachable right now is a separate question, and one that only
+    a caller about to *run* it has to ask.
+    """
+    prefix = _normalized_location(sys.prefix)
+    if "/uv/tools/agentic-hil" in prefix:
+        return "uv-tool"
+    if "/pipx/venvs/agentic-hil" in prefix:
+        return "pipx"
+    if _distribution_installer() == "uv":
+        return "uv-pip"
+    return "pip"
+
+
 def _upgrade_command() -> tuple[str, list[str]]:
     """Select the manager that owns the running installation, never another PATH copy."""
-    prefix = _normalized_location(sys.prefix)
-    installer = _distribution_installer()
-    if "/uv/tools/agentic-hil" in prefix:
+    manager = owning_manager()
+    if manager in {"uv-tool", "uv-pip"}:
         uv = shutil.which("uv")
         if uv is None:
             raise ConfigError("upgrade_manager_not_found", "This installation is managed by uv, but uv is not on PATH.", {"manager": "uv", "python": sys.executable})
-        return "uv", [uv, "tool", "upgrade", "agentic-hil"]
-    if "/pipx/venvs/agentic-hil" in prefix:
+        if manager == "uv-tool":
+            return "uv", [uv, "tool", "upgrade", "agentic-hil"]
+        return "uv", [uv, "pip", "install", "--python", sys.executable, "--upgrade", _upgrade_requirement()]
+    if manager == "pipx":
         pipx = shutil.which("pipx")
         if pipx is None:
             raise ConfigError("upgrade_manager_not_found", "This installation is managed by pipx, but pipx is not on PATH.", {"manager": "pipx", "python": sys.executable})
         return "pipx", [pipx, "upgrade", "agentic-hil"]
-    if installer == "uv":
-        uv = shutil.which("uv")
-        if uv is None:
-            raise ConfigError("upgrade_manager_not_found", "This installation is managed by uv, but uv is not on PATH.", {"manager": "uv", "python": sys.executable})
-        return "uv", [uv, "pip", "install", "--python", sys.executable, "--upgrade", _upgrade_requirement()]
     return "pip", _pip_upgrade_command()
 
 
@@ -273,23 +296,130 @@ def reinstall_command_with_extras(extras: tuple[str, ...]) -> str:
     Named and never run, like every other reinstall command this package
     produces: which requirement a machine records is the operator's decision.
 
-    The same four branches as `_upgrade_command` and in the same order, because
-    the question is the same one — which manager owns this installation — and two
-    answers to it would send an operator to rebuild an environment a different
-    manager is holding. It differs in taking no PATH lookup: this is a line to
-    print, and a `uv` that is missing right now says nothing about whether the
-    operator will have one when they run it.
+    The same four answers `owning_manager` gives the upgrade itself, so a machine
+    is never told to rebuild an environment a different manager is holding. It
+    differs in taking no PATH lookup: this is a line to print, and a `uv` that is
+    missing right now says nothing about whether the operator will have one when
+    they run it.
     """
     requirement = f"agentic-hil[{','.join(extras)}]" if extras else "agentic-hil"
-    prefix = _normalized_location(sys.prefix)
-    if "/uv/tools/agentic-hil" in prefix:
+    manager = owning_manager()
+    if manager == "uv-tool":
         return f'uv tool install "{requirement}@latest"'
-    if "/pipx/venvs/agentic-hil" in prefix:
+    if manager == "pipx":
         return f'pipx install --force "{requirement}"'
-    if _distribution_installer() == "uv":
+    if manager == "uv-pip":
         return f'uv pip install --python "{sys.executable}" --upgrade "{requirement}"'
     scope = " --user" if _user_site_installation() else ""
     return f'"{sys.executable}" -m pip install --upgrade{scope} "{requirement}"'
+
+
+def removal_command() -> str:
+    """The line that removes this installation, from the manager that owns it.
+
+    Named and never run, and here that is not a policy but a fact about the
+    process: a package cannot delete the files it is executing out of, so the
+    last step of `agentic-hil uninstall` is a line for the operator's shell and
+    could not be anything else. On Windows it could not even be a subprocess of
+    this one, because the image this interpreter has mapped stays undeletable
+    until it exits.
+
+    The same four answers as the upgrade and the reinstall line, through
+    `owning_manager`, and no extras on any of them: a requirement names what to
+    install, and a removal takes the distribution whole whatever it was installed
+    with. No `--yes` either. The line is read before it is run, and a removal
+    that asks once is the right shape for one somebody pasted.
+    """
+    manager = owning_manager()
+    if manager == "uv-tool":
+        return "uv tool uninstall agentic-hil"
+    if manager == "pipx":
+        return "pipx uninstall agentic-hil"
+    if manager == "uv-pip":
+        return f'uv pip uninstall --python "{sys.executable}" agentic-hil'
+    return f'"{sys.executable}" -m pip uninstall agentic-hil'
+
+
+def installed_package_directory() -> str | None:
+    """Where the importable package sits, or None when that cannot be read.
+
+    For the one check a removal cannot perform on its own. A `pip uninstall`
+    removes the files it has a record of and leaves whatever it does not, and a
+    `__pycache__` left behind under this directory keeps `import agentic_hil`
+    succeeding afterwards as an empty namespace package. That was observed on a
+    real machine, and it is why a reinstall could look like the only way back to
+    a working command. Naming the directory lets an operator look, once the
+    manager has run and this process is gone.
+
+    None for an editable or source installation, whatever `locate_file`
+    answers. Contrary to what a first read of `locate_file` suggests, that is
+    not empty ground for one: `locate_file("agentic_hil")` resolves straight to
+    the checkout's own source directory for an editable install and
+    `Path(...).is_dir()` is true of it, exactly this project's own dev
+    container included. Checked against where this interpreter's site-packages
+    actually are rather than against `direct_url.json`'s `dir_info.editable`,
+    because that field is a PEP 660 marker and this project's own editable
+    install is the older `setup.py develop` / `.egg-info` form, which writes no
+    `direct_url.json` at all: the checkout sits directly on `sys.path` with
+    nothing copied anywhere. A location outside every site-packages directory
+    is not a wheel's installed copy under either scheme, so naming it here
+    would point an operator's removal at their project source instead of a
+    leftover cache.
+    """
+    with suppress(Exception):
+        from importlib.metadata import distribution
+
+        located = distribution("agentic-hil").locate_file("agentic_hil")
+        if located is not None and Path(located).is_dir() and _inside_site_packages(located):
+            return str(located)
+    return None
+
+
+def _inside_site_packages(location: str | Path) -> bool:
+    site_dirs = []
+    for scheme_key in ("purelib", "platlib"):
+        with suppress(KeyError, OSError):
+            site_dirs.append(sysconfig.get_path(scheme_key))
+    with suppress(KeyError, OSError):
+        site_dirs.append(sysconfig.get_path("purelib", f"{os.name}_user"))
+    normalized = _normalized_location(location)
+    return any(site_dir and normalized.startswith(_normalized_location(site_dir) + "/") for site_dir in site_dirs)
+
+
+def _host_rmdir_refuses_nonempty_directories() -> bool:
+    """Whether this host's `rmdir` already has the behaviour `uninstall` promises.
+
+    POSIX's `rmdir` exits non-zero on a non-empty directory and touches
+    nothing. Windows has no equivalent through the shell this project's own
+    installer targets (`install.ps1`, PowerShell): `rmdir`/`rd` there is an
+    alias for `Remove-Item`, which does not refuse a non-empty directory the
+    same way -- it can prompt to remove it and everything still inside it
+    instead, which is exactly what this step tells an operator it will never
+    do. A function rather than a constant, so a test can exercise either
+    branch on whichever host the suite happens to run on -- the same seam
+    `_host_locks_running_files` uses below for the same platform split.
+    """
+    return os.name != "nt"
+
+
+def empty_directory_removal_command(directory: str) -> str:
+    """A copy-paste command that removes `directory` only if nothing is left inside it.
+
+    Quoted either way: an unquoted path containing spaces splits into several
+    shell arguments and leaves the stale directory behind with no error to say
+    so.
+
+    POSIX's own `rmdir` already refuses a non-empty directory outright, so
+    quoting it for the shell is the whole of what is needed there.
+    `[System.IO.Directory]::Delete(path, $false)` is PowerShell's equivalent --
+    the `recursive: false` overload throws `IOException` on a non-empty
+    directory instead of the prompt-then-delete-everything `Remove-Item`/`rmdir`
+    give on that host.
+    """
+    if _host_rmdir_refuses_nonempty_directories():
+        return f"rmdir {shlex.quote(directory)}"
+    literal = directory.replace("'", "''")
+    return f"[System.IO.Directory]::Delete('{literal}', $false)"
 
 
 # Which declared extra a configured capability needs, and which entries need it.

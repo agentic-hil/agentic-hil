@@ -21,7 +21,12 @@ from agentic_hil.backends.common import (
     spawn_command,
     which,
 )
-from agentic_hil.backends.gdbdebug import DEBUG_SYMBOL_PATTERN, resolve_gdb_executable
+from agentic_hil.backends.gdbdebug import (
+    DEBUG_SYMBOL_PATTERN,
+    decode_symbol_value,
+    image_byte_order,
+    resolve_gdb_executable,
+)
 from agentic_hil.config import (
     ConfigError,
     display_path,
@@ -30,6 +35,7 @@ from agentic_hil.config import (
     safe_write_text,
 )
 from agentic_hil.elfsymbols import read_elf_symbol
+from agentic_hil.gdbmi import read_intel_hex_file
 from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
 from agentic_hil.report import (
     classify_failure_report,
@@ -77,11 +83,23 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
 # "Data read successfully" — measured against a NUCLEO-F446RE on
 # STM32CubeProgrammer v2.23.0, which prints it after the UPLOADING block and
 # before the elapsed-time line.
+#
+# The two memory reads share that line because they are one command: both send
+# `-r` and differ only in what becomes of the file it wrote. Held in one name so
+# a measured marker is never transcribed twice and the two can never drift into
+# confirming themselves differently.
+STLINK_MEMORY_READ_CONFIRMATION = ["Data read successfully"]
 STLINK_SUCCESS_CONFIRMATION = {
     "probe_target": ["ST-LINK SN", "Device name"],
     "flash_firmware": ["Download verified successfully"],
-    "debug_dump_symbol_ihex": ["Data read successfully"],
+    "debug_dump_symbol_ihex": STLINK_MEMORY_READ_CONFIRMATION,
+    "debug_symbol_value": STLINK_MEMORY_READ_CONFIRMATION,
 }
+# The typed-debug reads this backend answers with no session behind them, and so
+# the ones the coordination layer must lease as one-shots rather than run on a
+# session lease that does not exist here. The same `-r` command, so the same
+# pair the confirmation table above carries.
+SESSIONLESS_DEBUG_READS = frozenset({"debug_dump_symbol_ihex", "debug_symbol_value"})
 # One row per reset mode, holding the argument that goes on the wire and the
 # lines STM32CubeProgrammer prints when that argument did what it says. The two
 # belong to the same command and are kept together for that reason: `-rst` and
@@ -255,15 +273,79 @@ class STLinkBackend:
     def debug_symbol_info(self, symbol: str = "") -> JsonObject:
         return self._unsupported_debug_tool("debug_symbol_info")
 
-    def debug_symbol_value(self, symbol: str = "") -> JsonObject:
-        # Not served here, unlike the dump beside it. STM32CubeProgrammer reads
-        # target memory into a file, which is exactly what `-r` produces and
-        # exactly what `debug_dump_symbol_ihex` promises; returning the bytes
-        # instead would mean writing a temporary file, parsing it back and
-        # calling the result a memory read. That is a second reading of the same
-        # bytes through a format that was never in the question, so this backend
-        # says what it does not do rather than approximating it.
-        return self._unsupported_debug_tool("debug_symbol_value")
+    def debug_symbol_value(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
+        """One allowed symbol's bytes, read the only way this backend reads memory.
+
+        The second tool of the typed family this backend serves, and for the
+        reason the first one is served: `-r` is a memory read, and what a caller
+        asks of it here is the same read the dump makes. It used to refuse,
+        because the file that read writes is not what this tool promises and
+        writing one anyway looked like approximating the answer. The asymmetry
+        was the worse half of that trade (#249): a plan that reads a counter had
+        to know which probe it was running on, while the file the objection was
+        about is this call's own business, created in a private directory,
+        deleted before the result is built, and named nowhere in it.
+
+        Everything a caller can observe is the OpenOCD path's. Same allowlist
+        refusal word for word, same `debug.max_dump_size_bytes` cap on the
+        resolved size before a probe is opened, same digest-verified offline
+        resolution the dump uses, same `hex` and integer readings and summary.
+        What differs is what has to: `symbol_source` names the flashed ELF the
+        symbol was resolved against, because there is no session that loaded it.
+
+        The parse-back is held to exactly what was asked for. Intel HEX carries
+        the address of every record it holds, so the bytes are taken by address
+        rather than by position, and a file that does not cover the whole window
+        is a failed read rather than a short answer.
+        """
+        tool = "debug_symbol_value"
+        if not self.config.probe_allowed():
+            return self._permission_denied(tool, "Symbol reads require allow_probe in the authoritative config.")
+        validated = self._validate_symbol(tool, symbol)
+        if not validated["ok"]:
+            return validated
+        resolved = self._resolve_symbol_offline(tool, symbol, symbol_elf)
+        if not resolved["ok"]:
+            return resolved
+        size_bytes = int(resolved["size_bytes"])
+        if size_bytes > self.config.debug.max_dump_size_bytes:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": "Symbol read exceeds debug.max_dump_size_bytes.", "symbol": symbol, "size_bytes": size_bytes, "max_dump_size_bytes": self.config.debug.max_dump_size_bytes}
+        address_value = int(resolved["address_value"])
+        try:
+            # Private, and outside the workspace on purpose: the caller asked for
+            # bytes and named no path, so this file is not theirs to find, to
+            # collide with or to have left behind. The same reasoning, and the
+            # same removal, as the staged ELF the resolution above copies.
+            staging_dir = Path(tempfile.mkdtemp(prefix="agentic-hil-symbol-value-"))
+        except OSError as error:
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs could not be created.", "backend_error": str(error), "symbol": symbol, **NOT_CONTACTED}
+        try:
+            # `.hex` because the CLI picks Intel HEX off the extension, which is
+            # the same thing that makes the dump's output what it promises.
+            memory_path = staging_dir / "symbol-value.hex"
+            result = self._run_stlink(tool, [*self._connection_args("NORMAL"), "-r", hex(address_value), str(size_bytes), str(memory_path)])
+            result.update({"symbol": symbol, "address": resolved["address"], "size_bytes": size_bytes, "resolved_from": resolved["resolved_from"], "symbol_source": resolved["symbol_source"]})
+            if not result.get("ok") and "side_effect_status" not in result:
+                # The dump's answer to the same question, for the same reason: a
+                # read drives no write, but the probe was attached to a live core
+                # and a CLI that exited without its confirmation line left no
+                # evidence of where it stopped.
+                result.update({"side_effect_status": "unknown", "retry_safe": False})
+            if result.get("ok"):
+                # The CLI confirmed the read, so the bytes left the target. What
+                # landed in the file is the separate question, and it is asked
+                # against the window that was requested rather than against the
+                # file's own idea of what it holds.
+                data = read_intel_hex_file(memory_path, address_value, size_bytes)
+                if data is None:
+                    result.update({"ok": False, "error_type": "memory_read_failed", "summary": "STM32CubeProgrammer confirmed the read but left no parseable Intel HEX covering the requested bytes.", "target_contacted": True})
+                    result.pop("success_confirmed", None)
+                    return self._write_action_report(result)
+                result.update(decode_symbol_value(data, resolved["image_byte_order"]))
+                result["summary"] = "Symbol value read from target memory."
+            return self._write_action_report(result)
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     def debug_dump_symbol_ihex(self, symbol: str = "", output: JsonObject | None = None, symbol_elf: JsonObject | None = None) -> JsonObject:
         """Read one allowed symbol out of target memory and write Intel HEX.
@@ -281,6 +363,8 @@ class STLinkBackend:
         sha256 travels in the result.
         """
         tool = "debug_dump_symbol_ihex"
+        if not self.config.probe_allowed():
+            return self._permission_denied(tool, "Symbol dumps require allow_probe in the authoritative config.")
         validated = self._validate_symbol(tool, symbol)
         if not validated["ok"]:
             return validated
@@ -333,6 +417,17 @@ class STLinkBackend:
 
     def close(self) -> None:
         return None
+
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        """The two reads this backend serves with no debug session behind them.
+
+        `-r` attaches to a live core the same way a reset does, so a symbol read
+        here is a standalone hardware interaction, not a call inside a session
+        that already holds the lease. The coordination layer takes a one-shot
+        debugger lease for exactly these — machine-wide ownership, run
+        declaration and the incident path for an unconfirmed read — where a
+        session backend's own lease would carry them instead."""
+        return SESSIONLESS_DEBUG_READS
 
     def target_support(self) -> JsonObject:
         """STM32CubeProgrammer identifies the part itself.
@@ -464,7 +559,7 @@ class STLinkBackend:
         return {"confirmed": len(matched) == len(expected), "matched": matched, "expected": expected}
 
     def _unconfirmed_backend_error_type(self, tool: str) -> str:
-        return {"probe_target": "probe_unconfirmed", "flash_firmware": "flash_unconfirmed", "reset_target": "reset_unconfirmed", "debug_dump_symbol_ihex": "memory_read_unconfirmed"}.get(tool, "unknown_debugger_error")
+        return {"probe_target": "probe_unconfirmed", "flash_firmware": "flash_unconfirmed", "reset_target": "reset_unconfirmed", "debug_dump_symbol_ihex": "memory_read_unconfirmed", "debug_symbol_value": "memory_read_unconfirmed"}.get(tool, "unknown_debugger_error")
 
     def _write_action_report(self, result: JsonObject) -> JsonObject:
         return write_report(self.config, mark_side_effect(result))
@@ -516,6 +611,13 @@ class STLinkBackend:
         having loaded the image. Nothing else is accepted: resolving against
         some other build would answer with an address that is right about the
         file and wrong about the board.
+
+        The image's byte order travels back with the address, for the caller
+        that turns the bytes into a number. Read here rather than by that caller
+        because here is where the trustworthy copy exists: the private staged
+        file is deleted on the way out, and reading EI_DATA off the caller's
+        path afterwards would be reading a file a rebuild is free to have
+        replaced, which is the exact race the copy was made to close.
         """
         if symbol_elf is None:
             return {
@@ -566,8 +668,9 @@ class STLinkBackend:
             address_value = gdb_symbol_marker_value(output, GDB_SYMBOL_ADDRESS_MARKER)
             size_value = gdb_symbol_marker_value(output, GDB_SYMBOL_SIZE_MARKER)
             source = {"path": symbol_elf.get("path"), "sha256": symbol_elf.get("sha256")}
+            order = image_byte_order(staged_elf)
             if address_value is not None and size_value is not None:
-                return {"ok": True, "symbol": symbol, "address": hex(address_value), "address_value": address_value, "size_bytes": size_value, "resolved_from": "debug_info", "symbol_source": source}
+                return {"ok": True, "symbol": symbol, "address": hex(address_value), "address_value": address_value, "size_bytes": size_value, "resolved_from": "debug_info", "symbol_source": source, "image_byte_order": order}
             # Both markers come from expressions that need a typed symbol, and an
             # assembly-defined object carries no type for them, while its
             # address and size sit in the symbol table of this same staged ELF,
@@ -578,7 +681,7 @@ class STLinkBackend:
             table = read_elf_symbol(staged_elf, symbol)
             if table["ok"]:
                 address = int(table["address"])
-                return {"ok": True, "symbol": symbol, "address": hex(address), "address_value": address, "size_bytes": int(table["size_bytes"]), "resolved_from": "elf_symbol_table", "symbol_source": source}
+                return {"ok": True, "symbol": symbol, "address": hex(address), "address_value": address, "size_bytes": int(table["size_bytes"]), "resolved_from": "elf_symbol_table", "symbol_source": source, "image_byte_order": order}
             lower = output.lower()
             error_type = "symbol_not_found" if contains_any(lower, GDB_SYMBOL_MISSING_MARKERS) else "symbol_resolution_failed"
             summary = "Symbol was not found in the flashed ELF." if error_type == "symbol_not_found" else "GDB returned no usable symbol address or size for the flashed ELF."
