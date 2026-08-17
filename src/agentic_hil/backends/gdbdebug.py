@@ -142,9 +142,18 @@ class GdbDebugSessions:
         timeout = self.config.debugger.timeout_s if timeout_s is None else min(self.config.debugger.timeout_s, max(0.1, timeout_s))
         started_at = utc_now_iso()
         start = time.perf_counter()
-        gdb_port = reserve_tcp_port()
-        server_args = self._build_server_args(str(resolved_server["executable_path"]), gdb_port, mode != "attach")
-        log_path = str(Path(logs_directory(self.config)) / f"gdb-debug-{timestamp_for_filename()}.json")
+        reservation = reserve_tcp_port()
+        gdb_port = reservation.port
+        try:
+            server_args = self._build_server_args(str(resolved_server["executable_path"]), gdb_port, mode != "attach")
+            log_path = str(Path(logs_directory(self.config)) / f"gdb-debug-{timestamp_for_filename()}.json")
+        except BaseException:
+            reservation.release()
+            raise
+        # The server binds this port by number, so the reservation has to go
+        # first; releasing it here, immediately before the spawn, is the shortest
+        # the handover window gets. See ReservedTcpPort for what the hold buys.
+        reservation.release()
         try:
             server = spawn_managed_process(
                 server_args,
@@ -1137,13 +1146,77 @@ def normalize_symbol_location(tool: str, symbol: object) -> JsonObject:
     return {"ok": False, "tool": tool, "error_type": "invalid_argument", "summary": "Breakpoint symbol must be a valid C/C++ identifier."}
 
 
-def reserve_tcp_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
+class ReservedTcpPort:
+    """A loopback port this process holds until the debug server is spawned.
+
+    The reservation used to be a bind to port 0 followed immediately by a close,
+    which names a port and then stops defending it. Everything after that close
+    is a window in which the kernel may hand the same number to anyone else who
+    asks for an ephemeral port, and it does: eight processes taking 24000 such
+    reservations on one Windows machine wrapped the dynamic range and were given
+    7590 ports that another of them had also been given. Two debug servers then
+    get told to bind one port, and both ways that lands are bad -- the loser
+    fails to bind and the session reports a server that would not come up, or the
+    two share the address and the debugger talks to whichever the kernel hands
+    the connection to.
+
+    So the socket stays bound for as long as the caller has not spawned anything,
+    and :meth:`release` runs in the same breath as the spawn. A held address is
+    refused to every other process on the platforms this ships on, measured
+    across processes here: a plain bind gets ``WSAEADDRINUSE``, a
+    ``SO_REUSEADDR`` bind -- how this project's own fake OpenOCD binds -- gets
+    ``WSAEACCES``. ``SO_EXCLUSIVEADDRUSE`` and ``listen`` keep that true in the
+    two cases a bare bind does not cover: Windows shares an address whose holder
+    also set ``SO_REUSEADDR``, and Linux lets two ``SO_REUSEADDR`` sockets share
+    a port while neither of them is listening.
+
+    What this cannot do is hand the port over atomically: an out-of-process
+    server binds by number, so a window remains between the release and its bind.
+    Closing that one needs the server to choose the port and say which one it
+    chose, which is a change to what this project tells OpenOCD to do rather than
+    a change to how it asks the kernel for a number.
+    """
+
+    def __init__(self) -> None:
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive is not None:
+                self._socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            self._socket.bind(("127.0.0.1", 0))
+            self._socket.listen(1)
+            self.port = int(self._socket.getsockname()[1])
+        except BaseException:
+            self._socket.close()
+            raise
+
+    def release(self) -> None:
+        """Stop defending the port. Idempotent: the caller releases on the way to
+        a spawn and the context manager releases again on the way out."""
+        self._socket.close()
+
+    def __enter__(self) -> ReservedTcpPort:
+        return self
+
+    def __exit__(self, *_exception: object) -> None:
+        self.release()
+
+
+def reserve_tcp_port() -> ReservedTcpPort:
+    return ReservedTcpPort()
 
 
 def wait_for_tcp_port(port: int, timeout_s: float, server: subprocess.Popen[str]) -> bool:
+    """Whether something is listening on `port` before the server gives up or the
+    deadline passes.
+
+    Deliberately stated that narrowly. A successful connect establishes that the
+    port answers, not that it is *this* server answering: identifying the process
+    behind a listening socket needs an OS-specific query this does not make, so a
+    server that lost the port race and a stranger that won it read the same here
+    for as long as our own process has not exited yet. The narrow window that can
+    happen in is what :class:`ReservedTcpPort` exists to keep narrow.
+    """
     deadline = time.monotonic() + max(0.1, timeout_s)
     while time.monotonic() < deadline:
         if server.poll() is not None:

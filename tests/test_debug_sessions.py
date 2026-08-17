@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
 import struct
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from conftest import (
 )
 
 from agentic_hil.backends.common import command_for_log
-from agentic_hil.backends.gdbdebug import decode_symbol_value, image_byte_order
+from agentic_hil.backends.gdbdebug import decode_symbol_value, image_byte_order, reserve_tcp_port
 from agentic_hil.bench import BenchMutex
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.devices import debugger_device
@@ -266,6 +267,36 @@ def test_failed_debug_start_does_not_poison_retry(tmp_path: Path, monkeypatch: p
         assert second["ok"] is True, second
     finally:
         service.close()
+
+
+def test_a_reserved_debug_port_is_held_against_the_rest_of_the_machine() -> None:
+    """A reservation nobody else can take, until the caller hands it over.
+
+    The old reservation bound port 0 and closed the socket in the same
+    expression, which names a port and then defends nothing: the kernel is free
+    to hand the same number to the next process that asks, and once the ephemeral
+    range comes round it does. Two suites -- or two xdist workers, which is how
+    this surfaced -- then tell two debug servers to bind one port.
+
+    `SO_REUSEADDR` is what the contender uses because it is what the project's
+    own fake OpenOCD uses, and because it is the bind Windows is documented to
+    let through onto an address somebody else already holds.
+    """
+    reservation = reserve_tcp_port()
+    contender = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    contender.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        with pytest.raises(OSError):
+            contender.bind(("127.0.0.1", reservation.port))
+
+        reservation.release()
+
+        # And released means released: the server this port was reserved for
+        # binds it by number a moment later, so the hold must not outlive it.
+        contender.bind(("127.0.0.1", reservation.port))
+    finally:
+        contender.close()
+        reservation.release()
 
 
 @pytest.mark.parametrize(
