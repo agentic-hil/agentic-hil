@@ -275,6 +275,15 @@ def _pump(stream: IO[str], prefix: str, log_handle: IO[str], progress: Progress)
                 print(f"{prefix} {safe}", flush=True)
 
 
+# How often a taskkill that reported a failure is asked again, within the same
+# grace period the rest of the cleanup gets. See _terminate_tree.
+TASKKILL_CONFIRM_INTERVAL_S = 0.05
+
+
+def _taskkill_tree(pid: int) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, text=True)
+
+
 def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> None:
     """Kill the agent and everything it spawned, or raise CleanupUnconfirmed.
 
@@ -285,7 +294,10 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> 
     this call races that commit, so it has to be gone, not merely signalled,
     before this returns.
 
-    On Windows `taskkill /T` walks the tree from the agent's pid. On POSIX the
+    On Windows `taskkill /T` walks the tree from the agent's pid, and is asked
+    until it stops reporting a member it could not terminate, because the walk
+    and the kill are two steps and a member that leaves between them is reported
+    as a member that resisted. On POSIX the
     agent leads its own process group (``start_new_session`` on the `Popen`), so
     its shells and their children share its pgid; the whole group is signalled,
     the leader reaped so the group can empty, and the group waited out. A plain
@@ -299,21 +311,35 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> 
     it, which is the race this exists to prevent.
     """
     if sys.platform == "win32":
-        result = subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-            capture_output=True,
-            text=True,
-        )
+        # 0 is a kill; 128 is "process not found", i.e. already gone. Any other
+        # code means at least one member of the tree taskkill walked was not
+        # terminated, which is not the same thing as one that is still running.
+        # taskkill enumerates the tree and then kills what it enumerated, so a
+        # member that exited in between -- and a stranger the walk collected
+        # because Windows had recycled a pid into it -- comes back as the same
+        # failure: on a loaded machine here, 10 of 40 kills reported it for a
+        # tree that was measurably gone, against none of 40 on an idle machine,
+        # and every one of those aborted a round and discarded its work. So the
+        # question is asked again rather than answered once. A member that had
+        # already gone is not in the next walk; one that is genuinely beyond us
+        # is, and keeps saying so until the deadline.
+        deadline = time.monotonic() + grace_s
+        result = _taskkill_tree(process.pid)
+        while result.returncode not in (0, 128) and time.monotonic() < deadline:
+            time.sleep(TASKKILL_CONFIRM_INTERVAL_S)
+            result = _taskkill_tree(process.pid)
         process.kill()
         _reap_leader(process, grace_s)
-        # 0 is a kill; 128 is "process not found", i.e. already gone. Any other
-        # code means taskkill did not confirm the tree was killed, so its members
-        # may still be live -- exactly what must not be reported as clean.
         if result.returncode not in (0, 128):
             raise CleanupUnconfirmed(
                 f"taskkill could not confirm the process tree for pid {process.pid} was killed "
                 f"(exit {result.returncode}): {(result.stderr or '').strip()}"
             )
+        # The one member no exit code speaks for. taskkill reporting a clean
+        # sweep says nothing about the agent still being here afterwards, and the
+        # agent is the process most likely to be holding the working tree open.
+        if process.poll() is None:
+            raise CleanupUnconfirmed(f"the agent process {process.pid} was still running after it was killed")
         return
 
     # The agent leads its own process group: `start_new_session` ran setsid() in
