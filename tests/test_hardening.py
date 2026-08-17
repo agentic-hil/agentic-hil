@@ -337,11 +337,19 @@ def test_a_sandbox_root_is_swept_only_once_nobody_is_using_it() -> None:
     has no garbage collection of its own. Age is what tells residue from a live
     suite: a running session creates and removes a sandbox inside its root on
     every test, so only a root nothing has written to for hours is free.
+
+    The two roots this plants carry the pid, because the directory they are
+    planted in is the one place in this suite that is genuinely shared: the sweep
+    is about the whole temp root, so it has to be asked about the whole temp
+    root, and fixed names would have meant two suites on one machine -- an xdist
+    worker and a second clone's run -- planting, ageing and deleting each other's
+    fixtures. Every assertion below names one of this process's own entries, so
+    what a neighbour leaves in `removed` is none of this test's business.
     """
     from conftest import SANDBOX_PREFIX, SANDBOX_ROOT, STALE_SANDBOX_AGE_S, sweep_stale_sandbox_roots
 
-    stale = SANDBOX_ROOT.parent / f"{SANDBOX_PREFIX}test-stale"
-    fresh = SANDBOX_ROOT.parent / f"{SANDBOX_PREFIX}test-fresh"
+    stale = SANDBOX_ROOT.parent / f"{SANDBOX_PREFIX}test-stale-{os.getpid()}"
+    fresh = SANDBOX_ROOT.parent / f"{SANDBOX_PREFIX}test-fresh-{os.getpid()}"
     for root in (stale, fresh):
         (root / "held").mkdir(parents=True, exist_ok=True)
     os.utime(stale, (time.time() - STALE_SANDBOX_AGE_S - 60,) * 2)
