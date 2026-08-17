@@ -255,6 +255,35 @@ agentic-hil test-schema --output testconfig.schema.json
 agentic-hil skill-install --agent opencode
 ```
 
+Every one of them takes `--json`, before or after the subcommand.
+
+## What a command prints
+
+Each command answers with one result document, and how it is printed depends on
+who is reading. At a terminal you get that document rendered for a person: the
+summary as prose, the steps and warnings as lines, permission changes named, and
+the next step at the end. A refusal renders its `error_type`, what happened, and
+the numbered remediation the tool already carries for that error.
+
+Whenever stdout is not a terminal, the same result is printed as the JSON
+document it has always been, unchanged and field for field, because that is what
+the installer, the agent and any script reading a field parse. Nothing has to be
+passed for that: a pipe, a redirect and a subprocess all answer `isatty` the same
+way.
+
+`--json` prints that document at a terminal too, which is what to reach for when
+you want to read a field yourself or hand the output to `jq`:
+
+```bash
+agentic-hil doctor                  # the health report, for a person
+agentic-hil doctor --json           # the document, at a terminal
+agentic-hil doctor > doctor.json    # the document, no flag needed
+```
+
+`mcp-stdio` and `com-stdio` are untouched by any of this: their stdout carries a
+protocol, not a result. So is every `--output` file, which is written the same
+either way.
+
 `agentic-hil grant` and `agentic-hil revoke` move one named permission in the
 authoritative configuration and are described with it, in
 [the authoritative configuration](configuration.md#opening-one-again-agentic-hil-grant).

@@ -4,7 +4,9 @@ This page covers the most common Agentic Hardware-in-the-Loop (Agentic HIL) setu
 
 Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
-Always inspect structured JSON first. The most useful fields are `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path`.
+Always inspect the structured result first. The most useful fields are `ok`, `error_type`, `backend_error_type`, `summary`, `likely_causes`, `report_path`, and `log_path`.
+
+Every result on this page is one document, and how a command prints it depends on who is reading. At a terminal `agentic-hil` renders it for a person under those same field names: a refusal opens with `Refused: <error_type>`, followed by its summary and its numbered remediation, and `doctor` comes back as a section-by-section report rather than as a document. Piped, redirected, or read by a script or the installer, it prints the JSON document itself, unchanged and field for field. `--json` prints that document at a terminal too, and every subcommand takes it, so `agentic-hil <command> --json` is the spelling to use when you want to read one field with `jq` or paste the whole thing into an issue.
 
 ## Windows Quick Notes
 
@@ -62,13 +64,13 @@ Two things the one-liner never does, so they are never the cause: it writes no p
 
 ## 2. `config_file_not_found` / `config_invalid` / `config_unreadable`
 
-Symptom: `agentic-hil doctor` returns one of these `error_type` values.
+Symptom: `agentic-hil doctor` refuses with one of these `error_type` values, named on the first line at a terminal and under `error_type` in the document.
 
 Likely cause: the automatically discovered config is missing, or `AGENTIC_HIL_CONFIG` is relative, points to a missing file, or selects invalid YAML.
 
 Fix: run `agentic-hil init`, review the file it writes outside the repository (every permission in it is granted except `allow_raw_debugger_commands` and `allow_mass_erase`, which are false so that flashing works), then run `agentic-hil doctor` again. Set `AGENTIC_HIL_CONFIG` only if an explicit absolute-path override is required. Use structured fields such as `field`, `allowed_fields`, `allowed_values`, and `expected_type` to fix schema errors.
 
-`init` is the project half of `setup`. After a `setup` that reported `ok: false` here, read `scopes.user.ok` first: `true` means the agent skill and the user-level MCP registration are installed and stay installed, so only `init` is left. A configuration refusal never undoes them, and `agent-install` need not run again for this user.
+`init` is the project half of `setup`. After a `setup` that failed here, read the user half first: at a terminal it is the `user (agent-install)` line under `Halves`, and in the document it is `scopes.user.ok`. An `ok` user half means the agent skill and the user-level MCP registration are installed and stay installed, so only `init` is left. A configuration refusal never undoes them, and `agent-install` need not run again for this user.
 
 If the refusal is `unsafe_configured_path` on the location rather than the file contents, a component of the path is not what the path claims: a symlink where a real directory is needed, or a file where a directory belongs. `path` names the path and `component` the part of the chain that stopped the walk. Replace it, or move the configuration as `agentic-hil://reference/platform-paths` describes and point `AGENTIC_HIL_CONFIG` at the new absolute path.
 
@@ -95,7 +97,7 @@ Fix: stop and ask the human operator. The operator reviews the external config c
 
 ## 4. `debugger_not_found`
 
-Symptom: `agentic-hil doctor` returns `ok: false` with `error_type: "debugger_not_found"`.
+Symptom: `agentic-hil doctor` fails, and the debugger's `check` names `error_type: "debugger_not_found"`. At a terminal that is the `check  FAILED` line under the entry in the `Debuggers` section.
 
 Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI for `type: "stlink"`) is not installed, not on `PATH`, or the configured `debuggers.<name>.executable` could not be pinned.
 
@@ -111,7 +113,7 @@ Fix: verify OpenOCD's script directory. `interface/stlink.cfg` and `target/stm32
 
 ## 5a. `target_type_invalid` (pyOCD): the CMSIS pack is missing
 
-Symptom: a pyOCD call returns `error_type: "target_type_invalid"`, or `agentic-hil doctor` reports `debuggers.<name>.target_support.status: "unsupported"`. pyOCD's own message is `Target type <name> not recognized`.
+Symptom: a pyOCD call returns `error_type: "target_type_invalid"`, or `agentic-hil doctor` reports `debuggers.<name>.target_support.status: "unsupported"` (at a terminal, the `target_support  unsupported` line under that entry in the `Debuggers` section). pyOCD's own message is `Target type <name> not recognized`.
 
 Likely cause: the configured `target_type` comes from a CMSIS device-family pack that is not installed on this host. Most vendor parts, including the whole STM32F4 family, are not built into pyOCD; `pyocd list --targets` shows `pack` in its Source column for them.
 
