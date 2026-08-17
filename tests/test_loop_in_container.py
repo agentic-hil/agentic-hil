@@ -1536,6 +1536,102 @@ def test_terminate_tree_reports_cleanup_unconfirmed_when_taskkill_cannot_confirm
         agent_review_loop._terminate_tree(_FakeProcess(), grace_s=0.1)  # type: ignore[arg-type]
 
 
+def test_terminate_tree_asks_again_when_a_tree_member_left_between_the_walk_and_the_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member that had already gone is not a member that could not be killed.
+
+    `taskkill /T` enumerates the tree and then kills what it enumerated, and it
+    reports the same failure for a member that resisted and for one that exited
+    in between. On a loaded machine the second is the common case -- ten of forty
+    kills, against none of forty on an idle one -- and reading it as the first
+    aborted the round and threw away its work. The second walk is what tells them
+    apart: the process that had gone is not in it.
+    """
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    walks: list[list[str]] = []
+
+    def taskkill(*arguments, **_keywords) -> subprocess.CompletedProcess:
+        walks.append(list(arguments[0]))
+        # First walk: a member vanished under it. Second: nothing left to report.
+        return subprocess.CompletedProcess(arguments[0], 255 if len(walks) == 1 else 128, "", "no running instance")
+
+    monkeypatch.setattr(agent_review_loop.subprocess, "run", taskkill)
+
+    class _FakeProcess:
+        pid = 4243
+
+        def kill(self) -> None:
+            pass
+
+        def poll(self) -> int:
+            return 1
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 1
+
+    agent_review_loop._terminate_tree(_FakeProcess(), grace_s=5.0)  # type: ignore[arg-type]
+
+    assert [walk[:2] for walk in walks] == [["taskkill", "/F"], ["taskkill", "/F"]]
+
+
+def test_taskkill_tree_decodes_with_the_same_care_as_git_and_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """taskkill is a console app, and on a non-English Windows its OEM codepage is
+    not the ANSI codepage `text=True` decodes with by default -- the same mismatch
+    that made a smart quote in a Codex message raise UnicodeEncodeError and
+    deadlock a round, which is why `git()` and the agent's own `Popen` above both
+    pin `encoding="utf-8", errors="replace"`. A byte outside that decoded a walk's
+    stdout or stderr used to raise inside `subprocess.run`'s reader thread, an
+    exception a background thread cannot hand back to `_terminate_tree` -- it
+    surfaces as a lost taskkill confirmation, not as this test's own failure. This
+    call is now asked far more often, once a failure is retried within the grace
+    period, so a decode this narrow was going to be met.
+    """
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        agent_review_loop.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append(kwargs) or subprocess.CompletedProcess(args[0], 0, "", ""),
+    )
+
+    agent_review_loop._taskkill_tree(4321)
+
+    assert calls[0]["encoding"] == "utf-8"
+    assert calls[0]["errors"] == "replace"
+
+
+def test_terminate_tree_refuses_to_confirm_an_agent_that_outlived_its_own_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one member taskkill's exit code says nothing about.
+
+    A clean sweep is a statement about the tree taskkill walked, not about the
+    agent still being here afterwards -- and the agent is the process most likely
+    to be holding the working tree open when `salvage_commit` runs.
+    """
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    monkeypatch.setattr(
+        agent_review_loop.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0, "", ""),
+    )
+
+    class _SurvivingProcess:
+        pid = 4244
+
+        def kill(self) -> None:
+            pass
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired("agent", timeout or 0)
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed, match="still running after it was killed"):
+        agent_review_loop._terminate_tree(_SurvivingProcess(), grace_s=0.1)  # type: ignore[arg-type]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
 def test_run_agent_surfaces_cleanup_unconfirmed_rather_than_a_plain_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
