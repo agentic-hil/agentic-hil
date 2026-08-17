@@ -2006,6 +2006,36 @@ FLASH_ADDRESS_RULE = {
     "example": "0x08000000 for STM32 internal flash.",
 }
 
+# A second, later rule than MULTI_PROBE_RULE above, and deliberately not
+# merged into it: that one is what config load rejects about the *text* of a
+# multi-probe document (two entries naming one probe), and is enforced with
+# error_type config_invalid before any tool exists to call. This one is what
+# a probe-addressing tool call itself refuses about the *bound* entry once
+# several are configured, with error_type not_supported, and it is the one
+# place a document with several unnamed debuggers is allowed to load at all:
+# discovering the ids is exactly what an operator does before they can
+# write one down, which config load cannot ask of them.
+UNNAMED_PROBE_RULE = {
+    "rule": "Once `debuggers` holds more than one entry, the bound one must carry a probe_id before a probe-addressing tool (flash_firmware, reset_target, probe_target, the typed debug tools) will drive it.",
+    "why": "the bound entry's name alone does not prove which physical probe a call reaches once another configured entry could just as easily be meant; probe_id is what pyOCD and ST-Link verify against the attached hardware, and what OpenOCD opens by adapter serial.",
+    "enforced_at": "each probe-addressing tool call, as error_type `not_supported`",
+    "single_debugger_exemption": (
+        "A lone configured debugger does not have to carry a probe_id: it has no other entry to be confused with, so "
+        "the rule above would not remove any ambiguity there, only block the bench outright - including the "
+        "Nucleo-F446RE + ST-Link + OpenOCD bench this project documents as its supported first path, for which OpenOCD "
+        "cannot self-enumerate a serial to satisfy the demand with (debugger_probes_list answers not_supported), and a "
+        "probe with no serial pyOCD or ST-Link can read either - the debugger analogue of the CH340-style adapters "
+        "com_ports already has to tolerate - would have no way to satisfy it at all. The exemption is from being "
+        "forced to, not from being able to: probe_id still works, and is still checked against the attached hardware, "
+        "with exactly one debugger configured."
+    ),
+    "what_the_exemption_does_not_cover": (
+        "whether the one probe behind an unnamed single debugger is still the physical unit it was last run. Nothing "
+        "here, or at the pyOCD/ST-Link/OpenOCD boundary, pins that without a probe_id; the coordination lock has the "
+        "same blind spot for the same reason (see devices.DebuggerDevice.identity_warning)."
+    ),
+}
+
 
 def debugger_backends_document() -> JsonObject:
     return {
@@ -2020,6 +2050,7 @@ def debugger_backends_document() -> JsonObject:
         },
         "backends": DEBUGGER_FIELD_MATRIX,
         "probe_id_when_multiple_probes": MULTI_PROBE_RULE,
+        "probe_id_at_tool_call_time": UNNAMED_PROBE_RULE,
         "flash_address": FLASH_ADDRESS_RULE,
         "permissions": {
             "rule": (
@@ -3638,6 +3669,7 @@ def read_resource(uri: str) -> JsonObject | None:
                 "config_path": "debuggers.<name>.<field>",
                 "fields": matrix,
                 "probe_id_when_multiple_probes": MULTI_PROBE_RULE,
+                "probe_id_at_tool_call_time": UNNAMED_PROBE_RULE,
                 "flash_address": FLASH_ADDRESS_RULE,
             },
         )

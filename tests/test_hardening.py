@@ -3509,3 +3509,113 @@ def test_pyocd_without_a_probe_id_passes_no_uid(tmp_path: Path) -> None:
         assert "--uid" not in service.backend._connection_args()
     finally:
         service.close()
+
+
+def test_pyocd_refuses_two_debuggers_that_resolve_to_one_physical_probe(tmp_path: Path) -> None:
+    # "OCD1" and "123" share no substring relationship with each other, so
+    # config.validate_debuggers accepts both at load time (it only rejects a
+    # selector contained in another). Enumerated against the fake's two
+    # boards they both land on PYOCD123 alone and nothing else, which only
+    # the hardware boundary can see (#278).
+    from agentic_hil.config import bind_debugger
+
+    config = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_type="pyocd",
+            debugger_name="probe_x",
+            probe_id="OCD1",
+            auto_probe_ids=False,
+            debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "123"\n',
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert result["side_effect_committed"] is False
+    assert result["other_debugger"] == "probe_y"
+    assert result["other_probe_id"] == "123"
+    assert "probe_x" in result["summary"]
+    assert "probe_y" in result["summary"]
+    # Not cached as if the resolution had succeeded: a later call must repeat
+    # the same refusal rather than silently reuse a collided identity.
+    assert service.backend._resolved_probe_uid is None
+
+
+def test_pyocd_probe_naming_no_other_debugger_is_unaffected_by_the_collision_check(tmp_path: Path) -> None:
+    # A control alongside the collision test above: two debuggers configured,
+    # each resolving to its own distinct probe, must still both work.
+    from agentic_hil.config import bind_debugger
+
+    config = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_type="pyocd",
+            debugger_name="probe_x",
+            probe_id="PYOCD123",
+            auto_probe_ids=False,
+            debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "PYOCD456"\n',
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert service.backend._resolved_probe_uid == "PYOCD123"
+
+
+def test_unnamed_probe_refusal_no_longer_reasons_from_a_debugger_count(tmp_path: Path) -> None:
+    # The refusal exists because this call cannot tell the bound, unnamed
+    # debugger apart from another configured one - not because some number of
+    # debuggers happen to be configured. The old text recited that count as
+    # its own justification ("...and the project configures 2 debuggers...");
+    # this asserts that reasoning is gone from what a caller reads (#278).
+    from agentic_hil.config import bind_debugger
+
+    config = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_name="probe_x",
+            auto_probe_ids=False,
+            debuggers_yaml="debuggers:\n  probe_y:\n    type: openocd\n",
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("reset_target", {"mode": "run"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "not_supported"
+    assert "the project configures" not in result["summary"]
+    assert f"{len(config.debuggers)} debuggers" not in result["summary"]
+    assert "debugger-probes" in result["summary"]
+    assert result["configured_debuggers"] == ["probe_x", "probe_y"]
+
+
+def test_single_debugger_stays_exempt_from_naming_its_probe(tmp_path: Path) -> None:
+    # The other half of the same decision: with nothing else configured, a
+    # bound debugger cannot be confused with another entry, so it is not
+    # forced to pin a probe_id it may have no self-service way to discover
+    # (OpenOCD cannot enumerate probes) or that may not exist at all (#278).
+    config = load_test_config(tmp_path, debugger_name="dut")
+    assert config.debugger.probe_id is None
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("reset_target", {"mode": "run"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
