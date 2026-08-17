@@ -205,15 +205,25 @@ def sole_statement(document: Path, anchor: str) -> str:
 
 def exclusion_statements() -> dict[str, str]:
     """Every statement of the interlock a reader can meet, as they meet it."""
-    statements = {
-        "docs/security-design.md": sole_statement(REPO_ROOT / "docs" / "security-design.md", "`allow_mass_erase` is enabled"),
+    statements: dict[str, str] = {}
+    for label, document, anchor in (
+        ("docs/security-design.md", REPO_ROOT / "docs" / "security-design.md", "`allow_mass_erase` is enabled"),
         # The operator-facing statement. It stood in README.md until the README
         # became the human entry point; the configuration reference it moved
         # into is where a reader now meets the interlock, and the reason moved
         # with it rather than being left behind.
-        "docs/configuration.md": sole_statement(REPO_ROOT / "docs" / "configuration.md", "Those two are false"),
-        "knowledge.py: the shipped configuration guide": sole_statement(KNOWLEDGE_SOURCE, "**generated with every permission true**"),
-    }
+        ("docs/configuration.md", REPO_ROOT / "docs" / "configuration.md", "Those two are false"),
+    ):
+        # docs/ is repository content, not package content: MANIFEST.in ships
+        # only docs/mcp-hosts.md, so a source distribution's checkout has
+        # neither file. Skip rather than fail collection there; a repository
+        # checkout, which is what every contributor and this project's own CI
+        # run against, always has both and still reads every statement below.
+        if document.is_file():
+            statements[label] = sole_statement(document, anchor)
+    statements["knowledge.py: the shipped configuration guide"] = sole_statement(
+        KNOWLEDGE_SOURCE, "**generated with every permission true**"
+    )
     for flag in EXCLUSIVE_FLASH_PERMISSIONS:
         # The refusal itself, rendered — the one an operator meets on a first
         # flash, from all four backends.

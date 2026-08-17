@@ -72,6 +72,23 @@ jobs:
       - name: Check distributions
         run: twine check dist/*
 
+      # tools/ and evals/ are repository tooling, not package content, so
+      # MANIFEST.in does not ship them; a test that reaches either at module
+      # scope has to be on MANIFEST.in's exclusion list or it fails to collect
+      # from the sdist this job just built and checked, the way
+      # tests/test_shipped_references.py did until that list named it too.
+      # Collection only, not a run: this job's dev dependencies are already on
+      # this interpreter, so unpacking the sdist only has to prove pytest can
+      # still find its way through what it ships.
+      - name: Collect the source distribution's tests
+        shell: bash
+        run: |
+          rm -rf sdist-check
+          mkdir sdist-check
+          tar xzf dist/agentic_hil-*.tar.gz -C sdist-check
+          cd sdist-check/agentic_hil-*
+          python -m pytest --collect-only -q
+
   release_metadata:
     name: Release metadata consistency
     runs-on: ubuntu-latest
