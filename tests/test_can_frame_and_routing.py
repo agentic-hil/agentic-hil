@@ -46,6 +46,7 @@ from agentic_hil.can import (
     CanBusService,
     CanFrame,
     PythonCanAdapterSession,
+    can_adapter_library_missing,
     open_python_can_adapter,
     payload_frame,
     peak_channel_uses_socketcan,
@@ -53,6 +54,7 @@ from agentic_hil.can import (
 )
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.knowledge import (
+    CAN_ADAPTER_LIBRARY_MISSING_ERROR,
     CAN_CLASSIC_FRAME_TOO_LARGE_ERROR,
     CAN_FD_FRAME_LENGTH_INVALID_ERROR,
     CAN_FD_REMOTE_FRAME_ERROR,
@@ -415,6 +417,35 @@ def test_socketcan_interface_missing_still_excludes_a_peak_bus_on_pcanbasic(tmp_
     bus_config = config.can_buses["bench"]
 
     assert socketcan_interface_missing(OSError(errno.ENODEV, "gone"), "bench", bus_config) is None
+
+
+@POSIX_ONLY
+def test_library_missing_does_not_blame_pcanbasic_for_a_peak_bus_routed_through_socketcan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Linux box with SocketCAN but no PCANBasic is the ordinary case
+    `peak_channel_uses_socketcan` exists for, so an unrelated socketcan
+    failure on such a bus must not be misreported as the vendor library
+    being absent: this bus was never going to construct one."""
+    monkeypatch.setattr("agentic_hil.can.pcan_basic_library_error", lambda: "PCANBasic.dll could not be loaded (simulated)")
+    config = can_config(tmp_path, adapter="peak", channel="can0")
+    bus_config = config.can_buses["bench"]
+
+    result = can_adapter_library_missing(RuntimeError("unrelated socketcan failure"), "bench", bus_config)
+
+    assert result is None
+
+
+def test_library_missing_still_blames_pcanbasic_for_a_real_pcan_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """OS-independent contrast: the same simulated-missing PCANBasic does fire
+    for a `peak` bus that actually opens through it."""
+    monkeypatch.setattr("agentic_hil.can.pcan_basic_library_error", lambda: "PCANBasic.dll could not be loaded (simulated)")
+    config = can_config(tmp_path, adapter="peak", channel="PCAN_USBBUS1")
+    bus_config = config.can_buses["bench"]
+
+    result = can_adapter_library_missing(RuntimeError("unrelated"), "bench", bus_config)
+
+    assert result is not None
+    assert result["error_type"] == CAN_ADAPTER_LIBRARY_MISSING_ERROR
+    assert result["missing_library"] == "PCAN-Basic API"
 
 
 # ---------------------------------------------------------------------------

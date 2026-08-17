@@ -926,11 +926,23 @@ def can_adapter_library_missing(error: BaseException, bus_id: str, bus_config: C
 
     Two ways in, and both are answered by the installed library rather than by a
     string. ``CanInterfaceNotImplementedError`` is what ``can.Bus`` raises when
-    the interface module will not import at all. And for a `peak` bus,
-    ``PcanBus.__init__`` constructs ``PCANBasic()`` as its first statement, so a
-    host where that construction fails is a host where nothing after it ran,
-    whatever the exception that came back said.
+    the interface module will not import at all. And for a `peak` bus that
+    actually opens through PCANBasic, ``PcanBus.__init__`` constructs
+    ``PCANBasic()`` as its first statement, so a host where that construction
+    fails is a host where nothing after it ran, whatever the exception that
+    came back said.
+
+    A `peak` bus whose channel routes it through `socketcan` instead (see
+    `peak_channel_uses_socketcan`) is read as `socketcan` here too, on both
+    questions: `CanInterfaceNotImplementedError` on such a bus names the
+    interface module that actually failed to import, and a missing PCANBasic
+    API is not asked about at all, since this bus was never going to construct
+    one. Without that, a host that has SocketCAN but not PCANBasic (an
+    ordinary Linux box `peak_channel_uses_socketcan` exists for) could see an
+    unrelated socketcan failure misreported as a missing vendor library.
     """
+    peak_via_socketcan = bus_config.adapter == "peak" and peak_channel_uses_socketcan(bus_config.channel)
+    interface = "socketcan" if bus_config.adapter != "peak" or peak_via_socketcan else "pcan"
     library: str | None = None
     detail: str | None = None
     with suppress(Exception):
@@ -938,8 +950,8 @@ def can_adapter_library_missing(error: BaseException, bus_id: str, bus_config: C
 
         not_implemented = getattr(can, "CanInterfaceNotImplementedError", None)
         if isinstance(not_implemented, type) and isinstance(error, not_implemented):
-            library, detail = f"python-can interface for {bus_config.adapter}", str(error)
-    if library is None and bus_config.adapter == "peak":
+            library, detail = f"python-can interface for {interface}", str(error)
+    if library is None and interface == "pcan":
         absent = pcan_basic_library_error()
         if absent is not None:
             library, detail = "PCAN-Basic API", absent
@@ -983,6 +995,11 @@ def peak_channel_not_available(error: BaseException, bus_id: str, bus_config: Ca
     a channel absent from a non-empty enumeration is a channel that is not there.
     An empty enumeration answers nothing and is not used, because it is also what
     a driver that will not enumerate returns.
+
+    Unlike `can_adapter_library_missing`, a `peak` bus routed through
+    `socketcan` needs no extra guard here: `PcanCanInitializationError` is
+    raised only from inside `PcanBus.__init__`, which such a bus never
+    reaches, so the `isinstance` check below already excludes it on its own.
     """
     if bus_config.adapter != "peak":
         return None
