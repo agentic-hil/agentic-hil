@@ -230,6 +230,22 @@ def target_mcp_tools(target: dict[str, Any]) -> set[str]:
     return set(names)
 
 
+def package_digest_matches(installed_digest: str | None, expected_digest: str | None) -> bool:
+    """Whether the installed package's digest proves it is the trusted source.
+
+    expected_digest is None in published mode: nothing on this host digests to
+    a released wheel, so there is no trusted source to compare the installed
+    bytes against. A digest that merely computed is not a match, and staging
+    those unverified bytes as "trusted" is exactly what this refusal exists to
+    stop; refuse honestly instead, the same way a skill with no reference copy
+    is "not checked" rather than waved through. Version and origin, checked
+    separately, are what a published install is actually held to.
+    """
+    if expected_digest is None:
+        return False
+    return installed_digest == expected_digest
+
+
 def run_trusted(
     arguments: list[str],
     *,
@@ -508,6 +524,8 @@ def origin_matches(target: dict[str, Any], metadata: dict[str, Any]) -> tuple[bo
         # What must not happen is a third party's package of the same name.
         if direct is None:
             return True, "installed from a package index"
+        if not isinstance(direct, dict):
+            return False, "direct_url.json is not an object"
         url = str(direct.get("url") or "")
         official = url.removesuffix(".git").rstrip("/").endswith("github.com/agentic-hil/agentic-hil")
         if official:
@@ -1644,12 +1662,10 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
             except Exception as error:
                 package_tree_detail = f"{type(error).__name__}: {error}"
         expected_digest = target["expected_package_digest"]
+        package_matches = package_digest_matches(installed_digest, expected_digest)
         if expected_digest is None:
-            # Published mode: nothing on this host digests to a released wheel.
-            package_matches = installed_digest is not None
-            digest_detail = f"digest={installed_digest or '<unavailable>'}; no local source to compare a release against"
+            digest_detail = f"digest={installed_digest or '<unavailable>'}; no local source to compare a release against, so not verified"
         else:
-            package_matches = installed_digest == expected_digest
             digest_detail = f"digest={installed_digest or '<unavailable>'}; {package_tree_detail}"
         checks.append(Check("installed package matches trusted source", package_matches, digest_detail))
         if package_matches and evidence_ok and inspected_package is not None:

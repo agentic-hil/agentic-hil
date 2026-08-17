@@ -1252,6 +1252,23 @@ def test_a_third_party_package_of_the_same_name_is_not() -> None:
     assert "someone-else" in detail
 
 
+def test_a_malformed_direct_url_is_refused_not_raised() -> None:
+    """direct_url.json is written by the install under test, not by this verifier.
+
+    The local and remote branches already refuse a direct_url that is not an
+    object; the published branch called .get() on it unguarded, so a
+    malformed file crashed the check instead of failing it closed.
+    """
+    from evals.install.verifier import origin_matches
+
+    published = {"mode": "published", "expected_version": "0.4.0"}
+
+    ok, detail = origin_matches(published, {"direct_url": ["not", "an", "object"]})
+
+    assert not ok
+    assert "not an object" in detail
+
+
 def test_a_measured_duration_must_be_a_positive_number(tmp_path: Path) -> None:
     matrix = _matrix_with_jobs(
         tmp_path,
