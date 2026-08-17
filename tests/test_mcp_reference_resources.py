@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import (
     FAKE_OPENOCD_NO_TARGET,
     FAKE_OPENOCD_POST_INIT_UNCONFIRMED,
@@ -34,6 +35,7 @@ from agentic_hil.knowledge import (
     CONFIG_SCHEMA_URI,
     DEBUGGER_BACKEND_URI_PREFIX,
     DEBUGGER_BACKENDS_URI,
+    DEFAULT_TEST_CONFIG_PATH,
     ERROR_CATALOGUE,
     ERROR_URI_PREFIX,
     ERRORS_URI,
@@ -41,10 +43,18 @@ from agentic_hil.knowledge import (
     LEASE_LIFECYCLE_URI,
     MCP_RESOURCE_TEMPLATES,
     MCP_RESOURCES,
+    PLAN_COMPARATOR_EXAMPLE,
+    PLAN_FEATURE_VERSION_KEY,
+    PLAN_MINIMAL_EXAMPLE,
+    PLAN_ROUTE_KEYS,
     PLATFORM_PATHS_URI,
     RESOURCE_SCHEME,
     TARGET_SUPPORT_URI,
+    TEST_PLAN_SCHEMA_URI,
+    TEST_PLAN_URI,
     catalogue_entry,
+    plan_schema_document,
+    plan_schema_text,
     remediation_fields,
     safe_user_root,
 )
@@ -190,6 +200,115 @@ def test_the_questions_that_sent_agents_into_the_installed_package_are_answered(
     #    hand-run downloads from keil.com, ended at this string.
     assert "stm32f446retx" in targets
     assert "pyocd pack install" in targets
+
+
+def test_the_nine_shell_calls_that_recovered_the_plan_format_are_answered(service: AgenticHILToolService) -> None:
+    """The first-run session that motivated this, verbatim.
+
+    Asked to pin a hardware test, an agent issued nine Bash calls: locate the
+    installed package under site-packages, dump `schemas/testconfig.schema.json`
+    with inline Python, then grep `cli.py` and `test_reactor.py` for the default
+    plan filename. It was obeying the published rule (facts about this server
+    are resources, never its installed package) and no resource answered the
+    one question it had. Each assertion below is one of those calls, closed.
+    """
+    document = read_text(service, TEST_PLAN_URI)
+    schema = plan_schema_document()
+
+    # 1. Where the plan is, and what the reactor reads when nobody names one.
+    assert DEFAULT_TEST_CONFIG_PATH in document
+    assert "test_config_path" in document and "--test-config" in document
+    assert "workspace_root" in document
+    # 2. Which versions exist, and that a plan is held to its own.
+    for version in schema["properties"]["version"]["enum"]:
+        assert f"`{version}`" in document, version
+    # 3. Every step the format admits, with the version that introduced it.
+    for name, definition in schema["$defs"].items():
+        action = (definition.get("properties") or {}).get("action", {}).get("const")
+        if not isinstance(action, str):
+            continue
+        assert f"### `{action}`" in document, name
+        since = definition.get(PLAN_FEATURE_VERSION_KEY, min(schema["properties"]["version"]["enum"]))
+        assert f"### `{action}`\n\nVersion {since} on." in document, action
+    # 4. The comparator family, its rules, and the numeric one version 5 added.
+    assert "## The comparators" in document
+    assert "Exactly one of `equals` and `pattern`. Both, or neither, is refused." in document
+    assert "`range:` is written only beside `pattern`." in document
+    assert "`mask:` is refused beside `signed`." in document
+
+
+def test_the_plan_schema_resource_serves_the_shipped_file_unchanged(service: AgenticHILToolService) -> None:
+    """Served the way the configuration schema is: the file, not a rendering of it.
+
+    A caller that wants to validate a plan before sending it needs the document
+    the reactor validates against, byte for byte, and a re-serialization would
+    quietly drop the `$comment` and the `x-since-version` markers' formatting."""
+    served = read_text(service, TEST_PLAN_SCHEMA_URI)
+
+    assert served == plan_schema_text()
+    assert json.loads(served) == plan_schema_document()
+    assert json.loads(served)["$defs"]["repeat"][PLAN_FEATURE_VERSION_KEY] == 4
+
+
+def test_the_reference_and_the_reactor_read_one_schema(service: AgenticHILToolService) -> None:
+    """The property the whole design exists for, for this format.
+
+    A document generated from a second copy of the schema is a document that
+    will one day describe a plan the reactor refuses. Both sides call
+    `plan_schema_document`, and this fails the moment somebody gives either its
+    own read of the file."""
+    from agentic_hil import test_reactor
+
+    assert test_reactor.test_config_schema() is plan_schema_document()
+    assert test_reactor.DEFAULT_TEST_CONFIG_PATH == DEFAULT_TEST_CONFIG_PATH
+    # The keys the document says a step routes with are the keys the reactor
+    # actually resolves a step by, which it builds from its device classes.
+    assert PLAN_ROUTE_KEYS == test_reactor.ROUTE_FIELDS
+
+
+@pytest.mark.parametrize(
+    ("name", "plan"),
+    [("minimal", PLAN_MINIMAL_EXAMPLE), ("comparator", PLAN_COMPARATOR_EXAMPLE)],
+)
+def test_the_published_example_plans_load(tmp_path: Path, service: AgenticHILToolService, name: str, plan: str) -> None:
+    """An example a reader cannot run is worse than none.
+
+    This is a document written to be copied from, so both plans go through the
+    loader itself: the schema, the version gate that refuses a step older than
+    the plan's own `version:`, and the build into steps. Nothing here touches
+    hardware: a plan is loaded long before a device is opened."""
+    from agentic_hil.test_reactor import load_test_config
+
+    assert plan in read_text(service, TEST_PLAN_URI), f"the {name} example is not the one served"
+    path = tmp_path / DEFAULT_TEST_CONFIG_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plan, encoding="utf-8")
+
+    loaded = load_test_config(str(path), str(tmp_path))
+
+    assert loaded.steps
+    assert all(step.action for step in loaded.steps)
+    # And the plan is written the way the document tells a reader to write one:
+    # one routing key per step, the version 3 spelling.
+    for step in loaded.steps:
+        assert step.route_keys == ["device"], step.action
+
+
+def test_the_comparator_example_claims_something_on_every_medium() -> None:
+    """The second example earns its place by covering the three families.
+
+    One comparator would have shown the shape; three show that the vocabulary
+    differs per medium, which is the mistake the schema's own text warns about:
+    a `range` over a regular expression capture is not the `range` a symbol
+    takes."""
+    plan = yaml.safe_load(PLAN_COMPARATOR_EXAMPLE)
+    comparators = {step["action"]: step["comparator"] for step in plan["steps"] if "comparator" in step}
+
+    assert set(comparators) == {"uart_read", "can_read", "read_symbol"}
+    assert comparators["uart_read"]["range"] == {"min": 20, "max": 30}
+    assert comparators["uart_read"]["pattern"] == r"temp=(\d+)C"
+    assert comparators["can_read"]["id"] == "0x201"
+    assert comparators["read_symbol"]["range"] == {"min": 1, "max": 8}
 
 
 def test_a_refused_path_names_the_component_and_a_location_that_works() -> None:

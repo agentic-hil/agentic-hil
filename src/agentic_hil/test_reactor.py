@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import json
 import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache
-from importlib import resources
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -37,17 +34,18 @@ from agentic_hil.devices import (
     debugger_device,
     uart_device,
 )
-from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR
+from agentic_hil.knowledge import DEFAULT_TEST_CONFIG_PATH as DEFAULT_TEST_CONFIG_PATH
+from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR, plan_schema_document
+from agentic_hil.knowledge import PLAN_FEATURE_VERSION_KEY as PLAN_FEATURE_VERSION_KEY
+from agentic_hil.knowledge import TEST_CONFIG_SCHEMA_RESOURCE as TEST_CONFIG_SCHEMA_RESOURCE
 from agentic_hil.report import audit_errors, overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
 
-DEFAULT_TEST_CONFIG_PATH = ".agentic-hil/testconfig.yaml"
-TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
-# The annotation the plan schema marks a newer format's additions with. A plan
-# is held to what its own `version:` contains, and the schema is what says which
-# version each action and each key arrived in.
-PLAN_FEATURE_VERSION_KEY = "x-since-version"
+# The default plan path, the packaged schema and the marker its version gate
+# reads are re-exported from `knowledge`, which is where the reference document
+# an agent reads is generated from them. One statement of each, so the format a
+# plan author is shown and the format a plan is refused by cannot come apart.
 # The one action the reactor serves itself. It routes to no device and drives no
 # hardware: what it does is run the subset of steps nested under it again, which
 # is a property of the sequence rather than of anything the bench has. So it is
@@ -862,10 +860,13 @@ def collect_step_actions(device_class: type) -> dict[str, StepActionSpec]:
     return collected
 
 
-@lru_cache(maxsize=1)
 def test_config_schema() -> JsonObject:
-    """The bundled plan schema, read once. Callers must not mutate it."""
-    return json.loads(resources.files("agentic_hil").joinpath(TEST_CONFIG_SCHEMA_RESOURCE).read_text(encoding="utf-8"))
+    """The bundled plan schema, read once. Callers must not mutate it.
+
+    The same object `agentic-hil://reference/test-plan` is generated from, so
+    the document a plan author reads describes the schema this validates
+    against rather than a copy of it."""
+    return plan_schema_document()
 
 
 def action_schema_errors(schema_name: str, document: JsonObject) -> list[Any]:

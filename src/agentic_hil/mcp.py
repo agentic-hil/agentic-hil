@@ -98,7 +98,11 @@ SERVER_INSTRUCTIONS = (
     "field each debugger backend requires, discovers, or ignores), .../target-support (which field "
     "names the target, which values are known good), .../errors (every error_type with its fix), "
     ".../platform-paths (where each file lives on each platform), .../lease-lifecycle, "
-    ".../config-schema, and .../config-shape (what a configuration looks like and how to change it)."
+    ".../config-schema, .../config-shape (what a configuration looks like and how to change it), "
+    ".../test-plan (where a plan lives, how its path resolves, which version admits which step, every "
+    "step with its keys, the comparators, and two plans that run) and .../test-plan-schema (the plan "
+    "schema itself). Read .../test-plan before writing a test plan; the format is published there and "
+    "nowhere a shell has to go looking for it."
 )
 
 JSONRPC_PARSE_ERROR = -32700
