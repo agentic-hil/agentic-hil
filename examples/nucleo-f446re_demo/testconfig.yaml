@@ -36,9 +36,15 @@
 version: 3
 name: nucleo-f446re-hello-world
 steps:
+  # `reset_after_flash: false` is the default and is written out because the
+  # rest of this plan depends on it: the board stays where the flash left it
+  # until the reset step below, which is what lets the port be open before the
+  # firmware starts printing. Flashing with a reset here would boot the board
+  # into a port nobody is listening on yet.
   - device: dut
     action: flash
     image_path: build/Debug/nucleo-f446re_demo.elf
+    reset_after_flash: false
 
   # Opened before the reset, so the banner the firmware prints at boot is
   # already being captured when the core starts running. `clear_buffer` discards
