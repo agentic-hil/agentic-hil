@@ -62,6 +62,8 @@ Read facts about the server from its MCP resources, not from its source or its i
 | `agentic-hil://reference/lease-lifecycle` | which device a run locks and for how long, `device_busy` and `undeclared_device`, why a crashed run needs no recovery; lease states, the continue predicate, the recovery path |
 | `agentic-hil://reference/config-schema` | the authoritative configuration JSON Schema |
 | `agentic-hil://reference/config-shape` | which sections a configuration has and what each is for, which are required, a worked Nucleo-F446RE example; how to change one field-wise over MCP, which permission opens which key, and what deliberately cannot be done |
+| `agentic-hil://reference/test-plan` | where a test plan lives and how `test_config_path` and `workspace_root` resolve its path; which format version admits which step; every step with the entry it routes to and its required and optional keys; the comparator families with their rules; two plans that run. Read this before writing a plan, never the shipped schema file or the installed package |
+| `agentic-hil://reference/test-plan-schema` | the test plan JSON Schema, which the document above is generated from |
 
 Continue after a result only when `ok` is true, `target_ok`, `audit_ok`, and `cleanup_ok` are not false, `cleanup_required` and `quarantined` are not true, `lease_state` is one of `null`, `active`, or `released` (any other value, including `stale`, blocks success), `side_effect_status` is not `unknown` or `partial`, and `hardware_state` is not `unknown`. The public `overall_success()` helper in `agentic_hil.report` encodes exactly this predicate.
 

@@ -377,6 +377,18 @@ with the rest of the bench and visible to the operator as a hardware action.
 `detach: true` is `--detach`, and `test_reactor_status` and `test_reactor_stop`
 answer for the handle it returns. The command line stays the operator's own route.
 
+**The plan format is published, so read it there.**
+`agentic-hil://reference/test-plan` says where a plan lives (`.agentic-hil/testconfig.yaml`,
+relative to `workspace_root`, and how `test_config_path` overrides it), which format
+version admits which step, every step with the entry it routes to and its required and
+optional keys, the three comparator families with their rules, and two plans that run.
+`agentic-hil://reference/test-plan-schema` serves the schema itself, and the document is
+generated from that schema, so the two cannot disagree. Read those before writing or
+changing a plan. Never recover the format by opening the installed package under
+`site-packages`, by dumping the shipped schema file yourself, or by reading this
+project's source for the default filename: those are the same fact, published, and a
+reference an operator can see beats a shell command they cannot.
+
 For automated regression runs the installed package registers a pytest plugin:
 the `agentic_hil` fixture drives the same tools through
 `agentic_hil.call(name, arguments)`, against the same discovered configuration.
