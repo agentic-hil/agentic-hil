@@ -48,6 +48,7 @@ from agentic_hil.config import (
     temporary_roots,
 )
 from agentic_hil.contracts import validate_tool_arguments
+from agentic_hil.devices import uart_device
 from agentic_hil.gdbmi import GdbMiClient
 from agentic_hil.knowledge import CONFIG_WORKED_EXAMPLE
 from agentic_hil.mcp import handle_mcp_message
@@ -450,6 +451,219 @@ def test_com_session_with_dead_reader_reports_not_active(tmp_path: Path) -> None
     assert result["error_type"] == "session_not_active"
     assert result["reader_error"]["error_type"] == "serial_read_failed"
     assert service._session_is_active(session) is False
+
+
+class ShortThenCompleteSerialHandle:
+    """First write() call confirms fewer bytes than requested, pyserial's own
+    documented behavior for a short write under a finite write_timeout,
+    and the second call, made against exactly the remainder, finishes it."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self, short_by: int = 3) -> None:
+        self.short_by = short_by
+        self.writes: list[bytes] = []
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(bytes(data))
+        if len(self.writes) == 1:
+            return max(0, len(data) - self.short_by)
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+class ChronicallyShortSerialHandle:
+    """Confirms only a few bytes per call, however many are asked for: a link
+    that genuinely cannot keep up, as opposed to a one-off short return a
+    retry recovers from."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self, chunk: int = 2) -> None:
+        self.chunk = chunk
+        self.writes: list[bytes] = []
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(bytes(data))
+        return min(self.chunk, len(data))
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def test_com_write_retries_a_short_write_and_completes(tmp_path: Path) -> None:
+    """pyserial's return value is read now, not discarded: a first call that
+    confirms fewer bytes than asked for is retried against exactly its own
+    remainder, and a write that recovers within the retry budget reports the
+    honest, complete count.
+
+    This fails before the fix in the one way that matters here: the old code
+    called ``write()`` exactly once and never looked at what it returned, so
+    ``handle.writes`` would hold a single, full-length entry instead of the
+    short first attempt followed by its remainder.
+    """
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-short-write-recovers.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = ShortThenCompleteSerialHandle(short_by=3)
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), start_reader=False)
+    service.sessions["dut"] = session
+
+    result = service.write_bytes("dut", b"12345678")
+
+    assert result["ok"] is True, result
+    assert result["bytes_written"] == 8
+    assert result["data"]["text"] == "12345678"
+    # The short first return was retried against exactly its own remainder,
+    # not resent from the top.
+    assert handle.writes == [b"12345678", b"678"]
+
+
+def test_com_write_that_stays_short_after_retry_records_event_without_quarantine(tmp_path: Path) -> None:
+    """The bug this pins: the write path used to discard pyserial's return
+    value and report ``bytes_written = len(data)`` regardless, so a write a
+    finite ``write_timeout_s`` cut short still came back ``ok: true`` and
+    claiming a whole write. A write that is still short after the bounded
+    retry now fails honestly with the confirmed count, and, because the
+    count is confirmed rather than unknown, the lease is treated the way
+    quarantine narrowing (#216) treats a peripheral failure the next call
+    proves nothing more about: the reason is recorded and the device goes
+    back, rather than a standing quarantine an operator has to clear.
+    """
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-short-write-exhausted.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = ChronicallyShortSerialHandle(chunk=2)
+    lease = service.coordinator.acquire(uart_device(config, "dut"))
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), lease, start_reader=False)
+    service.sessions["dut"] = session
+
+    result = service.write_bytes("dut", b"0123456789")
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "serial_write_incomplete"
+    assert result["bytes_written"] == 8
+    assert result["bytes_requested"] == 10
+    assert result["data"]["text"] == "01234567"
+    # Bounded: the initial attempt plus SHORT_WRITE_RETRY_LIMIT retries, and
+    # not one call more even though the handle never stops confirming
+    # progress.
+    assert len(handle.writes) == 4
+    # Confirmed, not unknown, so this is recorded rather than quarantined:
+    # the lease is not held for it and the bench is not blocked.
+    assert session.lease.state == "active"
+    assert session.lease.cleanup_reasons() == []
+    assert session.lease.reported_cleanup_reasons() == ["serial_write_incomplete"]
+    assert service.coordinator.blocked is False
+
+
+class DyingMidReadSerialHandle:
+    """Answers a few empty reads, proving the session was genuinely alive
+    when the wait started, then fails like a device unplugged while
+    `com_read` was still waiting on it."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self, healthy_reads: int = 5) -> None:
+        self.healthy_reads = healthy_reads
+        self.calls = 0
+
+    def read(self, size: int) -> bytes:
+        self.calls += 1
+        if self.calls > self.healthy_reads:
+            raise OSError("device disconnected mid-read")
+        return b""
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+class DataThenDiesSerialHandle:
+    """Delivers one chunk of real data, then fails like a device that was
+    unplugged right after: used to prove a read that got real bytes stays a
+    success even though the session goes on to record a reader_error."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def read(self, size: int) -> bytes:
+        self.calls += 1
+        if self.calls == 1:
+            return b"ok\n"
+        raise OSError("device disconnected after delivering data")
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def test_com_read_reports_failure_when_reader_dies_mid_wait(tmp_path: Path) -> None:
+    """The bug this pins: a reader that dies while `com_read` is inside its
+    wait loop used to exit that loop into the same result as no feedback at
+    all, ``{"ok": true, ..., "summary": "No COM port feedback was
+    available."}``, with the reader's own error present only as a nested
+    ``reader_error`` that ``overall_success`` never inspects. A reader that
+    died partway through the wait is a failed read, not an empty successful
+    one, and it now refuses the same way a read against an already-dead
+    session does.
+    """
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-mid-wait-death.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = DyingMidReadSerialHandle(healthy_reads=5)
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path))
+    service.sessions["dut"] = session
+
+    # The reader must still be alive when the call is made, or this would
+    # only exercise the pre-existing pre-check in `_active_session` (see
+    # test_com_session_with_dead_reader_reports_not_active above) instead of
+    # the wait loop this test targets.
+    assert session.reader_error is None
+
+    result = service.read_bytes("dut", 16, 2.0)
+
+    assert result["ok"] is False, result
+    assert overall_success(result) is False
+    assert result["error_type"] == "session_not_active"
+    assert result["reader_error"]["error_type"] == "serial_read_failed"
+    assert result["summary"] != "No COM port feedback was available."
+    assert wait_until(lambda: session.reader_error is not None)
+
+
+def test_com_read_keeps_real_data_a_success_even_if_the_reader_later_dies(tmp_path: Path) -> None:
+    """The fix is scoped to an empty read: a call that did retrieve real
+    bytes before the reader went on to fail stays a success, with the
+    reader's error still nested for the next call to see."""
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-data-then-dies.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = DataThenDiesSerialHandle()
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path))
+    service.sessions["dut"] = session
+
+    result = service.read_bytes("dut", 16, 2.0)
+
+    assert result["ok"] is True, result
+    assert overall_success(result) is True
+    assert result["bytes_read"] == 3
+    assert result["data"]["text"] == "ok\n"
 
 
 def test_com_session_stop_retains_session_when_close_fails_for_retry(tmp_path: Path) -> None:
