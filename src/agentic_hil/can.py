@@ -26,6 +26,9 @@ from agentic_hil.devices import can_device
 from agentic_hil.knowledge import (
     CAN_ADAPTER_LIBRARY_MISSING_ERROR,
     CAN_CHANNEL_NOT_AVAILABLE_ERROR,
+    CAN_CLASSIC_FRAME_TOO_LARGE_ERROR,
+    CAN_FD_FRAME_LENGTH_INVALID_ERROR,
+    CAN_FD_REMOTE_FRAME_ERROR,
     CAN_INTERFACE_NOT_FOUND_ERROR,
     LISTEN_ONLY_MODE_ERROR,
     LISTEN_ONLY_UNCONFIRMED_ERROR,
@@ -141,6 +144,41 @@ class CanBusSession:
         self.contact = contact if contact is not None else ContactMarker()
         if contact is None:
             self.contact.record("can_adapter_opened")
+
+
+def socketcan_bitrate_honesty_fields(bus_config: CanBusConfig) -> JsonObject:
+    """Whether this bus's ``bitrate`` is a fact this session set, said honestly.
+
+    Empty for `peak` and `process`. On `peak`, `PcanBus.__init__` maps `bitrate`
+    to a driver baud-rate constant and hands it to `PCANBasic.Initialize`, which
+    is what actually configures the channel: the value reported is the value
+    applied. A `process` bridge is told the rate in its own `open` request and is
+    the party that would apply it; that is unchanged here.
+
+    Not empty for `socketcan`. python-can's `SocketcanBus` takes no `bitrate`
+    argument: Linux CAN bit timing is netdev state, set with `ip link set
+    <dev> type can bitrate <rate>` before this process ever opens a socket, so
+    a `bitrate` this call put in `can.Bus(**kwargs)` for a `socketcan` bus
+    landed in `**kwargs` and was dropped without a word, the same shape of
+    no-op `listen_only` would have been on this backend. Reporting the
+    configured value next to an open session implied this call had set it. It
+    had not, and does not try to: setting Linux bit timing from here would mean
+    a raw `CAN_RAW` socket reaching for `ip link` behind the operator's back,
+    on an interface bit timing is not this session's to own. `bitrate_verified:
+    false` says so next to the number, rather than leaving the number to imply
+    it on its own.
+    """
+    if bus_config.adapter != "socketcan":
+        return {}
+    return {
+        "bitrate_verified": False,
+        "bitrate_note": (
+            "python-can's SocketCAN backend does not accept `bitrate`; Linux CAN bit timing belongs to the "
+            "interface and is set outside this session, typically with `ip link set <dev> type can bitrate "
+            "<rate>`. The `bitrate` above is this bus's configuration, not a measurement of what the interface is "
+            "actually running at."
+        ),
+    }
 
 
 class CanBusService:
@@ -286,8 +324,9 @@ class CanBusService:
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
                     raise error
                 return recommit_report_with_status(self.config, written, session.lease.status())
-        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate})
-        result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": False, "adapter": adapter_session.adapter_name, "adapter_result": public_backend_result(opened), "frames_drained": cleared.get("frames_drained", 0), "session": self._session_status(session), "summary": "CAN bus session started."}
+        bitrate_honesty = socketcan_bitrate_honesty_fields(bus_config)
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "start", "bus_id": bus_id, "adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate, **bitrate_honesty})
+        result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "already_active": False, "adapter": adapter_session.adapter_name, "adapter_result": public_backend_result(opened), "frames_drained": cleared.get("frames_drained", 0), "session": self._session_status(session), "summary": "CAN bus session started.", **bitrate_honesty}
         if audit_error is not None:
             session.audit_broken = True
             with suppress(BaseException):
@@ -440,6 +479,10 @@ class CanBusService:
         # before a session is started rather than only in the refusal that
         # follows one.
         result: JsonObject = {"adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "listen_only": bus_config.listen_only, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[bus_config.adapter], "max_buffer_frames": bus_config.max_buffer_frames, "max_frame_data_bytes": bus_config.max_frame_data_bytes, "session_active": False}
+        # `bitrate` above is this bus's configuration on every adapter; on
+        # `socketcan` it is nothing more; see `socketcan_bitrate_honesty_fields`.
+        # Empty, and therefore invisible, everywhere else.
+        result.update(socketcan_bitrate_honesty_fields(bus_config))
         # Only for a brokered bus. A bus with no `shares:` is the single-owner bus
         # this tool has always described, and it keeps describing it in exactly
         # the same words — the participant vocabulary appears where participants
@@ -641,10 +684,18 @@ def open_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig
 
 
 class PythonCanAdapterSession:
-    def __init__(self, adapter_name: str, bus: object, timeout_s: float):
+    def __init__(self, adapter_name: str, bus: object, timeout_s: float, is_fd: bool = False):
         self.adapter_name = adapter_name
         self.bus = bus
         self.timeout_s = timeout_s
+        # The bus's own mode, retained rather than re-derived, because `send()`
+        # builds a fresh `can.Message` per call and has no other way to know it.
+        # Without this, every outgoing message defaults to `is_fd=False` whatever
+        # the bus was opened with, so an `fd: true` bus would keep ACKing its own
+        # sends while writing nothing but classic frames, accepted by python-can
+        # without complaint, since a classic frame is a legal thing to put on an
+        # FD-capable socket, just not the frame that was asked for.
+        self.is_fd = is_fd
         self.active = True
 
     def send(self, frame: CanFrame) -> JsonObject:
@@ -672,7 +723,7 @@ class PythonCanAdapterSession:
         try:
             import can
 
-            message = can.Message(arbitration_id=frame.id, is_extended_id=frame.extended, is_remote_frame=frame.rtr, data=frame.data)
+            message = can.Message(arbitration_id=frame.id, is_extended_id=frame.extended, is_remote_frame=frame.rtr, is_fd=self.is_fd, data=frame.data)
             self.bus.send(message, timeout=self.timeout_s)
             return {"ok": True, "backend": self.adapter_name}
         except Exception as error:
@@ -707,6 +758,32 @@ class PythonCanAdapterSession:
         return {"active": self.active, "backend": self.adapter_name}
 
 
+# A Linux `peak` channel shaped like a kernel netdev rather than a PCANBasic
+# handle. Shared between the channel-shape guard below, the interface this bus
+# opens through, and `socketcan_interface_missing`'s own guard, so the three
+# cannot drift into naming three different sets of channels "SocketCAN-shaped".
+PEAK_LINUX_NETDEV_CHANNEL = re.compile(r"can\d+|vcan\d+|slcan\d+")
+
+
+def peak_channel_uses_socketcan(channel: str) -> bool:
+    """Whether a `peak` bus's channel names a SocketCAN netdev rather than a PCANBasic handle.
+
+    Linux reaches PEAK hardware two ways, and they do not share a channel
+    namespace. PCANBasic (the vendor's own API, `libpcanbasic`) is addressed by
+    the handles it enumerates: `PCAN_USBBUS1`, or the hex handle
+    `is_windows_peak_channel` also recognises. The kernel's own `peak_usb`
+    driver needs no vendor library at all and publishes an ordinary SocketCAN
+    netdev instead: `can0` for a real adapter, `vcan0`/`slcan0` for the virtual
+    and serial-line variants the same driver family creates. A channel shaped
+    like one of those names is a request for the second path, and python-can's
+    `PcanBus` cannot open a netdev: it speaks PCANBasic and nothing else, so
+    routing such a channel to `pcan` was never going to open it. There is no
+    such split on Windows, where PCANBasic is the only route and this is always
+    `False`.
+    """
+    return os.name != "nt" and not is_windows_peak_channel(channel) and PEAK_LINUX_NETDEV_CHANNEL.fullmatch(channel) is not None
+
+
 def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: CanBusConfig) -> JsonObject | None:
     """The refusal for a SocketCAN interface that does not exist, or ``None``.
 
@@ -731,8 +808,18 @@ def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: C
     of it. So the one failure that is provably harmless — a `can0` that is simply
     not there after a re-enumeration — quarantined a bench that nothing had
     touched.
+
+    A `peak` bus reaches here too, and is excluded on the same terms as any
+    other adapter rather than by name: `bus_config.adapter` alone used to decide
+    it, back when a `peak` bus only ever opened through `pcan`. It can now open
+    through `socketcan` instead, for the Linux netdev channels
+    `peak_channel_uses_socketcan` recognises, and a netdev that vanished out
+    from under one of those is exactly the same provable non-event a native
+    `socketcan` bus's missing interface is: the exclusion below follows the
+    channel's actual route rather than the adapter's name.
     """
-    if bus_config.adapter == "peak" or not raised_errno(error, errno_module.ENODEV):
+    routed_through_socketcan = bus_config.adapter == "socketcan" or (bus_config.adapter == "peak" and peak_channel_uses_socketcan(bus_config.channel))
+    if not routed_through_socketcan or not raised_errno(error, errno_module.ENODEV):
         return None
     return {
         "ok": False,
@@ -954,7 +1041,7 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         bus_config.adapter == "peak"
         and not is_windows_peak_channel(bus_config.channel)
         and os.name != "nt"
-        and not re.fullmatch(r"can\d+|vcan\d+|slcan\d+", bus_config.channel)
+        and not PEAK_LINUX_NETDEV_CHANNEL.fullmatch(bus_config.channel)
     ):
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "config_invalid", "field": f"can_buses.{bus_id}.channel", "summary": "PEAK adapter on Linux expects a SocketCAN-style interface name such as can0.", "side_effect_committed": False}
     try:
@@ -965,7 +1052,15 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     def open_failure(error: BaseException) -> JsonObject:
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
 
-    interface = "pcan" if bus_config.adapter == "peak" else "socketcan"
+    # A `peak` bus whose channel names a Linux kernel netdev is routed to
+    # `socketcan`, the same interface a `socketcan` bus opens through, rather
+    # than to `pcan`: `PcanBus` speaks PCANBasic and cannot open a netdev at
+    # all, so a channel the guard above accepted as SocketCAN-shaped and then
+    # handed to `pcan` was never going to open: it would fail exactly as if
+    # the channel did not exist, on hardware that does. See
+    # `peak_channel_uses_socketcan` for the channel shapes this recognises.
+    peak_via_socketcan = bus_config.adapter == "peak" and peak_channel_uses_socketcan(bus_config.channel)
+    interface = "socketcan" if bus_config.adapter != "peak" or peak_via_socketcan else "pcan"
     bus_kwargs: JsonObject = {
         "interface": interface,
         "channel": bus_config.channel,
@@ -1060,7 +1155,7 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
             raise
         return {**open_failure(register_error), "cleanup_confirmed": True}
     try:
-        session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s)
+        session = PythonCanAdapterSession(bus_config.adapter, bus, bus_config.timeout_s, bus_config.fd)
     except BaseException as primary_error:
         try:
             if callable(shutdown):
@@ -1096,7 +1191,14 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         discharge_provisional_handle(provisional)
         return {**unconfirmed, "cleanup_confirmed": True}
     discharge_provisional_handle(provisional)
-    result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": "CAN adapter opened."}
+    summary = "CAN adapter opened."
+    if peak_via_socketcan:
+        # `backend` already says `socketcan`; this is the sentence an operator
+        # reading past that field sees, since a `peak` bus opening through
+        # anything but `pcan` is the one thing here worth explaining rather than
+        # only naming.
+        summary = f"CAN adapter opened through SocketCAN: channel {bus_config.channel} names a Linux kernel netdev, which PCANBasic cannot open, so this `peak` bus was routed to the socketcan backend instead of pcan."
+    result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": summary}
     if bus_config.listen_only:
         result.update({"listen_only": True, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[bus_config.adapter]})
     return result
@@ -1463,6 +1565,19 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
     return result
 
 
+# Classic CAN's data field is eight bytes, full stop, on every controller that
+# speaks it: not a configured ceiling but the format itself. The schema lets
+# `max_frame_data_bytes` be set past this on a bus that never declared
+# `fd: true` (`minimum`/`maximum` there bound the field alone, not its relation
+# to `fd`), so this is checked here rather than trusted to that value.
+CLASSIC_CAN_MAX_FRAME_DATA_BYTES = 8
+# The sixteen lengths a CAN FD DLC nibble can encode: one for one up to eight
+# bytes, then by fours, eights and sixteens. A length between two of these has
+# no code at all, and no config value implies rounding one up to the next
+# legal length. That is why this is a fixed tuple and not a range.
+CAN_FD_FRAME_DATA_LENGTHS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64)
+
+
 def payload_frame(bus_config: CanBusConfig, payload: JsonObject) -> JsonObject:
     if set(payload) - {"frame_id", "extended", "rtr", "data_hex"}:
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "CAN frame contains unsupported fields."}
@@ -1476,12 +1591,45 @@ def payload_frame(bus_config: CanBusConfig, payload: JsonObject) -> JsonObject:
     max_id = 0x1FFFFFFF if extended else 0x7FF
     if parsed_id < 0 or parsed_id > max_id:
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "Extended CAN frame_id must be between 0 and 0x1fffffff." if extended else "Standard CAN frame_id must be between 0 and 0x7ff."}
+    if rtr and bus_config.fd:
+        return {
+            "ok": False,
+            "tool": "can_send",
+            "error_type": CAN_FD_REMOTE_FRAME_ERROR,
+            "field": "rtr",
+            "summary": (
+                "This bus is configured `fd: true`, and CAN FD has no remote frame: the FDF bit that marks a frame "
+                "as FD occupies the position RTR held in classic CAN, so an FD controller has none to send."
+            ),
+            **remediation_fields(CAN_FD_REMOTE_FRAME_ERROR),
+        }
     data_hex = payload.get("data_hex", "")
     if not isinstance(data_hex, str):
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "data_hex must be a string."}
     data = parse_hex_bytes(data_hex)
     if data is None:
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "data_hex must contain valid hexadecimal bytes."}
+    if bus_config.fd:
+        if len(data) not in CAN_FD_FRAME_DATA_LENGTHS:
+            return {
+                "ok": False,
+                "tool": "can_send",
+                "error_type": CAN_FD_FRAME_LENGTH_INVALID_ERROR,
+                "summary": f"CAN FD data length must be one of {CAN_FD_FRAME_DATA_LENGTHS}; {len(data)} bytes matches no DLC code.",
+                "bytes_requested": len(data),
+                "allowed_lengths": list(CAN_FD_FRAME_DATA_LENGTHS),
+                **remediation_fields(CAN_FD_FRAME_LENGTH_INVALID_ERROR),
+            }
+    elif len(data) > CLASSIC_CAN_MAX_FRAME_DATA_BYTES:
+        return {
+            "ok": False,
+            "tool": "can_send",
+            "error_type": CAN_CLASSIC_FRAME_TOO_LARGE_ERROR,
+            "summary": f"Classic CAN carries at most {CLASSIC_CAN_MAX_FRAME_DATA_BYTES} data bytes; this bus is not configured `fd: true`, so {len(data)} bytes cannot go in one frame.",
+            "bytes_requested": len(data),
+            "classic_max_frame_data_bytes": CLASSIC_CAN_MAX_FRAME_DATA_BYTES,
+            **remediation_fields(CAN_CLASSIC_FRAME_TOO_LARGE_ERROR),
+        }
     if len(data) > bus_config.max_frame_data_bytes:
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "CAN frame data exceeds configured max_frame_data_bytes.", "bytes_requested": len(data), "max_frame_data_bytes": bus_config.max_frame_data_bytes}
     return {"ok": True, "frame": CanFrame(id=parsed_id, extended=extended, rtr=rtr, data=data)}
