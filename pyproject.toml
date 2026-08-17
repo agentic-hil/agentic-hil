@@ -52,6 +52,9 @@ pyocd = ["pyocd>=0.36"]
 dev = [
   "build>=1.2",
   "pytest>=8.0",
+  # Deliberately not in addopts below: a bare `pytest` stays one process, and
+  # `pytest -n auto` is the parallel invocation, which CONTRIBUTING.md documents.
+  "pytest-xdist>=3.6",
   "ruff>=0.6",
   "twine>=5.0"
 ]
