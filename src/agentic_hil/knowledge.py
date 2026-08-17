@@ -669,6 +669,34 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "quarantine exists because the physical state is unknown, and the tools are not what makes it so.",
         ),
     ),
+    "permission_denied:allow_debug_execution": ErrorRemedy(
+        meaning=(
+            "`debug_continue`, or any other call that would resume a halted target, was refused because "
+            "`permissions.allow_debug_execution` is false on this probe. A debug session may still open and the "
+            "target may still be inspected while it sits halted: breakpoints, symbol reads, memory dumps and "
+            "`debug_halt` all read or hold the target rather than resume it, and none of them need this grant. Only "
+            "letting the core run again does. Nothing was sent to the target and the session, if one is open, is "
+            "unchanged."
+        ),
+        remediation=(
+            "Report the refusal, name `permissions.allow_debug_execution`, and say which probe it is on. Whether "
+            "this bench should let an agent resume the target is the operator's decision; you cannot grant it "
+            "yourself, and `project_config_set` writes only `false` into a permission.",
+            "Everything a session can still do with the target halted remains available: set or clear breakpoints, "
+            "read `debug_get_stop_reason`, `debug_symbol_info`, `debug_symbol_value` or `debug_dump_symbol_ihex`, and "
+            "close the session with `debug_stop_session`. Finish the part of the task that only needs a halted "
+            "target before asking about the rest.",
+            "`project_config_describe` says whether this permission is open on the bound probe right now, so a "
+            "second attempt at `debug_continue` is not how to find out.",
+        ),
+        do_not=(
+            "Do not reach for `reset_target` or `flash_firmware` as a way around this. Both are gated by their own "
+            "permissions and neither resumes the target under the debugger session this refusal is protecting.",
+            "Do not drive GDB, OpenOCD or another debugger outside Agentic HIL to send the continue yourself. That "
+            "reaches the exact target state this refusal withholds, outside the audit trail that would have recorded "
+            "it.",
+        ),
+    ),
     RECOVERY_PHYSICAL_CHECK_ERROR: ErrorRemedy(
         meaning=(
             "`hardware_recover` was allowed to run and refused on the class of the incident, not on a permission. At "

@@ -161,13 +161,25 @@ class DebuggerPermissions:
 
     ``allow_probe`` exists only for version 1 files. From version 2 on there is
     no read permission: exclusivity replaced it, and a version 2 config that
-    still carries the key is refused rather than reinterpreted."""
+    still carries the key is refused rather than reinterpreted.
+
+    ``allow_debug_execution`` is the flag that decides whether a debug session
+    may resume the core at all: ``debug_continue`` and anything else that lifts
+    the target off a halt read this and nothing else. It is independent of
+    ``allow_probe``: a session opens and the target halts under exactly the
+    same reads-need-no-grant rule ``probe_allowed`` states for the rest of this
+    file, so a probe that may attach and inspect a halted target may still not
+    let it run. Defaulted ``False`` for the same reason every flag here is: a
+    configuration written before this flag existed named no opinion on
+    resuming the core, and a security fix that turned that silence into a grant
+    would be the widening this dataclass exists to refuse."""
 
     allow_probe: bool = False
     allow_flash: bool = False
     allow_reset: bool = False
     allow_raw_debugger_commands: bool = False
     allow_mass_erase: bool = False
+    allow_debug_execution: bool = False
 
 
 @dataclass(frozen=True)

@@ -348,7 +348,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["action", "location"],
-      "description": "Set one breakpoint, let the target run, and wait for it to stop there. A stop somewhere else is reported as the stop reason it was rather than as a pass, and a target that never arrives fails at `timeout_s`. The breakpoint is removed afterwards either way, so a plan leaves none behind.",
+      "description": "Set one breakpoint, let the target run, and wait for it to stop there, exactly as `debug_continue` does: the same `permissions.allow_debug_execution` on the debugger that started the session. A stop somewhere else is reported as the stop reason it was rather than as a pass, and a target that never arrives fails at `timeout_s`. The breakpoint is removed afterwards either way, so a plan leaves none behind.",
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },

@@ -8,7 +8,7 @@
   "$defs": {
     "debugger_permissions": {
       "type": "object",
-      "description": "What this debug probe may do beyond reading it. Scoped to this debugger alone, so narrowing one board leaves a second board in the same file untouched. A generated configuration sets allow_flash and allow_reset true and sets allow_raw_debugger_commands and allow_mass_erase false: validated flashing and unrestricted debugger access are mutually exclusive, so either of the latter two being true refuses flash_firmware on this probe, and neither has a tool behind it to trade for that. A flag a file does not name is false, because absence must not widen a configuration written before this default changed. allow_probe is a version 1 field and is refused in a version 2 file.",
+      "description": "What this debug probe may do beyond reading it. Scoped to this debugger alone, so narrowing one board leaves a second board in the same file untouched. A generated configuration sets allow_flash, allow_reset and allow_debug_execution true and sets allow_raw_debugger_commands and allow_mass_erase false: validated flashing and unrestricted debugger access are mutually exclusive, so either of the latter two being true refuses flash_firmware on this probe and refuses a debug session outright, and neither has a tool behind it to trade for that. A flag a file does not name is false, because absence must not widen a configuration written before this default changed. allow_probe is a version 1 field and is refused in a version 2 file.",
       "additionalProperties": false,
       "properties": {
         "allow_probe": {
@@ -24,6 +24,11 @@
         "allow_reset": {
           "type": "boolean",
           "default": false
+        },
+        "allow_debug_execution": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether a debug session on this probe may resume a halted target: debug_continue and nothing else reads this. Opening a session and inspecting one while it is halted need only allow_probe (or, from version 2 on, nothing at all); this is the separate grant for lifting the core off that halt. A flag a file does not name is false, so a configuration written before this permission existed does not gain the ability to resume a target silently on update."
         },
         "allow_raw_debugger_commands": {
           "type": "boolean",

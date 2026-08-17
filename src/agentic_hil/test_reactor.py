@@ -2090,6 +2090,15 @@ class DebuggerRunner(StepDevice):
             return preflight_error(location, step, "action", "A debug session must be started before this action.")
         if state.debug_session != debugger_id:
             return preflight_error(location, step, "debugger", "This action must run on the debugger that started the debug session.", {"debug_session_debugger": state.debug_session})
+        if step.action == "run_until_breakpoint" and not permissions.allow_debug_execution:
+            # `_run_until_breakpoint` always calls `debug_continue` once its
+            # breakpoint is set, whatever this step's own `timeout_s` says, so
+            # this is checked unconditionally rather than mirrored off that
+            # argument. Named here for the same reason every other debug_start
+            # flag is: the backend's own refusal is never reached because this
+            # runs first, so pointing at a permission the config plainly shows
+            # as false is the only diagnosis the operator gets.
+            return preflight_error(location, step, "action", "Resuming target execution requires allow_debug_execution on this debugger.", {"permission": "allow_debug_execution"})
         symbol = breakpoint_symbol(step.arguments.get("location")) if step.action == "run_until_breakpoint" else step.arguments.get("symbol")
         if symbol is None and not config.debug.allow_all_symbols:
             return preflight_error(location, step, "location", "File/line breakpoints require debug.allow_all_symbols.")

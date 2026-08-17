@@ -192,7 +192,12 @@ def test_unconfirmed_debug_halt_quarantines_lease(tmp_path: Path) -> None:
         assert cleared["cleanup_required"] is True
         assert service.coordinator.blocked is True
     finally:
-        with pytest.raises(RuntimeError, match="target state remains unconfirmed"):
+        # Service shutdown now catches this closer to the fact than the lease
+        # bookkeeping alone did: `close()` re-attempts the halt itself, finds
+        # the same `halt_timeout` fake still refusing to confirm one, and
+        # refuses to call that a clean stop before the lease release is ever
+        # reached.
+        with pytest.raises(RuntimeError, match="reconfirming the target was halted"):
             service.close()
         service.coordinator.close()
 
@@ -664,14 +669,14 @@ def test_breakpoint_cleanup_retry_only_deletes_remaining_breakpoint(tmp_path: Pa
         failed_once = False
         deletes: list[str] = []
 
-        def command(session, command: str, timeout_s=None):
+        def command(session, command: str, timeout_s=None, **kwargs):
             nonlocal failed_once
             if command.startswith("-break-delete"):
                 deletes.append(command)
                 if command.endswith(" 2") and not failed_once:
                     failed_once = True
                     return GdbMiCommandResult(result_class="error", line="", error_message="delete failed")
-            return original(session, command, timeout_s)
+            return original(session, command, timeout_s, **kwargs)
 
         monkeypatch.setattr(debug, "_gdb_command", command)
         first = service.call("debug_clear_breakpoints")
@@ -705,6 +710,11 @@ def test_service_close_reports_debug_cleanup_failure(tmp_path: Path, monkeypatch
     with pytest.raises(RuntimeError, match="Debug session cleanup failed"):
         service.close()
 
+    # The first failure left the session status cleanup_required, so the
+    # retry does not re-demand a halt reconfirmation through a connection
+    # `_close_unlocked`'s own process-registry sweep already reaped out from
+    # under it in the meantime: it goes straight to tidying up, exactly as a
+    # retry after any other cleanup failure does.
     monkeypatch.setattr(session.gdb, "close", original_close)
     service.close()
 

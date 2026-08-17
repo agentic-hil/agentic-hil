@@ -352,6 +352,7 @@ DEFAULT_TEST_PERMISSIONS = {
     "allow_probe": True,
     "allow_flash": True,
     "allow_reset": True,
+    "allow_debug_execution": True,
     "allow_com_read": True,
     "allow_com_write": True,
     "allow_can_read": True,
@@ -361,7 +362,14 @@ DEFAULT_TEST_PERMISSIONS = {
 }
 READ_PERMISSION_FLAGS = frozenset({"allow_probe", "allow_read"})
 SECTION_GRANTS = {
-    "debuggers": {"allow_probe": "allow_probe", "allow_flash": "allow_flash", "allow_reset": "allow_reset", "allow_raw_debugger_commands": "allow_raw_debugger_commands", "allow_mass_erase": "allow_mass_erase"},
+    "debuggers": {
+        "allow_probe": "allow_probe",
+        "allow_flash": "allow_flash",
+        "allow_reset": "allow_reset",
+        "allow_debug_execution": "allow_debug_execution",
+        "allow_raw_debugger_commands": "allow_raw_debugger_commands",
+        "allow_mass_erase": "allow_mass_erase",
+    },
     "com_ports": {"allow_read": "allow_com_read", "allow_write": "allow_com_write"},
     "can_buses": {"allow_read": "allow_can_read", "allow_write": "allow_can_write"},
 }

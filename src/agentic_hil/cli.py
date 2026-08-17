@@ -2330,14 +2330,15 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
 
 def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
     granted_step = (
-        "Every permission in this file is true — probing, flashing, resetting, and serial and CAN writes — except "
-        "allow_raw_debugger_commands and allow_mass_erase, which are false so that flashing works. Read the "
-        "permissions blocks and decide which of the rest this bench should not have."
+        "Every permission in this file is true, including probing, flashing, resetting, resuming a halted debug "
+        "session, and serial and CAN writes, except allow_raw_debugger_commands and allow_mass_erase, which are "
+        "false so that flashing works. Read the permissions blocks and decide which of the rest this bench should "
+        "not have."
         if not narrowed
-        else "Every permission in this file is true — probing, flashing, resetting, and serial and CAN writes — except "
-        "allow_raw_debugger_commands and allow_mass_erase, which are false so that flashing works, and the ones your "
-        "project profile set to false (" + ", ".join(narrowed) + "). Read the permissions blocks and decide which of "
-        "the rest this bench should not have."
+        else "Every permission in this file is true, including probing, flashing, resetting, resuming a halted "
+        "debug session, and serial and CAN writes, except allow_raw_debugger_commands and allow_mass_erase, which "
+        "are false so that flashing works, and the ones your project profile set to false (" + ", ".join(narrowed) + "). "
+        "Read the permissions blocks and decide which of the rest this bench should not have."
     )
     next_steps = [
         f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
