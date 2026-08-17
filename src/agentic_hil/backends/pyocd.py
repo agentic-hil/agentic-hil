@@ -17,7 +17,7 @@ from agentic_hil.backends.common import (
     spawn_command,
     which,
 )
-from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
+from agentic_hil.config import ConfigError, display_path, probe_selector_key, resolve_work_path, safe_write_text
 from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
 from agentic_hil.report import (
     classify_failure_report,
@@ -443,7 +443,16 @@ class PyOCDBackend:
         the full UID is the only way a configured name means one probe.
 
         Config load cannot do this — it must work with no hardware attached —
-        so it happens here, once per bound probe, before anything is driven."""
+        so it happens here, once per bound probe, before anything is driven.
+
+        Enumerating also lets this catch what config load provably cannot: two
+        selectors that share no substring relationship with each other
+        (config.validate_debuggers rejects only that relationship, the one
+        static text can decide) can still both resolve, uniquely, to the same
+        attached probe once real hardware answers (`OCD1` and `123` both
+        landing on `PYOCD123`, neither a substring of the other). That
+        collision is checked below, against every other configured debugger,
+        before this resolution is trusted or cached."""
         debugger = self.config.debugger
         if debugger is None or debugger.probe_id is None:
             return {"ok": True, "uid": None}
@@ -466,8 +475,39 @@ class PyOCDBackend:
         reselected = [uid for uid in available if matches[0].lower() in uid.lower()]
         if len(reselected) > 1:
             return self._probe_selector_error(tool, "the resolved probe UID is itself a prefix of another connected probe's UID, so it cannot address one board.", debugger.probe_id, reselected)
+        collision = self._cross_debugger_identity_collision(matches[0], available)
+        if collision is not None:
+            return self._probe_identity_collision_error(tool, debugger.probe_id, matches[0], *collision)
         self._resolved_probe_uid = matches[0]
         return {"ok": True, "uid": matches[0]}
+
+    def _cross_debugger_identity_collision(self, resolved_uid: str, available: list[str]) -> tuple[str, str] | None:
+        """The other configured debugger, if any, whose own probe_id resolves to
+        this same attached probe.
+
+        Two selectors can each be sound on their own (neither a no-match, a
+        multi-match, nor a self-prefix) and still name one physical probe for
+        two logical debuggers, which is exactly what `validate_debuggers`
+        cannot see from the text alone and defers to here. Every other
+        configured entry with a probe_id is a candidate, not only the other
+        pyocd ones: `probe_selector_key` already carries the right rule for
+        each (the `<type>:` prefix pyOCD strips applies only when that entry
+        is itself type pyocd), and a probe pyOCD can see is a probe some other
+        backend's entry may also have been given the serial of. Resolved
+        against the same attached hardware this entry just enumerated, so an
+        entry naming a probe that is not actually here never collides with
+        one that is."""
+        debugger_id = self.config.debugger_id
+        for name, other in self.config.debuggers.items():
+            if name == debugger_id or other.probe_id is None:
+                continue
+            needle = probe_selector_key(other)
+            if needle is None:
+                continue
+            other_matches = [uid for uid in available if needle in uid.lower()]
+            if len(other_matches) == 1 and other_matches[0] == resolved_uid:
+                return name, other.probe_id
+        return None
 
     def _probe_selector_error(self, tool: str, reason: str, configured: str, candidates: list[str]) -> JsonObject:
         return {
@@ -484,6 +524,27 @@ class PyOCDBackend:
             # cannot resolve the ambiguity, only a config or bench change can.
             "retry_safe": False,
         }
+
+    def _probe_identity_collision_error(self, tool: str, configured: str, resolved_uid: str, other_debugger: str, other_probe_id: str) -> JsonObject:
+        # Same envelope every other unresolvable selector returns from this
+        # method, plus the two fields naming the other side of the collision:
+        # config.py's own collision refusals (validate_debuggers,
+        # validate_resource_ids) carry an `other_debugger` for the same reason:
+        # a caller told two boards apart by name needs the other name, not just
+        # a probe string, to know which entry to fix.
+        error = self._probe_selector_error(
+            tool,
+            (
+                f"debuggers.{self.config.debugger_id}.probe_id ({configured!r}) and "
+                f"debuggers.{other_debugger}.probe_id ({other_probe_id!r}) both resolve to the same "
+                f"connected probe ({resolved_uid}), so they would drive one physical probe as if it were two."
+            ),
+            configured,
+            [resolved_uid],
+        )
+        error["other_debugger"] = other_debugger
+        error["other_probe_id"] = other_probe_id
+        return error
 
     def _artifact_summary(self, artifact: JsonObject) -> JsonObject:
         return {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
