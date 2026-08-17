@@ -559,7 +559,7 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 64,
-            "description": "Maximum CAN payload size in bytes. Defaults to 8, or 64 when fd is true."
+            "description": "Maximum CAN payload size in bytes. Defaults to 8, or 64 when fd is true. Capped at 8 unless fd is true: classic CAN cannot carry more, whatever this is set to."
           },
           "resource_id": {
             "type": [
@@ -619,7 +619,21 @@
             },
             "default": {}
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "fd": { "const": true } },
+              "required": ["fd"]
+            },
+            "then": {
+              "properties": { "max_frame_data_bytes": { "maximum": 64 } }
+            },
+            "else": {
+              "properties": { "max_frame_data_bytes": { "maximum": 8 } }
+            }
+          }
+        ]
       },
       "default": {}
     },

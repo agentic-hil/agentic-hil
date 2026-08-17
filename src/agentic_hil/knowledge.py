@@ -164,6 +164,26 @@ CAN_ADAPTER_LIBRARY_MISSING_ERROR = "can_adapter_library_missing"
 # run *after* a successful `Initialize`, which leave a channel that is on the bus
 # and keep the quarantine they earn.
 CAN_CHANNEL_NOT_AVAILABLE_ERROR = "can_channel_not_available"
+# A remote frame asked for on a bus configured `fd: true`. Not a variant of
+# `invalid_argument`: CAN FD's FDF bit sits in the position classic CAN's RTR bit
+# held, so an FD controller has no remote frame to send at all, and the request is
+# refused before it is built into anything rather than sent as whatever an FD
+# frame with a stale RTR bit would come out as.
+CAN_FD_REMOTE_FRAME_ERROR = "can_fd_remote_frame_unsupported"
+# A payload longer than eight bytes on a bus that is not `fd: true`. Its own
+# error_type rather than the plain `invalid_argument` a payload over
+# `max_frame_data_bytes` gets, because raising that configured ceiling cannot fix
+# this one: classic CAN's data field is eight bytes full stop, on every
+# controller, and the schema's own `max_frame_data_bytes` maximum used to allow a
+# non-FD bus to be configured past it.
+CAN_CLASSIC_FRAME_TOO_LARGE_ERROR = "can_classic_frame_too_large"
+# A payload on an `fd: true` bus whose length is not one of the sixteen a CAN FD
+# DLC field can encode. Above eight bytes the encoding stops counting one at a
+# time and jumps by fours, then by eights, then by sixteens, so a length between
+# two of those steps cannot be put in a real frame. There is no padding this
+# server invents on a caller's behalf, because padding silently sent is data on
+# the wire the caller did not ask for.
+CAN_FD_FRAME_LENGTH_INVALID_ERROR = "can_fd_frame_length_invalid"
 # A serial device another program is already holding. Its own error_type for the
 # same reason as the one above: the open was refused by the operating system
 # before this session had a handle, so the port kept whatever the other holder is
@@ -1248,6 +1268,78 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "moved; the channel was never opened.",
             "Do not point the entry at whichever channel happens to be attached. That is the wrong-bus mistake the "
             "channel name exists to prevent; confirm which adapter belongs to this bench first.",
+        ),
+    ),
+    CAN_FD_REMOTE_FRAME_ERROR: ErrorRemedy(
+        meaning=(
+            "A remote frame was asked for on a bus configured `can_buses.<name>.fd: true`. Classic CAN's RTR bit, "
+            "the one that marks a frame as a request rather than data, sits at the same position CAN FD's FDF bit "
+            "occupies, and FDF is what tells a controller the frame is FD at all. A CAN FD controller therefore has "
+            "no remote frame to send: the bit that used to mean one now means something else, and the ISO 11898-1 "
+            "FD format carries no remote-frame encoding in its place. The request is refused before a frame is built "
+            "out of it, rather than sent as whatever an FD frame with a stale RTR bit would come out as."
+        ),
+        remediation=(
+            "Send this as a data frame instead. A device answering a request answers with data; if what you need is "
+            "that answer, `rtr: false` with the expected reply's identifier and a normal `can_send` reads it once "
+            "the device has put it on the bus.",
+            "If a remote-frame poll is genuinely required against this device, declare a second `can_buses` entry "
+            "for the same channel with `fd: false` and send the remote frame there: classic CAN still has RTR, and "
+            "two entries keep the FD and classic intentions separately readable.",
+            "`can_buses_list` reports `fd` for every configured bus, so which entries can carry a remote frame is "
+            "readable before a plan is written.",
+        ),
+        do_not=(
+            "Do not set `fd: false` on this bus just to get one remote frame out. Every frame after it reverts to "
+            "classic CAN too, silently, until the entry is changed back.",
+        ),
+    ),
+    CAN_CLASSIC_FRAME_TOO_LARGE_ERROR: ErrorRemedy(
+        meaning=(
+            "A payload longer than eight bytes was sent on a bus that is not configured `can_buses.<name>.fd: "
+            "true`. Classic CAN's data field is eight bytes on every controller that speaks it; that is not a "
+            "configured ceiling but the format itself, so `max_frame_data_bytes` being set higher (the schema used "
+            "to allow up to 64 on a bus that never declared `fd: true`) could not have made this frame fit in one. "
+            "The refusal is at the point a frame is actually built, which holds whatever `max_frame_data_bytes` a "
+            "bus was loaded with before this guard existed."
+        ),
+        remediation=(
+            "Send eight bytes or fewer on this bus.",
+            "If this data belongs in one frame, set `can_buses.<name>.fd: true` (through `project_config_set`, or "
+            "by asking the operator) on a bus whose adapter and controller actually support CAN FD, which turns on "
+            "the sixteen lengths up to 64 bytes a single frame can carry.",
+            "If the bus genuinely cannot be FD, split the payload across multiple classic frames at whatever "
+            "protocol sits above raw CAN on this bus: that framing decision belongs above this server, which moves "
+            "exactly the bytes it is given in each `can_send`.",
+            "`can_buses_list` reports `fd` for every configured bus, so which entries can carry more than eight "
+            "bytes is readable before a plan is written.",
+        ),
+        do_not=(
+            "Do not raise `max_frame_data_bytes` to make this go away on a bus that is not `fd: true`. The schema "
+            "holds it to eight there for exactly this reason, and even a hand-edited file that got past it would "
+            "not change what a classic controller can put in one frame.",
+        ),
+    ),
+    CAN_FD_FRAME_LENGTH_INVALID_ERROR: ErrorRemedy(
+        meaning=(
+            "A payload was sent on an `fd: true` bus whose length is not one CAN FD's DLC field can encode. The DLC "
+            "nibble has sixteen codes: 0 through 8 count bytes one for one, and the remaining seven jump to 12, 16, "
+            "20, 24, 32, 48 and 64, so a length between two of those, nine bytes or thirty for instance, names no "
+            "code at all. Nothing here rounds a payload up and pads it to the nearest legal length on a caller's "
+            "behalf: padding sent silently is data on the wire the caller never asked for, so a length outside the "
+            "set is refused instead of adjusted."
+        ),
+        remediation=(
+            "Send exactly one of the sixteen lengths CAN FD encodes: 0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, "
+            "48 or 64 bytes: the result's `allowed_lengths` carries the same list.",
+            "If the device accepts padded data, pad the payload to the next allowed length yourself before calling "
+            "`can_send`, so the padding is on record in what was asked for rather than an adjustment made for you.",
+            "`bytes_requested` on the result is the length that was refused, for checking against whatever produced "
+            "it.",
+        ),
+        do_not=(
+            "Do not raise `max_frame_data_bytes` in response to this. A length between two DLC codes is illegal at "
+            "any ceiling; the fix is the length sent, not the bound it is checked against.",
         ),
     ),
     LISTEN_ONLY_UNSUPPORTED_ERROR: ErrorRemedy(
