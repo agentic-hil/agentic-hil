@@ -1242,3 +1242,27 @@ def test_the_measured_window_clears_a_session_whose_only_records_are_the_runtime
 
     assert ok, detail
     assert "1 invocation(s) were spawned by the agentic-hil runtime" in detail
+
+
+def test_published_mode_never_accepts_mere_presence_as_a_match() -> None:
+    """expected_digest is None in every published-mode job; presence is not proof.
+
+    package_matches used to be `installed_digest is not None` here, so any
+    computable digest satisfied a check named "installed package matches
+    trusted source" and prepare_trusted_package went on to stage those
+    unverified bytes as the reference every later comparison trusts. Nothing
+    about the trusted source was ever actually consulted.
+    """
+    computed = "deadbeef" * 8
+
+    assert verifier.package_digest_matches(computed, None) is False
+    assert verifier.package_digest_matches(None, None) is False
+
+
+def test_a_real_digest_still_has_to_equal_the_expected_one() -> None:
+    """Local and remote mode carry a real expected_digest; that path is untouched."""
+    digest = "deadbeef" * 8
+
+    assert verifier.package_digest_matches(digest, digest) is True
+    assert verifier.package_digest_matches(digest, "f" * 64) is False
+    assert verifier.package_digest_matches(None, digest) is False

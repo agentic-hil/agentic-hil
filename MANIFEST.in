@@ -13,6 +13,15 @@ recursive-include tests *.py
 # tests that import it would fail to collect in a source distribution.
 exclude tests/test_install_eval*.py
 exclude tests/test_windows_install_eval_scripts.py
+exclude tests/test_hil_eval_probe.py
+exclude tests/test_loop_in_container.py
+# tools/ is repository tooling for the same reason evals/ is: it never ships,
+# so a test that imports out of it at module scope fails to collect too. This
+# is the rule test_shipped_references.py's own import of check_shipped_references
+# missed until a from-sdist collection was actually tried.
+exclude tests/test_shipped_references.py
+exclude tests/test_version_consistency.py
+exclude tests/test_ci_linux.py
 # The one-line installers sit at the repository root and are fetched from there
 # rather than from the distribution, so the pins on them have nothing to read in
 # a source distribution.
