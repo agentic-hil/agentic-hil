@@ -975,12 +975,11 @@ printf '#!/bin/sh\nexit 0\n' > /work/bin/claude
 chmod +x /work/bin/claude
 export PATH="/work/bin:$HOME/.local/bin:$PATH"
 
-# The line is typed in a firmware project, not in the home directory or at the
-# filesystem root: the release this pulls from the index still reads every
-# user-level path as inside the working directory there and refuses (#235). The
-# two lines below go once a release carries the fix.
-mkdir -p "$HOME/project"
-cd "$HOME/project"
+# Typed in the home directory, which is where an install line is actually typed
+# and where every release from 0.15.0 on accepts it: the boundary collapses at
+# home rather than swallowing it (#235), so this run exercises the case the fix
+# exists for instead of stepping around it (#244).
+cd "$HOME"
 
 sh /repo/install.sh
 
