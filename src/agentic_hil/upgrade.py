@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -383,6 +384,42 @@ def _inside_site_packages(location: str | Path) -> bool:
         site_dirs.append(sysconfig.get_path("purelib", f"{os.name}_user"))
     normalized = _normalized_location(location)
     return any(site_dir and normalized.startswith(_normalized_location(site_dir) + "/") for site_dir in site_dirs)
+
+
+def _host_rmdir_refuses_nonempty_directories() -> bool:
+    """Whether this host's `rmdir` already has the behaviour `uninstall` promises.
+
+    POSIX's `rmdir` exits non-zero on a non-empty directory and touches
+    nothing. Windows has no equivalent through the shell this project's own
+    installer targets (`install.ps1`, PowerShell): `rmdir`/`rd` there is an
+    alias for `Remove-Item`, which does not refuse a non-empty directory the
+    same way -- it can prompt to remove it and everything still inside it
+    instead, which is exactly what this step tells an operator it will never
+    do. A function rather than a constant, so a test can exercise either
+    branch on whichever host the suite happens to run on -- the same seam
+    `_host_locks_running_files` uses below for the same platform split.
+    """
+    return os.name != "nt"
+
+
+def empty_directory_removal_command(directory: str) -> str:
+    """A copy-paste command that removes `directory` only if nothing is left inside it.
+
+    Quoted either way: an unquoted path containing spaces splits into several
+    shell arguments and leaves the stale directory behind with no error to say
+    so.
+
+    POSIX's own `rmdir` already refuses a non-empty directory outright, so
+    quoting it for the shell is the whole of what is needed there.
+    `[System.IO.Directory]::Delete(path, $false)` is PowerShell's equivalent --
+    the `recursive: false` overload throws `IOException` on a non-empty
+    directory instead of the prompt-then-delete-everything `Remove-Item`/`rmdir`
+    give on that host.
+    """
+    if _host_rmdir_refuses_nonempty_directories():
+        return f"rmdir {shlex.quote(directory)}"
+    literal = directory.replace("'", "''")
+    return f"[System.IO.Directory]::Delete('{literal}', $false)"
 
 
 # Which declared extra a configured capability needs, and which entries need it.

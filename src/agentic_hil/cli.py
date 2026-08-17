@@ -1018,8 +1018,9 @@ def uninstall_agent_integration(agents: list[str] | None = None) -> JsonObject:
                 f"If `import agentic_hil` still succeeds after that, a `__pycache__` left under {package_directory} is why; "
                 f"remove only `{package_directory}/__pycache__`, never the rest of {package_directory}. "
                 f"Python still imports the now-empty `{package_directory}` itself as a namespace package after that; "
-                f"finish with a non-recursive empty-directory removal such as `rmdir {package_directory}`, which "
-                f"succeeds only once nothing else is left there. "
+                f"finish with a non-recursive empty-directory removal such as "
+                f"`{upgrade.empty_directory_removal_command(package_directory)}`, which succeeds only once nothing "
+                f"else is left there. "
                 if package_directory
                 else ""
             )

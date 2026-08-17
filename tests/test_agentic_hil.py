@@ -5,6 +5,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -964,6 +965,44 @@ def _import_agentic_hil_in_a_clean_interpreter(site_packages: Path) -> subproces
         env={"PATH": os.environ.get("PATH", "")},
         check=False,
     )
+
+
+def test_empty_directory_removal_command_quotes_a_posix_path_with_spaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unquoted path with spaces splits into several `rmdir` arguments and finishes nothing."""
+    from agentic_hil.upgrade import empty_directory_removal_command
+
+    monkeypatch.setattr("agentic_hil.upgrade._host_rmdir_refuses_nonempty_directories", lambda: True)
+
+    command = empty_directory_removal_command("/opt/my venv/site-packages/agentic_hil")
+
+    assert command == "rmdir '/opt/my venv/site-packages/agentic_hil'"
+    assert shlex.split(command) == ["rmdir", "/opt/my venv/site-packages/agentic_hil"]
+
+
+def test_empty_directory_removal_command_uses_dotnet_delete_where_rmdir_would_not_refuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where `rmdir` is PowerShell's `Remove-Item` in disguise, it does not refuse a non-empty directory
+    the way POSIX's does -- it can prompt to remove it and everything inside instead. The line for that
+    host must be one that actually refuses, `[System.IO.Directory]::Delete` with `recursive: false`."""
+    from agentic_hil.upgrade import empty_directory_removal_command
+
+    monkeypatch.setattr("agentic_hil.upgrade._host_rmdir_refuses_nonempty_directories", lambda: False)
+
+    command = empty_directory_removal_command(r"C:\Users\me\AppData\Local\Programs\agentic_hil")
+
+    assert command == r"[System.IO.Directory]::Delete('C:\Users\me\AppData\Local\Programs\agentic_hil', $false)"
+
+
+def test_empty_directory_removal_command_escapes_a_single_quote_for_powershell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A literal PowerShell string doubles an embedded `'` rather than ending the string early."""
+    from agentic_hil.upgrade import empty_directory_removal_command
+
+    monkeypatch.setattr("agentic_hil.upgrade._host_rmdir_refuses_nonempty_directories", lambda: False)
+
+    command = empty_directory_removal_command("C:\\Users\\o'brien\\agentic_hil")
+
+    assert command == "[System.IO.Directory]::Delete('C:\\Users\\o''brien\\agentic_hil', $false)"
 
 
 # ---------------------------------------------------------------------------
@@ -3497,13 +3536,16 @@ def test_uninstall_names_rmdir_to_finish_the_pycache_cleanup(
     namespace package (proven in `test_pycache_then_rmdir_together_finish_what_next_step_now_advises`),
     so `next_step` must also name the `rmdir` step that actually stops it —
     non-recursive, so it only succeeds once nothing else is left in the
-    directory.
+    directory. Pinned to the POSIX branch of `empty_directory_removal_command`
+    so this assertion holds on whichever host the suite runs on; the platform
+    split itself is `empty_directory_removal_command`'s own tests to make.
     """
     _isolated_workspace(tmp_path, monkeypatch)
     _isolated_home(tmp_path, monkeypatch)
     monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: "pipx")
     monkeypatch.setattr("agentic_hil.upgrade.removal_command", lambda: "pipx uninstall agentic-hil")
     monkeypatch.setattr("agentic_hil.upgrade.installed_package_directory", lambda: "/opt/venv/site-packages/agentic_hil")
+    monkeypatch.setattr("agentic_hil.upgrade._host_rmdir_refuses_nonempty_directories", lambda: True)
 
     result = uninstall_agent_integration()
 
