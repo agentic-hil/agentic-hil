@@ -31,6 +31,7 @@ from agentic_hil.coordination import (
     resource_digest,
 )
 from agentic_hil.devices import config_devices
+from agentic_hil.knowledge import CAN_CLASSIC_FRAME_TOO_LARGE_ERROR, CAN_FD_FRAME_LENGTH_INVALID_ERROR
 from agentic_hil.mcp import call_tool
 from agentic_hil.process import (
     cleanup_registered_processes,
@@ -470,8 +471,11 @@ def test_the_debugger_timeout_bound_is_enforced_where_the_number_is_built() -> N
     assert debugger_config({}, "openocd", "debuggers.dut").timeout_s == node["default"]
 
 
-@pytest.mark.parametrize(("fd_flag", "expected"), [("false", 8), ("true", 64)])
-def test_the_can_payload_default_follows_the_fd_flag(tmp_path: Path, fd_flag: str, expected: int) -> None:
+@pytest.mark.parametrize(
+    ("fd_flag", "expected", "protocol_error_type"),
+    [("false", 8, CAN_CLASSIC_FRAME_TOO_LARGE_ERROR), ("true", 64, CAN_FD_FRAME_LENGTH_INVALID_ERROR)],
+)
+def test_the_can_payload_default_follows_the_fd_flag(tmp_path: Path, fd_flag: str, expected: int, protocol_error_type: str) -> None:
     path = write_config(
         tmp_path,
         can_buses_yaml=f'can_buses:\n  bench:\n    adapter: "socketcan"\n    channel: "can0"\n    fd: {fd_flag}\n',
@@ -482,9 +486,14 @@ def test_the_can_payload_default_follows_the_fd_flag(tmp_path: Path, fd_flag: st
     # The default is only worth documenting because it is the limit the send
     # guard compares against, so the guard is what pins it.
     assert payload_frame(bus, {"frame_id": 1, "data_hex": "00" * expected})["ok"] is True
+    # One byte past the default is one byte past what the wire itself allows at
+    # this fd setting: classic CAN's own 8-byte limit, or CAN FD's discrete DLC
+    # set past its top code. The protocol-level guard answers, not the
+    # separate, milder "over the configured ceiling" check beneath it.
     refused = payload_frame(bus, {"frame_id": 1, "data_hex": "00" * (expected + 1)})
-    assert refused["error_type"] == "invalid_argument"
-    assert refused["max_frame_data_bytes"] == expected
+    assert refused["error_type"] == protocol_error_type
+    assert refused["bytes_requested"] == expected + 1
+    assert refused["remediation"]
     # And the number the shipped schema documents is the number it produced.
     documented = config_schema()["properties"]["can_buses"]["additionalProperties"]["properties"]["max_frame_data_bytes"]["description"]
     assert str(expected) in documented
