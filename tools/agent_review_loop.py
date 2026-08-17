@@ -281,7 +281,13 @@ TASKKILL_CONFIRM_INTERVAL_S = 0.05
 
 
 def _taskkill_tree(pid: int) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, text=True)
+    # encoding/errors as in git() and run_agent()'s own Popen above: taskkill is a
+    # console app and prints in the OEM codepage, which on a non-English Windows
+    # is not the ANSI codepage `text=True` would otherwise decode with -- the same
+    # mismatch that made a smart quote in a Codex message raise UnicodeEncodeError
+    # and deadlock a round. Asked far more often now that a failure is retried
+    # within the grace period, so a decode this narrow was going to be met.
+    return subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> None:

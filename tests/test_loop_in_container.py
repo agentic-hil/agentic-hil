@@ -1575,6 +1575,31 @@ def test_terminate_tree_asks_again_when_a_tree_member_left_between_the_walk_and_
     assert [walk[:2] for walk in walks] == [["taskkill", "/F"], ["taskkill", "/F"]]
 
 
+def test_taskkill_tree_decodes_with_the_same_care_as_git_and_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """taskkill is a console app, and on a non-English Windows its OEM codepage is
+    not the ANSI codepage `text=True` decodes with by default -- the same mismatch
+    that made a smart quote in a Codex message raise UnicodeEncodeError and
+    deadlock a round, which is why `git()` and the agent's own `Popen` above both
+    pin `encoding="utf-8", errors="replace"`. A byte outside that decoded a walk's
+    stdout or stderr used to raise inside `subprocess.run`'s reader thread, an
+    exception a background thread cannot hand back to `_terminate_tree` -- it
+    surfaces as a lost taskkill confirmation, not as this test's own failure. This
+    call is now asked far more often, once a failure is retried within the grace
+    period, so a decode this narrow was going to be met.
+    """
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        agent_review_loop.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append(kwargs) or subprocess.CompletedProcess(args[0], 0, "", ""),
+    )
+
+    agent_review_loop._taskkill_tree(4321)
+
+    assert calls[0]["encoding"] == "utf-8"
+    assert calls[0]["errors"] == "replace"
+
+
 def test_terminate_tree_refuses_to_confirm_an_agent_that_outlived_its_own_kill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
