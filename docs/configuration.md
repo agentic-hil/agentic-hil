@@ -17,7 +17,7 @@ A configured path is checked for what it *is*: every component is opened without
 
 ## What it declares
 
-Reading a device needs no permission. What protects a read is exclusivity: every device a test plan names is locked machine-wide for the duration of the run, a device the plan does not name is refused, and a second session is turned away with the holder named. Everything that writes or changes state (flash, reset, serial and CAN sends, mass erase, raw debugger commands) is declared per device, and a generated configuration grants all of it except `allow_raw_debugger_commands` and `allow_mass_erase`. Those two are false because of what they can reach: both act on flash outside the path this server validates (a raw debugger command writes whatever it is given, a mass erase clears whatever a flash has just written), so once either is allowed, a flash report's claim about what is on the device is no longer one this server can stand behind. That is the mutual exclusion between validated flashing and unrestricted debugger access: while either is true, `flash_firmware` on that probe is refused. Neither has a tool behind it here to trade for that, so setting one true withholds flashing rather than granting anything. The example below is what a generation writes:
+Reading a device needs no permission. What protects a read is exclusivity: every device a test plan names is locked machine-wide for the duration of the run, a device the plan does not name is refused, and a second session is turned away with the holder named. That covers opening a debug session and inspecting it while the target sits halted, the same way it covers a probe attach: both halt the core the way any read on this bench can, and exclusivity rather than a grant answers for it. Everything that writes or changes state, or that lifts a halted target back into running (flash, reset, serial and CAN sends, resuming a debug session, mass erase, raw debugger commands), is declared per device, and a generated configuration grants all of it except `allow_raw_debugger_commands` and `allow_mass_erase`. Those two are false because of what they can reach: both act on flash outside the path this server validates (a raw debugger command writes whatever it is given, a mass erase clears whatever a flash has just written), so once either is allowed, a flash report's claim about what is on the device is no longer one this server can stand behind. That is the mutual exclusion between validated flashing and unrestricted debugger access: while either is true, `flash_firmware` on that probe is refused, and so is a debug session. Neither has a tool behind it here to trade for that, so setting one true withholds flashing rather than granting anything. The example below is what a generation writes:
 
 ```yaml
 version: 3                   # reading needs no permission, and every com_ports
@@ -47,6 +47,7 @@ debuggers:
     permissions:
       allow_flash: true
       allow_reset: true
+      allow_debug_execution: true  # resume a halted target in a debug session
       allow_raw_debugger_commands: false
       allow_mass_erase: false
   probe_b:                   # a second, independently controlled board

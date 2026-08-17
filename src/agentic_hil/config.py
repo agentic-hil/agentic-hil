@@ -1398,6 +1398,12 @@ debuggers:
     permissions:
       allow_flash: true
       allow_reset: true
+      # A debug session may open and inspect a halted target under the same
+      # reads-need-no-grant rule that covers probing; this is the separate grant
+      # that lets debug_continue lift it off that halt. True here for the same
+      # reason allow_flash and allow_reset are: a freshly generated bench is a
+      # workable one.
+      allow_debug_execution: true
       # These two are the exception to the open default above, and they are false
       # so that flashing works. Validated flashing and unrestricted debugger
       # access are mutually exclusive policies: while either of these is true,
@@ -1508,7 +1514,7 @@ recovery:
 # be complete in either direction, because a flag missing from it is one the
 # skeleton alone decides.
 GENERATED_WRITE_PERMISSIONS = {
-    "debuggers": ("allow_flash", "allow_reset", "allow_raw_debugger_commands", "allow_mass_erase"),
+    "debuggers": ("allow_flash", "allow_reset", "allow_debug_execution", "allow_raw_debugger_commands", "allow_mass_erase"),
     "com_ports": ("allow_write",),
     "can_buses": ("allow_write",),
 }
@@ -2639,6 +2645,7 @@ def debugger_permissions(raw: JsonObject) -> DebuggerPermissions:
         allow_reset=bool(raw.get("allow_reset", False)),
         allow_raw_debugger_commands=bool(raw.get("allow_raw_debugger_commands", False)),
         allow_mass_erase=bool(raw.get("allow_mass_erase", False)),
+        allow_debug_execution=bool(raw.get("allow_debug_execution", False)),
     )
 
 

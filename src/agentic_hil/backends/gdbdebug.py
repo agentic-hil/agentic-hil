@@ -18,7 +18,7 @@ from agentic_hil.gdbmi import (
     parse_gdb_integer,
     write_intel_hex_file,
 )
-from agentic_hil.knowledge import exclusive_permission_summary
+from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
 from agentic_hil.process import spawn_managed_process, terminate_process_tree
 from agentic_hil.report import (
     logs_directory,
@@ -267,16 +267,54 @@ class GdbDebugSessions:
         tool = "debug_stop_session"
         session = self.session
         if session is None or session.status == "stopped":
-            return {"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "summary": "No debug session is active."}
+            return {"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "safe_state_confirmed": True, "summary": "No debug session is active."}
         timeout = min(self.config.debugger.timeout_s, STOP_SESSION_TIMEOUT_CAP_S)
         if timeout_s is not None:
             timeout = min(timeout, max(0.1, timeout_s))
+        # Fixed sequence, in this order, every time a session ends: confirm the
+        # target is halted (reconfirming with an explicit interrupt if the last
+        # known state does not already say so), tell the backend not to resume it
+        # on its own once this connection goes away, and only then tear the
+        # connection down. See `_confirm_halted_before_end` and
+        # `_pin_no_resume_on_detach` for why each step exists.
+        #
+        # Skipped when the session already entered as cleanup_required: that
+        # status is never this call's own discovery, only ever left behind by
+        # an earlier failed start or a previous failed teardown attempt, and
+        # both already ran this same sequence over the connection before
+        # giving up on it. What happens to that incident from here (an
+        # operator's recovery, or a later machine recovery that reset and
+        # reread the target) is tracked at the lease level and is not
+        # something a retried teardown can prove anything new about by
+        # demanding a connection that is already, permanently gone.
+        already_unsettled = session.status == "cleanup_required"
+        halt_confirmed = True if already_unsettled else self._confirm_halted_before_end(session, timeout)
+        if not already_unsettled:
+            self._pin_no_resume_on_detach(session, timeout)
         cleanup_error = self._cleanup_session(session, timeout)
-        session.status = "cleanup_required" if cleanup_error is not None else "stopped"
         if cleanup_error is not None:
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed; ownership is retained for retry."})
+            session.status = "cleanup_required"
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "safe_state_confirmed": False, "halt_not_confirmed": not halt_confirmed, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed; ownership is retained for retry."})
+        if not halt_confirmed:
+            session.status = "cleanup_required"
+            return self._report({
+                "ok": False,
+                "tool": tool,
+                "backend": self.backend_name,
+                "active": True,
+                "status": "cleanup_required",
+                "hardware_state": "unknown",
+                "cleanup_required": True,
+                "safe_state_confirmed": False,
+                "halt_not_confirmed": True,
+                "error_type": "halt_not_confirmed",
+                "session": self._session_status(session),
+                "log_path": display_path(self.config, session.log_path),
+                "summary": "Debug session processes were cleaned up, but the target's halt could not be reconfirmed before the session ended; ownership is retained for retry.",
+            })
+        session.status = "stopped"
         self.session = None
-        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped."})
+        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "safe_state_confirmed": True, "halt_not_confirmed": False, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped with the target confirmed halted."})
 
     def get_session_status(self) -> JsonObject:
         session = self.session
@@ -394,6 +432,23 @@ class GdbDebugSessions:
         if not session_result["ok"]:
             return self._report(session_result)
         session = session_result["session"]
+        # The one permission that gates lifting the core off a halt. Every other
+        # session tool reads or holds the target rather than resuming it, so none
+        # of them are gated on this: opening a session (an SWD attach halts the
+        # core) and inspecting one already needs no more than allow_probe already
+        # requires, the same "reading may still perturb, but exclusivity answers
+        # for that" rule AgenticHILConfig.read_free states for the rest of this
+        # project. Checked before the "already stopped" fast path below on
+        # purpose: whether the target happens to be sitting in a fault is not a
+        # reason to skip asking whether this bench may resume it at all, and
+        # `debug_get_stop_reason` already answers the same question this fast
+        # path would without needing this grant.
+        if not self.config.debugger.permissions.allow_debug_execution:
+            return self._report(self._permission_denied(
+                tool,
+                "Resuming target execution requires allow_debug_execution in the authoritative config.",
+                remediation_scope="allow_debug_execution",
+            ))
         self._refresh_session_stop(session)
         if session.stop_reason is not None and str(session.stop_reason.get("stop_reason")) in {"debugger_error", "exception", "fault"}:
             return self._report(self._stopped_result(tool, session, "Target is already stopped"))
@@ -555,10 +610,21 @@ class GdbDebugSessions:
     def close(self) -> None:
         session = self.session
         if session is not None and session.status != "stopped":
+            # See stop_session for why a session already entered as
+            # cleanup_required skips straight to tidying up: that status is
+            # never this call's own discovery, and the connection it names is
+            # already gone.
+            already_unsettled = session.status == "cleanup_required"
+            halt_confirmed = True if already_unsettled else self._confirm_halted_before_end(session, CLOSE_SESSION_TIMEOUT_S)
+            if not already_unsettled:
+                self._pin_no_resume_on_detach(session, CLOSE_SESSION_TIMEOUT_S)
             cleanup_error = self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
             if cleanup_error is not None:
                 session.status = "cleanup_required"
                 raise RuntimeError(f"Debug session cleanup failed: {cleanup_error}")
+            if not halt_confirmed:
+                session.status = "cleanup_required"
+                raise RuntimeError("Debug session closed without reconfirming the target was halted.")
             session.status = "stopped"
         self.session = None
 
@@ -577,8 +643,11 @@ class GdbDebugSessions:
                 return self._permission_denied(tool, exclusive_permission_summary("Debug session mode 'load'", "allow_mass_erase", self.config.debugger_id))
         return {"ok": True}
 
-    def _permission_denied(self, tool: str, summary: str) -> JsonObject:
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": summary}
+    def _permission_denied(self, tool: str, summary: str, *, remediation_scope: str | None = None) -> JsonObject:
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": summary}
+        if remediation_scope is not None:
+            result.update(remediation_fields("permission_denied", remediation_scope))
+        return result
 
     def _resolve_gdb(self) -> JsonObject:
         return resolve_gdb_executable(self.config, self.backend_name)
@@ -865,6 +934,84 @@ class GdbDebugSessions:
         if len(data) != size_bytes:
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "GDB returned fewer memory bytes than requested.", "bytes_requested": size_bytes, "bytes_read": len(data)}
         return {"ok": True, "data": bytes(data)}
+
+    def _confirm_halted_before_end(self, session: GdbDebugSession, timeout_s: float) -> bool:
+        """Whether the target is confirmed halted, reconfirming with an explicit
+        interrupt if the session's last known state does not already say so.
+
+        Called only on the way a session ends (`stop_session`, `close`), never
+        on the way through: a debug server commonly resumes an attached target
+        on its own once the last GDB connection detaches or exits, so what a
+        session leaves running is decided the moment before that happens, not
+        after. `debug_continue`'s own timeout path already earns this proof for
+        a stop it was already waiting on; this is the same proof taken for a
+        stop nobody asked for, because ending the session is not exempt from
+        it.
+
+        Vacuously ``True`` for a session that never reached a target:
+        `start_session` can fail before `-target-select` ever runs, and this
+        same teardown path tears a failed start down too. There is no remote
+        connection for a detach to resume anything on, so there is nothing to
+        confirm, and a proof demanded of a session that never touched the board
+        would be a proof of nothing.
+        """
+        if session.load_phase in {"not_started", "server_spawned", "server_ready"}:
+            return True
+        if session.gdb is None or not session.gdb.is_running():
+            return False
+        self._refresh_session_stop(session)
+        if session.status == "halted":
+            return True
+        response = self._gdb_command(session, "-exec-interrupt --all", timeout_s, containment=True)
+        if not response.ok:
+            return False
+        assert session.gdb is not None
+        stop = session.gdb.wait_for_stop(timeout_s)
+        confirmed = not stop.timed_out and stop.reason != "debugger_error"
+        if confirmed:
+            session.stop_reason = self._stop_reason_from_gdb(session, stop)
+            session.status = "halted"
+        else:
+            session.status = "running"
+            session.stop_reason = {"stop_reason": "timeout", "backend_stop_reason": "timeout", "halt_confirmed": False}
+        return confirmed
+
+    def _pin_no_resume_on_detach(self, session: GdbDebugSession, timeout_s: float) -> None:
+        """Best effort: tell OpenOCD not to resume the target on its own once
+        this GDB connection goes away.
+
+        OpenOCD's ``gdb-detach`` and ``gdb-end`` target events resume the core
+        by default the moment the last GDB connection ends, which is exactly
+        backwards for a session this project just finished proving halted with
+        `_confirm_halted_before_end`. That proof covers the instant before the
+        connection ends; this is what keeps the disconnect itself from moving
+        the target a moment later, by overriding both events to do nothing
+        before anything that could trigger either one runs.
+
+        Fixed and sent every time a session ends, so a later change to this
+        sequence has to edit this function to drop the override rather than
+        having it fall out of a reordering somewhere else. Best effort and
+        never allowed to overturn a halt already confirmed: `_gdb_command`
+        marks a failed command as a fresh ``debugger_error`` stop, and a
+        defensive command nobody asked for is not license to make a confirmed
+        halt read as lost, so a failure here restores the state this method
+        was called with instead of leaving that behind.
+        """
+        if session.load_phase in {"not_started", "server_spawned", "server_ready"}:
+            return
+        if session.gdb is None or not session.gdb.is_running():
+            return
+        prior_stop_reason = session.stop_reason
+        prior_status = session.status
+        response = self._gdb_command(
+            session,
+            '-interpreter-exec console "monitor $_TARGETNAME configure -event gdb-detach {}; $_TARGETNAME configure -event gdb-end {}"',
+            timeout_s,
+            containment=True,
+        )
+        if not response.ok:
+            session.stop_reason = prior_stop_reason
+            session.status = prior_status
 
     def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> str | None:
         errors: list[tuple[str, BaseException]] = []
