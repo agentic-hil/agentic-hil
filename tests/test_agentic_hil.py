@@ -958,11 +958,19 @@ def _import_agentic_hil_in_a_clean_interpreter(site_packages: Path) -> subproces
     environment so this suite's own editable install (found via `PYTHONPATH`,
     not a `.pth` file, in this project's dev container) cannot shadow it."""
     script = f"import sys; sys.path.insert(0, {str(site_packages)!r}); import agentic_hil; print(agentic_hil.__spec__.origin)"
+    # A bare environment, but not barer than the interpreter itself can stand:
+    # on Windows, CPython's startup asks the CryptoAPI for hash randomization,
+    # and that call fails without SYSTEMROOT ("failed to get random numbers"),
+    # observed on the Python 3.10 CI runner.
+    environment = {"PATH": os.environ.get("PATH", "")}
+    for name in ("SYSTEMROOT", "SYSTEMDRIVE"):
+        if name in os.environ:
+            environment[name] = os.environ[name]
     return subprocess.run(
         [sys.executable, "-S", "-c", script],
         capture_output=True,
         text=True,
-        env={"PATH": os.environ.get("PATH", "")},
+        env=environment,
         check=False,
     )
 
