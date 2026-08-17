@@ -407,7 +407,15 @@ def test_a_numbered_root_with_pytests_own_current_symlink_is_scratch_with_no_loc
     root = tree / "scratch7"
     root.mkdir()
     (root / "config.yaml").write_text(f"# written by a fixture at {package_version(tree)}\n", encoding="utf-8")
-    (tree / "scratchcurrent").symlink_to(root, target_is_directory=True)
+    try:
+        (tree / "scratchcurrent").symlink_to(root, target_is_directory=True)
+    except OSError as error:
+        # Creating one needs SeCreateSymbolicLinkPrivilege, which a Windows
+        # account without developer mode does not have, and the shape this is
+        # about cannot be built without it. CI has the privilege; a developer
+        # bench frequently does not, and an unconditional failure there is a
+        # standing red mark that teaches everyone to ignore this file.
+        pytest.skip(f"directory symlinks unavailable: {error}")
 
     assert uncovered_files(tree) == []
 
