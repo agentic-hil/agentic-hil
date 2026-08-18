@@ -922,7 +922,8 @@ def _sweeping_agent(tmp_path: Path) -> Path:
     """An agent that commits the way agents do: everything the tree happens to hold."""
     script = tmp_path / "sweeping_agent.py"
     script.write_text(
-        "import pathlib, subprocess, uuid\n"
+        "import pathlib, subprocess, sys, uuid\n"
+        "sys.stdin.read()\n"
         "name = 'change-%s.py' % uuid.uuid4().hex[:8]\n"
         "pathlib.Path(name).write_text('x\\n', encoding='utf-8')\n"
         "subprocess.run(['git', 'add', '-A'], check=True)\n"
@@ -1012,6 +1013,12 @@ def _stalling_agent(tmp_path: Path, *, then: str) -> Path:
     attempts = (tmp_path / "attempts.txt").as_posix()
     script.write_text(
         "import pathlib, subprocess, sys\n"
+        # The loop writes the prompt to stdin right after the spawn. An agent
+        # that exits without reading it hands the loop EPIPE instead of a
+        # round, which is a race about scheduling rather than anything this
+        # test is about, and it failed a CI leg. Every other fake agent in
+        # this file drains stdin first, and so does every real agent CLI.
+        "sys.stdin.read()\n"
         f"attempts = pathlib.Path({attempts!r})\n"
         "seen = len(attempts.read_text(encoding='utf-8')) if attempts.exists() else 0\n"
         "attempts.write_text('x' * (seen + 1), encoding='utf-8')\n"
@@ -2815,7 +2822,8 @@ def test_a_run_that_has_stopped_contributing_ends_before_max_rounds(
     repository = _repository(tmp_path)
     committer = tmp_path / "commit_agent.py"
     committer.write_text(
-        "import pathlib, subprocess, uuid\n"
+        "import pathlib, subprocess, sys, uuid\n"
+        "sys.stdin.read()\n"
         "name = 'change-%s.py' % uuid.uuid4().hex[:8]\n"
         "pathlib.Path(name).write_text('x\\n', encoding='utf-8')\n"
         "subprocess.run(['git', 'add', name], check=True)\n"
