@@ -46,9 +46,16 @@ test has to keep true for that to stay so:
   record its own test wrote, never by sweeping a directory of records.
 
 No test currently needs a machine to itself. A test that genuinely does gets
-`@pytest.mark.xdist_group("<why>")`, which pins a group to one worker; the
-marker is registered by pytest-xdist, so it needs no entry in `pyproject.toml`.
-Keep that list short and give every entry a reason in the group name.
+`@pytest.mark.xdist_group("<why>")` — but that marker only pins a group to one
+worker under `--dist loadgroup`. `-n auto` above is `pytest-xdist`'s own
+shortcut for `--dist load --tx auto*popen`, and under plain `load` balancing a
+named group can still be split across workers, so the marker needs `pytest -n
+auto --dist loadgroup`, not the bare command this section otherwise
+recommends. The marker is registered by pytest-xdist, so it needs no entry in
+`pyproject.toml`. Keep that list short, give every entry a reason in the group
+name, and add `--dist loadgroup` to whichever command line is meant to honor
+it (CI, `tools/ci_linux.py`, or a developer's own invocation) once a test
+actually uses it.
 
 ### Working on Windows
 
