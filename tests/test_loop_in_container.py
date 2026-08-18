@@ -1646,11 +1646,30 @@ class _FakeSuspendedProcessKillable:
         return 1
 
 
+def _tracked_launch(process: object, *, suspended: bool = True) -> object:
+    """Run `_track_in_job_object` the way `run_agent` does: an ownership record
+    that exists before the call, and a `finally` around it that releases whatever
+    the call recorded.
+
+    Review round 6 finding 1: the release used to live inside the tracking call,
+    where it could not cover the one path that left it -- the return that handed
+    the job to `run_agent`. Now the call only records, so what a failed launch
+    gives back is a property of the pair, and these tests exercise the pair."""
+    agent_job = agent_review_loop._AgentJob(process=process, suspended=suspended)  # type: ignore[arg-type]
+    try:
+        agent_review_loop._track_in_job_object(agent_job)
+    finally:
+        agent_review_loop._release_job(agent_job)
+    return agent_job
+
+
 def test_track_in_job_object_creates_assigns_and_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
     """The happy path: a job is created, the suspended process is assigned to it,
     and only then resumed -- so it cannot spawn anything before it is a member,
     closing the gap review round 2 finding 1 identified in the snapshot-based
-    taskkill walk."""
+    taskkill walk. Each step is recorded in the launch's ownership record as the
+    kernel grants it, and nothing is returned: since review round 6 finding 1 the
+    record, not a return value, is what `run_agent` releases from."""
     calls: list[str] = []
     monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: (calls.append("create"), 555)[1])
     monkeypatch.setattr(
@@ -1660,10 +1679,11 @@ def test_track_in_job_object_creates_assigns_and_resumes(monkeypatch: pytest.Mon
     )
     monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: (calls.append(f"resume:{pid}"), True)[1])
     monkeypatch.setattr(agent_review_loop, "_close_handle", lambda handle: calls.append(f"close:{handle}"))
+    agent_job = agent_review_loop._AgentJob(process=_FakeSuspendedProcess(), suspended=True)  # type: ignore[arg-type]
 
-    job = agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
+    assert agent_review_loop._track_in_job_object(agent_job) is None
 
-    assert job == 555
+    assert (agent_job.handle, agent_job.member, agent_job.suspended) == (555, True, False)
     assert calls == ["create", f"assign:555:{_FakeSuspendedProcess._handle}", "resume:9001"]
 
 
@@ -1685,7 +1705,7 @@ def test_track_in_job_object_fails_the_launch_when_a_job_cannot_be_created(monke
     process = _FakeSuspendedProcessKillable()
 
     with pytest.raises(agent_review_loop.AgentError, match="could not be placed under a Windows Job Object"):
-        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
+        _tracked_launch(process)
 
     assert resumed == []
     assert process.kills == 1
@@ -1707,7 +1727,7 @@ def test_track_in_job_object_closes_the_job_and_fails_the_launch_when_assignment
     process = _FakeSuspendedProcessKillable()
 
     with pytest.raises(agent_review_loop.AgentError):
-        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
+        _tracked_launch(process)
 
     assert closed == [555]
     assert resumed == []
@@ -1728,7 +1748,7 @@ def test_track_in_job_object_fails_the_launch_when_a_step_raises(monkeypatch: py
     process = _FakeSuspendedProcessKillable()
 
     with pytest.raises(agent_review_loop.AgentError) as excinfo:
-        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
+        _tracked_launch(process)
 
     assert isinstance(excinfo.value.__cause__, OSError)
     assert resumed == []
@@ -1755,7 +1775,7 @@ def test_track_in_job_object_closes_an_already_created_job_when_assignment_raise
     process = _FakeSuspendedProcessKillable()
 
     with pytest.raises(agent_review_loop.AgentError):
-        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
+        _tracked_launch(process)
 
     assert closed == [555]
     assert process.kills == 1
@@ -1778,7 +1798,7 @@ def test_track_in_job_object_kills_the_still_suspended_process_when_resume_fails
     calls = _win32_job_fake(monkeypatch, active_counts=[0])
 
     with pytest.raises(agent_review_loop.AgentError) as excinfo:
-        agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
+        _tracked_launch(_FakeSuspendedProcess())
 
     assert not isinstance(excinfo.value, agent_review_loop.CleanupUnconfirmed)
     assert calls["terminate"] == [555]
@@ -1805,7 +1825,7 @@ def test_track_in_job_object_raises_cleanup_unconfirmed_when_the_untracked_root_
     process = _FakeSuspendedProcessKillable(alive_after_kill=alive_after_kill, kill_error=kill_error)
 
     with pytest.raises(agent_review_loop.CleanupUnconfirmed):
-        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
+        _tracked_launch(process)
 
 
 def test_track_in_job_object_treats_a_raised_resume_error_the_same_as_a_false_result(
@@ -1825,7 +1845,7 @@ def test_track_in_job_object_treats_a_raised_resume_error_the_same_as_a_false_re
     calls = _win32_job_fake(monkeypatch, active_counts=[0])
 
     with pytest.raises(agent_review_loop.AgentError) as excinfo:
-        agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
+        _tracked_launch(_FakeSuspendedProcess())
 
     assert isinstance(excinfo.value.__cause__, OSError)
     assert calls["terminate"] == [555]
@@ -1839,11 +1859,11 @@ def test_track_in_job_object_confirms_and_closes_the_job_when_the_handoff_is_int
     per step, so an exception that is not an `Exception` -- and an unattended
     loop's is the operator's Ctrl-C -- escaped between a successful assignment
     and the return that hands the job to `run_agent`, with the job neither
-    terminated nor closed. `run_agent`'s own `finally` cannot cover that: it
-    owns the handle only once this call has returned one. Worse than a leaked
-    handle, the resume may already have succeeded when the interrupt lands, so
-    what is left inside that job is a running agent. The interrupt still
-    reaches the caller; the job does not outlive it."""
+    terminated nor closed. Worse than a leaked handle, the resume may already
+    have succeeded when the interrupt lands, so what is left inside that job is a
+    running agent. The interrupt still reaches the caller; the job does not
+    outlive it. Since round 6 finding 1 the release that makes that true is the
+    owner's, not the tracking call's, which is why this runs the pair."""
 
     def _interrupt(pid: int) -> bool:
         raise KeyboardInterrupt
@@ -1854,7 +1874,7 @@ def test_track_in_job_object_confirms_and_closes_the_job_when_the_handoff_is_int
     calls = _win32_job_fake(monkeypatch, active_counts=[0])
 
     with pytest.raises(KeyboardInterrupt):
-        agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
+        _tracked_launch(_FakeSuspendedProcess())
 
     assert calls["terminate"] == [555]
     assert calls["close"] == [555]
@@ -1882,7 +1902,7 @@ def test_track_in_job_object_reports_a_job_it_could_not_empty_over_an_interrupt(
     monkeypatch.setattr(agent_review_loop, "_confirm_job_empty", refuse_to_confirm)
 
     with pytest.raises(agent_review_loop.CleanupUnconfirmed) as excinfo:
-        agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
+        _tracked_launch(_FakeSuspendedProcess())
 
     assert isinstance(excinfo.value.__context__, KeyboardInterrupt)
     assert calls["close"] == [555]
@@ -1909,7 +1929,7 @@ def test_track_in_job_object_kills_the_suspended_root_when_the_setup_is_interrup
     process = _FakeSuspendedProcessKillable()
 
     with pytest.raises(KeyboardInterrupt):
-        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
+        _tracked_launch(process)
 
     assert closed == [555]
     assert process.kills == 1
@@ -1930,7 +1950,7 @@ def test_track_in_job_object_raises_cleanup_unconfirmed_when_an_interrupted_setu
     process = _FakeSuspendedProcessKillable(alive_after_kill=True)
 
     with pytest.raises(agent_review_loop.CleanupUnconfirmed) as excinfo:
-        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
+        _tracked_launch(process)
 
     assert isinstance(excinfo.value.__context__, KeyboardInterrupt)
     assert process.kills == 1
@@ -1939,11 +1959,13 @@ def test_track_in_job_object_raises_cleanup_unconfirmed_when_an_interrupted_setu
 def _win32_job_fake(
     monkeypatch: pytest.MonkeyPatch, *, active_counts: list[int | None], terminate_ok: bool = True
 ) -> dict[str, list]:
-    """Route the Job Object wrappers `_terminate_tree`, `_track_in_job_object`,
-    and `run_agent`'s own normal-exit cleanup call once they have a job handle
-    -- each call answers from `active_counts` in order, standing in for the
-    kernel's own live member count rather than a snapshot this module took
-    itself."""
+    """Route the Job Object wrappers `_terminate_tree` and `_release_job` use
+    once they have a job handle -- each call answers from `active_counts` in
+    order, standing in for the kernel's own live member count rather than a
+    snapshot this module took itself. A count asked for after the list runs out
+    gets its last entry, so a release that confirms a job `_terminate_tree` has
+    already emptied reads the same answer twice rather than falling off the
+    end."""
     calls: dict[str, list] = {"terminate": [], "count": [], "close": []}
 
     def fake_terminate(job: int) -> bool:
@@ -1968,7 +1990,13 @@ def _win32_job_fake(
 
 def test_terminate_tree_with_a_job_confirms_empty_from_the_kernels_own_count(monkeypatch: pytest.MonkeyPatch) -> None:
     """The job reports empty on the first ask: TerminateJobObject, then a clean
-    return once the kernel's own count is zero -- no `tasklist` involved."""
+    return once the kernel's own count is zero -- no `tasklist` involved.
+
+    The handle is borrowed, not consumed: since review round 6 finding 1 this
+    call never closes it, because `_release_job` holds it across the call and
+    closes it exactly once afterwards. That is what removes the interval in which
+    a handle cleared out of the caller's record had not yet reached this frame's
+    cleanup."""
     monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
     calls = _win32_job_fake(monkeypatch, active_counts=[0])
 
@@ -1987,7 +2015,7 @@ def test_terminate_tree_with_a_job_confirms_empty_from_the_kernels_own_count(mon
     agent_review_loop._terminate_tree(_FakeProcess(), grace_s=1.0, job=777)  # type: ignore[arg-type]
 
     assert calls["terminate"] == [777]
-    assert calls["close"] == [777]
+    assert calls["close"] == []
 
 
 def test_terminate_tree_with_a_job_waits_out_a_descendant_born_after_the_kill(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2040,10 +2068,10 @@ def test_terminate_tree_with_a_job_raises_when_it_never_empties(monkeypatch: pyt
     with pytest.raises(agent_review_loop.CleanupUnconfirmed, match="could not be confirmed empty"):
         agent_review_loop._terminate_tree(_FakeProcess(), grace_s=0.2, job=777)  # type: ignore[arg-type]
 
-    # The job handle is still closed on the failure path -- KILL_ON_JOB_CLOSE
-    # means the last handle closing is itself one more attempt to kill whatever
-    # is still in it.
-    assert calls["close"] == [777]
+    # And the borrowed handle is not closed here even on the failure path: the
+    # owner closes it once, after this raises, and KILL_ON_JOB_CLOSE makes that
+    # close itself one more attempt to kill whatever is still in the job.
+    assert calls["close"] == []
 
 
 def test_terminate_tree_with_a_job_fails_safe_when_the_job_cannot_be_queried(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2092,6 +2120,24 @@ def test_terminate_tree_with_a_job_still_checks_the_agent_handle(monkeypatch: py
         agent_review_loop._terminate_tree(_SurvivingProcess(), grace_s=0.1, job=777)  # type: ignore[arg-type]
 
 
+def _fake_tracking(monkeypatch: pytest.MonkeyPatch, *, job: int = 42, seen: list[int] | None = None) -> None:
+    """Stand in for `_track_in_job_object` in the `run_agent` tests that are not
+    about the tracking call itself.
+
+    It writes `job` into the launch's ownership record exactly as the real call
+    does once the kernel has granted every step -- a handle, the agent assigned
+    to it, and the agent resumed -- so `run_agent`'s own release has the same
+    thing to answer for. Since review round 6 finding 1 that record, rather than
+    a returned handle, is the whole of what the call gives its caller."""
+
+    def fake_track(agent_job: object) -> None:
+        if seen is not None:
+            seen.append(agent_job.process.pid)  # type: ignore[attr-defined]
+        agent_job.handle, agent_job.member, agent_job.suspended = job, True, False  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(agent_review_loop, "_track_in_job_object", fake_track)
+
+
 def test_run_agent_launches_windows_suspended_and_tracks_it_in_a_job_object(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2114,11 +2160,7 @@ def test_run_agent_launches_windows_suspended_and_tracks_it_in_a_job_object(
 
     monkeypatch.setattr(agent_review_loop.subprocess, "Popen", fake_popen)
     tracked: list[int] = []
-    monkeypatch.setattr(
-        agent_review_loop,
-        "_track_in_job_object",
-        lambda process: tracked.append(process.pid) or 42,
-    )
+    _fake_tracking(monkeypatch, seen=tracked)
     # The agent exits on its own below, so `run_agent`'s own normal-exit
     # cleanup (review round 3 finding 3) confirms and closes job 42; these
     # stand in for the kernel the same way they do for `_terminate_tree`.
@@ -2147,10 +2189,11 @@ def test_run_agent_launches_windows_suspended_and_tracks_it_in_a_job_object(
 def test_run_agent_threads_the_tracked_job_into_terminate_tree_on_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The job `_track_in_job_object` hands back must be the one `_terminate_tree`
+    """The job `_track_in_job_object` recorded must be the one `_terminate_tree`
     is asked to confirm empty -- not a fresh, unrelated one -- or the whole point
     of assigning it before the process could spawn anything is lost the moment
-    cleanup runs."""
+    cleanup runs. It is lent to that call and closed once by the owner
+    afterwards, which the test below this one asserts."""
     monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
     real_popen = subprocess.Popen
 
@@ -2159,7 +2202,7 @@ def test_run_agent_threads_the_tracked_job_into_terminate_tree_on_timeout(
         return real_popen(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(agent_review_loop.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(agent_review_loop, "_track_in_job_object", lambda process: 42)
+    _fake_tracking(monkeypatch)
     seen_jobs: list[int | None] = []
     real_terminate_tree = agent_review_loop._terminate_tree
 
@@ -2314,7 +2357,7 @@ def test_run_agent_confirms_and_closes_the_job_when_the_reader_thread_cannot_sta
     the caller."""
     monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
     started = _forced_windows_popen(monkeypatch)
-    monkeypatch.setattr(agent_review_loop, "_track_in_job_object", lambda process: 42)
+    _fake_tracking(monkeypatch)
     _exploding_reader_thread(monkeypatch, RuntimeError("can't start new thread"))
     job_calls = _win32_job_fake(monkeypatch, active_counts=[0])
     recorded_terminate = agent_review_loop._terminate_job
@@ -2360,7 +2403,7 @@ def test_run_agent_reports_a_job_it_could_not_empty_over_the_failure_that_reache
     failure it replaced is still attached as its context."""
     monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
     started = _forced_windows_popen(monkeypatch)
-    monkeypatch.setattr(agent_review_loop, "_track_in_job_object", lambda process: 42)
+    _fake_tracking(monkeypatch)
     _exploding_reader_thread(monkeypatch, RuntimeError("can't start new thread"))
     job_calls = _win32_job_fake(monkeypatch, active_counts=[1])
 
@@ -2401,12 +2444,13 @@ def test_run_agent_leaves_no_live_agent_when_the_launch_is_interrupted(
 
     The agent here is a job member and running -- in this model it has been
     since `Popen` returned, standing in for a resume that had already succeeded
-    when the interrupt arrived. Nothing downstream can clean up after it:
-    `run_agent` never receives the handle, so its `finally` never owns one, and
+    when the interrupt arrived. Nothing further downstream can clean up after it:
     `main` catches KeyboardInterrupt and walks on through its own summary and
     scratch-removal path with the agent still running in the tree it is tidying.
-    So the release happens inside the tracking call, for an exception that is
-    not an `Exception` as much as for one that is."""
+    So the release happens for an exception that is not an `Exception` as much as
+    for one that is -- and since round 6 finding 1 it happens in `run_agent`'s
+    own `finally`, which has owned this launch since before the tracking call was
+    made rather than only once it returned a handle."""
     monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
     started = _forced_windows_popen(monkeypatch)
     forced_popen = agent_review_loop.subprocess.Popen
@@ -2456,6 +2500,124 @@ def test_run_agent_leaves_no_live_agent_when_the_launch_is_interrupted(
         )
 
     assert job_calls["terminate"] == [42]
+    assert job_calls["close"] == [42]
+    assert started and all(process.poll() is not None for process in started)
+
+
+def test_run_agent_releases_a_job_whose_handle_never_reached_the_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 6 finding 1: the interrupt that lands at the handover itself.
+
+    Everything the tracking call does succeeds here -- the job is created, the
+    agent is assigned to it, and the resume returns True -- and only then does
+    the KeyboardInterrupt arrive, on the boundary where the handle was about to
+    be returned. That was the one interval neither frame's cleanup covered. The
+    old helper's `finally` read the flag saying it had handed the job over, while
+    `run_agent` had not yet stored anything, so a job holding a resumed agent was
+    left with no owner at all: nothing terminated it, nothing confirmed it empty,
+    nothing closed the handle, and a raw Win32 handle held as an int is not
+    something the interpreter collects on the way out.
+
+    Nothing is handed over now. The launch's record holds the handle from the
+    instant the kernel granted it, so the owner that was already active when this
+    began terminates the job, confirms the kernel's own member count reads zero,
+    and closes the handle exactly once -- and the interrupt still reaches the
+    caller. The real tracking call runs here, wrapped only to raise as it
+    returns, so what the release finds is what the real one records."""
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    started = _forced_windows_popen(monkeypatch)
+    forced_popen = agent_review_loop.subprocess.Popen
+
+    def popen_with_a_process_handle(*args: object, **kwargs: object) -> subprocess.Popen:
+        process = forced_popen(*args, **kwargs)  # type: ignore[operator]
+        process._handle = 0xFEED  # type: ignore[attr-defined]
+        return process
+
+    monkeypatch.setattr(agent_review_loop.subprocess, "Popen", popen_with_a_process_handle)
+    monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: 42)
+    monkeypatch.setattr(agent_review_loop, "_assign_process_to_job", lambda job, handle: True)
+    monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: True)
+    real_track = agent_review_loop._track_in_job_object
+
+    def track_then_interrupt(agent_job: object) -> None:
+        # A complete, successful tracking call -- assigned and resumed -- with
+        # the interrupt on its way out, which is the reviewer's reproduction at
+        # the return line rather than at the resume the round before it.
+        real_track(agent_job)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(agent_review_loop, "_track_in_job_object", track_then_interrupt)
+    job_calls = _win32_job_fake(monkeypatch, active_counts=[0])
+    recorded_terminate = agent_review_loop._terminate_job
+
+    def terminate_and_kill(job: int) -> bool:
+        # TerminateJobObject really does reach every member, the agent included,
+        # so the survivor assertion below is about this run's own process rather
+        # than about a fake's bookkeeping.
+        for process in started:
+            process.kill()
+        return recorded_terminate(job)
+
+    monkeypatch.setattr(agent_review_loop, "_terminate_job", terminate_and_kill)
+
+    agent = tmp_path / "agent.py"
+    agent.write_text("import sys\nsys.stdin.read()\n", encoding="utf-8")
+
+    with pytest.raises(KeyboardInterrupt):
+        agent_review_loop.run_agent(
+            [sys.executable, str(agent)],
+            "prompt",
+            tmp_path,
+            "[claude r1]",
+            tmp_path / "log.txt",
+            timeout=30,
+            dry_run=False,
+            heartbeat=0,
+        )
+
+    assert job_calls["terminate"] == [42]
+    assert job_calls["count"] == [42]
+    assert job_calls["close"] == [42]
+    assert started and all(process.poll() is not None for process in started)
+
+
+def test_run_agent_closes_a_job_lent_to_terminate_tree_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of one owner: `_terminate_tree` borrows the handle.
+
+    It used to consume it, which meant `run_agent` had to clear its own record
+    before the call so the `finally` would not close it twice -- and an interrupt
+    between that clear and the call's own `try` left the handle in a temporary
+    nobody owned, with the agent still running inside the job it named. That is
+    the same shape as the finding above, so it gets the same answer: the record
+    keeps the handle across the call, `_terminate_tree` never closes it, and the
+    release closes it once afterwards. From outside, one owner looks like two
+    terminations -- the call's and the release's re-confirmation of an already
+    empty job -- and exactly one close, over an agent that is still killed and
+    reaped by the timeout path that borrowed it."""
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    started = _forced_windows_popen(monkeypatch)
+    _fake_tracking(monkeypatch)
+    job_calls = _win32_job_fake(monkeypatch, active_counts=[0])
+
+    agent = tmp_path / "slow.py"
+    agent.write_text("import sys, time\nsys.stdin.read()\ntime.sleep(120)\n", encoding="utf-8")
+
+    with pytest.raises(agent_review_loop.AgentTimeout):
+        agent_review_loop.run_agent(
+            [sys.executable, str(agent)],
+            "prompt",
+            tmp_path,
+            "[claude r1]",
+            tmp_path / "log.txt",
+            timeout=0.5,
+            dry_run=False,
+            heartbeat=0,
+        )
+
+    assert job_calls["terminate"] == [42, 42]
     assert job_calls["close"] == [42]
     assert started and all(process.poll() is not None for process in started)
 
