@@ -11,6 +11,7 @@ param(
     [string]$Version = '',
     [switch]$Can,
     [switch]$NoCan,
+    [switch]$SystemCerts,
     [switch]$Help,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
@@ -59,16 +60,22 @@ Options:
   --can               Install the [can] extra for PEAK and SocketCAN adapters.
                       This is the default.
   --no-can            Install without the [can] extra.
+  --system-certs      Validate TLS against this machine's own certificate
+                      store, the one curl and apt already read, instead of the
+                      roots uv carries inside its binary. This is what a
+                      TLS-intercepting proxy needs. Verification is never
+                      disabled, at any level, by this or any other flag.
   --help              Print this text and exit.
 
 PowerShell spells the same flags -Agent, -NoAgentInstall, -Version, -Can,
--NoCan and -Help; both spellings bind to the same options.
+-NoCan, -SystemCerts and -Help; both spellings bind to the same options.
 '@
 }
 
 $WithCan = -not $NoCan
 $WithAgentInstall = -not $NoAgentInstall
 $ShowHelp = [bool]$Help
+$UseSystemCerts = [bool]$SystemCerts
 
 # Two spellings carry an inner dash, which no PowerShell parameter name can, so
 # they arrive here rather than bound. Everything else binds by itself.
@@ -78,6 +85,7 @@ foreach ($token in @($Rest)) {
         '^--no-agent-install$' { $WithAgentInstall = $false }
         '^--no-can$' { $WithCan = $false }
         '^--can$' { $WithCan = $true }
+        '^--system-certs$' { $UseSystemCerts = $true }
         '^(--help|-h|/\?)$' { $ShowHelp = $true }
         default {
             Write-Host "agentic-hil install: unknown option: $token"
@@ -91,6 +99,25 @@ if ($Can) { $WithCan = $true }
 if ($ShowHelp) {
     Write-Usage
     exit 0
+}
+
+# The certificate store a TLS-intercepting proxy needs, and the only concession
+# this script makes to one. uv validates against roots bundled in its own
+# binary, so on a managed network it fails where a browser on the same machine
+# keeps working; this points it at the store Windows itself holds. pip takes a
+# file rather than a switch and Windows ships no bundle file, so PIP_CERT is the
+# operator's to set on the rare host where pip rather than uv does the install.
+# Verification is never disabled: -SkipCertificateCheck, --allow-insecure-host
+# and --trusted-host are not options this script offers.
+if ($UseSystemCerts) {
+    $env:UV_SYSTEM_CERTS = '1'
+    Write-Say "certificates: uv reads this machine's own certificate store"
+}
+
+$UvInstallFailure = if ($UseSystemCerts) {
+    "uv could not install agentic-hil, --system-certs included; if the failure above is a certificate, the proxy's own CA is missing from this machine's store and installing it there is the fix; TROUBLESHOOTING.md section 1 has the rest"
+} else {
+    "uv could not install agentic-hil; TROUBLESHOOTING.md section 1 has the fallbacks. On a managed network the usual cause is a TLS-intercepting proxy, which uv reports as an invalid peer certificate because it validates against roots bundled in its own binary; re-run with --system-certs to point it at this machine's own store"
 }
 
 # Windows PowerShell 5.1 still negotiates TLS 1.0 by default, and every host
@@ -342,7 +369,7 @@ if (-not $needsPackage) {
     Write-Step 2 'package: nothing to install'
 } elseif (Test-Executable 'uv') {
     Write-Step 2 "package: uv is here, installing $(Get-PackageSpec) user-local with uv tool install"
-    Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure 'uv could not install agentic-hil'
+    Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure $UvInstallFailure
     $packageManager = 'uv'
 } else {
     $pythonCommand = Find-Python
@@ -360,7 +387,7 @@ if (-not $needsPackage) {
                 if (-not (Test-Executable 'uv')) { Install-Uv }
                 Add-UserBinToPath
                 if (-not (Test-Executable 'uv')) { throw 'uv installed but does not resolve yet; open a new shell and run this again' }
-                Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure 'uv could not install agentic-hil'
+                Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure $UvInstallFailure
                 $packageManager = 'uv'
             } else {
                 throw "pip could not install $(Get-PackageSpec); TROUBLESHOOTING.md section 1 has the fallbacks"
@@ -373,7 +400,7 @@ if (-not $needsPackage) {
         Install-Uv
         if (-not (Test-Executable 'uv')) { throw 'uv installed but does not resolve yet; open a new shell and run this again' }
         Write-Say "package: installing $(Get-PackageSpec) user-local with uv tool install"
-        Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure 'uv could not install agentic-hil'
+        Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure $UvInstallFailure
         $packageManager = 'uv'
     }
 }

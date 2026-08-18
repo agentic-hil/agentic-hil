@@ -46,6 +46,7 @@ DOCUMENTED_FLAGS = (
     "--version",
     "--can",
     "--no-can",
+    "--system-certs",
     "--help",
 )
 
@@ -1058,6 +1059,103 @@ def test_an_installation_below_the_release_is_upgraded_rather_than_kept(tmp_path
     assert "0.11.0 is older than" in transcript, transcript
     assert marker.is_file(), transcript
     assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+
+
+def test_neither_script_offers_a_way_to_disable_certificate_verification() -> None:
+    """A proxied network is answered by a trust store, never by a switch.
+
+    `--system-certs` exists because uv validates against roots bundled in its own
+    binary and a TLS-intercepting proxy is not in them. The neighbouring switches
+    that make the same symptom go away do it by not checking, and one of them
+    reaching a script a stranger pipes into a shell would be the whole promise of
+    these two files gone. Comments are stripped first, so the comment that names
+    what must never be passed is not read as passing it.
+    """
+    for name, code in _both_code().items():
+        for forbidden in ("--allow-insecure-host", "--trusted-host", "--insecure", "-SkipCertificateCheck", "ServerCertificateValidationCallback"):
+            assert forbidden not in code, f"{name} carries {forbidden}"
+
+
+def test_both_scripts_point_the_package_manager_at_the_system_store() -> None:
+    """The flag sets the variable rather than passing a switch to one command.
+
+    `agentic-hil upgrade` shells out to `uv tool upgrade` and passes no TLS flags
+    of its own, so a proxied host whose install command carried the switch would
+    lose the upgrade path the next time. An exported variable is inherited by
+    both, which is the shape TROUBLESHOOTING.md already recommends.
+    """
+    shell = _code_only(_shell_source())
+    assert "UV_SYSTEM_CERTS" in shell
+    assert "export UV_SYSTEM_CERTS" in shell
+    # pip takes a file rather than a switch, so the flag has to find one.
+    assert "PIP_CERT" in shell
+    powershell = _code_only(_powershell_source())
+    assert "UV_SYSTEM_CERTS" in powershell
+
+
+def test_the_system_certs_flag_reaches_the_package_manager(tmp_path: Path) -> None:
+    """`--system-certs`, run end to end through a POSIX shell.
+
+    A static read can show the variable is set somewhere in the file. It cannot
+    show that the process which needs it is started after that, and inherits it.
+    The stub uv records what it was given.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, uv_bin, tools):
+        directory.mkdir(parents=True)
+
+    seen = tmp_path / "what-uv-was-given"
+
+    _stub_executable(
+        tools / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'  echo "${{UV_SYSTEM_CERTS:-unset}}" > "{seen}"\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "99.0.0" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--system-certs", "--no-can", "--no-agent-install"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert seen.is_file(), transcript
+    assert seen.read_text(encoding="utf-8").strip() == "1", transcript
+    assert "certificates: uv" in transcript, transcript
 
 
 # The container run, end to end: a machine with nothing on it, the real package

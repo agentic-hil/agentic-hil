@@ -20,6 +20,7 @@ AGENT=""
 WITH_AGENT_INSTALL=1
 PINNED=""
 WITH_CAN=1
+SYSTEM_CERTS=0
 STEP_TOTAL=5
 
 say() {
@@ -61,6 +62,11 @@ Options:
   --can               Install the [can] extra for PEAK and SocketCAN adapters.
                       This is the default.
   --no-can            Install without the [can] extra.
+  --system-certs      Validate TLS against this machine's own certificate
+                      store, the one curl and apt already read, instead of the
+                      roots uv carries inside its binary. This is what a
+                      TLS-intercepting proxy needs. Verification is never
+                      disabled, at any level, by this or any other flag.
   --help              Print this text and exit.
 USAGE
 }
@@ -101,6 +107,10 @@ while [ $# -gt 0 ]; do
             WITH_CAN=0
             shift
             ;;
+        --system-certs)
+            SYSTEM_CERTS=1
+            shift
+            ;;
         --help | -h)
             usage
             exit 0
@@ -112,6 +122,42 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+
+# The certificate store a TLS-intercepting proxy needs, and the only concession
+# this script makes to one. uv validates against roots bundled in its own
+# binary, so on a managed network it fails where curl and apt on the same host
+# keep working, which is what makes the cause recognisable; this points it at
+# the store those two already read. pip takes a file rather than a switch, so
+# the usual locations are tried and whichever is found is named. Verification is
+# never disabled: --allow-insecure-host, --insecure and --trusted-host are not
+# options this script offers, and no flag here is a way to reach them.
+system_cert_bundle() {
+    for candidate in \
+        /etc/ssl/certs/ca-certificates.crt \
+        /etc/pki/tls/certs/ca-bundle.crt \
+        /etc/ssl/ca-bundle.pem \
+        /etc/ssl/cert.pem; do
+        if [ -r "$candidate" ]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ "$SYSTEM_CERTS" -eq 1 ]; then
+    UV_SYSTEM_CERTS=1
+    export UV_SYSTEM_CERTS
+    if [ -n "${PIP_CERT:-}" ]; then
+        say "certificates: uv reads this machine's own store; pip keeps the PIP_CERT already set here"
+    elif pip_cert_bundle=$(system_cert_bundle); then
+        PIP_CERT="$pip_cert_bundle"
+        export PIP_CERT
+        say "certificates: uv and pip read this machine's own store ($pip_cert_bundle)"
+    else
+        say "certificates: uv reads this machine's own store; no bundle file was found here for pip, so set PIP_CERT to one if pip is what fails"
+    fi
+fi
 
 # The leading run of digits of one dot-separated field, so a development version
 # spelled X.Y.Z.devN compares as X.Y.Z instead of refusing to parse.
@@ -303,7 +349,13 @@ user_bin_on_path() {
 }
 
 install_with_uv() {
-    uv tool install --upgrade "$(package_spec)"
+    if uv tool install --upgrade "$(package_spec)"; then
+        return 0
+    fi
+    if [ "$SYSTEM_CERTS" -eq 1 ]; then
+        fail "package: uv could not install $(package_spec), --system-certs included; if the failure above is a certificate, the proxy's own CA is missing from this machine's store and installing it there is the fix; TROUBLESHOOTING.md section 1 has the rest"
+    fi
+    fail "package: uv could not install $(package_spec); TROUBLESHOOTING.md section 1 has the fallbacks. On a managed network the usual cause is a TLS-intercepting proxy, which uv reports as an invalid peer certificate because it validates against roots bundled in its own binary; re-run with --system-certs to point it at this machine's own store"
 }
 
 install_with_pip() {
