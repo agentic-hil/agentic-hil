@@ -149,26 +149,30 @@ class CanBusSession:
 def socketcan_bitrate_honesty_fields(bus_config: CanBusConfig) -> JsonObject:
     """Whether this bus's ``bitrate`` is a fact this session set, said honestly.
 
-    Empty for `peak` and `process`. On `peak`, `PcanBus.__init__` maps `bitrate`
-    to a driver baud-rate constant and hands it to `PCANBasic.Initialize`, which
-    is what actually configures the channel: the value reported is the value
-    applied. A `process` bridge is told the rate in its own `open` request and is
-    the party that would apply it; that is unchanged here.
+    Empty for a bus that actually opens through PCANBasic and for `process`. On
+    such a `peak` bus, `PcanBus.__init__` maps `bitrate` to a driver baud-rate
+    constant and hands it to `PCANBasic.Initialize`, which is what actually
+    configures the channel: the value reported is the value applied. A
+    `process` bridge is told the rate in its own `open` request and is the
+    party that would apply it; that is unchanged here.
 
-    Not empty for `socketcan`. python-can's `SocketcanBus` takes no `bitrate`
-    argument: Linux CAN bit timing is netdev state, set with `ip link set
-    <dev> type can bitrate <rate>` before this process ever opens a socket, so
-    a `bitrate` this call put in `can.Bus(**kwargs)` for a `socketcan` bus
-    landed in `**kwargs` and was dropped without a word, the same shape of
-    no-op `listen_only` would have been on this backend. Reporting the
-    configured value next to an open session implied this call had set it. It
-    had not, and does not try to: setting Linux bit timing from here would mean
-    a raw `CAN_RAW` socket reaching for `ip link` behind the operator's back,
-    on an interface bit timing is not this session's to own. `bitrate_verified:
+    Not empty for a bus that opens through `socketcan` -- whether configured
+    that way directly, or a `peak` bus whose channel names a Linux kernel
+    netdev instead of a PCANBasic handle (`effective_can_adapter`,
+    `peak_channel_uses_socketcan`) and is routed to the same backend. Neither
+    takes a `bitrate` argument: Linux CAN bit timing is netdev state, set with
+    `ip link set <dev> type can bitrate <rate>` before this process ever opens
+    a socket, so a `bitrate` this call put in `can.Bus(**kwargs)` landed in
+    `**kwargs` and was dropped without a word, the same shape of no-op
+    `listen_only` would have been on this backend. Reporting the configured
+    value next to an open session implied this call had set it. It had not,
+    and does not try to: setting Linux bit timing from here would mean a raw
+    `CAN_RAW` socket reaching for `ip link` behind the operator's back, on an
+    interface bit timing is not this session's to own. `bitrate_verified:
     false` says so next to the number, rather than leaving the number to imply
     it on its own.
     """
-    if bus_config.adapter != "socketcan":
+    if effective_can_adapter(bus_config) != "socketcan":
         return {}
     return {
         "bitrate_verified": False,
@@ -478,7 +482,7 @@ class CanBusService:
         # back it on this adapter, so the scope of the guarantee is readable
         # before a session is started rather than only in the refusal that
         # follows one.
-        result: JsonObject = {"adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "listen_only": bus_config.listen_only, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[bus_config.adapter], "max_buffer_frames": bus_config.max_buffer_frames, "max_frame_data_bytes": bus_config.max_frame_data_bytes, "session_active": False}
+        result: JsonObject = {"adapter": bus_config.adapter, "channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "listen_only": bus_config.listen_only, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[effective_can_adapter(bus_config)], "max_buffer_frames": bus_config.max_buffer_frames, "max_frame_data_bytes": bus_config.max_frame_data_bytes, "session_active": False}
         # `bitrate` above is this bus's configuration on every adapter; on
         # `socketcan` it is nothing more; see `socketcan_bitrate_honesty_fields`.
         # Empty, and therefore invisible, everywhere else.
@@ -652,7 +656,7 @@ def listen_only_send_refusal(bus_id: str, bus_config: CanBusConfig, tool: str = 
         "error_type": LISTEN_ONLY_MODE_ERROR,
         "field": f"can_buses.{bus_id}.listen_only",
         "listen_only": True,
-        "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[bus_config.adapter],
+        "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[effective_can_adapter(bus_config)],
         "summary": (
             f"CAN bus {bus_id} is configured `listen_only: true` — the claim that observing it sends nothing — so a "
             "transmit on it is refused before any driver is called, whatever permissions.allow_write says. To "
@@ -784,6 +788,32 @@ def peak_channel_uses_socketcan(channel: str) -> bool:
     return os.name != "nt" and not is_windows_peak_channel(channel) and PEAK_LINUX_NETDEV_CHANNEL.fullmatch(channel) is not None
 
 
+def effective_can_adapter(bus_config: CanBusConfig) -> str:
+    """Which entry in `LISTEN_ONLY_ENFORCEMENT` -- and every other place keyed by
+    adapter to describe what a session actually proves -- names this bus's route.
+
+    Identity for every adapter but `peak`, which is the one configured name that
+    can route through either of two backends. A PCANBasic handle opens as
+    `peak` and inherits everything that implies. A channel shaped like a Linux
+    kernel netdev (`peak_channel_uses_socketcan`) opens through `socketcan`
+    instead, and inherits *that* backend's proof, not PCANBasic's: what
+    listen-only actually verifies there is the kernel's ctrlmode, not a
+    driver read-back, and a reported bitrate is configuration nobody applied,
+    not a measurement, exactly as for a bus configured `socketcan` from the
+    start. Resolved once so opening, bitrate honesty, listen-only enforcement
+    and status cannot each answer a different question about the one bus that
+    actually opened.
+
+    This is not `bus_config.adapter`, and callers that mean the *logical*
+    adapter -- what the bench is configured as, reported back unchanged in
+    every result's `adapter` field -- must keep reading that directly. This is
+    only for the question of which backend's semantics actually apply.
+    """
+    if bus_config.adapter == "peak" and peak_channel_uses_socketcan(bus_config.channel):
+        return "socketcan"
+    return bus_config.adapter
+
+
 def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: CanBusConfig) -> JsonObject | None:
     """The refusal for a SocketCAN interface that does not exist, or ``None``.
 
@@ -818,7 +848,7 @@ def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: C
     `socketcan` bus's missing interface is: the exclusion below follows the
     channel's actual route rather than the adapter's name.
     """
-    routed_through_socketcan = bus_config.adapter == "socketcan" or (bus_config.adapter == "peak" and peak_channel_uses_socketcan(bus_config.channel))
+    routed_through_socketcan = effective_can_adapter(bus_config) == "socketcan"
     if not routed_through_socketcan or not raised_errno(error, errno_module.ENODEV):
         return None
     return {
@@ -941,8 +971,8 @@ def can_adapter_library_missing(error: BaseException, bus_id: str, bus_config: C
     ordinary Linux box `peak_channel_uses_socketcan` exists for) could see an
     unrelated socketcan failure misreported as a missing vendor library.
     """
-    peak_via_socketcan = bus_config.adapter == "peak" and peak_channel_uses_socketcan(bus_config.channel)
-    interface = "socketcan" if bus_config.adapter != "peak" or peak_via_socketcan else "pcan"
+    effective_adapter = effective_can_adapter(bus_config)
+    interface = "pcan" if effective_adapter == "peak" else effective_adapter
     library: str | None = None
     detail: str | None = None
     with suppress(Exception):
@@ -1074,10 +1104,13 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     # than to `pcan`: `PcanBus` speaks PCANBasic and cannot open a netdev at
     # all, so a channel the guard above accepted as SocketCAN-shaped and then
     # handed to `pcan` was never going to open: it would fail exactly as if
-    # the channel did not exist, on hardware that does. See
-    # `peak_channel_uses_socketcan` for the channel shapes this recognises.
-    peak_via_socketcan = bus_config.adapter == "peak" and peak_channel_uses_socketcan(bus_config.channel)
-    interface = "socketcan" if bus_config.adapter != "peak" or peak_via_socketcan else "pcan"
+    # the channel did not exist, on hardware that does. `effective_can_adapter`
+    # is the one place that answers this, so everything below that depends on
+    # which backend actually opened -- listen-only enforcement, bitrate
+    # honesty, the summary -- reads the same answer this does.
+    effective_adapter = effective_can_adapter(bus_config)
+    peak_via_socketcan = bus_config.adapter == "peak" and effective_adapter == "socketcan"
+    interface = "pcan" if effective_adapter == "peak" else effective_adapter
     bus_kwargs: JsonObject = {
         "interface": interface,
         "channel": bus_config.channel,
@@ -1217,7 +1250,7 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         summary = f"CAN adapter opened through SocketCAN: channel {bus_config.channel} names a Linux kernel netdev, which PCANBasic cannot open, so this `peak` bus was routed to the socketcan backend instead of pcan."
     result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "backend": interface, "session": session, "summary": summary}
     if bus_config.listen_only:
-        result.update({"listen_only": True, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[bus_config.adapter]})
+        result.update({"listen_only": True, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[effective_adapter]})
     return result
 
 

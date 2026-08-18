@@ -507,3 +507,30 @@ def test_a_peak_session_carries_no_such_caveat(tmp_path: Path, monkeypatch: pyte
     assert "bitrate_note" not in started
     assert "bitrate_verified" not in listed
     assert "bitrate_note" not in listed
+
+
+@POSIX_ONLY
+def test_a_peak_bus_routed_through_socketcan_gets_the_socketcan_bitrate_caveat_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review finding: a `peak` bus routed through `socketcan` for its channel
+    must carry the same bitrate honesty caveat a `socketcan` bus does, not the
+    caveat-free report `test_a_peak_session_carries_no_such_caveat` proves for a
+    genuine PCANBasic handle. The backend that actually opened is socketcan,
+    whatever the bus is configured as, and socketcan is the one that silently
+    drops `bitrate` -- reporting continued to key off `bus_config.adapter`
+    ("peak") rather than the backend that actually opened, so this caveat never
+    appeared for this route."""
+    config = can_config(tmp_path, adapter="peak", channel="can0", bitrate=250000)
+    monkeypatch.setitem(sys.modules, "can", fake_can_module(lambda **kwargs: RecordingBus()))
+    service = CanBusService(config)
+    try:
+        started = service.session_start("bench", clear_rx_queue=False)
+        listed = service.list_buses()["buses"]["bench"]
+    finally:
+        service.close()
+
+    assert started["ok"] is True
+    assert started["adapter_result"]["backend"] == "socketcan"
+    assert started["bitrate_verified"] is False
+    assert "interface" in started["bitrate_note"]
+    assert listed["bitrate_verified"] is False
+    assert "bitrate_note" in listed

@@ -21,6 +21,7 @@ driver and that an unbacked claim refuses instead of listening anyway.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -46,6 +47,8 @@ PCAN_ERROR_OK = 0
 PCAN_LISTEN_ONLY = 8
 PCAN_PARAMETER_ON = 1
 PCAN_PARAMETER_OFF = 0
+
+POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX-only PEAK-via-SocketCAN channel routing")
 
 FAKE_CAN_BRIDGE = Path(__file__).parent / "fixtures" / "fake_can_bridge.py"
 
@@ -306,6 +309,54 @@ def test_socketcan_without_listen_only_never_probes_the_link(tmp_path: Path, mon
     assert result["ok"] is True
     assert commands == []
     assert "listen_only" not in result
+
+
+# --- PEAK routed through SocketCAN: the socketcan mechanism applies, not PEAK's -
+
+
+@POSIX_ONLY
+def test_peak_routed_through_socketcan_is_held_to_socketcans_mechanism_not_peaks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review finding: a `peak` bus whose channel names a Linux kernel netdev
+    opens through `socketcan` (see test_can_frame_and_routing.py), and the code
+    that actually runs for `listen_only: true` on that route is the SocketCAN
+    link-state check below, not PEAK's PCANBasic read-back -- `open_python_can_adapter`
+    passes `interface="socketcan"` into `listen_only_precondition` for this
+    route. The report has to say so: `driver_verified` next to a proof that was
+    actually `ip link`'s kernel ctrlmode reading would tell an operator the
+    wrong thing was checked, on the one bus where the two could actually
+    diverge from `bus_config.adapter` alone.
+    """
+    config = can_config(tmp_path, "peak", "can0", listen_only=True)
+    commands = install_ip(monkeypatch, tmp_path, lambda command, **kwargs: completed(ip_json(["listen-only"])))
+    opened: dict[str, object] = {}
+    monkeypatch.setitem(sys.modules, "can", fake_can_module(lambda **kwargs: opened.update(kwargs) or SimpleNamespace(shutdown=lambda: None)))
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+
+    assert result["ok"] is True
+    assert result["backend"] == "socketcan"
+    assert result["listen_only"] is True
+    assert result["listen_only_enforcement"] == "link_verified"
+    # The SocketCAN mechanism ran: an `ip link` query, not a PCANBasic
+    # `GetValue` read-back, and PEAK's own `state=` keyword was never sent.
+    assert commands[0][1:] == ["-details", "-json", "link", "show", "dev", "can0"]
+    assert "state" not in opened
+
+
+@POSIX_ONLY
+def test_peak_routed_through_socketcan_refuses_the_same_way_socketcan_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half: an ACKing controller on this route must be refused
+    before contact, exactly as a native `socketcan` bus is -- not waved
+    through by a channel-shape guard that only ever checked `bus_config.adapter`."""
+    config = can_config(tmp_path, "peak", "can0", listen_only=True)
+    install_ip(monkeypatch, tmp_path, lambda command, **kwargs: completed(ip_json([])))
+    monkeypatch.setitem(sys.modules, "can", fake_can_module(lambda **kwargs: pytest.fail("the bus must not be opened")))
+
+    result = open_python_can_adapter(config, "bench", config.can_buses["bench"], False)
+
+    assert result["ok"] is False
+    assert result["error_type"] == LISTEN_ONLY_UNSUPPORTED_ERROR
+    assert result["listen_only_confirmed"] is False
 
 
 # --- PEAK: the mode is settable, so it is set, re-asserted, and measured -------
@@ -716,6 +767,25 @@ def test_a_driver_that_cannot_honour_it_refuses_the_session_through_the_service(
 
 def test_can_buses_list_names_what_would_back_the_claim(tmp_path: Path) -> None:
     config = can_config(tmp_path, "socketcan", "can0", listen_only=True)
+    service = CanBusService(config)
+    try:
+        listed = service.list_buses()
+    finally:
+        service.close()
+
+    assert listed["buses"]["bench"]["listen_only"] is True
+    assert listed["buses"]["bench"]["listen_only_enforcement"] == "link_verified"
+
+
+@POSIX_ONLY
+def test_can_buses_list_names_socketcans_mechanism_for_a_peak_bus_routed_through_it(tmp_path: Path) -> None:
+    """Before any session opens, listing must already answer the question the
+    channel shape has already settled: a `peak` bus naming a Linux kernel
+    netdev is going to route through `socketcan`, so what would back its
+    `listen_only` claim is `link_verified`, not PEAK's own `driver_verified` --
+    readable before a session starts, the same way the docstring on
+    `_bus_status` already promises for the flag itself."""
+    config = can_config(tmp_path, "peak", "can0", listen_only=True)
     service = CanBusService(config)
     try:
         listed = service.list_buses()
