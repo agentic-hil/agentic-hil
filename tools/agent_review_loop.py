@@ -489,7 +489,7 @@ def _resume_process_threads(pid: int) -> bool:
         _close_handle(snapshot)
 
 
-def _track_in_job_object(process: subprocess.Popen[str]) -> int | None:
+def _track_in_job_object(process: subprocess.Popen[str]) -> int:
     """Assign `process` -- launched suspended with `_CREATE_SUSPENDED` -- to a
     fresh Job Object and resume it, so every descendant it will ever create is
     a job member from the instant it exists, not from whenever this module's
@@ -504,36 +504,67 @@ def _track_in_job_object(process: subprocess.Popen[str]) -> int | None:
     cannot be created and exit invisibly to a job it was already in before it
     ran its first instruction.
 
-    Returns the job handle on success, so `_terminate_tree` can ask it whether
-    it is empty instead of walking `tasklist`. If a job could not be created or
-    assigned -- the process already belongs to a job that forbids nesting, or
-    anything else -- this still resumes the process and returns None, and
-    `_terminate_tree` falls back to a best-effort taskkill that can never
-    confirm the tree clean (see review round 3 finding 1); job creation is not
-    required for the agent to run, only for cleanup to ever be confirmed.
+    Returns the job handle, which is the only way this returns at all: an agent
+    that could not be placed under a job is never resumed. Round 2 let such a
+    launch run untracked on the argument that a narrower fallback beat losing
+    agent execution entirely; round 3 finding 1 then showed that fallback can
+    never confirm a tree empty, and round 4 finding 1 showed the ordinary exits
+    -- success and a plain nonzero code -- never even reach cleanup, so an
+    untracked agent's detached descendant outlives the round and races the very
+    salvage commit this work exists to protect. Nothing can be added to the
+    no-job path to fix that: once the root has exited, a PID-rooted taskkill
+    cannot discover descendants that are already orphaned. So the launch is
+    failed at the one moment the answer is still knowable, while the process is
+    suspended and has provably spawned nothing, and the run ends with
+    AgentError (or CleanupUnconfirmed if even that kill cannot be confirmed)
+    rather than with a round whose result could never be trusted.
 
-    But the resume itself is required: review round 3 finding 2 is a resume
-    that silently failed leaving the process suspended forever, which
-    `run_agent` then waited out for the whole round timeout because nothing
-    told it the agent had never started. So a resume that returns False or
-    raises is not swallowed here -- the process is still suspended, so it can
-    have no descendants of its own yet, and is killed through whichever handle
-    can reach it (the job, if one was assigned, or the process handle
-    otherwise) before this raises AgentError or CleanupUnconfirmed, so the
-    caller fails the launch immediately instead of waiting on a process that
-    will never run.
+    The resume is required for the same reason it has been since review round 3
+    finding 2: a resume that silently failed left the process suspended
+    forever, which `run_agent` then waited out for the whole round timeout
+    because nothing told it the agent had never started. A resume that returns
+    False or raises is not swallowed -- the process is still suspended, so it
+    can have no descendants of its own yet, and is killed through the job it
+    was just assigned to before this raises.
     """
     job: int | None = None
     created: int | None = None
+    setup_error: Exception | None = None
     try:
         created = _create_job_object()
         if created is not None and _assign_process_to_job(created, process._handle):  # noqa: SLF001 -- see _resume_process_threads
             job = created
-    except Exception:
-        job = None
+    except Exception as error:
+        setup_error = error
     finally:
         if job is None and created is not None:
             _close_handle(created)
+
+    if job is None:
+        # Creation failed, assignment failed, or a Win32 call raised: there is
+        # no kernel-tracked membership for this tree and there never will be
+        # one, because a process can only be assigned to a job it is not yet
+        # running ahead of. Kill it here rather than resume it. It is still
+        # suspended, so this is the whole tree -- one process that has executed
+        # no instruction -- and its death is confirmable, which is exactly what
+        # nothing later in the round would be able to say about it. A kill that
+        # errors is not raised over the answer below: it is the answer, and
+        # `poll()` gives it as the CleanupUnconfirmed a failed kill deserves
+        # rather than as an OSError nothing in the loop is looking for.
+        with contextlib.suppress(OSError, ValueError):
+            process.kill()
+        _reap_leader(process, grace_s=5.0)
+        if process.poll() is None:
+            raise CleanupUnconfirmed(
+                f"pid {process.pid} could not be placed under a Windows Job Object and then could not be "
+                "confirmed killed while it was still suspended"
+            ) from setup_error
+        raise AgentError(
+            f"pid {process.pid} could not be placed under a Windows Job Object, so nothing could ever confirm "
+            "its process tree gone; it was killed while still suspended rather than run untracked. Run the "
+            "loop through tools/loop_in_container.py, or from a host where this process is not already "
+            "confined to a job object that forbids nesting."
+        ) from setup_error
 
     try:
         resumed = _resume_process_threads(process.pid)
@@ -545,18 +576,10 @@ def _track_in_job_object(process: subprocess.Popen[str]) -> int | None:
     if resumed:
         return job
 
-    if job is not None:
-        try:
-            _confirm_job_empty(job, process, grace_s=5.0)
-        finally:
-            _close_handle(job)
-    else:
-        process.kill()
-        _reap_leader(process, grace_s=5.0)
-        if process.poll() is None:
-            raise CleanupUnconfirmed(
-                f"pid {process.pid} could not be resumed and then could not be confirmed killed"
-            ) from resume_error
+    try:
+        _confirm_job_empty(job, process, grace_s=5.0)
+    finally:
+        _close_handle(job)
     raise AgentError(f"pid {process.pid} could not be resumed to start running") from resume_error
 
 
@@ -619,10 +642,9 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job
     be delivered, or the group still has a member after the final SIGKILL and its
     deadline, this raises CleanupUnconfirmed rather than returning: returning would
     tell the caller the tree is safe to commit when a process may still be editing
-    it, which is the race this exists to prevent. On Windows without a job --
-    creation or assignment failed, or nesting is unavailable -- there is no
-    kernel-tracked membership to ask, so this never returns cleanly at all; see
-    the `job is None` branch below.
+    it, which is the race this exists to prevent. On Windows without a job there
+    is no kernel-tracked membership to ask, so this never returns cleanly at
+    all; see the `job is None` branch below.
     """
     if sys.platform == "win32" and job is not None:
         try:
@@ -638,19 +660,22 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job
             _close_handle(job)
 
     if sys.platform == "win32":
-        # No Job Object could be established for this process -- creation or
-        # assignment failed, or the host's job policy forbids nesting -- so
-        # nothing has been tracking this tree's membership since before it ran
-        # its first instruction. A `taskkill /T` walk is then racing a live
-        # tree the same way repeated `tasklist` snapshots were shown to in
-        # review round 3 finding 1: a descendant born after the walk, or even
-        # after the kill, is invisible to it, and re-enumerating harder cannot
-        # rule that out -- only something that was tracking membership the
-        # whole time (a Job Object) can. taskkill is still run here, once, as a
-        # courtesy: a clean host is the common case and there is no reason not
-        # to try. But the result is never trusted as proof of anything, so this
-        # always raises CleanupUnconfirmed -- salvage_commit must never race a
-        # descendant this call had no way to rule out.
+        # A Windows agent `run_agent` started never reaches this: since review
+        # round 4 finding 1, `_track_in_job_object` fails the launch instead of
+        # resuming a process it could not place under a job, so a running agent
+        # always has one. This stays as the backstop for every other way a
+        # `job=None` process could arrive here, and it is deliberately the
+        # unhappy answer. Nothing has been tracking such a tree's membership
+        # since before it ran its first instruction, so a `taskkill /T` walk is
+        # racing a live tree the same way repeated `tasklist` snapshots were
+        # shown to in review round 3 finding 1: a descendant born after the
+        # walk, or even after the kill, is invisible to it, and re-enumerating
+        # harder cannot rule that out -- only something that was tracking
+        # membership the whole time (a Job Object) can. taskkill is still run
+        # here, once, as a courtesy: a clean host is the common case and there
+        # is no reason not to try. But the result is never trusted as proof of
+        # anything, so this always raises CleanupUnconfirmed -- salvage_commit
+        # must never race a descendant this call had no way to rule out.
         _taskkill_tree(process.pid)
         process.kill()
         _reap_leader(process, grace_s)
@@ -803,50 +828,72 @@ def run_agent(
             start_new_session=True,
             creationflags=_CREATE_SUSPENDED if sys.platform == "win32" else 0,
         )
-        job = _track_in_job_object(process) if sys.platform == "win32" else None
-        assert process.stdin is not None and process.stdout is not None
-        reader = threading.Thread(target=_pump, args=(process.stdout, prefix, log_handle, progress), daemon=True)
-        reader.start()
+        job: int | None = _track_in_job_object(process) if sys.platform == "win32" else None
+        # From here to the `finally` below, this frame owns that job handle, and
+        # `job` is the record of whether it still does. Review round 3 finding 3
+        # was a handle closed on only some paths; review round 4 finding 2 was
+        # the rest of them -- a `reader.start()` that raises RuntimeError, an
+        # unexpected `process.wait()` error, a heartbeat `print` that fails --
+        # walking out past every close there was, leaving both the handle and
+        # everything still running inside the job live. So there is now exactly
+        # one owner and one release. `_terminate_tree` consumes the handle when
+        # it is called, so `job` is cleared to None *before* the call rather
+        # than after it: if that call raises, ownership has already moved and
+        # the `finally` must not close a handle a second time.
         try:
-            process.stdin.write(prompt)
-            process.stdin.close()
-        except OSError as error:  # the agent exited before reading the prompt
-            # It may still be alive and holding the working tree; do not leave it
-            # running just because it stopped listening.
-            _terminate_tree(process, job=job)
-            reader.join(timeout=10)
-            raise AgentError(f"{prefix} refused the prompt: {error}") from error
-
-        deadline = started + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                _terminate_tree(process, job=job)
+            assert process.stdin is not None and process.stdout is not None
+            reader = threading.Thread(target=_pump, args=(process.stdout, prefix, log_handle, progress), daemon=True)
+            reader.start()
+            try:
+                process.stdin.write(prompt)
+                process.stdin.close()
+            except OSError as error:  # the agent exited before reading the prompt
+                # It may still be alive and holding the working tree; do not leave it
+                # running just because it stopped listening.
+                consumed, job = job, None
+                _terminate_tree(process, job=consumed)
                 reader.join(timeout=10)
-                raise AgentTimeout(f"{prefix} exceeded --timeout of {timeout:.0f}s")
-            try:
-                returncode = process.wait(timeout=min(heartbeat, remaining) if heartbeat > 0 else remaining)
-                break
-            except subprocess.TimeoutExpired:
-                if heartbeat > 0:
-                    elapsed = time.monotonic() - started
-                    print(f"{prefix} ... {elapsed:.0f}s of {timeout:.0f}s, {progress.describe()}", flush=True)
-        reader.join(timeout=30)
+                raise AgentError(f"{prefix} refused the prompt: {error}") from error
 
-        if job is not None:
-            # The agent itself just exited on its own -- `_terminate_tree` was
-            # never called, so nothing has closed this job handle yet. Left
-            # open, it leaks for the rest of the loop process's life and, since
-            # the job carries KILL_ON_JOB_CLOSE, keeps whatever the agent left
-            # running in it alive indefinitely too (review round 3 finding 3).
-            # Confirm-then-close mirrors `_terminate_tree`'s own job branch,
-            # rather than trusting KILL_ON_JOB_CLOSE's kill to have finished by
-            # the time close returns -- it is asynchronous, the same reason
-            # `_terminate_tree` does not just close and trust it.
-            try:
-                _confirm_job_empty(job, process, grace_s=5.0)
-            finally:
-                _close_handle(job)
+            deadline = started + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    consumed, job = job, None
+                    _terminate_tree(process, job=consumed)
+                    reader.join(timeout=10)
+                    raise AgentTimeout(f"{prefix} exceeded --timeout of {timeout:.0f}s")
+                try:
+                    returncode = process.wait(timeout=min(heartbeat, remaining) if heartbeat > 0 else remaining)
+                    break
+                except subprocess.TimeoutExpired:
+                    if heartbeat > 0:
+                        elapsed = time.monotonic() - started
+                        print(f"{prefix} ... {elapsed:.0f}s of {timeout:.0f}s, {progress.describe()}", flush=True)
+            reader.join(timeout=30)
+        finally:
+            if job is not None:
+                # Reached on an agent that exited on its own -- success or an
+                # ordinary nonzero code, where `_terminate_tree` is never called
+                # -- and on every exception that got past the two handovers
+                # above. Both need the same thing, so both get it here:
+                # terminate the job, wait for the kernel's own member count to
+                # read zero, and close the handle exactly once. Confirming
+                # rather than closing and trusting KILL_ON_JOB_CLOSE is
+                # deliberate: that kill is asynchronous, the same reason
+                # `_terminate_tree` does not close and trust it either. A
+                # CleanupUnconfirmed raised here does replace an exception on
+                # its way out, which is the right precedence -- a descendant
+                # still writing to the tree outranks whatever failed above it,
+                # and only that type stops the caller from salvaging the tree
+                # underneath it.
+                try:
+                    _confirm_job_empty(job, process, grace_s=5.0)
+                    # The job says nothing is running; collect the agent's own
+                    # exit so this does not walk away from an unreaped child.
+                    _reap_leader(process, grace_s=5.0)
+                finally:
+                    _close_handle(job)
 
     elapsed = time.monotonic() - started
     print(f"{prefix} exit {returncode} after {elapsed:.0f}s (log: {log_path})", flush=True)

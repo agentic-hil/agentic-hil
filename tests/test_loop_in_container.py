@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1615,19 +1616,24 @@ class _FakeSuspendedProcess:
 
 
 class _FakeSuspendedProcessKillable:
-    """Adds the process-handle surface `_track_in_job_object` needs when a
-    failed resume forces it to kill the still-suspended process directly,
-    without a job: `.kill()`, `.poll()`, `.wait()` alongside the `.pid` /
-    `._handle` that `_FakeSuspendedProcess` above already provides."""
+    """Adds the process-handle surface `_track_in_job_object` needs when it has
+    to kill the still-suspended process directly, without a job: `.kill()`,
+    `.poll()`, `.wait()` alongside the `.pid` / `._handle` that
+    `_FakeSuspendedProcess` above already provides. `.kills` counts the kills so
+    a test can assert the launch was failed rather than resumed."""
 
     pid = 9002
     _handle = 0xFACE
 
-    def __init__(self, *, alive_after_kill: bool = False) -> None:
-        self._alive_after_kill = alive_after_kill
+    def __init__(self, *, alive_after_kill: bool = False, kill_error: Exception | None = None) -> None:
+        self._alive_after_kill = alive_after_kill or kill_error is not None
+        self._kill_error = kill_error
+        self.kills = 0
 
     def kill(self) -> None:
-        pass
+        self.kills += 1
+        if self._kill_error is not None:
+            raise self._kill_error
 
     def poll(self) -> int | None:
         return None if self._alive_after_kill else 1
@@ -1657,41 +1663,57 @@ def test_track_in_job_object_creates_assigns_and_resumes(monkeypatch: pytest.Mon
     assert calls == ["create", f"assign:555:{_FakeSuspendedProcess._handle}", "resume:9001"]
 
 
-def test_track_in_job_object_still_resumes_when_creation_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A job that could not be created must not leave the process suspended
-    forever -- a best-effort upgrade must never be the reason a round produces
-    nothing for the whole timeout."""
+def test_track_in_job_object_fails_the_launch_when_a_job_cannot_be_created(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 4 finding 1: an agent that could not be placed under
+    authoritative lifetime tracking is never resumed.
+
+    Round 2 resumed it anyway, on the argument that a narrower fallback beat
+    losing agent execution; round 3 finding 1 showed that fallback can never
+    confirm a tree empty, and round 4 finding 1 showed the ordinary exits never
+    reach cleanup at all, so an untracked agent's detached descendant simply
+    outlives the round. The kill happens here, while the process is still
+    suspended and has therefore spawned nothing, because this is the last
+    moment at which "the whole tree is gone" is a statement anything can
+    truthfully make about it."""
     resumed: list[int] = []
     monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: None)
     monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: resumed.append(pid) or True)
+    process = _FakeSuspendedProcessKillable()
 
-    job = agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
+    with pytest.raises(agent_review_loop.AgentError, match="could not be placed under a Windows Job Object"):
+        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
 
-    assert job is None
-    assert resumed == [9001]
+    assert resumed == []
+    assert process.kills == 1
 
 
-def test_track_in_job_object_closes_the_job_and_resumes_when_assignment_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_track_in_job_object_closes_the_job_and_fails_the_launch_when_assignment_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Assignment fails on a host where this process is already confined to a job
     that forbids nesting (pre-Windows 8, or an operator's own job policy). The
-    orphaned job handle must not leak, and the process must still run."""
+    orphaned job handle must not leak, and the process must not be resumed into
+    a round whose cleanup could never be confirmed."""
     closed: list[int] = []
     resumed: list[int] = []
     monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: 555)
     monkeypatch.setattr(agent_review_loop, "_assign_process_to_job", lambda job, handle: False)
     monkeypatch.setattr(agent_review_loop, "_close_handle", lambda handle: closed.append(handle))
     monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: resumed.append(pid) or True)
+    process = _FakeSuspendedProcessKillable()
 
-    job = agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
+    with pytest.raises(agent_review_loop.AgentError):
+        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
 
-    assert job is None
     assert closed == [555]
-    assert resumed == [9001]
+    assert resumed == []
+    assert process.kills == 1
 
 
-def test_track_in_job_object_still_resumes_when_a_step_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Whatever goes wrong in the Win32 calls, the suspended process is resumed
-    on the way out -- the resume is in a `finally`, not chained after success."""
+def test_track_in_job_object_fails_the_launch_when_a_step_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whatever goes wrong in the Win32 calls, the outcome is the same as a
+    clean failure to create or assign: no tracking, so no run. The original
+    error is chained onto the failure rather than lost."""
     resumed: list[int] = []
 
     def _boom() -> int | None:
@@ -1699,11 +1721,14 @@ def test_track_in_job_object_still_resumes_when_a_step_raises(monkeypatch: pytes
 
     monkeypatch.setattr(agent_review_loop, "_create_job_object", _boom)
     monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: resumed.append(pid) or True)
+    process = _FakeSuspendedProcessKillable()
 
-    job = agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
+    with pytest.raises(agent_review_loop.AgentError) as excinfo:
+        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
 
-    assert job is None
-    assert resumed == [9001]
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert resumed == []
+    assert process.kills == 1
 
 
 def test_track_in_job_object_closes_an_already_created_job_when_assignment_raises(
@@ -1723,11 +1748,13 @@ def test_track_in_job_object_closes_an_already_created_job_when_assignment_raise
     monkeypatch.setattr(agent_review_loop, "_assign_process_to_job", _boom)
     monkeypatch.setattr(agent_review_loop, "_close_handle", lambda handle: closed.append(handle))
     monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: True)
+    process = _FakeSuspendedProcessKillable()
 
-    job = agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
+    with pytest.raises(agent_review_loop.AgentError):
+        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
 
-    assert job is None
     assert closed == [555]
+    assert process.kills == 1
 
 
 def test_track_in_job_object_kills_the_still_suspended_process_when_resume_fails_with_a_job(
@@ -1754,55 +1781,51 @@ def test_track_in_job_object_kills_the_still_suspended_process_when_resume_fails
     assert calls["close"] == [555]
 
 
-def test_track_in_job_object_kills_the_still_suspended_process_when_resume_fails_without_a_job(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("alive_after_kill", "kill_error"),
+    [(True, None), (False, OSError("TerminateProcess failed"))],
+    ids=["survives-the-kill", "the-kill-itself-errors"],
+)
+def test_track_in_job_object_raises_cleanup_unconfirmed_when_the_untracked_root_will_not_die(
+    monkeypatch: pytest.MonkeyPatch, alive_after_kill: bool, kill_error: Exception | None
 ) -> None:
-    """The no-job twin of the test above: creation or assignment already
-    failed, so there is no job to kill through -- the process handle
-    `subprocess.Popen` itself still holds is the only way left to reach it,
-    and it is confirmed dead before the launch is failed."""
+    """Fail safe, not fail available: killing the still-suspended process is the
+    whole basis for failing an untracked launch cleanly, so a process that is
+    still alive afterwards is reported as CleanupUnconfirmed rather than the
+    plainer AgentError -- the same distinction `_terminate_tree` makes for a tree
+    that resists its own kill, and the one the caller reads to skip salvage. A
+    kill that errors rather than failing quietly is the same situation and gets
+    the same answer, not an OSError nothing in the loop is looking for."""
     monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: None)
-    monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: False)
-
-    with pytest.raises(agent_review_loop.AgentError) as excinfo:
-        agent_review_loop._track_in_job_object(_FakeSuspendedProcessKillable())  # type: ignore[arg-type]
-
-    assert not isinstance(excinfo.value, agent_review_loop.CleanupUnconfirmed)
-
-
-def test_track_in_job_object_raises_cleanup_unconfirmed_when_the_post_resume_failure_kill_cannot_be_confirmed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Fail safe, not fail available: without a job, if the process still looks
-    alive after being killed for a failed resume, that is reported as
-    CleanupUnconfirmed rather than the plainer AgentError -- the same
-    distinction `_terminate_tree` makes for a tree that resists its own kill.
-    """
-    monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: None)
-    monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: False)
+    monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: True)
+    process = _FakeSuspendedProcessKillable(alive_after_kill=alive_after_kill, kill_error=kill_error)
 
     with pytest.raises(agent_review_loop.CleanupUnconfirmed):
-        agent_review_loop._track_in_job_object(_FakeSuspendedProcessKillable(alive_after_kill=True))  # type: ignore[arg-type]
+        agent_review_loop._track_in_job_object(process)  # type: ignore[arg-type]
 
 
 def test_track_in_job_object_treats_a_raised_resume_error_the_same_as_a_false_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other half of finding 2: a resume that raises instead of returning
-    False must not escape uncaught and leave the suspended process and any
-    assigned job handle unmanaged -- it is handled the same way a False result
-    is, and the original error is chained onto the failure this raises."""
+    """The other half of round 3 finding 2: a resume that raises instead of
+    returning False must not escape uncaught and leave the suspended process and
+    its assigned job handle unmanaged -- it is handled the same way a False
+    result is, and the original error is chained onto the failure this raises."""
 
     def _boom(pid: int) -> bool:
         raise OSError("OpenThread failed")
 
-    monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: None)
+    monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: 555)
+    monkeypatch.setattr(agent_review_loop, "_assign_process_to_job", lambda job, handle: True)
     monkeypatch.setattr(agent_review_loop, "_resume_process_threads", _boom)
+    calls = _win32_job_fake(monkeypatch, active_counts=[0])
 
     with pytest.raises(agent_review_loop.AgentError) as excinfo:
-        agent_review_loop._track_in_job_object(_FakeSuspendedProcessKillable())  # type: ignore[arg-type]
+        agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
 
     assert isinstance(excinfo.value.__cause__, OSError)
+    assert calls["terminate"] == [555]
+    assert calls["close"] == [555]
 
 
 def _win32_job_fake(
@@ -2058,6 +2081,208 @@ def test_run_agent_threads_the_tracked_job_into_terminate_tree_on_timeout(
         )
 
     assert seen_jobs == [42]
+
+
+def _forced_windows_popen(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen[str]]:
+    """Let the forced-Windows `run_agent` tests below start a real process here,
+    and hand back every process they start so a test can ask whether it is still
+    running.
+
+    `CREATE_SUSPENDED` means something only to a real Windows kernel, and on
+    POSIX `Popen` rejects any nonzero `creationflags` outright, so the flag is
+    dropped and the process starts running immediately. Each script these tests
+    launch therefore blocks on reading its stdin as its very first act, and
+    `run_agent` writes that stdin only once the launch is tracked: the read
+    stands in for the suspension, so whatever the script does after it models
+    exactly what a real suspended agent could do only once it was resumed.
+    """
+    started: list[subprocess.Popen[str]] = []
+    real_popen = subprocess.Popen
+
+    def fake_popen(*args: object, **kwargs: object) -> subprocess.Popen:
+        kwargs.pop("creationflags", None)
+        process = real_popen(*args, **kwargs)  # type: ignore[arg-type]
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(agent_review_loop.subprocess, "Popen", fake_popen)
+    return started
+
+
+@pytest.mark.parametrize("exit_code", [7, 0])
+def test_run_agent_never_runs_an_agent_it_could_not_place_under_a_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int
+) -> None:
+    """Review round 4 finding 1, in both the shapes it was reported in.
+
+    An untracked agent used to be resumed and run to completion, and `run_agent`
+    reached its normal-exit path with no cleanup call at all: an ordinary
+    nonzero code went straight to `AgentError`, which `implement_round` salvages
+    -- `git add -A` over a tree a detached descendant is still writing -- and a
+    successful exit returned into the loop's commit inspection with the same
+    survivor still running. Nothing could be added there to close it: once the
+    root has exited, a PID-rooted taskkill cannot find descendants that are
+    already orphaned. So neither exit is reached any more. The agent here would
+    spawn a detached writer and exit `exit_code`; it never gets the stdin that
+    stands in for its resume, and the worktree is untouched when the round ends.
+    """
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    started = _forced_windows_popen(monkeypatch)
+    monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: None)
+    resumed: list[int] = []
+    monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: resumed.append(pid) or True)
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    survivor = worktree / "written-after-the-round.txt"
+    writer = tmp_path / "writer.py"
+    writer.write_text(
+        "import pathlib, sys, time\ntime.sleep(0.5)\npathlib.Path(sys.argv[1]).write_text('raced the round')\n",
+        encoding="utf-8",
+    )
+    agent = tmp_path / "agent.py"
+    agent.write_text(
+        "import subprocess, sys\n"
+        "sys.stdin.read()\n"
+        "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]], start_new_session=True)\n"
+        f"sys.exit({exit_code})\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(agent_review_loop.AgentError) as excinfo:
+        agent_review_loop.run_agent(
+            [sys.executable, str(agent), str(writer), str(survivor)],
+            "prompt",
+            worktree,
+            "[claude r1]",
+            tmp_path / "log.txt",
+            timeout=30,
+            dry_run=False,
+            heartbeat=0,
+        )
+
+    # Past the delay the writer would have waited out, had it ever been started.
+    # This is the assertion the reported defect fails: the round was over and the
+    # descendant wrote into the worktree afterwards.
+    time.sleep(1.2)
+    assert not survivor.exists()
+    assert list(worktree.iterdir()) == []
+    assert resumed == []
+    assert started and all(process.poll() is not None for process in started)
+    # A plain AgentError, salvageable, and safely so: this one is raised over a
+    # tree the agent never touched, not over one a survivor may still be in.
+    assert "could not be placed under a Windows Job Object" in str(excinfo.value)
+    assert not isinstance(excinfo.value, agent_review_loop.CleanupUnconfirmed)
+
+
+def _exploding_reader_thread(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    """Fail `run_agent` between `_track_in_job_object` and its stdin/wait
+    handling, where review round 4 finding 2 showed the job handle escaping
+    every close path. Only the module's own `threading` reference is replaced,
+    never the real `threading.Thread`, which the test session itself needs."""
+
+    class _ExplodingThread:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            raise error
+
+        def join(self, timeout: float | None = None) -> None:
+            pass
+
+    monkeypatch.setattr(agent_review_loop, "threading", types.SimpleNamespace(Thread=_ExplodingThread))
+
+
+def test_run_agent_confirms_and_closes_the_job_when_the_reader_thread_cannot_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 4 finding 2: a failure after the job handle is acquired and
+    before the stdin/wait handling used to walk straight out of `run_agent`,
+    closing nothing and killing nothing -- the raw handle leaked and the agent,
+    already assigned to that job, was left running. The handle now has one
+    owner: whatever the exception, the job is terminated, confirmed empty, and
+    closed exactly once on the way out, and the exception itself still reaches
+    the caller."""
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    started = _forced_windows_popen(monkeypatch)
+    monkeypatch.setattr(agent_review_loop, "_track_in_job_object", lambda process: 42)
+    _exploding_reader_thread(monkeypatch, RuntimeError("can't start new thread"))
+    job_calls = _win32_job_fake(monkeypatch, active_counts=[0])
+    recorded_terminate = agent_review_loop._terminate_job
+
+    def terminate_and_kill(job: int) -> bool:
+        # TerminateJobObject really does reach every member, the agent included.
+        # Modelling that is what lets the assertion below be about the process
+        # this run actually left behind rather than about a fake's bookkeeping.
+        for process in started:
+            process.kill()
+        return recorded_terminate(job)
+
+    monkeypatch.setattr(agent_review_loop, "_terminate_job", terminate_and_kill)
+
+    agent = tmp_path / "agent.py"
+    agent.write_text("import sys\nsys.stdin.read()\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        agent_review_loop.run_agent(
+            [sys.executable, str(agent)],
+            "prompt",
+            tmp_path,
+            "[claude r1]",
+            tmp_path / "log.txt",
+            timeout=30,
+            dry_run=False,
+            heartbeat=0,
+        )
+
+    assert job_calls["terminate"] == [42]
+    assert job_calls["close"] == [42]
+    assert started and all(process.poll() is not None for process in started)
+
+
+def test_run_agent_reports_a_job_it_could_not_empty_over_the_failure_that_reached_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same injected failure, but the job will not confirm empty. The handle is
+    still closed exactly once, and the CleanupUnconfirmed replaces the original
+    exception on the way out rather than being swallowed by it: a descendant
+    that may still be writing to the tree outranks whatever failed above it, and
+    only that type stops the caller from salvaging the tree underneath it. The
+    failure it replaced is still attached as its context."""
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    started = _forced_windows_popen(monkeypatch)
+    monkeypatch.setattr(agent_review_loop, "_track_in_job_object", lambda process: 42)
+    _exploding_reader_thread(monkeypatch, RuntimeError("can't start new thread"))
+    job_calls = _win32_job_fake(monkeypatch, active_counts=[1])
+
+    def refuse_to_confirm(job: int, process: subprocess.Popen[str], grace_s: float) -> None:
+        # The root died with the job; something detached in it did not, which is
+        # the case the kernel's count reports and this stands in for.
+        process.kill()
+        process.wait(timeout=10)
+        raise agent_review_loop.CleanupUnconfirmed(f"job {job} still had a member")
+
+    monkeypatch.setattr(agent_review_loop, "_confirm_job_empty", refuse_to_confirm)
+
+    agent = tmp_path / "agent.py"
+    agent.write_text("import sys\nsys.stdin.read()\n", encoding="utf-8")
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed) as excinfo:
+        agent_review_loop.run_agent(
+            [sys.executable, str(agent)],
+            "prompt",
+            tmp_path,
+            "[claude r1]",
+            tmp_path / "log.txt",
+            timeout=30,
+            dry_run=False,
+            heartbeat=0,
+        )
+
+    assert isinstance(excinfo.value.__context__, RuntimeError)
+    assert job_calls["close"] == [42]
+    assert started and all(process.poll() is not None for process in started)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
