@@ -402,7 +402,7 @@ def test_upgrade_uses_running_python_and_refreshes_the_agent_it_had_set_up(
     assert calls[0][0][:3] == [sys.executable, "-m", "pip"] and "--dry-run" in calls[0][0]
     assert calls[1][0] == PIP_UPGRADE_COMMAND
     assert calls[2] == ([sys.executable, "-m", "agentic_hil", "--version"], None)
-    assert calls[3][0] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]
+    assert calls[3][0] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force", "--json"]
     assert calls[3][1] is not None
 
 
@@ -1063,7 +1063,7 @@ def test_a_successful_upgrade_refreshes_only_the_agents_this_installation_had_se
     # Exactly one refresh, run out of the new package rather than in this
     # process, which still holds the release that was just replaced.
     invocations = [command for command, _cwd in calls if "agent-install" in command]
-    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]]
+    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force", "--json"]]
 
 
 def test_a_registration_that_exists_without_a_skill_is_refreshed_too(
@@ -1081,7 +1081,7 @@ def test_a_registration_that_exists_without_a_skill_is_refreshed_too(
     result = upgrade_installation([])
 
     invocations = [command for command, _cwd in calls if "agent-install" in command]
-    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "claude-code", "--force"]]
+    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "claude-code", "--force", "--json"]]
     assert result["summary"].endswith("The MCP registration was rewritten for Claude Code, so restart Claude Code to load it.")
 
 
@@ -1123,7 +1123,7 @@ def test_a_refresh_that_failed_is_reported_and_does_not_fail_the_upgrade(
     assert entry["ok"] is False
     assert entry["skill"] is False
     assert entry["registration"] is False
-    assert entry["command"] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]
+    assert entry["command"] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force", "--json"]
     assert "could not be refreshed for opencode" in result["summary"]
 
 

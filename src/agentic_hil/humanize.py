@@ -22,7 +22,6 @@ comes back as something readable rather than as a wall of braces.
 from __future__ import annotations
 
 import shutil
-import sys
 import textwrap
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
@@ -32,22 +31,15 @@ from agentic_hil.types import JsonObject
 
 # What `--json` says on every `--help` page. One text, because the flag is added
 # to the top-level parser and to every subcommand and the two must not drift.
+# Every result is rendered for a person unless this says otherwise. Who is
+# reading is declared rather than guessed: sniffing stdout got it wrong for
+# every wrapper that captures the output in order to act on it and then shows
+# a person what came back, which is what the installer does and what most
+# things that run this command do.
 JSON_FLAG_HELP = (
-    "print the JSON document instead of the human-readable rendering. The document is what an agent, a script or "
-    "the installer reads, and it is already what is printed whenever stdout is not a terminal, so a pipe or a "
-    "redirect needs no flag"
-)
-
-# The other direction, which the tty rule alone cannot reach. A frontend that
-# runs this CLI to show a person the answer has to capture stdout to act on the
-# result at all, and capturing is exactly what the tty rule reads as "a machine
-# is on the other end". install.sh is that frontend: it captures the report to
-# decide whether the step succeeded, and printed the raw document at the person
-# it exists to serve on the one path where the document is all they get.
-HUMAN_FLAG_HELP = (
-    "render the result for a person even when stdout is not a terminal. For a frontend that captures this "
-    "command's output and shows it to somebody; --json wins if both are given, and mcp-stdio and com-stdio "
-    "are unaffected because their stdout carries a protocol"
+    "print the JSON document instead of the rendering. The document is the machine contract, field for field, "
+    "and every caller that parses this command has to ask for it: a pipe, a redirect and a subprocess are "
+    "rendered like anything else"
 )
 
 # The two commands that own stdout for a protocol rather than for a result. They
@@ -62,24 +54,6 @@ _FALLBACK_WIDTH = 88
 # Fields whose place in the rendering is fixed, so the generic pass over
 # "everything else" must not print them a second time.
 _HANDLED_EVERYWHERE = frozenset({"ok", "tool", "summary", "next_step", "next_steps", "remediation", "do_not", "warnings", "error_type", "meaning"})
-
-
-def stdout_is_terminal() -> bool:
-    """Whether a person is watching stdout right now.
-
-    Everything POSIX-only stays out of this on purpose: Windows PowerShell is a
-    first-class host here, and `sys.stdout.isatty()` answers on every platform.
-    A stream that has been closed or replaced by something without the method is
-    not a terminal, which is the safe answer in both directions: it prints the
-    machine document, which is what every non-interactive caller expects.
-    """
-    isatty = getattr(sys.stdout, "isatty", None)
-    if isatty is None:
-        return False
-    try:
-        return bool(isatty())
-    except (ValueError, OSError):
-        return False
 
 
 def render_result(result: JsonObject, command: str | None = None) -> str:

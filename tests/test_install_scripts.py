@@ -533,50 +533,48 @@ def test_the_powershell_installer_never_invokes_a_bare_agentic_hil_for_agent_ins
     assert "-File $AgenticHilCmd" in code
 
 
-def test_step_four_reports_a_result_and_does_not_print_the_agent_install_document() -> None:
-    """One line per agent on success, the whole document only when it is the diagnosis.
+def test_step_four_reports_a_result_and_does_not_stream_the_agent_install_report() -> None:
+    """One line per agent on success, the whole report only when it is the diagnosis.
 
-    `agent-install` answers with a JSON report of every path it touched. Streamed,
-    a machine with three agent CLIs turned a successful install into roughly a
-    hundred and fifty lines of machine-readable detail inside a five-step
-    transcript. Captured, the operator gets one line per agent and still gets the
-    document whole on a failure, where it is the only thing that says which half
-    broke. Both scripts read the top-level `ok` at its own indentation, so a `true`
-    nested inside a failed report cannot answer for the report.
+    `agent-install` answers with a report of every path it touched. Streamed, a
+    machine with three agent CLIs turned a successful install into roughly a
+    hundred and fifty lines of detail inside a five-step transcript. Captured,
+    the operator gets one line per agent and still gets the report whole on a
+    failure, where it is the only thing that says which half broke.
+
+    The verdict is the exit status and nothing else. Both scripts used to also
+    match the top-level `ok` at its own indentation, which was a check on a
+    document; the report is prose now, addressed to the operator who is going to
+    read it, and matching text in prose would be weaker than the status it was
+    doubling.
     """
     shell = _code_only(_shell_source())
     assert "register_agent" in shell
     assert f'"agent: $registering_agent {REGISTERED_LINE}"' in shell
-    assert "agent_install_report=$(" in shell, "install.sh streams the document instead of capturing it"
-    assert '^  "ok": true' in shell, "install.sh does not read the top-level ok at its own indentation"
-    assert '"$agent_install_report" >&2' in shell, "install.sh does not print the document on a failure"
+    assert "agent_install_report=$(" in shell, "install.sh streams the report instead of capturing it"
+    assert '"$agent_install_report" >&2' in shell, "install.sh does not print the report on a failure"
+    assert '"ok": true' not in shell, "install.sh still matches a document it is no longer handed"
 
     powershell = _code_only(_powershell_source())
     assert "function Register-Agent" in powershell
     assert f'"agent: $AgentId {REGISTERED_LINE}"' in powershell
-    assert "Invoke-Captured -File $AgenticHilCmd" in powershell, "install.ps1 streams the document instead of capturing it"
+    assert "Invoke-Captured -File $AgenticHilCmd" in powershell, "install.ps1 streams the report instead of capturing it"
     assert "Invoke-Checked -File $AgenticHilCmd" not in powershell
-    assert '(?m)^  "ok": true' in powershell, "install.ps1 does not read the top-level ok at its own indentation"
+    assert '"ok": true' not in powershell, "install.ps1 still matches a document it is no longer handed"
 
 
-def test_both_scripts_ask_agent_install_for_the_rendering_they_show_a_person() -> None:
-    """The captured report reaches an operator, so it is asked for in prose.
+def test_neither_script_asks_agent_install_for_a_rendering_it_gets_anyway() -> None:
+    """Rendering is the default, so the frontend that shows a person says nothing.
 
-    Capturing this command's output is what the CLI's own stdout test reads as a
-    machine on the other end, so the failure these scripts print whole, on the
-    one path where it is the entire diagnosis, arrived as the machine document.
-    `--human` is the caller saying who is reading. The fallback for a copy too
-    old to know the flag stays, and with it the indentation-anchored read of the
-    top-level `ok` that path still needs.
+    This was a flag for a while, on the reasoning that capturing the output is
+    indistinguishable from a machine reading it. The reasoning held and the
+    conclusion was backwards: a wrapper that shows a person what came back is
+    what almost every caller is, so the rendering is the default and `--json` is
+    what the few that parse ask for. Neither script parses.
     """
-    shell = _code_only(_shell_source())
-    assert "--human" in shell
-    assert "unrecognized arguments: --human" in shell, "install.sh cannot tell a refused flag from a failed install"
-    assert '^  "ok": true' in shell, "the fallback lost its verdict"
-    powershell = _code_only(_powershell_source())
-    assert "'--human'" in powershell
-    assert "unrecognized argument" in powershell
-    assert '(?m)^  "ok": true' in powershell
+    for name, code in _both_code().items():
+        assert "--human" not in code, f"{name} asks for what it is given"
+        assert "--json" not in code, f"{name} asks for a document it does not read"
 
 
 def test_the_powershell_capture_unwraps_a_stderr_error_record() -> None:
@@ -1320,73 +1318,6 @@ def test_the_retry_is_refused_when_it_was_told_to_be(tmp_path: Path) -> None:
     assert result.returncode != 0, transcript
     assert attempts.read_text(encoding="utf-8").split() == ["unset"], transcript
     assert "--no-system-certs" in transcript, transcript
-
-
-def test_an_agent_install_too_old_for_the_flag_still_registers(tmp_path: Path) -> None:
-    """The `--version` pin's path, run end to end through a POSIX shell.
-
-    `--human` is asked for first, because the report this step captures is the
-    one an operator reads when it fails. A copy installed from an older pin
-    refuses the flag, and argparse refuses it before the command runs, so nothing
-    was done and the second call is safe. What must not happen is that refusal
-    being read as a failed registration, or shown to anybody.
-    """
-    if os.name != "posix":
-        pytest.skip("the shell install flow is exercised on the POSIX half")
-    shell = _posix_shell()
-
-    home = tmp_path / "home"
-    project = home / "project"
-    user_bin = home / ".local" / "bin"
-    for directory in (project, user_bin):
-        directory.mkdir(parents=True)
-
-    calls = tmp_path / "calls"
-
-    _stub_executable(
-        user_bin / "agentic-hil",
-        'if [ "$1" = "--version" ]; then echo "99.0.0"; exit 0; fi\n'
-        'if [ "$1" = "agent-install" ]; then\n'
-        f'  echo "$@" >> "{calls}"\n'
-        '  for argument in "$@"; do\n'
-        '    if [ "$argument" = "--human" ]; then\n'
-        '      echo "usage: agentic-hil agent-install [-h] [--agent AGENT]" >&2\n'
-        '      echo "agentic-hil agent-install: error: unrecognized arguments: --human" >&2\n'
-        "      exit 2\n"
-        "    fi\n"
-        "  done\n"
-        "  cat <<'DOCUMENT'\n"
-        "{\n"
-        '  "ok": true\n'
-        "}\n"
-        "DOCUMENT\n"
-        "fi\n"
-        "exit 0\n",
-    )
-
-    env = {"HOME": str(home), "PATH": f"{user_bin}:/usr/bin:/bin"}
-
-    result = subprocess.run(
-        [shell, str(SHELL_SCRIPT), "--agent", "claude-code", "--no-can"],
-        cwd=str(project),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-        timeout=SCRIPT_TIMEOUT_S,
-        check=False,
-    )
-
-    transcript = f"{result.stdout}{result.stderr}"
-    assert result.returncode == 0, transcript
-    assert f"claude-code {REGISTERED_LINE}" in transcript, transcript
-    attempts = calls.read_text(encoding="utf-8").splitlines()
-    assert len(attempts) == 2, attempts
-    assert "--human" in attempts[0]
-    assert "--human" not in attempts[1]
-    # argparse's refusal is a message between two programs, and stays one.
-    assert "unrecognized arguments" not in transcript, transcript
 
 
 # The container run, end to end: a machine with nothing on it, the real package

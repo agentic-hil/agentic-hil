@@ -517,26 +517,17 @@ function Register-Agent {
     # calm things. On success the operator needs one line. On failure the report
     # is the diagnosis, so then it is printed whole and this stops.
     #
-    # What it has to be on that failing path is readable, and it was not:
-    # capturing it here is indistinguishable, from inside the CLI, from a machine
-    # reading a pipe, so the CLI printed the machine document at the person this
-    # script exists to serve. `--human` is the caller saying which it is, and then
-    # the exit status carries the verdict, which is `overall_success` computed
-    # rather than the top-level `ok` matched. A copy too old to know the flag
-    # refuses it before running anything, so that run falls back to the document
-    # and to the indentation-anchored read of "ok" this script has always used.
+    # The verdict is the exit status, which is `overall_success` computed inside
+    # the CLI. It used to be that status and a match on the top-level "ok" at its
+    # own indentation, from back when the report arrived as JSON whoever was
+    # reading. It is prose now, addressed to the operator who is about to read
+    # it, and a text match on prose would be a worse check than the status it was
+    # doubling.
     param([string]$AgentId)
-    $result = Invoke-Captured -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $AgentId, '--human')
+    $result = Invoke-Captured -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $AgentId)
     if ($result.ExitCode -eq 0) {
         Write-Say "agent: $AgentId registered (skill and MCP server, restart pending)"
         return
-    }
-    if ($result.Output -match 'unrecognized argument') {
-        $result = Invoke-Captured -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $AgentId)
-        if ($result.ExitCode -eq 0 -and $result.Output -match '(?m)^  "ok": true') {
-            Write-Say "agent: $AgentId registered (skill and MCP server, restart pending)"
-            return
-        }
     }
     Write-Host $result.Output.TrimEnd()
     throw "agent-install failed for $AgentId; the report above says which half"
