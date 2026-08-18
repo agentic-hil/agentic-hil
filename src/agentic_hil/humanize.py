@@ -38,6 +38,18 @@ JSON_FLAG_HELP = (
     "redirect needs no flag"
 )
 
+# The other direction, which the tty rule alone cannot reach. A frontend that
+# runs this CLI to show a person the answer has to capture stdout to act on the
+# result at all, and capturing is exactly what the tty rule reads as "a machine
+# is on the other end". install.sh is that frontend: it captures the report to
+# decide whether the step succeeded, and printed the raw document at the person
+# it exists to serve on the one path where the document is all they get.
+HUMAN_FLAG_HELP = (
+    "render the result for a person even when stdout is not a terminal. For a frontend that captures this "
+    "command's output and shows it to somebody; --json wins if both are given, and mcp-stdio and com-stdio "
+    "are unaffected because their stdout carries a protocol"
+)
+
 # The two commands that own stdout for a protocol rather than for a result. They
 # never reach the renderer, and the guard is here rather than in the entrypoint's
 # head so that the one list lives beside the one decision.

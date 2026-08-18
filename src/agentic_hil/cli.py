@@ -73,7 +73,14 @@ from agentic_hil.configwrite import (
 )
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator, nothing_standing_result
 from agentic_hil.devices import config_devices
-from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, stdout_is_terminal, write_rendered
+from agentic_hil.humanize import (
+    HUMAN_FLAG_HELP,
+    JSON_FLAG_HELP,
+    PROTOCOL_COMMANDS,
+    render_result,
+    stdout_is_terminal,
+    write_rendered,
+)
 from agentic_hil.knowledge import (
     CONFIG_GRANT_COMMAND,
     CONFIG_REOPEN_COMMAND,
@@ -230,7 +237,7 @@ def entrypoint(argv: list[str] | None = None) -> int:
     # same document; who is reading it is a property of this process, not of the
     # command that ran, and a second decision anywhere below is a second answer
     # waiting to differ from this one.
-    human = human_readable_output(command, json_requested=getattr(args, "json", False))
+    human = human_readable_output(command, json_requested=getattr(args, "json", False), human_requested=getattr(args, "human", False))
     try:
         result = dispatch(args)
     except ConfigError as error:
@@ -247,7 +254,7 @@ def entrypoint(argv: list[str] | None = None) -> int:
     return 0
 
 
-def human_readable_output(command: str, *, json_requested: bool) -> bool:
+def human_readable_output(command: str, *, json_requested: bool, human_requested: bool) -> bool:
     """Whether this invocation renders its result for a person.
 
     Three ways to answer no, and all of them are the machine contract: `--json`
@@ -255,9 +262,18 @@ def human_readable_output(command: str, *, json_requested: bool) -> bool:
     pipe, a redirect or a subprocess is reading, and `mcp-stdio`/`com-stdio` own
     stdout for a protocol rather than for a result. Anything else is somebody at
     a shell.
+
+    `--human` answers the one case the stdout test gets wrong: a frontend that
+    captures this command's output in order to act on it, and then has a person
+    read what came back. Capturing is indistinguishable from a machine reading,
+    so the caller says which it is. `--json` still wins over it, because a caller
+    that asks for the document is stating a contract rather than a preference,
+    and a protocol command answers neither: its stdout is not carrying a result.
     """
-    if json_requested or command in PROTOCOL_COMMANDS:
+    if command in PROTOCOL_COMMANDS or json_requested:
         return False
+    if human_requested:
+        return True
     return stdout_is_terminal()
 
 
@@ -284,6 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentic-hil", description="Agentic Hardware-in-the-Loop (Agentic HIL) local MCP stdio server")
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--json", action="store_true", help=JSON_FLAG_HELP)
+    parser.add_argument("--human", action="store_true", help=HUMAN_FLAG_HELP)
     subparsers = parser.add_subparsers(dest="command")
 
     init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted but the two flashing is interlocked against, and verify it with doctor. A config that is already there is kept, unchanged, and only the steps that do not touch it run")
@@ -422,7 +439,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     uninstall_parser.add_argument("--agent", action="append", default=[], help="take back only this agent's half, instead of every agent this installation set up; repeat for multiple agents. An agent that has nothing installed is reported and left alone.")
 
-    # `--json` on every subcommand as well as on the parser, so both
+    # `--json` and `--human` on every subcommand as well as on the parser, so both
     # `agentic-hil --json init` and the `agentic-hil init --json` everybody
     # actually types are accepted. Added in one loop rather than at each
     # `add_parser` call, because a subcommand added later must not be able to
@@ -436,6 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
             continue
         added.add(id(subparser))
         subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help=JSON_FLAG_HELP)
+        subparser.add_argument("--human", action="store_true", default=argparse.SUPPRESS, help=HUMAN_FLAG_HELP)
 
     return parser
 

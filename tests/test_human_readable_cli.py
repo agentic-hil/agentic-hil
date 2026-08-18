@@ -192,7 +192,9 @@ def test_the_exit_code_does_not_depend_on_who_is_reading(monkeypatch: pytest.Mon
 def test_the_protocol_streams_are_never_rendered() -> None:
     assert set(PROTOCOL_COMMANDS) == {"mcp-stdio", "com-stdio"}
     for command in PROTOCOL_COMMANDS:
-        assert cli.human_readable_output(command, json_requested=False) is False
+        assert cli.human_readable_output(command, json_requested=False, human_requested=False) is False
+        # Not even when asked: that stdout is carrying a protocol.
+        assert cli.human_readable_output(command, json_requested=False, human_requested=True) is False
 
 
 def test_a_refusal_reaching_a_pipe_is_still_the_document_it_was(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,11 +214,50 @@ def test_a_refusal_reaching_a_pipe_is_still_the_document_it_was(monkeypatch: pyt
 def test_the_terminal_decision_is_isatty_and_nothing_else(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.stdout", FakeStdout(tty=True))
     assert stdout_is_terminal() is True
-    assert cli.human_readable_output("init", json_requested=False) is True
-    assert cli.human_readable_output("init", json_requested=True) is False
+    assert cli.human_readable_output("init", json_requested=False, human_requested=False) is True
+    assert cli.human_readable_output("init", json_requested=True, human_requested=False) is False
     monkeypatch.setattr("sys.stdout", FakeStdout(tty=False))
     assert stdout_is_terminal() is False
-    assert cli.human_readable_output("init", json_requested=False) is False
+    assert cli.human_readable_output("init", json_requested=False, human_requested=False) is False
+
+
+def test_a_frontend_can_ask_for_the_rendering_it_is_going_to_show_somebody(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--human` is the half of the decision the stdout test cannot reach.
+
+    A frontend that runs this command in order to act on the result has to
+    capture stdout, and capturing is exactly what the stdout test reads as a
+    machine on the other end. install.sh is that frontend: it captures the
+    report to decide whether the step worked, and on the one path where the
+    report is all the operator gets, it was handing them the machine document.
+    """
+    code, out = _run(monkeypatch, ["init", "--human"], INIT_FAILED, tty=False)
+    assert code == 1
+    assert not out.lstrip().startswith("{"), out
+    assert "Agentic HIL project setup failed" in out, out
+
+
+def test_the_document_wins_when_a_caller_asks_for_both(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--json` states a contract; `--human` states a preference about a reader."""
+    code, out = _run(monkeypatch, ["init", "--json", "--human"], INIT_FORCED, tty=False)
+    assert code == 0
+    assert json.loads(out) == INIT_FORCED
+
+
+def test_the_flag_is_accepted_before_and_after_the_subcommand(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same composition `--json` already has, for the same reason.
+
+    A subparser default would overwrite what the top-level flag put on the
+    namespace, so `agentic-hil --human init` would print the document.
+    """
+    for argv in (["init", "--human"], ["--human", "init"]):
+        _, out = _run(monkeypatch, argv, INIT_FORCED, tty=False)
+        assert not out.lstrip().startswith("{"), argv
+
+
+def test_asking_for_prose_does_not_change_the_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    piped, _ = _run(monkeypatch, ["init"], INIT_FAILED, tty=False)
+    asked, _ = _run(monkeypatch, ["init", "--human"], INIT_FAILED, tty=False)
+    assert piped == asked == 1
 
 
 def test_a_stdout_without_isatty_is_not_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:

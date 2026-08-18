@@ -255,7 +255,7 @@ agentic-hil test-schema --output testconfig.schema.json
 agentic-hil skill-install --agent opencode
 ```
 
-Every one of them takes `--json`, before or after the subcommand.
+Every one of them takes `--json` and `--human`, before or after the subcommand.
 
 ## What a command prints
 
@@ -278,7 +278,15 @@ you want to read a field yourself or hand the output to `jq`:
 agentic-hil doctor                  # the health report, for a person
 agentic-hil doctor --json           # the document, at a terminal
 agentic-hil doctor > doctor.json    # the document, no flag needed
+agentic-hil doctor --human | less   # the report, for a person, through a pipe
 ```
+
+`--human` is the other direction, and it exists for one shape of caller: a
+frontend that captures this command's output in order to act on the result, and
+then puts what came back in front of somebody. Capturing is indistinguishable
+from a machine reading, so that caller says which it is. The installers use it on
+the `agent-install` call whose report they print when it fails. `--json` wins if
+both are given.
 
 `mcp-stdio` and `com-stdio` are untouched by any of this: their stdout carries a
 protocol, not a result. So is every `--output` file, which is written the same

@@ -617,13 +617,34 @@ ensure_resolved_for_agent_install() {
 # diagnosis, so then it is printed whole and this stops. The top-level "ok" is
 # read at its own indentation, so a true nested inside a failed report cannot
 # stand in for the answer.
+# One agent registered, reported as a result rather than as a document. On
+# success the operator needs one line; on failure the report is the diagnosis
+# and is printed whole. What the report has to be on that failing path is
+# readable, and it was not: capturing it here is indistinguishable, from inside
+# the CLI, from a machine reading a pipe, so the CLI printed the machine
+# document at the person this script exists to serve. `--human` is the caller
+# saying which it is, and then the exit status carries the verdict, which is
+# `overall_success` computed rather than the top-level `ok` matched.
+#
+# A copy too old to know the flag refuses it before running anything (argparse
+# exits without reaching the command), so that run falls back to the document
+# and to the indentation-anchored read of `ok` this script has always used. That
+# is the `--version` pin's path, and nothing else reaches it.
 register_agent() {
     registering_agent="$1"
-    if agent_install_report=$("$AGENTIC_HIL_CMD" agent-install --agent "$registering_agent" 2>&1) &&
-        printf '%s\n' "$agent_install_report" | grep -q '^  "ok": true'; then
+    if agent_install_report=$("$AGENTIC_HIL_CMD" agent-install --agent "$registering_agent" --human 2>&1); then
         say "agent: $registering_agent registered (skill and MCP server, restart pending)"
         return 0
     fi
+    case "$agent_install_report" in
+        *"unrecognized arguments: --human"* | *"unrecognized argument: --human"*)
+            if agent_install_report=$("$AGENTIC_HIL_CMD" agent-install --agent "$registering_agent" 2>&1) &&
+                printf '%s\n' "$agent_install_report" | grep -q '^  "ok": true'; then
+                say "agent: $registering_agent registered (skill and MCP server, restart pending)"
+                return 0
+            fi
+            ;;
+    esac
     printf '%s\n' "$agent_install_report" >&2
     fail "agent: agent-install failed for $registering_agent; the report above says which half"
 }

@@ -559,6 +559,26 @@ def test_step_four_reports_a_result_and_does_not_print_the_agent_install_documen
     assert '(?m)^  "ok": true' in powershell, "install.ps1 does not read the top-level ok at its own indentation"
 
 
+def test_both_scripts_ask_agent_install_for_the_rendering_they_show_a_person() -> None:
+    """The captured report reaches an operator, so it is asked for in prose.
+
+    Capturing this command's output is what the CLI's own stdout test reads as a
+    machine on the other end, so the failure these scripts print whole, on the
+    one path where it is the entire diagnosis, arrived as the machine document.
+    `--human` is the caller saying who is reading. The fallback for a copy too
+    old to know the flag stays, and with it the indentation-anchored read of the
+    top-level `ok` that path still needs.
+    """
+    shell = _code_only(_shell_source())
+    assert "--human" in shell
+    assert "unrecognized arguments: --human" in shell, "install.sh cannot tell a refused flag from a failed install"
+    assert '^  "ok": true' in shell, "the fallback lost its verdict"
+    powershell = _code_only(_powershell_source())
+    assert "'--human'" in powershell
+    assert "unrecognized argument" in powershell
+    assert '(?m)^  "ok": true' in powershell
+
+
 def test_the_powershell_capture_unwraps_a_stderr_error_record() -> None:
     """A successful command's stderr is a line, not an error block.
 
@@ -1300,6 +1320,73 @@ def test_the_retry_is_refused_when_it_was_told_to_be(tmp_path: Path) -> None:
     assert result.returncode != 0, transcript
     assert attempts.read_text(encoding="utf-8").split() == ["unset"], transcript
     assert "--no-system-certs" in transcript, transcript
+
+
+def test_an_agent_install_too_old_for_the_flag_still_registers(tmp_path: Path) -> None:
+    """The `--version` pin's path, run end to end through a POSIX shell.
+
+    `--human` is asked for first, because the report this step captures is the
+    one an operator reads when it fails. A copy installed from an older pin
+    refuses the flag, and argparse refuses it before the command runs, so nothing
+    was done and the second call is safe. What must not happen is that refusal
+    being read as a failed registration, or shown to anybody.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    user_bin = home / ".local" / "bin"
+    for directory in (project, user_bin):
+        directory.mkdir(parents=True)
+
+    calls = tmp_path / "calls"
+
+    _stub_executable(
+        user_bin / "agentic-hil",
+        'if [ "$1" = "--version" ]; then echo "99.0.0"; exit 0; fi\n'
+        'if [ "$1" = "agent-install" ]; then\n'
+        f'  echo "$@" >> "{calls}"\n'
+        '  for argument in "$@"; do\n'
+        '    if [ "$argument" = "--human" ]; then\n'
+        '      echo "usage: agentic-hil agent-install [-h] [--agent AGENT]" >&2\n'
+        '      echo "agentic-hil agent-install: error: unrecognized arguments: --human" >&2\n'
+        "      exit 2\n"
+        "    fi\n"
+        "  done\n"
+        "  cat <<'DOCUMENT'\n"
+        "{\n"
+        '  "ok": true\n'
+        "}\n"
+        "DOCUMENT\n"
+        "fi\n"
+        "exit 0\n",
+    )
+
+    env = {"HOME": str(home), "PATH": f"{user_bin}:/usr/bin:/bin"}
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--agent", "claude-code", "--no-can"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert f"claude-code {REGISTERED_LINE}" in transcript, transcript
+    attempts = calls.read_text(encoding="utf-8").splitlines()
+    assert len(attempts) == 2, attempts
+    assert "--human" in attempts[0]
+    assert "--human" not in attempts[1]
+    # argparse's refusal is a message between two programs, and stays one.
+    assert "unrecognized arguments" not in transcript, transcript
 
 
 # The container run, end to end: a machine with nothing on it, the real package
