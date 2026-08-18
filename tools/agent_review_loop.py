@@ -277,10 +277,6 @@ def _pump(stream: IO[str], prefix: str, log_handle: IO[str], progress: Progress)
                 print(f"{prefix} {safe}", flush=True)
 
 
-# How often a taskkill that reported a failure is asked again, within the same
-# grace period the rest of the cleanup gets. See _terminate_tree.
-TASKKILL_CONFIRM_INTERVAL_S = 0.05
-
 # How often the Windows Job Object tracking an agent is asked whether it has
 # emptied out after TerminateJobObject. See _terminate_tree.
 JOB_CONFIRM_INTERVAL_S = 0.05
@@ -365,8 +361,8 @@ def _kernel32() -> ctypes.WinDLL:
     module never touches `ctypes.windll` -- an attribute that plain `ctypes`
     does not even define outside Windows -- and the whole job-tracking path
     below stays a set of ordinary functions the test suite can monkeypatch
-    from a forced `sys.platform == "win32"`, the same way `_taskkill_tree` and
-    `_process_parent_map` already are for the taskkill walk.
+    from a forced `sys.platform == "win32"`, the same way `_taskkill_tree`
+    already is for the taskkill walk.
     """
     return ctypes.WinDLL("kernel32", use_last_error=True)
 
@@ -456,8 +452,7 @@ def _resume_process_threads(pid: int) -> bool:
     before this module ever sees it (`_execute_child` always does, whether or
     not `CREATE_SUSPENDED` was requested), so there is no handle left to resume
     directly; the thread is instead found again by walking a toolhelp32
-    snapshot for `pid`, the same kind of independent re-enumeration
-    `_process_parent_map` already relies on for the taskkill path below.
+    snapshot for `pid`.
     """
     kernel32 = _kernel32()
     kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
@@ -500,34 +495,69 @@ def _track_in_job_object(process: subprocess.Popen[str]) -> int | None:
     a job member from the instant it exists, not from whenever this module's
     next `tasklist` snapshot happens to run.
 
-    This is what closes review round 2 finding 1: `_resnapshot` narrows the gap
-    a fresh arrival can hide in down to the time between the last snapshot and
-    taskkill's own walk, but cannot close it, because both are polling a
-    snapshot rather than asking something that was tracking membership the
-    whole time. A Job Object is that something -- the kernel updates its
-    member count as processes are created and exit, and a process cannot be
-    created and exit invisibly to a job it was already in before it ran its
-    first instruction.
+    This is what closes review round 2 finding 1: a snapshot-based retry
+    narrows the gap a fresh arrival can hide in down to the time between the
+    last snapshot and taskkill's own walk, but cannot close it, because both
+    are polling a snapshot rather than asking something that was tracking
+    membership the whole time. A Job Object is that something -- the kernel
+    updates its member count as processes are created and exit, and a process
+    cannot be created and exit invisibly to a job it was already in before it
+    ran its first instruction.
 
     Returns the job handle on success, so `_terminate_tree` can ask it whether
-    it is empty instead of walking `tasklist`. On any failure -- a job could not
-    be created, the process already belongs to a job that forbids nesting, or
-    anything else -- this still resumes the process (it must run either way)
-    and returns None, and `_terminate_tree` falls back to the taskkill walk. A
-    best-effort upgrade must never leave the agent stuck suspended, or turn
-    into the reason a round produces nothing for the whole timeout.
+    it is empty instead of walking `tasklist`. If a job could not be created or
+    assigned -- the process already belongs to a job that forbids nesting, or
+    anything else -- this still resumes the process and returns None, and
+    `_terminate_tree` falls back to a best-effort taskkill that can never
+    confirm the tree clean (see review round 3 finding 1); job creation is not
+    required for the agent to run, only for cleanup to ever be confirmed.
+
+    But the resume itself is required: review round 3 finding 2 is a resume
+    that silently failed leaving the process suspended forever, which
+    `run_agent` then waited out for the whole round timeout because nothing
+    told it the agent had never started. So a resume that returns False or
+    raises is not swallowed here -- the process is still suspended, so it can
+    have no descendants of its own yet, and is killed through whichever handle
+    can reach it (the job, if one was assigned, or the process handle
+    otherwise) before this raises AgentError or CleanupUnconfirmed, so the
+    caller fails the launch immediately instead of waiting on a process that
+    will never run.
     """
-    job = None
+    job: int | None = None
+    created: int | None = None
     try:
-        job = _create_job_object()
-        if job is not None and not _assign_process_to_job(job, process._handle):  # noqa: SLF001 -- see _resume_process_threads
-            _close_handle(job)
-            job = None
+        created = _create_job_object()
+        if created is not None and _assign_process_to_job(created, process._handle):  # noqa: SLF001 -- see _resume_process_threads
+            job = created
     except Exception:
         job = None
     finally:
-        _resume_process_threads(process.pid)
-    return job
+        if job is None and created is not None:
+            _close_handle(created)
+
+    try:
+        resumed = _resume_process_threads(process.pid)
+        resume_error: Exception | None = None
+    except Exception as error:
+        resumed = False
+        resume_error = error
+
+    if resumed:
+        return job
+
+    if job is not None:
+        try:
+            _confirm_job_empty(job, process, grace_s=5.0)
+        finally:
+            _close_handle(job)
+    else:
+        process.kill()
+        _reap_leader(process, grace_s=5.0)
+        if process.poll() is None:
+            raise CleanupUnconfirmed(
+                f"pid {process.pid} could not be resumed and then could not be confirmed killed"
+            ) from resume_error
+    raise AgentError(f"pid {process.pid} could not be resumed to start running") from resume_error
 
 
 def _taskkill_tree(pid: int) -> subprocess.CompletedProcess[str]:
@@ -540,67 +570,27 @@ def _taskkill_tree(pid: int) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
-def _process_parent_map() -> dict[int, int] | None:
-    """pid -> parent pid for every process running right now, or None if the
-    query itself could not be trusted.
+def _confirm_job_empty(job: int, process: subprocess.Popen[str], grace_s: float) -> None:
+    """Terminate every member of `job` and wait until the kernel's own active-
+    process count confirms none remain, or raise CleanupUnconfirmed.
 
-    One snapshot of the whole table, walked in Python, rather than a query per
-    pid: a tree several layers deep then costs one process spawn instead of one
-    per layer. PowerShell's CIM process class rather than wmic -- wmic is what
-    Windows is actively removing, and a host that drops it keeps taskkill and
-    PowerShell working.
+    Does not close `job` -- callers own that handle and close it exactly once,
+    whether or not this raises (`_terminate_tree`'s job branch still wants to
+    check the agent's own process handle afterwards; `_track_in_job_object` and
+    `run_agent`'s normal-exit path do not).
     """
-    result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId)\" }"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        return None
-    parents: dict[int, int] = {}
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        fields = line.split(",")
-        if len(fields) != 2:
-            return None
-        try:
-            parents[int(fields[0])] = int(fields[1])
-        except ValueError:
-            return None
-    return parents
-
-
-def _process_tree_pids(root_pid: int, parents: dict[int, int]) -> list[int]:
-    """root_pid and everything descended from it, per a `_process_parent_map` snapshot."""
-    members = {root_pid}
-    changed = True
-    while changed:
-        changed = False
-        for pid, parent_pid in parents.items():
-            if parent_pid in members and pid not in members:
-                members.add(pid)
-                changed = True
-    return sorted(members)
-
-
-def _all_confirmed_gone(pids: list[int]) -> bool | None:
-    """Whether every pid in pids is confirmed absent from the process list, or
-    None if tasklist itself could not be trusted to answer.
-
-    One bulk listing rather than one query per pid, in `/FO CSV` so a locale
-    that translates tasklist's own status prose still leaves each row's PID
-    field a bare, quoted number to look for -- the same reasoning that keeps
-    this module off taskkill's own textual output elsewhere.
-    """
-    result = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if result.returncode != 0:
-        return None
-    listed = result.stdout
-    return not any(f'"{pid}"' in listed for pid in pids)
+    terminated = _terminate_job(job)
+    deadline = time.monotonic() + grace_s
+    remaining = _job_active_process_count(job)
+    while remaining is not None and remaining > 0 and time.monotonic() < deadline:
+        time.sleep(JOB_CONFIRM_INTERVAL_S)
+        remaining = _job_active_process_count(job)
+    if remaining != 0:
+        detail = "" if terminated else "; TerminateJobObject itself reported failure"
+        raise CleanupUnconfirmed(
+            f"the Windows Job Object tracking pid {process.pid} could not be confirmed empty after "
+            f"TerminateJobObject and a {grace_s:.0f}s wait (active process count: {remaining}){detail}"
+        )
 
 
 def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job: int | None = None) -> None:
@@ -618,40 +608,27 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job
     one kernel call and its member count polled until it reads zero: the job has
     tracked every process born under it since before the first one ever ran, so
     its own count is authoritative the instant it is asked, with no snapshot to
-    go stale between being taken and being trusted. Without a job (creation
-    failed, or nesting is unavailable), `taskkill /T` walks the tree from the
-    agent's pid instead, and is asked until it stops reporting a member it could
-    not terminate, because the walk and the kill are two steps and a member that
-    leaves between them is reported as a member that resisted. On POSIX the
-    agent leads its own process group (``start_new_session`` on the `Popen`), so
-    its shells and their children share its pgid; the whole group is signalled,
-    the leader reaped so the group can empty, and the group waited out. A plain
-    `kill(pid)` reached only the leader, which is the bug this fixes -- the
-    grandchildren editing the tree never saw a signal at all.
+    go stale between being taken and being trusted. On POSIX the agent leads its
+    own process group (``start_new_session`` on the `Popen`), so its shells and
+    their children share its pgid; the whole group is signalled, the leader
+    reaped so the group can empty, and the group waited out. A plain `kill(pid)`
+    reached only the leader, which is the bug this fixes -- the grandchildren
+    editing the tree never saw a signal at all.
 
     Returns only once the tree is *positively confirmed* gone. If a signal cannot
     be delivered, or the group still has a member after the final SIGKILL and its
     deadline, this raises CleanupUnconfirmed rather than returning: returning would
     tell the caller the tree is safe to commit when a process may still be editing
-    it, which is the race this exists to prevent.
+    it, which is the race this exists to prevent. On Windows without a job --
+    creation or assignment failed, or nesting is unavailable -- there is no
+    kernel-tracked membership to ask, so this never returns cleanly at all; see
+    the `job is None` branch below.
     """
     if sys.platform == "win32" and job is not None:
         try:
-            terminated = _terminate_job(job)
-            deadline = time.monotonic() + grace_s
-            remaining = _job_active_process_count(job)
-            while remaining is not None and remaining > 0 and time.monotonic() < deadline:
-                time.sleep(JOB_CONFIRM_INTERVAL_S)
-                remaining = _job_active_process_count(job)
-            if remaining != 0:
-                detail = "" if terminated else "; TerminateJobObject itself reported failure"
-                raise CleanupUnconfirmed(
-                    f"the Windows Job Object tracking pid {process.pid} could not be confirmed empty after "
-                    f"TerminateJobObject and a {grace_s:.0f}s wait (active process count: {remaining}){detail}"
-                )
-            # As below: no exit code, not even a job's own member count, speaks
-            # for the agent handle `run_agent` is actually holding a pipe open
-            # against.
+            _confirm_job_empty(job, process, grace_s)
+            # No exit code, not even a job's own member count, speaks for the
+            # agent handle `run_agent` is actually holding a pipe open against.
             process.kill()
             _reap_leader(process, grace_s)
             if process.poll() is None:
@@ -661,98 +638,26 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job
             _close_handle(job)
 
     if sys.platform == "win32":
-        # 0 is a kill; 128 is "process not found", i.e. already gone. Any other
-        # code means at least one member of the tree taskkill walked was not
-        # terminated, which is not the same thing as one that is still running.
-        # taskkill enumerates the tree and then kills what it enumerated, so a
-        # member that exited in between -- and a stranger the walk collected
-        # because Windows had recycled a pid into it -- comes back as the same
-        # failure: on a loaded machine here, 10 of 40 kills reported it for a
-        # tree that was measurably gone, against none of 40 on an idle machine,
-        # and every one of those aborted a round and discarded its work. So the
-        # question is asked again rather than answered once. A member that had
-        # already gone is not in the next walk; one that is genuinely beyond us
-        # is, and keeps saying so until the deadline.
-        #
-        # A retry's own 128 is not the same proof a first call's is, though.
-        # taskkill enumerates the tree fresh from the pid it is given, so once
-        # an earlier attempt has force-killed that pid, a descendant that
-        # resisted *that* attempt is orphaned from any walk still rooted there
-        # -- the next call reports "not found" without ever seeing it. The
-        # membership taskkill would have walked is captured before the first
-        # kill, while the root is still alive to be walked from, so a 128 that
-        # follows a real (non-128) failure can be checked against it instead of
-        # trusted on its own.
-        #
-        # One snapshot before the first kill is not the whole story either: the
-        # root or a descendant can spawn another descendant after that snapshot
-        # and before taskkill's own walk, and if the first call kills everything
-        # captured but fails on that new arrival, the retry that follows reports
-        # 128 for a root that genuinely no longer exists to walk from -- a
-        # snapshot taken only once, before anything died, cannot name a process
-        # that was not yet alive to be named. So the snapshot is retaken before
-        # every subsequent attempt, and every snapshot merged into one combined
-        # parent map rather than the newest one replacing the last: a member
-        # already dead by a later snapshot no longer appears in it as a live
-        # process to walk from, and only the earlier snapshot that caught it
-        # while its own parent was still alive keeps that chain walkable. This
-        # narrows the window a fresh arrival can hide in from the whole kill
-        # sequence down to the gap between the last snapshot taken and
-        # taskkill's own walk in the call that follows it -- not a full close of
-        # the race (only tracking every process from the moment it is created,
-        # e.g. a Windows Job Object assigned before the agent can spawn
-        # anything, closes that gap), but materially narrower than one
-        # snapshot taken only at the very start.
-        combined_members: dict[int, int] = {}
-        any_snapshot_ok = False
-
-        def _resnapshot() -> None:
-            nonlocal any_snapshot_ok
-            snapshot = _process_parent_map()
-            if snapshot is not None:
-                any_snapshot_ok = True
-                combined_members.update(snapshot)
-
-        _resnapshot()
-        deadline = time.monotonic() + grace_s
-        result = _taskkill_tree(process.pid)
-        retried = False
-        while result.returncode not in (0, 128) and time.monotonic() < deadline:
-            retried = True
-            time.sleep(TASKKILL_CONFIRM_INTERVAL_S)
-            _resnapshot()
-            result = _taskkill_tree(process.pid)
+        # No Job Object could be established for this process -- creation or
+        # assignment failed, or the host's job policy forbids nesting -- so
+        # nothing has been tracking this tree's membership since before it ran
+        # its first instruction. A `taskkill /T` walk is then racing a live
+        # tree the same way repeated `tasklist` snapshots were shown to in
+        # review round 3 finding 1: a descendant born after the walk, or even
+        # after the kill, is invisible to it, and re-enumerating harder cannot
+        # rule that out -- only something that was tracking membership the
+        # whole time (a Job Object) can. taskkill is still run here, once, as a
+        # courtesy: a clean host is the common case and there is no reason not
+        # to try. But the result is never trusted as proof of anything, so this
+        # always raises CleanupUnconfirmed -- salvage_commit must never race a
+        # descendant this call had no way to rule out.
+        _taskkill_tree(process.pid)
         process.kill()
         _reap_leader(process, grace_s)
-        if result.returncode not in (0, 128):
-            raise CleanupUnconfirmed(
-                f"taskkill could not confirm the process tree for pid {process.pid} was killed "
-                f"(exit {result.returncode}): {(result.stderr or '').strip()}"
-            )
-        if retried and result.returncode == 128:
-            # One more snapshot, taken as close as possible to the confirmation
-            # check itself, narrows the same gap a final notch further.
-            _resnapshot()
-            if not any_snapshot_ok:
-                raise CleanupUnconfirmed(
-                    f"taskkill reported pid {process.pid} not found after an earlier attempt reported a "
-                    f"member it could not terminate, and the tree's original members could not be "
-                    f"independently re-enumerated to confirm none survived"
-                )
-            members = _process_tree_pids(process.pid, combined_members)
-            gone = _all_confirmed_gone(members)
-            if gone is not True:
-                raise CleanupUnconfirmed(
-                    f"taskkill reported pid {process.pid} not found after an earlier attempt reported a "
-                    f"member it could not terminate, but the tree's original members {members} could not be "
-                    f"independently confirmed gone"
-                )
-        # The one member no exit code speaks for. taskkill reporting a clean
-        # sweep says nothing about the agent still being here afterwards, and the
-        # agent is the process most likely to be holding the working tree open.
-        if process.poll() is None:
-            raise CleanupUnconfirmed(f"the agent process {process.pid} was still running after it was killed")
-        return
+        raise CleanupUnconfirmed(
+            f"pid {process.pid} has no Windows Job Object to authoritatively confirm its process tree is "
+            "empty; taskkill was run best-effort but its result cannot prove no descendant survived"
+        )
 
     # The agent leads its own process group: `start_new_session` ran setsid() in
     # the child, so its pgid equals its pid at launch. Target that pid-as-pgid
@@ -927,6 +832,21 @@ def run_agent(
                     elapsed = time.monotonic() - started
                     print(f"{prefix} ... {elapsed:.0f}s of {timeout:.0f}s, {progress.describe()}", flush=True)
         reader.join(timeout=30)
+
+        if job is not None:
+            # The agent itself just exited on its own -- `_terminate_tree` was
+            # never called, so nothing has closed this job handle yet. Left
+            # open, it leaks for the rest of the loop process's life and, since
+            # the job carries KILL_ON_JOB_CLOSE, keeps whatever the agent left
+            # running in it alive indefinitely too (review round 3 finding 3).
+            # Confirm-then-close mirrors `_terminate_tree`'s own job branch,
+            # rather than trusting KILL_ON_JOB_CLOSE's kill to have finished by
+            # the time close returns -- it is asynchronous, the same reason
+            # `_terminate_tree` does not just close and trust it.
+            try:
+                _confirm_job_empty(job, process, grace_s=5.0)
+            finally:
+                _close_handle(job)
 
     elapsed = time.monotonic() - started
     print(f"{prefix} exit {returncode} after {elapsed:.0f}s (log: {log_path})", flush=True)

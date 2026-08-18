@@ -1507,15 +1507,54 @@ def test_group_gone_treats_an_unclearable_group_as_not_gone(monkeypatch: pytest.
     assert agent_review_loop._group_gone(4321, deadline=time.monotonic() + 5.0) is True
 
 
-def test_terminate_tree_reports_cleanup_unconfirmed_when_taskkill_cannot_confirm(
+def test_terminate_tree_without_a_job_runs_taskkill_best_effort_then_always_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Windows tree walk, faced the same way: a taskkill that did not confirm.
+    """Review round 3 finding 1: without a Job Object, nothing has tracked this
+    tree's membership since before it ran its first instruction, so a
+    `taskkill /T` walk is racing a live process tree the same way repeated
+    `tasklist` snapshots were shown to in round 2 -- a descendant born after
+    the walk, or even after the kill, is invisible to it, and no amount of
+    re-enumeration can rule that out. taskkill is still run, once, as a
+    courtesy, but even a clean-looking result -- 0 here -- must never be
+    trusted as proof the tree is empty."""
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    calls: list[list[str]] = []
 
-    `taskkill /T` returns 0 on a kill and 128 when the pid is already gone; any
-    other code means it did not confirm the tree was killed. Exercised on every
-    platform by forcing the Windows branch, because that is the half a POSIX CI
-    never runs and where an unconfirmed kill would otherwise pass silently."""
+    def fake_run(*arguments: object, **_keywords: object) -> subprocess.CompletedProcess:
+        argv = list(arguments[0])  # type: ignore[index]
+        calls.append(argv)
+        assert argv[0] == "taskkill"
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(agent_review_loop.subprocess, "run", fake_run)
+
+    class _FakeProcess:
+        pid = 4243
+
+        def kill(self) -> None:
+            pass
+
+        def poll(self) -> int:
+            return 1
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 1
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed, match="no Windows Job Object"):
+        agent_review_loop._terminate_tree(_FakeProcess(), grace_s=0.1, job=None)  # type: ignore[arg-type]
+
+    assert len(calls) == 1
+    assert calls[0][:4] == ["taskkill", "/F", "/T", "/PID"]
+
+
+def test_terminate_tree_without_a_job_raises_cleanup_unconfirmed_even_when_taskkill_itself_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half: a taskkill that reports outright failure changes nothing
+    about the outcome -- this branch was never going to trust its answer
+    either way, so a failing exit code and a clean one lead to the same raise.
+    """
     monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
     monkeypatch.setattr(
         agent_review_loop.subprocess,
@@ -1529,194 +1568,14 @@ def test_terminate_tree_reports_cleanup_unconfirmed_when_taskkill_cannot_confirm
         def kill(self) -> None:
             pass
 
-        def wait(self, timeout: float | None = None) -> int:
-            return 1
-
-    with pytest.raises(agent_review_loop.CleanupUnconfirmed):
-        agent_review_loop._terminate_tree(_FakeProcess(), grace_s=0.1)  # type: ignore[arg-type]
-
-
-def _win32_kill_fake(monkeypatch: pytest.MonkeyPatch, *, taskkill_codes: list[int], parent_map_stdout: str = "", tasklist_stdout: str = "", parent_map_ok: bool = True, tasklist_ok: bool = True) -> list[list[str]]:
-    """Route `subprocess.run` for the win32 branch of `_terminate_tree` by which
-    tool is being asked, the way a real Windows host would answer taskkill, the
-    PowerShell process-table snapshot, and tasklist as three different things --
-    not one canned response replayed for whichever of them is called next.
-    """
-    calls: list[list[str]] = []
-
-    def fake_run(*arguments: object, **_keywords: object) -> subprocess.CompletedProcess:
-        argv = list(arguments[0])  # type: ignore[index]
-        calls.append(argv)
-        if argv[0] == "taskkill":
-            index = sum(1 for call in calls if call[0] == "taskkill") - 1
-            code = taskkill_codes[min(index, len(taskkill_codes) - 1)]
-            return subprocess.CompletedProcess(argv, code, "", "" if code in (0, 128) else "no running instance")
-        if argv[0] == "powershell":
-            return subprocess.CompletedProcess(argv, 0 if parent_map_ok else 1, parent_map_stdout, "")
-        if argv[0] == "tasklist":
-            return subprocess.CompletedProcess(argv, 0 if tasklist_ok else 1, tasklist_stdout, "")
-        raise AssertionError(f"unexpected command in the win32 kill path: {argv}")
-
-    monkeypatch.setattr(agent_review_loop.subprocess, "run", fake_run)
-    return calls
-
-
-def test_terminate_tree_asks_again_when_a_tree_member_left_between_the_walk_and_the_kill(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A member that had already gone is not a member that could not be killed.
-
-    `taskkill /T` enumerates the tree and then kills what it enumerated, and it
-    reports the same failure for a member that resisted and for one that exited
-    in between. On a loaded machine the second is the common case -- ten of forty
-    kills, against none of forty on an idle one -- and reading it as the first
-    aborted the round and threw away its work. The retry's own 128 is no longer
-    trusted on its own either (see the next two tests); here the independent
-    check finds the tree's original members gone too, so the benign case still
-    goes through.
-    """
-    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
-    calls = _win32_kill_fake(monkeypatch, taskkill_codes=[255, 128])
-
-    class _FakeProcess:
-        pid = 4243
-
-        def kill(self) -> None:
-            pass
-
         def poll(self) -> int:
             return 1
 
         def wait(self, timeout: float | None = None) -> int:
             return 1
 
-    agent_review_loop._terminate_tree(_FakeProcess(), grace_s=5.0)  # type: ignore[arg-type]
-
-    taskkill_calls = [call for call in calls if call[0] == "taskkill"]
-    assert [call[:2] for call in taskkill_calls] == [["taskkill", "/F"], ["taskkill", "/F"]]
-
-
-def test_terminate_tree_does_not_trust_a_retrys_not_found_when_a_member_actually_survived(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Review finding: the ambiguous case the benign one above must not paper over.
-
-    `taskkill /T` walks the tree from the pid it is given. Once the first call
-    has force-killed that root while a descendant resisted, the root is gone and
-    a retry walking from it reports "not found" -- 128 -- whether or not that
-    descendant is still alive, because there is no longer a root to walk from to
-    find out. A 128 that follows a real failure must be checked against the
-    tree taskkill would have walked, captured before anything was killed; here
-    that check finds a survivor, so this must not be read as a clean kill.
-    """
-    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
-    survivor_pid = 4321
-    _win32_kill_fake(
-        monkeypatch,
-        taskkill_codes=[255, 128],
-        parent_map_stdout=f"{survivor_pid},4243\n",
-        tasklist_stdout=f'"python.exe","{survivor_pid}","Console","1","10,000 K"\n',
-    )
-
-    class _FakeProcess:
-        pid = 4243
-
-        def kill(self) -> None:
-            pass
-
-        def poll(self) -> int:
-            return None
-
-        def wait(self, timeout: float | None = None) -> int:
-            raise subprocess.TimeoutExpired("agent", timeout or 0)
-
-    with pytest.raises(agent_review_loop.CleanupUnconfirmed, match="could not be independently confirmed gone"):
-        agent_review_loop._terminate_tree(_FakeProcess(), grace_s=5.0)  # type: ignore[arg-type]
-
-
-def test_terminate_tree_catches_a_descendant_spawned_after_the_first_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Review round 1, finding 1: a snapshot taken only once, before the first
-    kill, cannot name a descendant that was not yet alive to be captured in it.
-    The root or a descendant can spawn another descendant after that snapshot
-    and before taskkill's own walk; if the first call kills everything it
-    captured but fails on that new arrival, the retry that follows is rooted at
-    a now-dead pid and can only ever answer 128, whether or not the new arrival
-    is still alive. Checking that 128 against the stale, pre-spawn snapshot
-    alone would find every member it names already gone and wrongly call the
-    tree clean. Here the snapshot is retaken before the retry, the survivor is
-    alive to be captured by then, and the check must still refuse.
-    """
-    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
-    survivor_pid = 5000
-    calls: list[list[str]] = []
-
-    def fake_run(*arguments: object, **_keywords: object) -> subprocess.CompletedProcess:
-        argv = list(arguments[0])  # type: ignore[index]
-        calls.append(argv)
-        if argv[0] == "taskkill":
-            index = sum(1 for call in calls if call[0] == "taskkill") - 1
-            codes = [255, 128]
-            code = codes[min(index, len(codes) - 1)]
-            return subprocess.CompletedProcess(argv, code, "", "" if code in (0, 128) else "no running instance")
-        if argv[0] == "powershell":
-            index = sum(1 for call in calls if call[0] == "powershell") - 1
-            # The first snapshot, taken before the first kill, predates the
-            # survivor. Every snapshot after it is taken once the survivor
-            # already exists -- the same way a real retry's re-enumeration
-            # would see it.
-            stdout = "" if index == 0 else f"{survivor_pid},4243\n"
-            return subprocess.CompletedProcess(argv, 0, stdout, "")
-        if argv[0] == "tasklist":
-            return subprocess.CompletedProcess(argv, 0, f'"python.exe","{survivor_pid}","Console","1","10,000 K"\n', "")
-        raise AssertionError(f"unexpected command in the win32 kill path: {argv}")
-
-    monkeypatch.setattr(agent_review_loop.subprocess, "run", fake_run)
-
-    class _FakeProcess:
-        pid = 4243
-
-        def kill(self) -> None:
-            pass
-
-        def poll(self) -> int | None:
-            return None
-
-        def wait(self, timeout: float | None = None) -> int:
-            raise subprocess.TimeoutExpired("agent", timeout or 0)
-
-    with pytest.raises(agent_review_loop.CleanupUnconfirmed, match="could not be independently confirmed gone"):
-        agent_review_loop._terminate_tree(_FakeProcess(), grace_s=5.0)  # type: ignore[arg-type]
-
-    powershell_calls = sum(1 for call in calls if call[0] == "powershell")
-    assert powershell_calls >= 2, "the snapshot must be retaken at least once after the first, or the survivor is never seen"
-
-
-def test_terminate_tree_refuses_to_confirm_when_the_original_tree_cannot_be_re_enumerated(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Fail safe, not fail available: if the independent check itself cannot
-    answer (PowerShell missing, tasklist refusing), a retry's 128 following a
-    real failure must not be read as a clean kill just because nothing
-    contradicted it."""
-    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
-    _win32_kill_fake(monkeypatch, taskkill_codes=[255, 128], parent_map_ok=False)
-
-    class _FakeProcess:
-        pid = 4243
-
-        def kill(self) -> None:
-            pass
-
-        def poll(self) -> int:
-            return 1
-
-        def wait(self, timeout: float | None = None) -> int:
-            return 1
-
-    with pytest.raises(agent_review_loop.CleanupUnconfirmed, match="could not be independently re-enumerated"):
-        agent_review_loop._terminate_tree(_FakeProcess(), grace_s=5.0)  # type: ignore[arg-type]
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed, match="no Windows Job Object"):
+        agent_review_loop._terminate_tree(_FakeProcess(), grace_s=0.1, job=None)  # type: ignore[arg-type]
 
 
 def test_taskkill_tree_decodes_with_the_same_care_as_git_and_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1744,47 +1603,37 @@ def test_taskkill_tree_decodes_with_the_same_care_as_git_and_the_agent(monkeypat
     assert calls[0]["errors"] == "replace"
 
 
-def test_terminate_tree_refuses_to_confirm_an_agent_that_outlived_its_own_kill(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The one member taskkill's exit code says nothing about.
-
-    A clean sweep is a statement about the tree taskkill walked, not about the
-    agent still being here afterwards -- and the agent is the process most likely
-    to be holding the working tree open when `salvage_commit` runs.
-    """
-    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
-    monkeypatch.setattr(
-        agent_review_loop.subprocess,
-        "run",
-        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0, "", ""),
-    )
-
-    class _SurvivingProcess:
-        pid = 4244
-
-        def kill(self) -> None:
-            pass
-
-        def poll(self) -> None:
-            return None
-
-        def wait(self, timeout: float | None = None) -> int:
-            raise subprocess.TimeoutExpired("agent", timeout or 0)
-
-    with pytest.raises(agent_review_loop.CleanupUnconfirmed, match="still running after it was killed"):
-        agent_review_loop._terminate_tree(_SurvivingProcess(), grace_s=0.1)  # type: ignore[arg-type]
-
-
 class _FakeSuspendedProcess:
     """A `Popen`-shaped double for `_track_in_job_object`: it only ever reads
     `.pid` and `._handle`, never spawns anything real, and needs no actual
     Windows underneath it -- the job-tracking wrappers it is handed to are
-    monkeypatched below, the same way `_win32_kill_fake` replaces `subprocess.run`
-    for the taskkill path rather than requiring a real `tasklist`."""
+    monkeypatched below, the same way `_win32_job_fake` replaces the Job Object
+    wrappers for the terminate-tree path rather than requiring a real job."""
 
     pid = 9001
     _handle = 0xFEED
+
+
+class _FakeSuspendedProcessKillable:
+    """Adds the process-handle surface `_track_in_job_object` needs when a
+    failed resume forces it to kill the still-suspended process directly,
+    without a job: `.kill()`, `.poll()`, `.wait()` alongside the `.pid` /
+    `._handle` that `_FakeSuspendedProcess` above already provides."""
+
+    pid = 9002
+    _handle = 0xFACE
+
+    def __init__(self, *, alive_after_kill: bool = False) -> None:
+        self._alive_after_kill = alive_after_kill
+
+    def kill(self) -> None:
+        pass
+
+    def poll(self) -> int | None:
+        return None if self._alive_after_kill else 1
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 1
 
 
 def test_track_in_job_object_creates_assigns_and_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1857,14 +1706,113 @@ def test_track_in_job_object_still_resumes_when_a_step_raises(monkeypatch: pytes
     assert resumed == [9001]
 
 
+def test_track_in_job_object_closes_an_already_created_job_when_assignment_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 3 finding 2's last point: the old `except Exception: job =
+    None` dropped the handle `_create_job_object` had already handed back
+    without closing it if `_assign_process_to_job` raised instead of merely
+    returning False -- the assignment-returns-False case above already closed
+    it, but a raise skipped straight past that line."""
+    closed: list[int] = []
+
+    def _boom(job: int, handle: int) -> bool:
+        raise OSError("AssignProcessToJobObject failed")
+
+    monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: 555)
+    monkeypatch.setattr(agent_review_loop, "_assign_process_to_job", _boom)
+    monkeypatch.setattr(agent_review_loop, "_close_handle", lambda handle: closed.append(handle))
+    monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: True)
+
+    job = agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
+
+    assert job is None
+    assert closed == [555]
+
+
+def test_track_in_job_object_kills_the_still_suspended_process_when_resume_fails_with_a_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 3 finding 2: a resume that returns False used to be
+    swallowed, leaving the process suspended forever while `_track_in_job_object`
+    returned the job handle as if launch had succeeded -- `run_agent` then
+    waited out the whole round timeout for a process that never ran a single
+    instruction. With a job already assigned, the still-suspended process (it
+    ran no instruction, so it has no descendants of its own yet) is killed
+    through the job, confirmed empty, and the failure raised immediately
+    instead of silently returning."""
+    monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: 555)
+    monkeypatch.setattr(agent_review_loop, "_assign_process_to_job", lambda job, handle: True)
+    monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: False)
+    calls = _win32_job_fake(monkeypatch, active_counts=[0])
+
+    with pytest.raises(agent_review_loop.AgentError) as excinfo:
+        agent_review_loop._track_in_job_object(_FakeSuspendedProcess())  # type: ignore[arg-type]
+
+    assert not isinstance(excinfo.value, agent_review_loop.CleanupUnconfirmed)
+    assert calls["terminate"] == [555]
+    assert calls["close"] == [555]
+
+
+def test_track_in_job_object_kills_the_still_suspended_process_when_resume_fails_without_a_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-job twin of the test above: creation or assignment already
+    failed, so there is no job to kill through -- the process handle
+    `subprocess.Popen` itself still holds is the only way left to reach it,
+    and it is confirmed dead before the launch is failed."""
+    monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: None)
+    monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: False)
+
+    with pytest.raises(agent_review_loop.AgentError) as excinfo:
+        agent_review_loop._track_in_job_object(_FakeSuspendedProcessKillable())  # type: ignore[arg-type]
+
+    assert not isinstance(excinfo.value, agent_review_loop.CleanupUnconfirmed)
+
+
+def test_track_in_job_object_raises_cleanup_unconfirmed_when_the_post_resume_failure_kill_cannot_be_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail safe, not fail available: without a job, if the process still looks
+    alive after being killed for a failed resume, that is reported as
+    CleanupUnconfirmed rather than the plainer AgentError -- the same
+    distinction `_terminate_tree` makes for a tree that resists its own kill.
+    """
+    monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: None)
+    monkeypatch.setattr(agent_review_loop, "_resume_process_threads", lambda pid: False)
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed):
+        agent_review_loop._track_in_job_object(_FakeSuspendedProcessKillable(alive_after_kill=True))  # type: ignore[arg-type]
+
+
+def test_track_in_job_object_treats_a_raised_resume_error_the_same_as_a_false_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of finding 2: a resume that raises instead of returning
+    False must not escape uncaught and leave the suspended process and any
+    assigned job handle unmanaged -- it is handled the same way a False result
+    is, and the original error is chained onto the failure this raises."""
+
+    def _boom(pid: int) -> bool:
+        raise OSError("OpenThread failed")
+
+    monkeypatch.setattr(agent_review_loop, "_create_job_object", lambda: None)
+    monkeypatch.setattr(agent_review_loop, "_resume_process_threads", _boom)
+
+    with pytest.raises(agent_review_loop.AgentError) as excinfo:
+        agent_review_loop._track_in_job_object(_FakeSuspendedProcessKillable())  # type: ignore[arg-type]
+
+    assert isinstance(excinfo.value.__cause__, OSError)
+
+
 def _win32_job_fake(
     monkeypatch: pytest.MonkeyPatch, *, active_counts: list[int | None], terminate_ok: bool = True
 ) -> dict[str, list]:
-    """Route the Job Object wrappers `_terminate_tree` calls once it has a job
-    handle, the same way `_win32_kill_fake` routes `subprocess.run` for the
-    taskkill path -- each call answers from `active_counts` in order, standing
-    in for the kernel's own live member count rather than a snapshot this
-    module took itself."""
+    """Route the Job Object wrappers `_terminate_tree`, `_track_in_job_object`,
+    and `run_agent`'s own normal-exit cleanup call once they have a job handle
+    -- each call answers from `active_counts` in order, standing in for the
+    kernel's own live member count rather than a snapshot this module took
+    itself."""
     calls: dict[str, list] = {"terminate": [], "count": [], "close": []}
 
     def fake_terminate(job: int) -> bool:
@@ -2013,30 +1961,6 @@ def test_terminate_tree_with_a_job_still_checks_the_agent_handle(monkeypatch: py
         agent_review_loop._terminate_tree(_SurvivingProcess(), grace_s=0.1, job=777)  # type: ignore[arg-type]
 
 
-def test_terminate_tree_without_a_job_still_falls_back_to_the_taskkill_walk(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`job=None` -- creation failed, or nesting was unavailable -- must still
-    reach the taskkill path unchanged; this is what keeps every taskkill-path
-    test above valid without their own job wiring."""
-    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
-    calls = _win32_kill_fake(monkeypatch, taskkill_codes=[0])
-
-    class _FakeProcess:
-        pid = 4243
-
-        def kill(self) -> None:
-            pass
-
-        def poll(self) -> int:
-            return 1
-
-        def wait(self, timeout: float | None = None) -> int:
-            return 1
-
-    agent_review_loop._terminate_tree(_FakeProcess(), grace_s=1.0, job=None)  # type: ignore[arg-type]
-
-    assert any(call[0] == "taskkill" for call in calls)
-
-
 def test_run_agent_launches_windows_suspended_and_tracks_it_in_a_job_object(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2064,6 +1988,10 @@ def test_run_agent_launches_windows_suspended_and_tracks_it_in_a_job_object(
         "_track_in_job_object",
         lambda process: tracked.append(process.pid) or 42,
     )
+    # The agent exits on its own below, so `run_agent`'s own normal-exit
+    # cleanup (review round 3 finding 3) confirms and closes job 42; these
+    # stand in for the kernel the same way they do for `_terminate_tree`.
+    job_calls = _win32_job_fake(monkeypatch, active_counts=[0])
 
     script = tmp_path / "quick.py"
     script.write_text("import sys\nsys.stdin.read()\nsys.stdout.write('done\\n')\n", encoding="utf-8")
@@ -2081,6 +2009,8 @@ def test_run_agent_launches_windows_suspended_and_tracks_it_in_a_job_object(
 
     assert seen_creationflags == [agent_review_loop._CREATE_SUSPENDED]
     assert len(tracked) == 1
+    assert job_calls["terminate"] == [42]
+    assert job_calls["close"] == [42]
 
 
 def test_run_agent_threads_the_tracked_job_into_terminate_tree_on_timeout(
@@ -2104,10 +2034,13 @@ def test_run_agent_threads_the_tracked_job_into_terminate_tree_on_timeout(
 
     def fake_terminate_tree(process: object, *, grace_s: float = 5.0, job: int | None = None) -> None:
         seen_jobs.append(job)
-        real_terminate_tree(process, grace_s=grace_s, job=None)  # type: ignore[arg-type]
+        real_terminate_tree(process, grace_s=grace_s, job=job)  # type: ignore[arg-type]
 
     monkeypatch.setattr(agent_review_loop, "_terminate_tree", fake_terminate_tree)
-    monkeypatch.setattr(agent_review_loop.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0, "", ""))
+    # The real `_terminate_tree` is used above (only its `job` argument is
+    # intercepted), so with a job it takes the Job Object branch; these stand
+    # in for the kernel calls that branch makes.
+    _win32_job_fake(monkeypatch, active_counts=[0])
 
     script = tmp_path / "slow.py"
     script.write_text("import sys, time\nsys.stdout.write('go\\n')\nsys.stdout.flush()\ntime.sleep(120)\n", encoding="utf-8")
