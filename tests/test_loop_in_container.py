@@ -2459,8 +2459,13 @@ def test_run_agent_leaves_no_live_agent_when_the_launch_is_interrupted(
         process = forced_popen(*args, **kwargs)  # type: ignore[operator]
         # Unlike the tests that replace `_track_in_job_object` outright, this one
         # runs the real tracking call, and that call reads the `_handle` only a
-        # Windows `Popen` has to assign the process to the job.
-        process._handle = 0xFEED  # type: ignore[attr-defined]
+        # Windows `Popen` has to assign the process to the job. Only where the
+        # platform does not provide one: on a real Windows host that attribute is
+        # the kernel handle `Popen.__del__` polls with, and overwriting it leaves
+        # the finalizer to fail on an invalid handle long after the test passed.
+        # `_assign_process_to_job` is replaced below, so the value is never read.
+        if not hasattr(process, "_handle"):
+            process._handle = 0xFEED  # type: ignore[attr-defined]
         return process
 
     monkeypatch.setattr(agent_review_loop.subprocess, "Popen", popen_with_a_process_handle)
@@ -2531,7 +2536,11 @@ def test_run_agent_releases_a_job_whose_handle_never_reached_the_caller(
 
     def popen_with_a_process_handle(*args: object, **kwargs: object) -> subprocess.Popen:
         process = forced_popen(*args, **kwargs)  # type: ignore[operator]
-        process._handle = 0xFEED  # type: ignore[attr-defined]
+        # Only where the platform does not provide one: see the sibling test
+        # above. A real Windows `Popen` already carries the handle the tracking
+        # call needs, and it is the one its finalizer polls with.
+        if not hasattr(process, "_handle"):
+            process._handle = 0xFEED  # type: ignore[attr-defined]
         return process
 
     monkeypatch.setattr(agent_review_loop.subprocess, "Popen", popen_with_a_process_handle)
