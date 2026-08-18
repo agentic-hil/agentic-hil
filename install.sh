@@ -20,7 +20,9 @@ AGENT=""
 WITH_AGENT_INSTALL=1
 PINNED=""
 WITH_CAN=1
-SYSTEM_CERTS=0
+# auto, always or never: whether this machine's own certificate store is
+# reached for, and whether it takes a failed attempt first.
+SYSTEM_CERTS="auto"
 STEP_TOTAL=5
 
 say() {
@@ -63,10 +65,13 @@ Options:
                       This is the default.
   --no-can            Install without the [can] extra.
   --system-certs      Validate TLS against this machine's own certificate
-                      store, the one curl and apt already read, instead of the
-                      roots uv carries inside its binary. This is what a
-                      TLS-intercepting proxy needs. Verification is never
-                      disabled, at any level, by this or any other flag.
+                      store, the one curl and apt already read, from the start.
+                      Rarely needed: a failure that carries the signature of a
+                      TLS-intercepting proxy is retried against that store by
+                      itself. This only skips the first attempt.
+  --no-system-certs   Never reach for this machine's store, not even after such
+                      a failure. The install fails instead.
+                      Neither flag disables verification. Nothing here does.
   --help              Print this text and exit.
 USAGE
 }
@@ -108,7 +113,11 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         --system-certs)
-            SYSTEM_CERTS=1
+            SYSTEM_CERTS="always"
+            shift
+            ;;
+        --no-system-certs)
+            SYSTEM_CERTS="never"
             shift
             ;;
         --help | -h)
@@ -128,9 +137,14 @@ done
 # binary, so on a managed network it fails where curl and apt on the same host
 # keep working, which is what makes the cause recognisable; this points it at
 # the store those two already read. pip takes a file rather than a switch, so
-# the usual locations are tried and whichever is found is named. Verification is
-# never disabled: --allow-insecure-host, --insecure and --trusted-host are not
-# options this script offers, and no flag here is a way to reach them.
+# the usual locations are tried and whichever is found is named.
+#
+# Nobody has to know any of that in advance. The failed install is the
+# detection: a package manager that came back with one of the signatures below
+# is retried once against this machine's store, and only that. Verification is
+# on in both attempts, and this is not a way to reach a switch that turns it
+# off: --allow-insecure-host, --insecure and --trusted-host are not options this
+# script offers, and no path through it arrives at one.
 system_cert_bundle() {
     for candidate in \
         /etc/ssl/certs/ca-certificates.crt \
@@ -145,7 +159,19 @@ system_cert_bundle() {
     return 1
 }
 
-if [ "$SYSTEM_CERTS" -eq 1 ]; then
+# What a chain that ends outside the manager's own roots looks like, from uv
+# (rustls), pip (OpenSSL) and curl. A failure that says none of this is a
+# failure about something else, and is never retried.
+trust_failure() {
+    case "$1" in
+        *"invalid peer certificate"* | *UnknownIssuer* | *"self-signed certificate"* | *"self signed certificate"* | *"certificate verify failed"* | *CERTIFICATE_VERIFY_FAILED* | *"unable to get local issuer certificate"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+use_system_certs() {
     UV_SYSTEM_CERTS=1
     export UV_SYSTEM_CERTS
     if [ -n "${PIP_CERT:-}" ]; then
@@ -157,6 +183,10 @@ if [ "$SYSTEM_CERTS" -eq 1 ]; then
     else
         say "certificates: uv reads this machine's own store; no bundle file was found here for pip, so set PIP_CERT to one if pip is what fails"
     fi
+}
+
+if [ "$SYSTEM_CERTS" = "always" ]; then
+    use_system_certs
 fi
 
 # The leading run of digits of one dot-separated field, so a development version
@@ -348,14 +378,29 @@ user_bin_on_path() {
     export PATH
 }
 
+# uv's output is captured rather than streamed, because the text of a failure is
+# what decides whether there is a second attempt to make.
 install_with_uv() {
-    if uv tool install --upgrade "$(package_spec)"; then
+    if uv_output=$(uv tool install --upgrade "$(package_spec)" 2>&1); then
+        printf '%s\n' "$uv_output"
         return 0
     fi
-    if [ "$SYSTEM_CERTS" -eq 1 ]; then
-        fail "package: uv could not install $(package_spec), --system-certs included; if the failure above is a certificate, the proxy's own CA is missing from this machine's store and installing it there is the fix; TROUBLESHOOTING.md section 1 has the rest"
+    printf '%s\n' "$uv_output" >&2
+    if [ "$SYSTEM_CERTS" = "auto" ] && trust_failure "$uv_output"; then
+        say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
+        use_system_certs
+        SYSTEM_CERTS="always"
+        if uv_output=$(uv tool install --upgrade "$(package_spec)" 2>&1); then
+            printf '%s\n' "$uv_output"
+            return 0
+        fi
+        printf '%s\n' "$uv_output" >&2
+        fail "package: uv could not install $(package_spec) against this machine's own store either; the proxy's own CA is missing from that store, and installing it there is the fix; TROUBLESHOOTING.md section 1 has the rest"
     fi
-    fail "package: uv could not install $(package_spec); TROUBLESHOOTING.md section 1 has the fallbacks. On a managed network the usual cause is a TLS-intercepting proxy, which uv reports as an invalid peer certificate because it validates against roots bundled in its own binary; re-run with --system-certs to point it at this machine's own store"
+    if [ "$SYSTEM_CERTS" = "never" ] && trust_failure "$uv_output"; then
+        fail "package: uv could not install $(package_spec), and that is a certificate failure this run was told not to retry against this machine's own store; drop --no-system-certs, or install the proxy's CA where uv can be pointed at it; TROUBLESHOOTING.md section 1 has the rest"
+    fi
+    fail "package: uv could not install $(package_spec); TROUBLESHOOTING.md section 1 has the fallbacks"
 }
 
 install_with_pip() {
@@ -365,6 +410,18 @@ install_with_pip() {
         return 0
     fi
     printf '%s\n' "$pip_output" >&2
+    if [ "$SYSTEM_CERTS" = "auto" ] && trust_failure "$pip_output"; then
+        use_system_certs
+        SYSTEM_CERTS="always"
+        if [ -n "${PIP_CERT:-}" ]; then
+            say "certificates: retrying pip once against this machine's own store, with verification still on"
+            if pip_output=$("$python_bin" -m pip install --user --upgrade "$(package_spec)" 2>&1); then
+                printf '%s\n' "$pip_output"
+                return 0
+            fi
+            printf '%s\n' "$pip_output" >&2
+        fi
+    fi
     case "$pip_output" in
         *externally-managed-environment* | *"externally managed"*)
             # PEP 668: the distribution owns this interpreter. The answer is an

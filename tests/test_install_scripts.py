@@ -47,6 +47,7 @@ DOCUMENTED_FLAGS = (
     "--can",
     "--no-can",
     "--system-certs",
+    "--no-system-certs",
     "--help",
 )
 
@@ -1156,6 +1157,149 @@ def test_the_system_certs_flag_reaches_the_package_manager(tmp_path: Path) -> No
     assert seen.is_file(), transcript
     assert seen.read_text(encoding="utf-8").strip() == "1", transcript
     assert "certificates: uv" in transcript, transcript
+
+
+def _proxied_uv_stub(attempts: Path) -> str:
+    """A uv that fails the way a TLS-intercepting proxy makes it fail.
+
+    It records what it was given on each attempt, refuses the install while it
+    is validating against roots of its own, and writes the console script once
+    it is pointed at the machine's store.
+    """
+    return (
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'  echo "${{UV_SYSTEM_CERTS:-unset}}" >> "{attempts}"\n'
+        '  if [ -z "${UV_SYSTEM_CERTS:-}" ]; then\n'
+        '    echo "error: Failed to fetch: https://pypi.org/simple/agentic-hil/" >&2\n'
+        '    echo "  Caused by: invalid peer certificate: UnknownIssuer" >&2\n'
+        "    exit 2\n"
+        "  fi\n"
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "99.0.0" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+def test_both_scripts_recognise_a_trust_failure_by_its_own_words() -> None:
+    """The retry is decided by what the failure says, not by trying twice always.
+
+    A second attempt against a different set of roots is only ever an answer to
+    a chain that ended outside the first set. Anything else that can fail an
+    install, a proxy refusing the host, an index that is down, a version that
+    does not exist, is not helped by it and must not spend a second attempt on
+    it. Both scripts carry the words each manager uses for the one case.
+    """
+    for name, code in _both_code().items():
+        assert "invalid peer certificate" in code, name
+        assert "UnknownIssuer" in code, name
+        assert "certificate verify failed" in code, name
+
+
+def test_a_certificate_failure_is_retried_against_the_system_store(tmp_path: Path) -> None:
+    """The proxied machine, run end to end through a POSIX shell.
+
+    The person typing the line does not know that uv carries its own roots, and
+    should not have to. The failed attempt is the detection: uv comes back
+    saying the chain ended outside them, and the second attempt validates
+    against the store this machine already trusts for everything else. The stub
+    records what it was given on each attempt.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, uv_bin, tools):
+        directory.mkdir(parents=True)
+
+    attempts = tmp_path / "attempts"
+
+    _stub_executable(tools / "uv", _proxied_uv_stub(attempts))
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-can", "--no-agent-install"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert attempts.read_text(encoding="utf-8").split() == ["unset", "1"], transcript
+    assert "retrying once against this machine's own store" in transcript, transcript
+
+
+def test_the_retry_is_refused_when_it_was_told_to_be(tmp_path: Path) -> None:
+    """`--no-system-certs` keeps the install on uv's own roots and lets it fail.
+
+    The automatic retry reaches for a different set of trust anchors, and an
+    operator who wants that decision made by nobody but themselves has to be
+    able to say so. Then the install fails, and the refusal says which flag
+    stopped the second attempt rather than leaving the reader with uv's message
+    alone.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, uv_bin, tools):
+        directory.mkdir(parents=True)
+
+    attempts = tmp_path / "attempts"
+
+    _stub_executable(tools / "uv", _proxied_uv_stub(attempts))
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-system-certs", "--no-can", "--no-agent-install"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode != 0, transcript
+    assert attempts.read_text(encoding="utf-8").split() == ["unset"], transcript
+    assert "--no-system-certs" in transcript, transcript
 
 
 # The container run, end to end: a machine with nothing on it, the real package

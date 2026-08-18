@@ -12,6 +12,7 @@ param(
     [switch]$Can,
     [switch]$NoCan,
     [switch]$SystemCerts,
+    [switch]$NoSystemCerts,
     [switch]$Help,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
@@ -61,21 +62,25 @@ Options:
                       This is the default.
   --no-can            Install without the [can] extra.
   --system-certs      Validate TLS against this machine's own certificate
-                      store, the one curl and apt already read, instead of the
-                      roots uv carries inside its binary. This is what a
-                      TLS-intercepting proxy needs. Verification is never
-                      disabled, at any level, by this or any other flag.
+                      store, the one curl and apt already read, from the start.
+                      Rarely needed: a failure that carries the signature of a
+                      TLS-intercepting proxy is retried against that store by
+                      itself. This only skips the first attempt.
+  --no-system-certs   Never reach for this machine's store, not even after such
+                      a failure. The install fails instead.
+                      Neither flag disables verification. Nothing here does.
   --help              Print this text and exit.
 
 PowerShell spells the same flags -Agent, -NoAgentInstall, -Version, -Can,
--NoCan, -SystemCerts and -Help; both spellings bind to the same options.
+-NoCan, -SystemCerts, -NoSystemCerts and -Help; both spellings bind to the same
+options.
 '@
 }
 
 $WithCan = -not $NoCan
 $WithAgentInstall = -not $NoAgentInstall
 $ShowHelp = [bool]$Help
-$UseSystemCerts = [bool]$SystemCerts
+$SystemCertsMode = if ($NoSystemCerts) { 'never' } elseif ($SystemCerts) { 'always' } else { 'auto' }
 
 # Two spellings carry an inner dash, which no PowerShell parameter name can, so
 # they arrive here rather than bound. Everything else binds by itself.
@@ -85,7 +90,8 @@ foreach ($token in @($Rest)) {
         '^--no-agent-install$' { $WithAgentInstall = $false }
         '^--no-can$' { $WithCan = $false }
         '^--can$' { $WithCan = $true }
-        '^--system-certs$' { $UseSystemCerts = $true }
+        '^--system-certs$' { $SystemCertsMode = 'always' }
+        '^--no-system-certs$' { $SystemCertsMode = 'never' }
         '^(--help|-h|/\?)$' { $ShowHelp = $true }
         default {
             Write-Host "agentic-hil install: unknown option: $token"
@@ -107,17 +113,50 @@ if ($ShowHelp) {
 # keeps working; this points it at the store Windows itself holds. pip takes a
 # file rather than a switch and Windows ships no bundle file, so PIP_CERT is the
 # operator's to set on the rare host where pip rather than uv does the install.
-# Verification is never disabled: -SkipCertificateCheck, --allow-insecure-host
-# and --trusted-host are not options this script offers.
-if ($UseSystemCerts) {
+#
+# Nobody has to know that in advance. The failed install is the detection: an
+# install that came back with one of the signatures below is retried once
+# against this machine's store, and only that. Verification is on in both
+# attempts, and this is not a way to reach a switch that turns it off:
+# -SkipCertificateCheck, --allow-insecure-host and --trusted-host are not
+# options this script offers, and no path through it arrives at one.
+# What a chain that ends outside the manager's own roots looks like, from uv
+# (rustls), pip (OpenSSL) and .NET. A failure that says none of this is a
+# failure about something else, and is never retried.
+function Test-TrustFailure {
+    param([string]$Output)
+    return $Output -match 'invalid peer certificate|UnknownIssuer|self.signed certificate|certificate verify failed|CERTIFICATE_VERIFY_FAILED|unable to get local issuer certificate'
+}
+
+function Enable-SystemCerts {
     $env:UV_SYSTEM_CERTS = '1'
     Write-Say "certificates: uv reads this machine's own certificate store"
 }
 
-$UvInstallFailure = if ($UseSystemCerts) {
-    "uv could not install agentic-hil, --system-certs included; if the failure above is a certificate, the proxy's own CA is missing from this machine's store and installing it there is the fix; TROUBLESHOOTING.md section 1 has the rest"
+function Install-WithUv {
+    # uv's output is captured rather than streamed, because the text of a
+    # failure is what decides whether there is a second attempt to make.
+    $result = Invoke-Captured -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
+    Write-Host $result.Output.TrimEnd()
+    if ($result.ExitCode -eq 0) { return }
+    if ($script:SystemCertsMode -eq 'auto' -and (Test-TrustFailure $result.Output)) {
+        Write-Say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
+        Enable-SystemCerts
+        $script:SystemCertsMode = 'always'
+        $retry = Invoke-Captured -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
+        Write-Host $retry.Output.TrimEnd()
+        if ($retry.ExitCode -eq 0) { return }
+        throw "uv could not install agentic-hil against this machine's own certificate store either; the proxy's own CA is missing from that store, and installing it there is the fix; TROUBLESHOOTING.md section 1 has the rest"
+    }
+    throw $UvInstallFailure
+}
+
+if ($SystemCertsMode -eq 'always') { Enable-SystemCerts }
+
+$UvInstallFailure = if ($SystemCertsMode -eq 'never') {
+    'uv could not install agentic-hil, and a certificate failure would not have been retried against this machine own store because --no-system-certs was given; TROUBLESHOOTING.md section 1 has the rest'
 } else {
-    "uv could not install agentic-hil; TROUBLESHOOTING.md section 1 has the fallbacks. On a managed network the usual cause is a TLS-intercepting proxy, which uv reports as an invalid peer certificate because it validates against roots bundled in its own binary; re-run with --system-certs to point it at this machine's own store"
+    'uv could not install agentic-hil; TROUBLESHOOTING.md section 1 has the fallbacks'
 }
 
 # Windows PowerShell 5.1 still negotiates TLS 1.0 by default, and every host
@@ -369,7 +408,7 @@ if (-not $needsPackage) {
     Write-Step 2 'package: nothing to install'
 } elseif (Test-Executable 'uv') {
     Write-Step 2 "package: uv is here, installing $(Get-PackageSpec) user-local with uv tool install"
-    Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure $UvInstallFailure
+    Install-WithUv
     $packageManager = 'uv'
 } else {
     $pythonCommand = Find-Python
@@ -387,7 +426,7 @@ if (-not $needsPackage) {
                 if (-not (Test-Executable 'uv')) { Install-Uv }
                 Add-UserBinToPath
                 if (-not (Test-Executable 'uv')) { throw 'uv installed but does not resolve yet; open a new shell and run this again' }
-                Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure $UvInstallFailure
+                Install-WithUv
                 $packageManager = 'uv'
             } else {
                 throw "pip could not install $(Get-PackageSpec); TROUBLESHOOTING.md section 1 has the fallbacks"
@@ -400,7 +439,7 @@ if (-not $needsPackage) {
         Install-Uv
         if (-not (Test-Executable 'uv')) { throw 'uv installed but does not resolve yet; open a new shell and run this again' }
         Write-Say "package: installing $(Get-PackageSpec) user-local with uv tool install"
-        Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure $UvInstallFailure
+        Install-WithUv
         $packageManager = 'uv'
     }
 }
