@@ -253,6 +253,7 @@ def test_discovery_applies_project_requirements() -> None:
     assert configured["debuggers"]["dut"]["permissions"] == {
         "allow_flash": True,
         "allow_reset": False,
+        "allow_debug_execution": True,
         "allow_raw_debugger_commands": False,
         "allow_mass_erase": False,
     }

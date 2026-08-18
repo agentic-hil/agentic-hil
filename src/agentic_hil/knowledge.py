@@ -37,6 +37,8 @@ ERRORS_URI = f"{RESOURCE_SCHEME}://reference/errors"
 LEASE_LIFECYCLE_URI = f"{RESOURCE_SCHEME}://reference/lease-lifecycle"
 PLATFORM_PATHS_URI = f"{RESOURCE_SCHEME}://reference/platform-paths"
 TARGET_SUPPORT_URI = f"{RESOURCE_SCHEME}://reference/target-support"
+TEST_PLAN_URI = f"{RESOURCE_SCHEME}://reference/test-plan"
+TEST_PLAN_SCHEMA_URI = f"{RESOURCE_SCHEME}://reference/test-plan-schema"
 
 ERROR_URI_PREFIX = f"{ERRORS_URI}/"
 DEBUGGER_BACKEND_URI_PREFIX = f"{DEBUGGER_BACKENDS_URI}/"
@@ -45,6 +47,25 @@ JSON_MIME = "application/json"
 MARKDOWN_MIME = "text/markdown"
 
 BACKENDS = ("openocd", "stlink", "pyocd")
+
+# The plan the reactor reads when nobody names another one, and the packaged
+# schema every plan is validated against. Both live here rather than in
+# `test_reactor`, because the reference document below is generated from them
+# and that module imports this one: a second copy of either would be exactly the
+# drift this file exists to prevent.
+DEFAULT_TEST_CONFIG_PATH = ".agentic-hil/testconfig.yaml"
+TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
+# The annotation the plan schema marks a newer format's additions with. A plan
+# is held to what its own `version:` contains, and the schema is what says which
+# version each action and each key arrived in.
+PLAN_FEATURE_VERSION_KEY = "x-since-version"
+# The keys a step names its device with: the one routing key from version 3 on,
+# and the version 2 aliases that spell the section out. The reactor builds the
+# same tuple from its device classes (`test_reactor.ROUTE_FIELDS`), which this
+# module cannot read because that module imports this one. A test holds the two
+# equal, so a new device kind cannot quietly leave this document describing a
+# routing surface the reactor no longer has.
+PLAN_ROUTE_KEYS: tuple[str, ...] = ("device", "debugger", "port_id", "bus_id")
 
 # The loaded configuration and the file it came from have come apart. Not a
 # refusal — every tool still works — but it is carried like one, because what a
@@ -143,6 +164,26 @@ CAN_ADAPTER_LIBRARY_MISSING_ERROR = "can_adapter_library_missing"
 # run *after* a successful `Initialize`, which leave a channel that is on the bus
 # and keep the quarantine they earn.
 CAN_CHANNEL_NOT_AVAILABLE_ERROR = "can_channel_not_available"
+# A remote frame asked for on a bus configured `fd: true`. Not a variant of
+# `invalid_argument`: CAN FD's FDF bit sits in the position classic CAN's RTR bit
+# held, so an FD controller has no remote frame to send at all, and the request is
+# refused before it is built into anything rather than sent as whatever an FD
+# frame with a stale RTR bit would come out as.
+CAN_FD_REMOTE_FRAME_ERROR = "can_fd_remote_frame_unsupported"
+# A payload longer than eight bytes on a bus that is not `fd: true`. Its own
+# error_type rather than the plain `invalid_argument` a payload over
+# `max_frame_data_bytes` gets, because raising that configured ceiling cannot fix
+# this one: classic CAN's data field is eight bytes full stop, on every
+# controller, and the schema's own `max_frame_data_bytes` maximum used to allow a
+# non-FD bus to be configured past it.
+CAN_CLASSIC_FRAME_TOO_LARGE_ERROR = "can_classic_frame_too_large"
+# A payload on an `fd: true` bus whose length is not one of the sixteen a CAN FD
+# DLC field can encode. Above eight bytes the encoding stops counting one at a
+# time and jumps by fours, then by eights, then by sixteens, so a length between
+# two of those steps cannot be put in a real frame. There is no padding this
+# server invents on a caller's behalf, because padding silently sent is data on
+# the wire the caller did not ask for.
+CAN_FD_FRAME_LENGTH_INVALID_ERROR = "can_fd_frame_length_invalid"
 # A serial device another program is already holding. Its own error_type for the
 # same reason as the one above: the open was refused by the operating system
 # before this session had a handle, so the port kept whatever the other holder is
@@ -626,6 +667,34 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`state_root`. That is not recovery, it is erasing the record that a bench needs checking.",
             "Do not drive the probe, the serial port or the CAN adapter outside Agentic HIL to 'get on with it'. The "
             "quarantine exists because the physical state is unknown, and the tools are not what makes it so.",
+        ),
+    ),
+    "permission_denied:allow_debug_execution": ErrorRemedy(
+        meaning=(
+            "`debug_continue`, or any other call that would resume a halted target, was refused because "
+            "`permissions.allow_debug_execution` is false on this probe. A debug session may still open and the "
+            "target may still be inspected while it sits halted: breakpoints, symbol reads, memory dumps and "
+            "`debug_halt` all read or hold the target rather than resume it, and none of them need this grant. Only "
+            "letting the core run again does. Nothing was sent to the target and the session, if one is open, is "
+            "unchanged."
+        ),
+        remediation=(
+            "Report the refusal, name `permissions.allow_debug_execution`, and say which probe it is on. Whether "
+            "this bench should let an agent resume the target is the operator's decision; you cannot grant it "
+            "yourself, and `project_config_set` writes only `false` into a permission.",
+            "Everything a session can still do with the target halted remains available: set or clear breakpoints, "
+            "read `debug_get_stop_reason`, `debug_symbol_info`, `debug_symbol_value` or `debug_dump_symbol_ihex`, and "
+            "close the session with `debug_stop_session`. Finish the part of the task that only needs a halted "
+            "target before asking about the rest.",
+            "`project_config_describe` says whether this permission is open on the bound probe right now, so a "
+            "second attempt at `debug_continue` is not how to find out.",
+        ),
+        do_not=(
+            "Do not reach for `reset_target` or `flash_firmware` as a way around this. Both are gated by their own "
+            "permissions and neither resumes the target under the debugger session this refusal is protecting.",
+            "Do not drive GDB, OpenOCD or another debugger outside Agentic HIL to send the continue yourself. That "
+            "reaches the exact target state this refusal withholds, outside the audit trail that would have recorded "
+            "it.",
         ),
     ),
     RECOVERY_PHYSICAL_CHECK_ERROR: ErrorRemedy(
@@ -1227,6 +1296,78 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "moved; the channel was never opened.",
             "Do not point the entry at whichever channel happens to be attached. That is the wrong-bus mistake the "
             "channel name exists to prevent; confirm which adapter belongs to this bench first.",
+        ),
+    ),
+    CAN_FD_REMOTE_FRAME_ERROR: ErrorRemedy(
+        meaning=(
+            "A remote frame was asked for on a bus configured `can_buses.<name>.fd: true`. Classic CAN's RTR bit, "
+            "the one that marks a frame as a request rather than data, sits at the same position CAN FD's FDF bit "
+            "occupies, and FDF is what tells a controller the frame is FD at all. A CAN FD controller therefore has "
+            "no remote frame to send: the bit that used to mean one now means something else, and the ISO 11898-1 "
+            "FD format carries no remote-frame encoding in its place. The request is refused before a frame is built "
+            "out of it, rather than sent as whatever an FD frame with a stale RTR bit would come out as."
+        ),
+        remediation=(
+            "Send this as a data frame instead. A device answering a request answers with data; if what you need is "
+            "that answer, `rtr: false` with the expected reply's identifier and a normal `can_send` reads it once "
+            "the device has put it on the bus.",
+            "If a remote-frame poll is genuinely required against this device, declare a second `can_buses` entry "
+            "for the same channel with `fd: false` and send the remote frame there: classic CAN still has RTR, and "
+            "two entries keep the FD and classic intentions separately readable.",
+            "`can_buses_list` reports `fd` for every configured bus, so which entries can carry a remote frame is "
+            "readable before a plan is written.",
+        ),
+        do_not=(
+            "Do not set `fd: false` on this bus just to get one remote frame out. Every frame after it reverts to "
+            "classic CAN too, silently, until the entry is changed back.",
+        ),
+    ),
+    CAN_CLASSIC_FRAME_TOO_LARGE_ERROR: ErrorRemedy(
+        meaning=(
+            "A payload longer than eight bytes was sent on a bus that is not configured `can_buses.<name>.fd: "
+            "true`. Classic CAN's data field is eight bytes on every controller that speaks it; that is not a "
+            "configured ceiling but the format itself, so `max_frame_data_bytes` being set higher (the schema used "
+            "to allow up to 64 on a bus that never declared `fd: true`) could not have made this frame fit in one. "
+            "The refusal is at the point a frame is actually built, which holds whatever `max_frame_data_bytes` a "
+            "bus was loaded with before this guard existed."
+        ),
+        remediation=(
+            "Send eight bytes or fewer on this bus.",
+            "If this data belongs in one frame, set `can_buses.<name>.fd: true` (through `project_config_set`, or "
+            "by asking the operator) on a bus whose adapter and controller actually support CAN FD, which turns on "
+            "the sixteen lengths up to 64 bytes a single frame can carry.",
+            "If the bus genuinely cannot be FD, split the payload across multiple classic frames at whatever "
+            "protocol sits above raw CAN on this bus: that framing decision belongs above this server, which moves "
+            "exactly the bytes it is given in each `can_send`.",
+            "`can_buses_list` reports `fd` for every configured bus, so which entries can carry more than eight "
+            "bytes is readable before a plan is written.",
+        ),
+        do_not=(
+            "Do not raise `max_frame_data_bytes` to make this go away on a bus that is not `fd: true`. The schema "
+            "holds it to eight there for exactly this reason, and even a hand-edited file that got past it would "
+            "not change what a classic controller can put in one frame.",
+        ),
+    ),
+    CAN_FD_FRAME_LENGTH_INVALID_ERROR: ErrorRemedy(
+        meaning=(
+            "A payload was sent on an `fd: true` bus whose length is not one CAN FD's DLC field can encode. The DLC "
+            "nibble has sixteen codes: 0 through 8 count bytes one for one, and the remaining seven jump to 12, 16, "
+            "20, 24, 32, 48 and 64, so a length between two of those, nine bytes or thirty for instance, names no "
+            "code at all. Nothing here rounds a payload up and pads it to the nearest legal length on a caller's "
+            "behalf: padding sent silently is data on the wire the caller never asked for, so a length outside the "
+            "set is refused instead of adjusted."
+        ),
+        remediation=(
+            "Send exactly one of the sixteen lengths CAN FD encodes: 0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, "
+            "48 or 64 bytes: the result's `allowed_lengths` carries the same list.",
+            "If the device accepts padded data, pad the payload to the next allowed length yourself before calling "
+            "`can_send`, so the padding is on record in what was asked for rather than an adjustment made for you.",
+            "`bytes_requested` on the result is the length that was refused, for checking against whatever produced "
+            "it.",
+        ),
+        do_not=(
+            "Do not raise `max_frame_data_bytes` in response to this. A length between two DLC codes is illegal at "
+            "any ceiling; the fix is the length sent, not the bound it is checked against.",
         ),
     ),
     LISTEN_ONLY_UNSUPPORTED_ERROR: ErrorRemedy(
@@ -1893,6 +2034,36 @@ FLASH_ADDRESS_RULE = {
     "example": "0x08000000 for STM32 internal flash.",
 }
 
+# A second, later rule than MULTI_PROBE_RULE above, and deliberately not
+# merged into it: that one is what config load rejects about the *text* of a
+# multi-probe document (two entries naming one probe), and is enforced with
+# error_type config_invalid before any tool exists to call. This one is what
+# a probe-addressing tool call itself refuses about the *bound* entry once
+# several are configured, with error_type not_supported, and it is the one
+# place a document with several unnamed debuggers is allowed to load at all:
+# discovering the ids is exactly what an operator does before they can
+# write one down, which config load cannot ask of them.
+UNNAMED_PROBE_RULE = {
+    "rule": "Once `debuggers` holds more than one entry, the bound one must carry a probe_id before a probe-addressing tool (flash_firmware, reset_target, probe_target, the typed debug tools) will drive it.",
+    "why": "the bound entry's name alone does not prove which physical probe a call reaches once another configured entry could just as easily be meant; probe_id is what pyOCD and ST-Link verify against the attached hardware, and what OpenOCD opens by adapter serial.",
+    "enforced_at": "each probe-addressing tool call, as error_type `not_supported`",
+    "single_debugger_exemption": (
+        "A lone configured debugger does not have to carry a probe_id: it has no other entry to be confused with, so "
+        "the rule above would not remove any ambiguity there, only block the bench outright - including the "
+        "Nucleo-F446RE + ST-Link + OpenOCD bench this project documents as its supported first path, for which OpenOCD "
+        "cannot self-enumerate a serial to satisfy the demand with (debugger_probes_list answers not_supported), and a "
+        "probe with no serial pyOCD or ST-Link can read either - the debugger analogue of the CH340-style adapters "
+        "com_ports already has to tolerate - would have no way to satisfy it at all. The exemption is from being "
+        "forced to, not from being able to: probe_id still works, and is still checked against the attached hardware, "
+        "with exactly one debugger configured."
+    ),
+    "what_the_exemption_does_not_cover": (
+        "whether the one probe behind an unnamed single debugger is still the physical unit it was last run. Nothing "
+        "here, or at the pyOCD/ST-Link/OpenOCD boundary, pins that without a probe_id; the coordination lock has the "
+        "same blind spot for the same reason (see devices.DebuggerDevice.identity_warning)."
+    ),
+}
+
 
 def debugger_backends_document() -> JsonObject:
     return {
@@ -1907,6 +2078,7 @@ def debugger_backends_document() -> JsonObject:
         },
         "backends": DEBUGGER_FIELD_MATRIX,
         "probe_id_when_multiple_probes": MULTI_PROBE_RULE,
+        "probe_id_at_tool_call_time": UNNAMED_PROBE_RULE,
         "flash_address": FLASH_ADDRESS_RULE,
         "permissions": {
             "rule": (
@@ -1968,6 +2140,30 @@ def config_schema_document() -> JsonObject:
     document = json.loads(config_schema_text())
     if not isinstance(document, dict):  # pragma: no cover - the shipped schema is an object
         raise ValueError("The bundled configuration schema is not a JSON object.")
+    return document
+
+
+def plan_schema_text() -> str:
+    return resources.files("agentic_hil").joinpath(TEST_CONFIG_SCHEMA_RESOURCE).read_text(encoding="utf-8")
+
+
+@lru_cache(maxsize=1)
+def plan_schema_document() -> JsonObject:
+    """The shipped test plan schema, parsed once.
+
+    Cached for the reason the configuration schema is: the reactor validates
+    every plan against it and the reference document below is generated from it,
+    while the file itself is packaged data that cannot change while the process
+    runs. ``test_reactor.test_config_schema`` returns this same object, so the
+    document a plan author reads and the schema a plan is refused by are one
+    thing. Callers must not mutate it.
+
+    Not named ``test_plan_schema_document``: pytest collects a module-level name
+    beginning with ``test_`` the moment a test module imports it, and the test
+    that pins this document against the schema does exactly that."""
+    document = json.loads(plan_schema_text())
+    if not isinstance(document, dict):  # pragma: no cover - the shipped schema is an object
+        raise ValueError("The bundled test plan schema is not a JSON object.")
     return document
 
 
@@ -2405,10 +2601,17 @@ recovery:
 
 def _schema_type_label(node: JsonObject) -> str:
     declared = node.get("type")
+    alternatives = node.get("oneOf") if isinstance(node.get("oneOf"), list) else None
     if isinstance(declared, list):
         label = " or ".join(str(item) for item in declared)
     elif isinstance(declared, str):
         label = declared
+    elif alternatives:
+        # A key written two ways, a CAN identifier as an integer or as a
+        # hexadecimal string, declares no `type` of its own. Reading it as
+        # "any" would publish the one field shape a caller cannot guess as the
+        # one field shape nobody constrained.
+        label = " or ".join(_schema_type_label(member) for member in alternatives if isinstance(member, dict))
     else:
         label = "any"
     enum = node.get("enum")
@@ -2435,7 +2638,12 @@ def _schema_field_rows(schema: JsonObject, node: JsonObject) -> list[str]:
         description = str(field.get("description", "")).replace("\n", " ").replace("|", "\\|")
         if field.get("deprecated") is True:
             description = "**Deprecated.** " + description
-        rows.append(f"| `{name}` | {_schema_type_label(field)} | {default} | {description} |")
+        # The value shape needs the same escape the description gets, and for the
+        # same reason: a `pattern` with an alternation in it (a CAN identifier
+        # written decimal-or-hexadecimal, `flash_address`) carries a pipe, and a
+        # pipe splits the row it is written in whether or not it sits in backticks.
+        shape = _schema_type_label(field).replace("|", "\\|")
+        rows.append(f"| `{name}` | {shape} | {default} | {description} |")
     return rows
 
 
@@ -3032,6 +3240,329 @@ If `target_type` resolves on one machine and not on another, the difference is t
 """
 
 
+# Two plans that load. Constants rather than lines inside the document below,
+# because the test that pins this reference parses them back out and puts them
+# through the reactor's own schema validation and version gate: an example a
+# reader cannot run is worse than none, and this is a document meant to be
+# copied from.
+PLAN_MINIMAL_EXAMPLE = r"""version: 5
+name: boot-smoke
+steps:
+  - {device: dut, action: flash, image_path: build/app.elf, reset_after_flash: true}
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_expect, text: "boot complete", timeout_s: 10}
+"""
+
+PLAN_COMPARATOR_EXAMPLE = r"""version: 5
+name: capture-in-range
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_write, text: "capture\n"}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "temp=(\\d+)C", range: {min: 20, max: 30}}, timeout_s: 5}
+  - {device: dut_can, action: can_open}
+  - {device: dut_can, action: can_read, comparator: {id: "0x201", equals: "01 FF"}, timeout_s: 5}
+  - {device: dut, action: debug_start, image_path: build/app.elf, mode: attach}
+  - {device: dut, action: read_symbol, symbol: capture_count, size_bytes: 4, comparator: {range: {min: 1, max: 8}}}
+"""
+
+
+def _plan_names(names: object) -> str:
+    spelled = [f"`{item}`" for item in names if isinstance(item, str)]
+    if len(spelled) < 2:
+        return "".join(spelled)
+    return " and ".join([", ".join(spelled[:-1]), spelled[-1]])
+
+
+def _plan_version_enum(schema: JsonObject) -> list[int]:
+    node = _dereference(schema, (schema.get("properties") or {}).get("version"))
+    return [item for item in node.get("enum", []) if isinstance(item, int)]
+
+
+def _plan_step_entries(schema: JsonObject) -> list[tuple[str, JsonObject]]:
+    """Every step the format admits, as (action, its schema entry), in schema order.
+
+    Read out of the one list the validator reads, the `oneOf` under
+    `steps.items`, so a step added to the format appears in this document
+    without anybody writing it down a second time."""
+    steps = _dereference(schema, (schema.get("$defs") or {}).get("steps"))
+    items = _dereference(schema, steps.get("items"))
+    entries: list[tuple[str, JsonObject]] = []
+    for member in items.get("oneOf", []):
+        node = _dereference(schema, member)
+        action = _dereference(schema, (node.get("properties") or {}).get("action")).get("const")
+        if isinstance(action, str):
+            entries.append((action, node))
+    return entries
+
+
+def _plan_feature_version(schema: JsonObject, node: object) -> int | None:
+    """Which plan version a node belongs to, read the way the version gate reads it.
+
+    A marker written on the step or key itself wins over the definition a `$ref`
+    points at, which is the precedence `reject_newer_features_in_steps` applies:
+    `can_read`'s own `timeout_s` arrived in version 3 while the definition it
+    borrows its shape from is as old as the format."""
+    if not isinstance(node, dict):
+        return None
+    merged = {**_dereference(schema, node), **node}
+    since = merged.get(PLAN_FEATURE_VERSION_KEY)
+    return since if isinstance(since, int) else None
+
+
+def _plan_exclusive_names(node: JsonObject) -> list[str]:
+    """The keys a `oneOf` of the shape "this one, and not that one" names."""
+    names: list[str] = []
+    for member in node.get("oneOf", []):
+        if not isinstance(member, dict) or "not" not in member:
+            return []
+        names += [str(item) for item in member.get("required", [])]
+    return list(dict.fromkeys(names))
+
+
+def _plan_choice_names(node: JsonObject) -> list[str]:
+    """The keys an `anyOf` of bare `required` branches names: at least one of them."""
+    names: list[str] = []
+    for member in node.get("anyOf", []):
+        if not isinstance(member, dict) or set(member) != {"required"}:
+            return []
+        names += [str(item) for item in member.get("required", [])]
+    return list(dict.fromkeys(names))
+
+
+def _plan_constraint_notes(schema: JsonObject, node: JsonObject) -> list[str]:
+    """What a step or a comparator may not spell, read off the schema's own combinators.
+
+    Every one of these is refused before the run starts, so a plan author reads
+    them here rather than off a red bench."""
+    notes: list[str] = []
+    exclusive = _plan_exclusive_names(node)
+    if exclusive:
+        notes.append(f"Exactly one of {_plan_names(exclusive)}. Both, or neither, is refused.")
+    choice = [name for name in _plan_choice_names(node) if name not in PLAN_ROUTE_KEYS]
+    if choice:
+        notes.append(f"At least one of {_plan_names(choice)}.")
+    for key, needs in (node.get("dependentRequired") or {}).items():
+        notes.append(f"`{key}:` is written only beside {_plan_names(needs)}.")
+    for key, member in (node.get("dependentSchemas") or {}).items():
+        if not isinstance(member, dict):
+            continue
+        if member.get("required"):
+            narrowed = [
+                f"`{name}` is then `{_schema_type_label(_dereference(schema, raw))}`"
+                for name, raw in (member.get("properties") or {}).items()
+            ]
+            notes.append(f"`{key}:` requires {_plan_names(member['required'])}" + ("; " + ", ".join(narrowed) if narrowed else "") + ".")
+        refused = member.get("not") if isinstance(member.get("not"), dict) else {}
+        if refused.get("required"):
+            notes.append(f"`{key}:` is refused beside {_plan_names(refused['required'])}.")
+    return notes
+
+
+def _plan_routing(node: JsonObject) -> str:
+    """Which key this step names its device with, and whether it has to."""
+    present = [name for name in (node.get("properties") or {}) if name in PLAN_ROUTE_KEYS]
+    if not present:
+        return "nothing: the reactor runs this step itself"
+    spelled = " or ".join(f"`{name}:`" for name in present)
+    required = [name for name in _plan_choice_names(node) if name in PLAN_ROUTE_KEYS]
+    return spelled if required else spelled + ", which a plan may omit while the project configures exactly one probe"
+
+
+def _plan_version_rows(schema: JsonObject) -> list[str]:
+    """What each format version added, taken from the markers the version gate reads."""
+    steps_by_version: dict[int, list[str]] = {}
+    keys_by_version: dict[int, dict[str, list[str]]] = {}
+    for action, node in _plan_step_entries(schema):
+        since = _plan_feature_version(schema, node)
+        if since is not None:
+            steps_by_version.setdefault(since, []).append(action)
+        for name, raw in (node.get("properties") or {}).items():
+            key_since = _plan_feature_version(schema, raw)
+            if key_since is not None:
+                keys_by_version.setdefault(key_since, {}).setdefault(name, []).append(action)
+    rows: list[str] = []
+    for version in _plan_version_enum(schema):
+        steps = steps_by_version.get(version, [])
+        added = [f"the {_plan_names(steps)} step{'s' if len(steps) > 1 else ''}"] if steps else []
+        for name, actions in keys_by_version.get(version, {}).items():
+            # A key that arrived on nothing but the steps this same version
+            # introduced is not a second entry: the step already says when it
+            # became writable.
+            if set(actions) <= set(steps):
+                continue
+            where = _plan_names(actions) if len(actions) < 4 else f"all {len(actions)} steps that name a device"
+            added.append(f"`{name}:` on {where}")
+        rows.append(f"| `{version}` | {'; '.join(added) or 'the baseline: every step and key this table does not mark as newer'} |")
+    return rows
+
+
+def _plan_step_index_rows(schema: JsonObject) -> list[str]:
+    baseline = min(_plan_version_enum(schema), default=2)
+    return [
+        f"| `{action}` | `{_plan_feature_version(schema, node) or baseline}` | {_plan_routing(node)} |"
+        for action, node in _plan_step_entries(schema)
+    ]
+
+
+def _plan_merged_node(schema: JsonObject, raw: object) -> JsonObject:
+    """One schema node with its `$ref` folded in and what is written locally on top.
+
+    The precedence the reactor's own `resolve_schema_node` applies. Following
+    the reference alone would drop exactly the keys this format writes beside
+    one: `can_read`'s `wait_timeout_s` borrows the shape of a timeout and says
+    for itself what it is a timeout on."""
+    if not isinstance(raw, dict):
+        return {}
+    merged = {**_dereference(schema, raw), **raw}
+    # Dropped, so a second dereference downstream does not resolve back to the
+    # bare definition and undo the merge.
+    merged.pop("$ref", None)
+    return merged
+
+
+def _plan_field_table(schema: JsonObject, node: JsonObject, skip: set[str]) -> list[str]:
+    """The value shapes of one step or comparator, minus the keys said elsewhere."""
+    properties = {name: _plan_merged_node(schema, raw) for name, raw in (node.get("properties") or {}).items() if name not in skip}
+    rows = _schema_field_rows(schema, {**node, "properties": properties})
+    return ["", "| Key | Value shape | Default | Meaning |", "|---|---|---|---|", *rows] if rows else []
+
+
+def _plan_step_documents(schema: JsonObject) -> list[str]:
+    baseline = min(_plan_version_enum(schema), default=2)
+    blocks: list[str] = []
+    for action, node in _plan_step_entries(schema):
+        since = _plan_feature_version(schema, node) or baseline
+        lines = [f"### `{action}`", "", f"Version {since} on. Routes with {_plan_routing(node)}."]
+        description = str(node.get("description", "")).replace("\n", " ")
+        if description:
+            lines += ["", description]
+        notes = _plan_constraint_notes(schema, node)
+        if notes:
+            lines += ["", *[f"* {note}" for note in notes]]
+        lines += _plan_field_table(schema, node, {"action", *PLAN_ROUTE_KEYS})
+        blocks.append("\n".join(lines))
+    return blocks
+
+
+def _plan_comparator_documents(schema: JsonObject) -> list[str]:
+    """One block per comparator family, keyed on the definition each step points at.
+
+    Which family a step carries is read from that step's own `comparator`
+    reference, so a family added for a new medium documents itself against the
+    steps that actually use it."""
+    users: dict[str, list[str]] = {}
+    for action, node in _plan_step_entries(schema):
+        raw = (node.get("properties") or {}).get("comparator")
+        reference = raw.get("$ref") if isinstance(raw, dict) else None
+        if isinstance(reference, str):
+            users.setdefault(reference.rsplit("/", 1)[-1], []).append(action)
+    blocks: list[str] = []
+    for name, actions in users.items():
+        node = _dereference(schema, (schema.get("$defs") or {}).get(name))
+        since = _plan_feature_version(schema, node) or min(_plan_version_enum(schema), default=2)
+        lines = [f"### The comparator on {_plan_names(actions)}", "", f"Version {since} on."]
+        description = str(node.get("description", "")).replace("\n", " ")
+        if description:
+            lines += ["", description]
+        notes = _plan_constraint_notes(schema, node)
+        if notes:
+            lines += ["", *[f"* {note}" for note in notes]]
+        lines += _plan_field_table(schema, node, set())
+        blocks.append("\n".join(lines))
+    return blocks
+
+
+def plan_format_document() -> str:
+    """What a plan author needs, generated from the schema the reactor validates against.
+
+    Every step, key, default, version marker and combinator rule below is read
+    out of that schema when this is called. What is written here by hand is what
+    a schema cannot carry: where the file goes, how its path resolves, which
+    refusal each mistake earns, and two plans that run.
+
+    Not named ``test_plan_document`` for the reason ``plan_schema_document``
+    is not."""
+    schema = plan_schema_document()
+    versions = _plan_version_enum(schema)
+    steps_node = _dereference(schema, (schema.get("$defs") or {}).get("steps"))
+    return f"""# How to write an Agentic HIL test plan
+
+`{TEST_PLAN_SCHEMA_URI}` serves the JSON Schema every plan is validated against. A schema says what is **valid**; it does not say where the file goes, how its path resolves, which version admits which step, or what a comparator claims. This document is that, and it reads every step, key, default and version marker out of that same schema. There is no second list of the format anywhere.
+
+A plan is run with the `test_reactor_run` tool, or by an operator with `agentic-hil test-reactor`. Both drive one reactor: the same preflight before the first hardware action, the same devices locked for the whole plan, the same permission judged per step, the same report.
+
+## Where the plan is, and how its path resolves
+
+| | |
+|---|---|
+| Default | `{DEFAULT_TEST_CONFIG_PATH}`, relative to `workspace_root` |
+| Named instead | `test_config_path` on `test_reactor_run`, `--test-config` on the command line |
+| A relative path | resolved against `workspace_root`, never against the process's working directory |
+| An absolute path | taken as written |
+| Either way | it has to resolve **inside** `workspace_root`, symlinks followed |
+| Format | YAML or JSON, one mapping at the root, duplicate keys refused |
+
+`workspace_root` is the authoritative configuration's binding of this project, and it is what makes a plan path mean the same thing to the tool, to the command line and to a detached worker. It is not something a plan can move: `{CONFIG_SHAPE_URI}` has where that file lives and how it changes.
+
+Every mistake here is a refusal before the first hardware action, and each has its own `error_type` (`{ERRORS_URI}` has the fixes):
+
+| What is wrong | `error_type` |
+|---|---|
+| The path resolves outside `workspace_root` | `test_config_invalid` |
+| Nothing is at that path | `test_config_not_found` |
+| It is there and will not open | `test_config_unreadable` |
+| It is not valid YAML or JSON, or its root is not a mapping | `test_config_invalid` |
+| It does not match the schema | `test_config_invalid`, with the field path of the step |
+| It uses a step or key newer than its own `version:` | `test_config_invalid`, naming the version that introduced it |
+
+## The document
+
+Two keys are required: `version:` and `steps:`. `name:` is optional and defaults to the file's own stem; it is what the report calls the run. Nothing else may be written at the root. `steps:` holds {steps_node.get("minItems", 1)} to {steps_node.get("maxItems", 128)} steps, executed in order and stopped at the first one that fails.
+
+## The versions
+
+`version:` is one of {", ".join(f"`{version}`" for version in versions)}. A plan is held to what its own version contains, so a plan reaching for a newer step or key is refused by name rather than running here and failing on an older install for no stated reason. Nothing is removed by a later version: a plan written against an older one keeps loading and behaving exactly as it did.
+
+| Version | What it adds |
+|---|---|
+{chr(10).join(_plan_version_rows(schema))}
+
+## The steps
+
+Every step names its `action:` and the configured entry it drives. From version 3 on that entry is named with one key, `device:`, and the authoritative configuration is what knows whether the name belongs to its `debuggers`, `com_ports` or `can_buses` section. The version 2 keys `debugger:`, `port_id:` and `bus_id:` stay valid as readable aliases; a step writes one or the other, never both.
+
+A step naming a device the configuration does not declare, or one the run did not lock, is refused before anything is touched. So is a step whose permission the device's entry does not grant: `{ERRORS_URI}/permission_denied` has what to do with that, and the answer is never to edit the configuration.
+
+| Step | Since | Routes with |
+|---|---|---|
+{chr(10).join(_plan_step_index_rows(schema))}
+
+{chr(10).join(chr(10).join(("", block)) for block in _plan_step_documents(schema)).strip()}
+
+## The comparators
+
+A feedback step without a comparator is a plain read: it answers with whatever the session has, and claims nothing. With one, the step reads until its claim is met or its timeout passes, and a claim that goes unmet fails with what the device did say (the tail of the output, the last frames, or the value that was read), so a wrong claim and a silent board read differently.
+
+{chr(10).join(chr(10).join(("", block)) for block in _plan_comparator_documents(schema)).strip()}
+
+## A plan that runs
+
+Flash, watch the board come up, and stop. `dut` and `dut_uart` are entry names from the authoritative configuration, not fixed words.
+
+```yaml
+{PLAN_MINIMAL_EXAMPLE}```
+
+## The same bench, claiming what it read
+
+Stimulus and three claims: a number captured out of a serial line and held to a range, a CAN frame required by identifier and payload, and a symbol in target memory read through the debug session and held to bounds.
+
+```yaml
+{PLAN_COMPARATOR_EXAMPLE}```
+
+`uart_write` needs `permissions.allow_write` on that port, `can_send` needs it on the bus and is refused outright on one configured `listen_only: true`, and every symbol a plan reads has to be in `debug.allowed_symbols` unless the configuration sets `debug.allow_all_symbols`. All three are decided at preflight, with nothing opened.
+"""
+
+
 def _resource_descriptor(uri: str, name: str, title: str, description: str, mime_type: str) -> JsonObject:
     return {"uri": uri, "name": name, "title": title, "description": description, "mimeType": mime_type}
 
@@ -3086,6 +3617,20 @@ MCP_RESOURCES: list[JsonObject] = [
         "Which field names the target per backend, known-good values for the Nucleo-F446RE, how pyOCD target types are provided by CMSIS packs, how to find and install the right one and where installed packs live, and what doctor's target_support statuses mean — including why 'undetermined' is not a failure.",
         MARKDOWN_MIME,
     ),
+    _resource_descriptor(
+        TEST_PLAN_URI,
+        "test-plan",
+        "How to write a test plan the reactor runs",
+        f"Where a plan lives ({DEFAULT_TEST_CONFIG_PATH}), how test_config_path and workspace_root resolve it, and which refusal each mistake earns; which format version admits which step; every step with the entry it routes to and its required and optional keys; the comparator families with their rules; and two plans that run. Generated from the shipped plan schema, not restated.",
+        MARKDOWN_MIME,
+    ),
+    _resource_descriptor(
+        TEST_PLAN_SCHEMA_URI,
+        "test-plan-schema",
+        "Test plan JSON Schema",
+        "The bundled JSON Schema every test plan is validated against: every step, key, type, enum, default, and the x-since-version markers the format's version gate reads.",
+        JSON_MIME,
+    ),
 ]
 
 MCP_RESOURCE_TEMPLATES: list[JsonObject] = [
@@ -3133,6 +3678,10 @@ def read_resource(uri: str) -> JsonObject | None:
         return _markdown_content(uri, PLATFORM_PATHS_DOCUMENT)
     if uri == TARGET_SUPPORT_URI:
         return _markdown_content(uri, TARGET_SUPPORT_DOCUMENT)
+    if uri == TEST_PLAN_URI:
+        return _markdown_content(uri, plan_format_document())
+    if uri == TEST_PLAN_SCHEMA_URI:
+        return {"uri": uri, "mimeType": JSON_MIME, "text": plan_schema_text()}
     if uri.startswith(ERROR_URI_PREFIX):
         entry = catalogue_entry(uri[len(ERROR_URI_PREFIX) :])
         return None if entry is None else _json_content(uri, entry)
@@ -3148,6 +3697,7 @@ def read_resource(uri: str) -> JsonObject | None:
                 "config_path": "debuggers.<name>.<field>",
                 "fields": matrix,
                 "probe_id_when_multiple_probes": MULTI_PROBE_RULE,
+                "probe_id_at_tool_call_time": UNNAMED_PROBE_RULE,
                 "flash_address": FLASH_ADDRESS_RULE,
             },
         )

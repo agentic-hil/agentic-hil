@@ -18,7 +18,7 @@ from agentic_hil.gdbmi import (
     parse_gdb_integer,
     write_intel_hex_file,
 )
-from agentic_hil.knowledge import exclusive_permission_summary
+from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
 from agentic_hil.process import spawn_managed_process, terminate_process_tree
 from agentic_hil.report import (
     logs_directory,
@@ -60,6 +60,20 @@ STOP_SESSION_TIMEOUT_CAP_S = 5.0
 CLOSE_SESSION_TIMEOUT_S = 1.0
 INITIAL_STOP_POLL_TIMEOUT_S = 0.05
 OUTPUT_TAIL_CHARS = 65536
+# Keyed by (halt unconfirmed, detach-guard unconfirmed). A retry that could not
+# gather new evidence reports both as unconfirmed even when only one was the
+# original cause, so the phrasing has to make sense for that combination too,
+# not just for whichever single proof failed on the attempt that discovered it.
+_UNCONFIRMED_TEARDOWN_PROOFS = {
+    (True, False): "the target's halt could not be reconfirmed",
+    (False, True): "the backend's auto-resume-on-detach override could not be confirmed installed",
+    (True, True): "neither the target's halt nor the backend's auto-resume-on-detach override could be reconfirmed",
+}
+_UNCONFIRMED_TEARDOWN_CLOSE_REASONS = {
+    (True, False): "the target was halted",
+    (False, True): "the backend's auto-resume-on-detach override was installed",
+    (True, True): "the target was halted or the backend's auto-resume-on-detach override was installed",
+}
 
 
 class GdbDebugSession:
@@ -82,6 +96,14 @@ class GdbDebugSession:
         self.server_readers: list[threading.Thread] = []
         self.load_phase = "not_started"
         self.firmware_load_status = "not_started"
+        # Set only when a teardown leaves the target's own state (not merely
+        # process cleanup) unconfirmed: halt could not be reconfirmed, or the
+        # backend's auto-resume-on-detach override could not be verified
+        # installed. A retried teardown must not treat this the way it treats
+        # a status left `cleanup_required` by a plain process-cleanup failure
+        # (where the target state proof already succeeded) -- see
+        # `stop_session` and `close`.
+        self.hardware_state_unconfirmed = False
 
 
 class _AuditRefusedResponse:
@@ -142,9 +164,18 @@ class GdbDebugSessions:
         timeout = self.config.debugger.timeout_s if timeout_s is None else min(self.config.debugger.timeout_s, max(0.1, timeout_s))
         started_at = utc_now_iso()
         start = time.perf_counter()
-        gdb_port = reserve_tcp_port()
-        server_args = self._build_server_args(str(resolved_server["executable_path"]), gdb_port, mode != "attach")
-        log_path = str(Path(logs_directory(self.config)) / f"gdb-debug-{timestamp_for_filename()}.json")
+        reservation = reserve_tcp_port()
+        gdb_port = reservation.port
+        try:
+            server_args = self._build_server_args(str(resolved_server["executable_path"]), gdb_port, mode != "attach")
+            log_path = str(Path(logs_directory(self.config)) / f"gdb-debug-{timestamp_for_filename()}.json")
+        except BaseException:
+            reservation.release()
+            raise
+        # The server binds this port by number, so the reservation has to go
+        # first; releasing it here, immediately before the spawn, is the shortest
+        # the handover window gets. See ReservedTcpPort for what the hold buys.
+        reservation.release()
         try:
             server = spawn_managed_process(
                 server_args,
@@ -267,16 +298,73 @@ class GdbDebugSessions:
         tool = "debug_stop_session"
         session = self.session
         if session is None or session.status == "stopped":
-            return {"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "summary": "No debug session is active."}
+            return {"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "safe_state_confirmed": True, "summary": "No debug session is active."}
         timeout = min(self.config.debugger.timeout_s, STOP_SESSION_TIMEOUT_CAP_S)
         if timeout_s is not None:
             timeout = min(timeout, max(0.1, timeout_s))
+        # Fixed sequence, in this order, every time a session ends: confirm the
+        # target is halted (reconfirming with an explicit interrupt if the last
+        # known state does not already say so), tell the backend not to resume it
+        # on its own once this connection goes away, and only then tear the
+        # connection down. See `_confirm_halted_before_end` and
+        # `_pin_no_resume_on_detach` for why each step exists.
+        #
+        # Skipped when the session already entered as cleanup_required *and*
+        # that state was left by a plain process-cleanup failure, not by a
+        # target-state incident (`session.hardware_state_unconfirmed`): a
+        # cleanup-only failure already ran this same sequence over the
+        # connection and got a real proof out of it before cleanup itself
+        # failed, so a retry only needs to finish tidying up, not re-prove
+        # what it already proved.
+        #
+        # A target-state incident is different: nothing about retrying this
+        # call can manufacture new evidence about a connection that is
+        # already, permanently gone, so `halt_confirmed`/`detach_pinned` stay
+        # false and the incident is preserved every time this is called again,
+        # until an operator's recovery or a later machine action that resets
+        # and rereads the target establishes the board state. That is tracked
+        # at the lease level, not synthesized here from a retry alone.
+        already_unsettled = session.status == "cleanup_required"
+        retry_without_new_evidence = already_unsettled and session.hardware_state_unconfirmed
+        if retry_without_new_evidence:
+            halt_confirmed = False
+            detach_pinned = False
+        elif already_unsettled:
+            halt_confirmed = True
+            detach_pinned = True
+        else:
+            halt_confirmed = self._confirm_halted_before_end(session, timeout)
+            detach_pinned = self._pin_no_resume_on_detach(session, timeout)
         cleanup_error = self._cleanup_session(session, timeout)
-        session.status = "cleanup_required" if cleanup_error is not None else "stopped"
         if cleanup_error is not None:
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed; ownership is retained for retry."})
+            session.status = "cleanup_required"
+            if not halt_confirmed or not detach_pinned:
+                session.hardware_state_unconfirmed = True
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "safe_state_confirmed": False, "halt_not_confirmed": not halt_confirmed, "detach_resume_guard_confirmed": detach_pinned, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed; ownership is retained for retry."})
+        if not halt_confirmed or not detach_pinned:
+            session.status = "cleanup_required"
+            session.hardware_state_unconfirmed = True
+            unconfirmed_what = _UNCONFIRMED_TEARDOWN_PROOFS[(not halt_confirmed, not detach_pinned)]
+            return self._report({
+                "ok": False,
+                "tool": tool,
+                "backend": self.backend_name,
+                "active": True,
+                "status": "cleanup_required",
+                "hardware_state": "unknown",
+                "cleanup_required": True,
+                "safe_state_confirmed": False,
+                "halt_not_confirmed": not halt_confirmed,
+                "detach_resume_guard_confirmed": detach_pinned,
+                "error_type": "halt_not_confirmed" if not halt_confirmed else "detach_resume_not_confirmed",
+                "session": self._session_status(session),
+                "log_path": display_path(self.config, session.log_path),
+                "summary": f"Debug session processes were cleaned up, but {unconfirmed_what} before the session ended; ownership is retained for retry.",
+            })
+        session.status = "stopped"
+        session.hardware_state_unconfirmed = False
         self.session = None
-        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped."})
+        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "safe_state_confirmed": True, "halt_not_confirmed": False, "detach_resume_guard_confirmed": True, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped with the target confirmed halted."})
 
     def get_session_status(self) -> JsonObject:
         session = self.session
@@ -394,6 +482,23 @@ class GdbDebugSessions:
         if not session_result["ok"]:
             return self._report(session_result)
         session = session_result["session"]
+        # The one permission that gates lifting the core off a halt. Every other
+        # session tool reads or holds the target rather than resuming it, so none
+        # of them are gated on this: opening a session (an SWD attach halts the
+        # core) and inspecting one already needs no more than allow_probe already
+        # requires, the same "reading may still perturb, but exclusivity answers
+        # for that" rule AgenticHILConfig.read_free states for the rest of this
+        # project. Checked before the "already stopped" fast path below on
+        # purpose: whether the target happens to be sitting in a fault is not a
+        # reason to skip asking whether this bench may resume it at all, and
+        # `debug_get_stop_reason` already answers the same question this fast
+        # path would without needing this grant.
+        if not self.config.debugger.permissions.allow_debug_execution:
+            return self._report(self._permission_denied(
+                tool,
+                "Resuming target execution requires allow_debug_execution in the authoritative config.",
+                remediation_scope="allow_debug_execution",
+            ))
         self._refresh_session_stop(session)
         if session.stop_reason is not None and str(session.stop_reason.get("stop_reason")) in {"debugger_error", "exception", "fault"}:
             return self._report(self._stopped_result(tool, session, "Target is already stopped"))
@@ -555,11 +660,54 @@ class GdbDebugSessions:
     def close(self) -> None:
         session = self.session
         if session is not None and session.status != "stopped":
+            # See stop_session for why a session already entered as
+            # cleanup_required skips straight to tidying up only when that
+            # status came from a plain process-cleanup failure, and why a
+            # target-state incident (hardware_state_unconfirmed) instead
+            # keeps demanding proof this call cannot manufacture.
+            already_unsettled = session.status == "cleanup_required"
+            retry_without_new_evidence = already_unsettled and session.hardware_state_unconfirmed
+            if retry_without_new_evidence:
+                halt_confirmed = False
+                detach_pinned = False
+            elif already_unsettled:
+                halt_confirmed = True
+                detach_pinned = True
+            else:
+                halt_confirmed = self._confirm_halted_before_end(session, CLOSE_SESSION_TIMEOUT_S)
+                detach_pinned = self._pin_no_resume_on_detach(session, CLOSE_SESSION_TIMEOUT_S)
             cleanup_error = self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
             if cleanup_error is not None:
                 session.status = "cleanup_required"
+                if not halt_confirmed or not detach_pinned:
+                    session.hardware_state_unconfirmed = True
                 raise RuntimeError(f"Debug session cleanup failed: {cleanup_error}")
+            if not halt_confirmed or not detach_pinned:
+                session.status = "cleanup_required"
+                session.hardware_state_unconfirmed = True
+                reason = _UNCONFIRMED_TEARDOWN_CLOSE_REASONS[(not halt_confirmed, not detach_pinned)]
+                raise RuntimeError(f"Debug session closed without reconfirming {reason}.")
             session.status = "stopped"
+            session.hardware_state_unconfirmed = False
+        self.session = None
+
+    def discard_after_recovery(self) -> None:
+        """Retire whatever session is on file without asking it for teardown
+        proof it cannot give.
+
+        `stop_session` and `close()` both refuse to clear a session left
+        `cleanup_required` with `hardware_state_unconfirmed` set, on purpose:
+        nothing about calling either again can manufacture evidence about a
+        connection that is already gone. But an independent recovery --
+        `reset_target` verified into halt, or a machine/operator recovery that
+        reaped this owner's leftover processes and re-read the probe -- speaks
+        for the same hardware more directly than that stale session ever could,
+        and it is only ever called once that evidence has already cleared the
+        coordination-level incident this session's own failure raised. Holding
+        onto the session past that point serves nothing: it only makes the next
+        `debug_start_session` refuse with `session_already_active` over a
+        session the coordinator itself now considers settled, and makes a
+        later `close()` raise trying to reconfirm what recovery already did."""
         self.session = None
 
     def _start_permission(self, tool: str, mode: str) -> JsonObject:
@@ -577,8 +725,11 @@ class GdbDebugSessions:
                 return self._permission_denied(tool, exclusive_permission_summary("Debug session mode 'load'", "allow_mass_erase", self.config.debugger_id))
         return {"ok": True}
 
-    def _permission_denied(self, tool: str, summary: str) -> JsonObject:
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": summary}
+    def _permission_denied(self, tool: str, summary: str, *, remediation_scope: str | None = None) -> JsonObject:
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": summary}
+        if remediation_scope is not None:
+            result.update(remediation_fields("permission_denied", remediation_scope))
+        return result
 
     def _resolve_gdb(self) -> JsonObject:
         return resolve_gdb_executable(self.config, self.backend_name)
@@ -866,6 +1017,93 @@ class GdbDebugSessions:
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "GDB returned fewer memory bytes than requested.", "bytes_requested": size_bytes, "bytes_read": len(data)}
         return {"ok": True, "data": bytes(data)}
 
+    def _confirm_halted_before_end(self, session: GdbDebugSession, timeout_s: float) -> bool:
+        """Whether the target is confirmed halted, reconfirming with an explicit
+        interrupt if the session's last known state does not already say so.
+
+        Called only on the way a session ends (`stop_session`, `close`), never
+        on the way through: a debug server commonly resumes an attached target
+        on its own once the last GDB connection detaches or exits, so what a
+        session leaves running is decided the moment before that happens, not
+        after. `debug_continue`'s own timeout path already earns this proof for
+        a stop it was already waiting on; this is the same proof taken for a
+        stop nobody asked for, because ending the session is not exempt from
+        it.
+
+        Vacuously ``True`` for a session that never reached a target:
+        `start_session` can fail before `-target-select` ever runs, and this
+        same teardown path tears a failed start down too. There is no remote
+        connection for a detach to resume anything on, so there is nothing to
+        confirm, and a proof demanded of a session that never touched the board
+        would be a proof of nothing.
+        """
+        if session.load_phase in {"not_started", "server_spawned", "server_ready"}:
+            return True
+        if session.gdb is None or not session.gdb.is_running():
+            return False
+        self._refresh_session_stop(session)
+        if session.status == "halted":
+            return True
+        response = self._gdb_command(session, "-exec-interrupt --all", timeout_s, containment=True)
+        if not response.ok:
+            return False
+        assert session.gdb is not None
+        stop = session.gdb.wait_for_stop(timeout_s)
+        confirmed = not stop.timed_out and stop.reason != "debugger_error"
+        if confirmed:
+            session.stop_reason = self._stop_reason_from_gdb(session, stop)
+            session.status = "halted"
+        else:
+            session.status = "running"
+            session.stop_reason = {"stop_reason": "timeout", "backend_stop_reason": "timeout", "halt_confirmed": False}
+        return confirmed
+
+    def _pin_no_resume_on_detach(self, session: GdbDebugSession, timeout_s: float) -> bool:
+        """Tell OpenOCD not to resume the target on its own once this GDB
+        connection goes away, and report whether that was confirmed accepted.
+
+        OpenOCD's ``gdb-detach`` and ``gdb-end`` target events resume the core
+        by default the moment the last GDB connection ends, which is exactly
+        backwards for a session this project just finished proving halted with
+        `_confirm_halted_before_end`. That proof covers the instant before the
+        connection ends; this is what keeps the disconnect itself from moving
+        the target a moment later, by overriding both events to do nothing
+        before anything that could trigger either one runs.
+
+        Fixed and sent every time a session ends, so a later change to this
+        sequence has to edit this function to drop the override rather than
+        having it fall out of a reordering somewhere else. Never allowed to
+        overturn a halt already confirmed: `_gdb_command` marks a failed
+        command as a fresh ``debugger_error`` stop, and a defensive command
+        nobody asked for is not license to make a confirmed halt read as
+        lost, so a failure here restores the state this method was called
+        with instead of leaving that behind.
+
+        This is no longer best effort from the caller's point of view: a
+        session teardown that cannot verify this override is installed must
+        not report the target's post-detach state as safe, because OpenOCD's
+        default is to resume it. The caller decides what that means for the
+        overall result; this method only reports whether the override itself
+        was confirmed.
+        """
+        if session.load_phase in {"not_started", "server_spawned", "server_ready"}:
+            return True
+        if session.gdb is None or not session.gdb.is_running():
+            return False
+        prior_stop_reason = session.stop_reason
+        prior_status = session.status
+        response = self._gdb_command(
+            session,
+            '-interpreter-exec console "monitor $_TARGETNAME configure -event gdb-detach {}; $_TARGETNAME configure -event gdb-end {}"',
+            timeout_s,
+            containment=True,
+        )
+        if not response.ok:
+            session.stop_reason = prior_stop_reason
+            session.status = prior_status
+            return False
+        return True
+
     def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> str | None:
         errors: list[tuple[str, BaseException]] = []
         interrupt: BaseException | None = None
@@ -1137,13 +1375,77 @@ def normalize_symbol_location(tool: str, symbol: object) -> JsonObject:
     return {"ok": False, "tool": tool, "error_type": "invalid_argument", "summary": "Breakpoint symbol must be a valid C/C++ identifier."}
 
 
-def reserve_tcp_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
+class ReservedTcpPort:
+    """A loopback port this process holds until the debug server is spawned.
+
+    The reservation used to be a bind to port 0 followed immediately by a close,
+    which names a port and then stops defending it. Everything after that close
+    is a window in which the kernel may hand the same number to anyone else who
+    asks for an ephemeral port, and it does: eight processes taking 24000 such
+    reservations on one Windows machine wrapped the dynamic range and were given
+    7590 ports that another of them had also been given. Two debug servers then
+    get told to bind one port, and both ways that lands are bad -- the loser
+    fails to bind and the session reports a server that would not come up, or the
+    two share the address and the debugger talks to whichever the kernel hands
+    the connection to.
+
+    So the socket stays bound for as long as the caller has not spawned anything,
+    and :meth:`release` runs in the same breath as the spawn. A held address is
+    refused to every other process on the platforms this ships on, measured
+    across processes here: a plain bind gets ``WSAEADDRINUSE``, a
+    ``SO_REUSEADDR`` bind -- how this project's own fake OpenOCD binds -- gets
+    ``WSAEACCES``. ``SO_EXCLUSIVEADDRUSE`` and ``listen`` keep that true in the
+    two cases a bare bind does not cover: Windows shares an address whose holder
+    also set ``SO_REUSEADDR``, and Linux lets two ``SO_REUSEADDR`` sockets share
+    a port while neither of them is listening.
+
+    What this cannot do is hand the port over atomically: an out-of-process
+    server binds by number, so a window remains between the release and its bind.
+    Closing that one needs the server to choose the port and say which one it
+    chose, which is a change to what this project tells OpenOCD to do rather than
+    a change to how it asks the kernel for a number.
+    """
+
+    def __init__(self) -> None:
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive is not None:
+                self._socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            self._socket.bind(("127.0.0.1", 0))
+            self._socket.listen(1)
+            self.port = int(self._socket.getsockname()[1])
+        except BaseException:
+            self._socket.close()
+            raise
+
+    def release(self) -> None:
+        """Stop defending the port. Idempotent: the caller releases on the way to
+        a spawn and the context manager releases again on the way out."""
+        self._socket.close()
+
+    def __enter__(self) -> ReservedTcpPort:
+        return self
+
+    def __exit__(self, *_exception: object) -> None:
+        self.release()
+
+
+def reserve_tcp_port() -> ReservedTcpPort:
+    return ReservedTcpPort()
 
 
 def wait_for_tcp_port(port: int, timeout_s: float, server: subprocess.Popen[str]) -> bool:
+    """Whether something is listening on `port` before the server gives up or the
+    deadline passes.
+
+    Deliberately stated that narrowly. A successful connect establishes that the
+    port answers, not that it is *this* server answering: identifying the process
+    behind a listening socket needs an OS-specific query this does not make, so a
+    server that lost the port race and a stranger that won it read the same here
+    for as long as our own process has not exited yet. The narrow window that can
+    happen in is what :class:`ReservedTcpPort` exists to keep narrow.
+    """
     deadline = time.monotonic() + max(0.1, timeout_s)
     while time.monotonic() < deadline:
         if server.poll() is not None:

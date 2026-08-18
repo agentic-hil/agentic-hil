@@ -625,6 +625,42 @@ class ComPortSession:
                 break
 
 
+# A short write is retried against exactly its own remainder, and only a few
+# times. The common cause is a full OS send buffer draining the moment it is
+# asked again, which one or two more calls already answers; a handle that
+# keeps confirming zero further bytes on every attempt stops this before the
+# budget does, and the budget itself exists so a link that is genuinely this
+# slow fails the call instead of blocking it for an unbounded number of
+# round trips at the configured write_timeout_s each.
+SHORT_WRITE_RETRY_LIMIT = 3
+
+
+def _write_with_bounded_retry(serial_handle: object, data: bytes) -> int:
+    """Write ``data``, retrying a short return against its own remainder.
+
+    Returns the number of bytes pyserial's own return value confirms were
+    queued: never assumed, and never ``len(data)`` by default the way a
+    return value nobody read used to mean. A handle that answers ``None``
+    is trusted for the call it made, because some fakes and older backends
+    report nothing on a completed write; that trust is per call, not
+    inherited by the next one, so a real short return is still caught.
+
+    Stops the moment a call makes no progress at all, so a port that is
+    genuinely stuck is answered in one extra round trip rather than by
+    exhausting the retry budget doing nothing every time.
+    """
+    sent = 0
+    attempt = 0
+    while True:
+        remaining = data[sent:]
+        written = serial_handle.write(remaining)
+        chunk = len(remaining) if written is None else max(0, min(int(written), len(remaining)))
+        sent += chunk
+        attempt += 1
+        if sent >= len(data) or chunk == 0 or attempt > SHORT_WRITE_RETRY_LIMIT:
+            return sent
+
+
 class ComPortService:
     def __init__(self, config: AgenticHILConfig, coordinator: HardwareCoordinator | None = None):
         self.config = config
@@ -843,7 +879,7 @@ class ComPortService:
         if len(data) > session.port_config.max_write_bytes:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "COM port write exceeds configured max_write_bytes.", "bytes_requested": len(data), "max_write_bytes": session.port_config.max_write_bytes}
         try:
-            session.serial_handle.write(data)
+            sent = _write_with_bounded_retry(session.serial_handle, data)
             flush = getattr(session.serial_handle, "flush", None)
             if callable(flush):
                 flush()
@@ -859,8 +895,39 @@ class ComPortService:
             if not isinstance(error, Exception):
                 raise
             return result
-        audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "tx", "bytes": len(data), "hex": data.hex(), "text": decode_bytes(data, session.port_config.encoding)})
-        result = {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": len(data), "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
+        sent_data = data[:sent]
+        audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "tx", "bytes": len(sent_data), "hex": sent_data.hex(), "text": decode_bytes(sent_data, session.port_config.encoding)})
+        if sent < len(data):
+            # Confirmed short, not unknown: every attempt returned normally,
+            # nothing raised, and pyserial's own return values, read this
+            # time instead of discarded, say fewer bytes reached the line
+            # than were asked for even after `_write_with_bounded_retry`'s
+            # own retry of the remainder. There is no missing proof here for
+            # a later call to supply, so this does not hold the lease the
+            # way an exception mid-write does: it records what happened,
+            # by its own reason, and leaves the session usable.
+            result = {
+                "ok": False,
+                "tool": tool,
+                "port_id": port_id,
+                "error_type": "serial_write_incomplete",
+                "summary": f"COM port write was short: {sent} of {len(data)} byte(s) reached the line, even after a bounded retry of the remainder.",
+                "bytes_written": sent,
+                "bytes_requested": len(data),
+                "data": data_result(sent_data, session.port_config.encoding),
+                "log_path": display_path(self.config, session.log_path),
+                "side_effect_committed": True,
+                "side_effect_status": "committed",
+                "retry_safe": False,
+                "likely_causes": likely_causes("serial_write_incomplete"),
+            }
+            session.lease.record_cleanup_event("serial_write_incomplete", RuntimeError(result["summary"]))
+            if audit_error is not None:
+                session.audit_broken = True
+                session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
+                return mark_audit_failure(result, audit_error)
+            return result
+        result = {"ok": True, "tool": tool, "port_id": port_id, "bytes_written": sent, "data": data_result(sent_data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Stimulus written to COM port."}
         if audit_error is not None:
             session.audit_broken = True
             session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
@@ -901,6 +968,19 @@ class ComPortService:
             data = bytes(session.buffer[:parsed_max_bytes])
             del session.buffer[:parsed_max_bytes]
             remaining = len(session.buffer)
+        if not data and session.reader_error is not None:
+            # The wait loop above exited because the reader died while this
+            # call was waiting on it, not because the session was fine and
+            # the deadline simply passed: `_active_session` already refuses
+            # a read against a session in this state before the wait even
+            # starts, and a reader that dies mid-wait deserves exactly that
+            # refusal rather than a quiet "no feedback" once it is too late
+            # to ask before the fact. Re-checking now is the same question,
+            # asked one call later, and it reuses the same answer rather than
+            # inventing a second way to say a session is not active.
+            failure = self._active_session(port_id, tool)
+            if not failure["ok"]:
+                return failure
         result: JsonObject = {"ok": True, "tool": tool, "port_id": port_id, "bytes_read": len(data), "buffer_remaining_bytes": remaining, "overflow_bytes": session.overflow_bytes, "data": data_result(data, session.port_config.encoding), "log_path": display_path(self.config, session.log_path), "summary": "Feedback read from COM port." if data else "No COM port feedback was available."}
         if session.reader_error:
             result["reader_error"] = session.reader_error
@@ -1361,4 +1441,5 @@ def likely_causes(error_type: str) -> list[str]:
         "com_port_open_failed": ["configured COM port device does not exist", "COM port is already open in another program", "USB serial adapter is unplugged or driver is missing"],
         "serial_read_failed": ["COM port was disconnected", "serial driver reported an I/O error", "another process interfered with the port"],
         "serial_write_failed": ["COM port was disconnected", "serial driver write timed out", "target or USB serial adapter stopped responding"],
+        "serial_write_incomplete": ["configured write_timeout_s is too short for this payload size and baudrate", "target or USB serial adapter is applying flow control", "COM port was disconnected partway through the write"],
     }.get(error_type, ["inspect the COM port log for details"])

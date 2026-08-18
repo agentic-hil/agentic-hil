@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
 import struct
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from conftest import (
 )
 
 from agentic_hil.backends.common import command_for_log
-from agentic_hil.backends.gdbdebug import decode_symbol_value, image_byte_order
+from agentic_hil.backends.gdbdebug import decode_symbol_value, image_byte_order, reserve_tcp_port
 from agentic_hil.bench import BenchMutex
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.devices import debugger_device
@@ -191,7 +192,12 @@ def test_unconfirmed_debug_halt_quarantines_lease(tmp_path: Path) -> None:
         assert cleared["cleanup_required"] is True
         assert service.coordinator.blocked is True
     finally:
-        with pytest.raises(RuntimeError, match="target state remains unconfirmed"):
+        # Service shutdown now catches this closer to the fact than the lease
+        # bookkeeping alone did: `close()` re-attempts the halt itself, finds
+        # the same `halt_timeout` fake still refusing to confirm one, and
+        # refuses to call that a clean stop before the lease release is ever
+        # reached.
+        with pytest.raises(RuntimeError, match="reconfirming the target was halted"):
             service.close()
         service.coordinator.close()
 
@@ -266,6 +272,36 @@ def test_failed_debug_start_does_not_poison_retry(tmp_path: Path, monkeypatch: p
         assert second["ok"] is True, second
     finally:
         service.close()
+
+
+def test_a_reserved_debug_port_is_held_against_the_rest_of_the_machine() -> None:
+    """A reservation nobody else can take, until the caller hands it over.
+
+    The old reservation bound port 0 and closed the socket in the same
+    expression, which names a port and then defends nothing: the kernel is free
+    to hand the same number to the next process that asks, and once the ephemeral
+    range comes round it does. Two suites -- or two xdist workers, which is how
+    this surfaced -- then tell two debug servers to bind one port.
+
+    `SO_REUSEADDR` is what the contender uses because it is what the project's
+    own fake OpenOCD uses, and because it is the bind Windows is documented to
+    let through onto an address somebody else already holds.
+    """
+    reservation = reserve_tcp_port()
+    contender = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    contender.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        with pytest.raises(OSError):
+            contender.bind(("127.0.0.1", reservation.port))
+
+        reservation.release()
+
+        # And released means released: the server this port was reserved for
+        # binds it by number a moment later, so the hold must not outlive it.
+        contender.bind(("127.0.0.1", reservation.port))
+    finally:
+        contender.close()
+        reservation.release()
 
 
 @pytest.mark.parametrize(
@@ -622,6 +658,158 @@ def test_debug_stop_reports_cleanup_failure(tmp_path: Path, monkeypatch: pytest.
         service.close()
 
 
+def test_stop_session_detach_guard_failure_is_not_reported_safe_and_survives_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review finding 1: OpenOCD resumes a target on `gdb-detach`/`gdb-end` by
+    # default, so `_pin_no_resume_on_detach` installing an override that does
+    # nothing on those events is what keeps closing the connection from moving
+    # the target. Its result was previously discarded, so a refused monitor
+    # command left `stop_session` free to clean up and still report
+    # `safe_state_confirmed: true` even though nothing stopped OpenOCD from
+    # resuming the core the moment the connection closed.
+    #
+    # Review finding 2: a retried stop must not synthesize a safe-state
+    # confirmation from the fact that processes are already gone. This same
+    # session proves both: the first call fails to pin the guard, and the
+    # second (retried) call must still refuse to report success even though
+    # the backend it would have talked to answers healthily again.
+    service = debug_service(tmp_path)
+    debug = service.backend._debug
+    original = debug._gdb_command
+
+    def refuse_detach_guard(session, command: str, timeout_s=None, **kwargs):
+        if "gdb-detach" in command:
+            return GdbMiCommandResult(result_class="error", line="", error_message="monitor command refused")
+        return original(session, command, timeout_s, **kwargs)
+
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        monkeypatch.setattr(debug, "_gdb_command", refuse_detach_guard)
+
+        first = service.call("debug_stop_session")
+        assert first["ok"] is False
+        assert first["error_type"] == "detach_resume_not_confirmed"
+        assert first["safe_state_confirmed"] is False
+        assert first["detach_resume_guard_confirmed"] is False
+        assert first["halt_not_confirmed"] is False
+        assert first["status"] == "cleanup_required"
+        assert first["hardware_state"] == "unknown"
+        assert first["cleanup_required"] is True
+
+        # The backend answers healthily again, but a retry has no new
+        # connection to prove anything with: the incident must persist.
+        monkeypatch.setattr(debug, "_gdb_command", original)
+        retried = service.call("debug_stop_session")
+        assert retried["ok"] is False
+        assert retried["safe_state_confirmed"] is False
+        assert retried["cleanup_required"] is True
+    finally:
+        monkeypatch.setattr(debug, "_gdb_command", original)
+        with pytest.raises(RuntimeError, match="auto-resume-on-detach"):
+            service.close()
+        service.coordinator.close()
+
+
+def test_reset_target_recovery_after_a_stuck_stop_lets_a_new_session_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review round 1, finding 3: once a failed stop sets
+    # session.hardware_state_unconfirmed, stop_session can never retire that
+    # session itself -- every later call takes retry_without_new_evidence,
+    # exactly as the two tests above establish. `reset_target` in halt mode is
+    # a different, independent way to settle the same incident: it drives the
+    # target into a defined state (or, as here, the coordinator's own
+    # automatic pre-dispatch recovery attempt settles it first with a
+    # cheaper read-only re-probe, since `debug_session_cleanup_unconfirmed`
+    # is one `RETRYABLE_CLEANUP_REASONS` answers without a reset) and clears
+    # the coordinator-level quarantine. Either way `_release_recovered_leases`
+    # is what runs, and that used to stop at the lease -- the GDB backend's
+    # own `session` stayed on file, so the next debug_start_session still
+    # refused with session_already_active, and service.close() still tried to
+    # reconfirm teardown proof a connection that no longer exists can give.
+    service = debug_service(tmp_path)
+    debug = service.backend._debug
+    original = debug._gdb_command
+
+    def refuse_detach_guard(session, command: str, timeout_s=None, **kwargs):
+        if "gdb-detach" in command:
+            return GdbMiCommandResult(result_class="error", line="", error_message="monitor command refused")
+        return original(session, command, timeout_s, **kwargs)
+
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        monkeypatch.setattr(debug, "_gdb_command", refuse_detach_guard)
+
+        stopped = service.call("debug_stop_session")
+        assert stopped["ok"] is False
+        assert stopped["error_type"] == "detach_resume_not_confirmed"
+        assert debug.session is not None
+        assert debug.session.hardware_state_unconfirmed is True
+        assert service.coordinator.blocked is True
+
+        monkeypatch.setattr(debug, "_gdb_command", original)
+
+        recovered = service.call("reset_target", {"mode": "halt"})
+        assert recovered["ok"] is True, recovered
+        assert recovered["cleanup_required"] is False
+        assert recovered["quarantined"] is False
+        assert recovered["lease_state"] == "released"
+        assert service.coordinator.blocked is False
+        assert service._debug_lease is None
+        # The core of the fix: the backend's own stale session is gone, not
+        # merely the service's lease handle to it.
+        assert debug.session is None
+
+        restarted = start_debug_session(service, mode="attach")
+        assert restarted["ok"] is True, restarted
+        assert restarted["session"]["status"] == "halted"
+    finally:
+        monkeypatch.setattr(debug, "_gdb_command", original)
+        service.close()
+        service.coordinator.close()
+
+
+def test_stop_session_halt_not_confirmed_survives_retry_without_new_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review finding 2, reproduced on the exact path it named: a stop that
+    # cannot reconfirm the target is halted closes the connection and reports
+    # `halt_not_confirmed`, leaving `session.status == "cleanup_required"`. A
+    # second call must not read that status alone as proof the target is
+    # halted -- the connection it would have to reprove that on is already
+    # gone, and nothing else (reset, probe, operator confirmation) happened in
+    # between.
+    service = debug_service(tmp_path)
+    debug = service.backend._debug
+    original_confirm = debug._confirm_halted_before_end
+    calls = {"count": 0}
+
+    def unconfirmed(session, timeout_s):
+        calls["count"] += 1
+        return False
+
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        monkeypatch.setattr(debug, "_confirm_halted_before_end", unconfirmed)
+
+        first = service.call("debug_stop_session")
+        assert first["ok"] is False
+        assert first["error_type"] == "halt_not_confirmed"
+        assert first["safe_state_confirmed"] is False
+        assert first["status"] == "cleanup_required"
+        assert calls["count"] == 1
+
+        # Restore the real method; a retry that called it again would prove
+        # nothing was actually gained by retrying it (the connection is gone),
+        # so the fix must not call it again at all.
+        monkeypatch.setattr(debug, "_confirm_halted_before_end", original_confirm)
+        retried = service.call("debug_stop_session")
+        assert retried["ok"] is False
+        assert retried["safe_state_confirmed"] is False
+        assert retried["cleanup_required"] is True
+        assert calls["count"] == 1
+    finally:
+        monkeypatch.setattr(debug, "_confirm_halted_before_end", original_confirm)
+        with pytest.raises(RuntimeError, match="reconfirming the target was halted"):
+            service.close()
+        service.coordinator.close()
+
+
 def test_breakpoint_cleanup_retry_only_deletes_remaining_breakpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = debug_service(tmp_path)
     try:
@@ -633,14 +821,14 @@ def test_breakpoint_cleanup_retry_only_deletes_remaining_breakpoint(tmp_path: Pa
         failed_once = False
         deletes: list[str] = []
 
-        def command(session, command: str, timeout_s=None):
+        def command(session, command: str, timeout_s=None, **kwargs):
             nonlocal failed_once
             if command.startswith("-break-delete"):
                 deletes.append(command)
                 if command.endswith(" 2") and not failed_once:
                     failed_once = True
                     return GdbMiCommandResult(result_class="error", line="", error_message="delete failed")
-            return original(session, command, timeout_s)
+            return original(session, command, timeout_s, **kwargs)
 
         monkeypatch.setattr(debug, "_gdb_command", command)
         first = service.call("debug_clear_breakpoints")
@@ -674,6 +862,11 @@ def test_service_close_reports_debug_cleanup_failure(tmp_path: Path, monkeypatch
     with pytest.raises(RuntimeError, match="Debug session cleanup failed"):
         service.close()
 
+    # The first failure left the session status cleanup_required, so the
+    # retry does not re-demand a halt reconfirmation through a connection
+    # `_close_unlocked`'s own process-registry sweep already reaped out from
+    # under it in the meantime: it goes straight to tidying up, exactly as a
+    # retry after any other cleanup failure does.
     monkeypatch.setattr(session.gdb, "close", original_close)
     service.close()
 

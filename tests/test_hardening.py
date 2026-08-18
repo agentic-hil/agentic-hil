@@ -48,6 +48,7 @@ from agentic_hil.config import (
     temporary_roots,
 )
 from agentic_hil.contracts import validate_tool_arguments
+from agentic_hil.devices import uart_device
 from agentic_hil.gdbmi import GdbMiClient
 from agentic_hil.knowledge import CONFIG_WORKED_EXAMPLE
 from agentic_hil.mcp import handle_mcp_message
@@ -337,11 +338,19 @@ def test_a_sandbox_root_is_swept_only_once_nobody_is_using_it() -> None:
     has no garbage collection of its own. Age is what tells residue from a live
     suite: a running session creates and removes a sandbox inside its root on
     every test, so only a root nothing has written to for hours is free.
+
+    The two roots this plants carry the pid, because the directory they are
+    planted in is the one place in this suite that is genuinely shared: the sweep
+    is about the whole temp root, so it has to be asked about the whole temp
+    root, and fixed names would have meant two suites on one machine -- an xdist
+    worker and a second clone's run -- planting, ageing and deleting each other's
+    fixtures. Every assertion below names one of this process's own entries, so
+    what a neighbour leaves in `removed` is none of this test's business.
     """
     from conftest import SANDBOX_PREFIX, SANDBOX_ROOT, STALE_SANDBOX_AGE_S, sweep_stale_sandbox_roots
 
-    stale = SANDBOX_ROOT.parent / f"{SANDBOX_PREFIX}test-stale"
-    fresh = SANDBOX_ROOT.parent / f"{SANDBOX_PREFIX}test-fresh"
+    stale = SANDBOX_ROOT.parent / f"{SANDBOX_PREFIX}test-stale-{os.getpid()}"
+    fresh = SANDBOX_ROOT.parent / f"{SANDBOX_PREFIX}test-fresh-{os.getpid()}"
     for root in (stale, fresh):
         (root / "held").mkdir(parents=True, exist_ok=True)
     os.utime(stale, (time.time() - STALE_SANDBOX_AGE_S - 60,) * 2)
@@ -450,6 +459,219 @@ def test_com_session_with_dead_reader_reports_not_active(tmp_path: Path) -> None
     assert result["error_type"] == "session_not_active"
     assert result["reader_error"]["error_type"] == "serial_read_failed"
     assert service._session_is_active(session) is False
+
+
+class ShortThenCompleteSerialHandle:
+    """First write() call confirms fewer bytes than requested, pyserial's own
+    documented behavior for a short write under a finite write_timeout,
+    and the second call, made against exactly the remainder, finishes it."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self, short_by: int = 3) -> None:
+        self.short_by = short_by
+        self.writes: list[bytes] = []
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(bytes(data))
+        if len(self.writes) == 1:
+            return max(0, len(data) - self.short_by)
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+class ChronicallyShortSerialHandle:
+    """Confirms only a few bytes per call, however many are asked for: a link
+    that genuinely cannot keep up, as opposed to a one-off short return a
+    retry recovers from."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self, chunk: int = 2) -> None:
+        self.chunk = chunk
+        self.writes: list[bytes] = []
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(bytes(data))
+        return min(self.chunk, len(data))
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def test_com_write_retries_a_short_write_and_completes(tmp_path: Path) -> None:
+    """pyserial's return value is read now, not discarded: a first call that
+    confirms fewer bytes than asked for is retried against exactly its own
+    remainder, and a write that recovers within the retry budget reports the
+    honest, complete count.
+
+    This fails before the fix in the one way that matters here: the old code
+    called ``write()`` exactly once and never looked at what it returned, so
+    ``handle.writes`` would hold a single, full-length entry instead of the
+    short first attempt followed by its remainder.
+    """
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-short-write-recovers.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = ShortThenCompleteSerialHandle(short_by=3)
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), start_reader=False)
+    service.sessions["dut"] = session
+
+    result = service.write_bytes("dut", b"12345678")
+
+    assert result["ok"] is True, result
+    assert result["bytes_written"] == 8
+    assert result["data"]["text"] == "12345678"
+    # The short first return was retried against exactly its own remainder,
+    # not resent from the top.
+    assert handle.writes == [b"12345678", b"678"]
+
+
+def test_com_write_that_stays_short_after_retry_records_event_without_quarantine(tmp_path: Path) -> None:
+    """The bug this pins: the write path used to discard pyserial's return
+    value and report ``bytes_written = len(data)`` regardless, so a write a
+    finite ``write_timeout_s`` cut short still came back ``ok: true`` and
+    claiming a whole write. A write that is still short after the bounded
+    retry now fails honestly with the confirmed count, and, because the
+    count is confirmed rather than unknown, the lease is treated the way
+    quarantine narrowing (#216) treats a peripheral failure the next call
+    proves nothing more about: the reason is recorded and the device goes
+    back, rather than a standing quarantine an operator has to clear.
+    """
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-short-write-exhausted.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = ChronicallyShortSerialHandle(chunk=2)
+    lease = service.coordinator.acquire(uart_device(config, "dut"))
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), lease, start_reader=False)
+    service.sessions["dut"] = session
+
+    result = service.write_bytes("dut", b"0123456789")
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "serial_write_incomplete"
+    assert result["bytes_written"] == 8
+    assert result["bytes_requested"] == 10
+    assert result["data"]["text"] == "01234567"
+    # Bounded: the initial attempt plus SHORT_WRITE_RETRY_LIMIT retries, and
+    # not one call more even though the handle never stops confirming
+    # progress.
+    assert len(handle.writes) == 4
+    # Confirmed, not unknown, so this is recorded rather than quarantined:
+    # the lease is not held for it and the bench is not blocked.
+    assert session.lease.state == "active"
+    assert session.lease.cleanup_reasons() == []
+    assert session.lease.reported_cleanup_reasons() == ["serial_write_incomplete"]
+    assert service.coordinator.blocked is False
+
+
+class DyingMidReadSerialHandle:
+    """Answers a few empty reads, proving the session was genuinely alive
+    when the wait started, then fails like a device unplugged while
+    `com_read` was still waiting on it."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self, healthy_reads: int = 5) -> None:
+        self.healthy_reads = healthy_reads
+        self.calls = 0
+
+    def read(self, size: int) -> bytes:
+        self.calls += 1
+        if self.calls > self.healthy_reads:
+            raise OSError("device disconnected mid-read")
+        return b""
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+class DataThenDiesSerialHandle:
+    """Delivers one chunk of real data, then fails like a device that was
+    unplugged right after: used to prove a read that got real bytes stays a
+    success even though the session goes on to record a reader_error."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def read(self, size: int) -> bytes:
+        self.calls += 1
+        if self.calls == 1:
+            return b"ok\n"
+        raise OSError("device disconnected after delivering data")
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def test_com_read_reports_failure_when_reader_dies_mid_wait(tmp_path: Path) -> None:
+    """The bug this pins: a reader that dies while `com_read` is inside its
+    wait loop used to exit that loop into the same result as no feedback at
+    all, ``{"ok": true, ..., "summary": "No COM port feedback was
+    available."}``, with the reader's own error present only as a nested
+    ``reader_error`` that ``overall_success`` never inspects. A reader that
+    died partway through the wait is a failed read, not an empty successful
+    one, and it now refuses the same way a read against an already-dead
+    session does.
+    """
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-mid-wait-death.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = DyingMidReadSerialHandle(healthy_reads=5)
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path))
+    service.sessions["dut"] = session
+
+    # The reader must still be alive when the call is made, or this would
+    # only exercise the pre-existing pre-check in `_active_session` (see
+    # test_com_session_with_dead_reader_reports_not_active above) instead of
+    # the wait loop this test targets.
+    assert session.reader_error is None
+
+    result = service.read_bytes("dut", 16, 2.0)
+
+    assert result["ok"] is False, result
+    assert overall_success(result) is False
+    assert result["error_type"] == "session_not_active"
+    assert result["reader_error"]["error_type"] == "serial_read_failed"
+    assert result["summary"] != "No COM port feedback was available."
+    assert wait_until(lambda: session.reader_error is not None)
+
+
+def test_com_read_keeps_real_data_a_success_even_if_the_reader_later_dies(tmp_path: Path) -> None:
+    """The fix is scoped to an empty read: a call that did retrieve real
+    bytes before the reader went on to fail stays a success, with the
+    reader's error still nested for the next call to see."""
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-data-then-dies.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = DataThenDiesSerialHandle()
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path))
+    service.sessions["dut"] = session
+
+    result = service.read_bytes("dut", 16, 2.0)
+
+    assert result["ok"] is True, result
+    assert overall_success(result) is True
+    assert result["bytes_read"] == 3
+    assert result["data"]["text"] == "ok\n"
 
 
 def test_com_session_stop_retains_session_when_close_fails_for_retry(tmp_path: Path) -> None:
@@ -3287,3 +3509,289 @@ def test_pyocd_without_a_probe_id_passes_no_uid(tmp_path: Path) -> None:
         assert "--uid" not in service.backend._connection_args()
     finally:
         service.close()
+
+
+def test_pyocd_refuses_two_debuggers_that_resolve_to_one_physical_probe(tmp_path: Path) -> None:
+    # "OCD1" and "123" share no substring relationship with each other, so
+    # config.validate_debuggers accepts both at load time (it only rejects a
+    # selector contained in another). Enumerated against the fake's two
+    # boards they both land on PYOCD123 alone and nothing else, which only
+    # the hardware boundary can see (#278).
+    from agentic_hil.config import bind_debugger
+
+    config = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_type="pyocd",
+            debugger_name="probe_x",
+            probe_id="OCD1",
+            auto_probe_ids=False,
+            debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "123"\n',
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert result["side_effect_committed"] is False
+    assert result["other_debugger"] == "probe_y"
+    assert result["other_probe_id"] == "123"
+    assert "probe_x" in result["summary"]
+    assert "probe_y" in result["summary"]
+    # Not cached as if the resolution had succeeded: a later call must repeat
+    # the same refusal rather than silently reuse a collided identity.
+    assert service.backend._resolved_probe_uid is None
+
+
+def test_pyocd_probe_naming_no_other_debugger_is_unaffected_by_the_collision_check(tmp_path: Path) -> None:
+    # A control alongside the collision test above: two debuggers configured,
+    # each resolving to its own distinct probe, must still both work.
+    from agentic_hil.config import bind_debugger
+
+    config = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_type="pyocd",
+            debugger_name="probe_x",
+            probe_id="PYOCD123",
+            auto_probe_ids=False,
+            debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "PYOCD456"\n',
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert service.backend._resolved_probe_uid == "PYOCD123"
+
+
+def test_pyocd_collision_check_does_not_apply_pyocds_substring_rule_to_an_openocd_peer(tmp_path: Path) -> None:
+    # An OpenOCD entry passes its configured probe_id straight to OpenOCD as an
+    # exact serial ("adapter serial 123"), never as a pyOCD-style substring.
+    # "123" is a substring of "PYOCD123" but is not an OpenOCD serial that
+    # resolves to it, so this must not be reported as a collision -- unlike
+    # test_pyocd_refuses_two_debuggers_that_resolve_to_one_physical_probe,
+    # where the peer is itself type pyocd and the same "123" genuinely does
+    # collide (#review finding 7).
+    from agentic_hil.config import bind_debugger
+
+    config = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_type="pyocd",
+            debugger_name="probe_x",
+            probe_id="OCD1",
+            auto_probe_ids=False,
+            debuggers_yaml='debuggers:\n  probe_y:\n    type: openocd\n    probe_id: "123"\n',
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert service.backend._resolved_probe_uid == "PYOCD123"
+
+
+def test_pyocd_collision_check_still_catches_an_openocd_peer_with_the_exact_same_serial(tmp_path: Path) -> None:
+    # The other half: an OpenOCD (or ST-Link) peer configured with the *exact*
+    # resolved UID as its own serial would still resolve to the same physical
+    # probe under its own backend's exact-match semantics, so this must still
+    # be refused as a collision.
+    #
+    # Built by replacing the loaded config's debuggers directly rather than
+    # through YAML: any peer whose exact probe_id equals what a pyocd entry
+    # resolves to necessarily contains that entry's own (substring-matched)
+    # needle, so config-load's own static guard (validate_debuggers) already
+    # refuses that combination as text before any hardware is enumerated --
+    # correctly, since it cannot yet know the peer's type-based matching rule
+    # differs at the hardware boundary. This is the runtime check
+    # (`_cross_debugger_identity_collision`) in isolation, on the exact-match
+    # rule this fix adds for a non-pyocd peer.
+    import dataclasses
+
+    from agentic_hil.config import bind_debugger
+
+    config = bind_debugger(
+        load_test_config(tmp_path, debugger_type="pyocd", debugger_name="probe_x", probe_id="OCD1", auto_probe_ids=False),
+        "probe_x",
+    )
+    peer = dataclasses.replace(config.debuggers["probe_x"], type="openocd", probe_id="PYOCD123", executable=None, resource_id=None)
+    config = dataclasses.replace(config, debuggers={**config.debuggers, "probe_y": peer})
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert result["other_debugger"] == "probe_y"
+    assert result["other_probe_id"] == "PYOCD123"
+    assert service.backend._resolved_probe_uid is None
+
+
+def test_pyocd_reconfigure_re_checks_collisions_after_only_a_peers_selector_changes(tmp_path: Path) -> None:
+    # Review finding 6: the cache used to be invalidated only when the *bound*
+    # debugger's own probe_id changed. A project config reload that changes
+    # only the *other* debugger's selector into one that now collides has to
+    # invalidate it too, or a resolution cached before the reload keeps being
+    # reused as if the collision check had already cleared it against the new
+    # configuration.
+    from agentic_hil.config import bind_debugger
+
+    first = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_type="pyocd",
+            debugger_name="probe_x",
+            probe_id="OCD1",
+            auto_probe_ids=False,
+            debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "NOT-CONNECTED"\n',
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(first)
+    try:
+        clean = service.call("probe_target")
+        assert clean["ok"] is True, clean
+        assert service.backend._resolved_probe_uid == "PYOCD123"
+
+        second = bind_debugger(
+            load_test_config(
+                tmp_path,
+                debugger_type="pyocd",
+                debugger_name="probe_x",
+                probe_id="OCD1",
+                auto_probe_ids=False,
+                debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "123"\n',
+            ),
+            "probe_x",
+        )
+        service.backend.reconfigure(second)
+        assert service.backend._resolved_probe_uid is None
+
+        collided = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert collided["ok"] is False
+    assert collided["error_type"] == "adapter_not_found"
+    assert collided["other_debugger"] == "probe_y"
+    assert service.backend._resolved_probe_uid is None
+
+
+def test_pyocd_reconfigure_re_checks_collisions_after_a_peers_type_changes(tmp_path: Path) -> None:
+    # Review round 1, finding 2: `_probe_selector_map` used to record only
+    # `probe_selector_key(debugger)`, and that key carries no trace of `type`
+    # once computed -- an OpenOCD peer with probe_id "123" and a pyOCD peer
+    # with the same probe_id both fold to the key "123". So reconfiguring only
+    # a peer's *type*, keeping its probe_id byte-for-byte the same, produced an
+    # identical selector map and never invalidated the cache, even though
+    # `_cross_debugger_identity_collision` matches an OpenOCD peer by exact
+    # serial and a pyOCD peer by substring -- two different rules over the same
+    # key. Here "123" is not an OpenOCD serial that resolves to PYOCD123 (no
+    # collision, exact-match rule) but is a substring that does (collision,
+    # pyOCD's own rule), so retyping probe_y from openocd to pyocd must flip
+    # the outcome, and the cached resolution from before the reload must not
+    # paper over that.
+    from agentic_hil.config import bind_debugger
+
+    first = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_type="pyocd",
+            debugger_name="probe_x",
+            probe_id="OCD1",
+            auto_probe_ids=False,
+            debuggers_yaml='debuggers:\n  probe_y:\n    type: openocd\n    probe_id: "123"\n',
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(first)
+    try:
+        clean = service.call("probe_target")
+        assert clean["ok"] is True, clean
+        assert service.backend._resolved_probe_uid == "PYOCD123"
+
+        second = bind_debugger(
+            load_test_config(
+                tmp_path,
+                debugger_type="pyocd",
+                debugger_name="probe_x",
+                probe_id="OCD1",
+                auto_probe_ids=False,
+                debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "123"\n',
+            ),
+            "probe_x",
+        )
+        service.backend.reconfigure(second)
+        assert service.backend._resolved_probe_uid is None
+
+        collided = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert collided["ok"] is False
+    assert collided["error_type"] == "adapter_not_found"
+    assert collided["other_debugger"] == "probe_y"
+    assert service.backend._resolved_probe_uid is None
+
+
+def test_unnamed_probe_refusal_no_longer_reasons_from_a_debugger_count(tmp_path: Path) -> None:
+    # The refusal exists because this call cannot tell the bound, unnamed
+    # debugger apart from another configured one - not because some number of
+    # debuggers happen to be configured. The old text recited that count as
+    # its own justification ("...and the project configures 2 debuggers...");
+    # this asserts that reasoning is gone from what a caller reads (#278).
+    from agentic_hil.config import bind_debugger
+
+    config = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_name="probe_x",
+            auto_probe_ids=False,
+            debuggers_yaml="debuggers:\n  probe_y:\n    type: openocd\n",
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("reset_target", {"mode": "run"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "not_supported"
+    assert "the project configures" not in result["summary"]
+    assert f"{len(config.debuggers)} debuggers" not in result["summary"]
+    assert "debugger-probes" in result["summary"]
+    assert result["configured_debuggers"] == ["probe_x", "probe_y"]
+
+
+def test_single_debugger_stays_exempt_from_naming_its_probe(tmp_path: Path) -> None:
+    # The other half of the same decision: with nothing else configured, a
+    # bound debugger cannot be confused with another entry, so it is not
+    # forced to pin a probe_id it may have no self-service way to discover
+    # (OpenOCD cannot enumerate probes) or that may not exist at all (#278).
+    config = load_test_config(tmp_path, debugger_name="dut")
+    assert config.debugger.probe_id is None
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("reset_target", {"mode": "run"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result

@@ -603,6 +603,14 @@ class AgenticHILToolService:
         if name in dispatch:
             if name in debugger_tools() and self.config.debugger is None:
                 return unbound_debugger_error(name, self.config)
+            # A naming check, not a hardware one: with only one configured
+            # debugger this call can only ever mean that one entry, so there is
+            # no other name it could be confused with and nothing to demand a
+            # probe_id to resolve. Two or more configured debuggers do carry
+            # that ambiguity, and the bound one is refused until its own
+            # probe_id says which physical probe it is. See
+            # unnamed_probe_error for what the single-debugger exemption does
+            # and does not cover.
             if name in probe_addressing_tools() and len(self.config.debuggers) > 1 and self.config.debugger is not None and self.config.debugger.probe_id is None:
                 return unnamed_probe_error(name, self.config)
             blocked_before = self.coordinator.blocked
@@ -1474,7 +1482,13 @@ class AgenticHILToolService:
         Machine recovery only runs while no lease is active and it reaps this
         owner's debugger processes, so any debug session is definitively gone.
         Keeping its handle would let a later call act as if a live session were
-        still attached to the board.
+        still attached to the board. Dropping the service's own handle is not
+        enough on its own, though: the backend that actually owns the session
+        object (`GdbDebugSessions.session`) is told to discard it too, or a
+        session left `cleanup_required` with `hardware_state_unconfirmed` set
+        stays on file there and keeps refusing `debug_start_session` with
+        `session_already_active` even after the coordinator considers the
+        incident it raised settled.
 
         Returns whether every release confirmed. `HardwareLease.release()` fails
         closed: a release that cannot persist its own record re-quarantines the
@@ -1485,6 +1499,10 @@ class AgenticHILToolService:
         for lease in (self._debug_lease, self._quarantined_lease):
             if lease is not None and not any(lease is held for held in handles):
                 handles.append(lease)
+        if self._debug_lease is not None:
+            debug_sessions = getattr(self.backend, "_debug", None)
+            if debug_sessions is not None:
+                debug_sessions.discard_after_recovery()
         self._debug_lease = None
         self._quarantined_lease = None
         if self._debug_artifact is not None:
@@ -2084,19 +2102,47 @@ def probe_addressing_tools() -> set[str]:
 
 
 def unnamed_probe_error(tool: str, config: AgenticHILConfig) -> JsonObject:
-    """Refuse to drive a board when the bound probe names no hardware.
+    """Refuse to drive a board when the bound probe cannot be told apart from
+    another configured one.
 
-    Config load cannot demand a probe_id: discovering the ids is exactly what
-    an operator does before they can write one down, and loading must work with
-    no hardware attached. The demand belongs here, where a board is about to be
-    driven and picking the wrong one is the failure that matters."""
+    This is a naming check, not a hardware one. A call here always drives
+    whichever debugger this server is bound to; if that entry has no
+    probe_id while other debuggers are configured, nothing says the bound
+    name and the physical probe actually agree, which is the gap
+    `config.validate_debuggers` closes between *configured* entries and
+    cannot close here, because config load must work with no hardware
+    attached and cannot demand an id nobody has discovered yet. This refusal
+    is what closes it once a board is actually about to be driven, where
+    picking the wrong one is the failure that matters. It fires only once
+    more than one debugger is configured, because that is the only place the
+    naming ambiguity this guards against can exist: a single configured
+    debugger has no other entry to be confused with, so every call here can
+    only ever mean that one, whether or not it names its probe. Refusing it
+    too would not remove any ambiguity; it would only block the common
+    single-board bench, including the Nucleo-F446RE + ST-Link + OpenOCD bench
+    this project documents as its supported first path, for which
+    `debugger_probes_list` answers `not_supported` (OpenOCD cannot
+    self-enumerate a serial to write down), and it would give a probe with no
+    serial pyOCD or ST-Link can read either (the debugger analogue of the
+    CH340-style adapters `com_ports` already has to tolerate) no way to
+    satisfy the demand at all.
+
+    What the single-debugger exemption does not cover: whether the one probe
+    behind an unnamed debugger is still the physical unit it was last run.
+    Nothing here, and nothing at the pyOCD/ST-Link/OpenOCD boundary either,
+    pins that without a probe_id: the coordination lock has the identical
+    blind spot for the identical reason (see
+    devices.DebuggerDevice.identity_warning). An operator who wants that
+    guarantee sets probe_id, checked against the attached probe at the pyOCD
+    and ST-Link hardware boundary and passed to OpenOCD as the adapter serial
+    to open, whether one debugger is configured or several."""
     return {
         "ok": False,
         "tool": tool,
         "error_type": "not_supported",
         "summary": (
-            f"Debugger '{config.debugger_id}' has no probe_id, and the project configures "
-            f"{len(config.debuggers)} debuggers, so this call cannot say which board it means. "
+            f"Debugger '{config.debugger_id}' has no probe_id, so this call cannot confirm it means "
+            f"'{config.debugger_id}' and not one of the project's other configured debuggers. "
             "Run `agentic-hil debugger-probes` to list the connected probes and give each entry its own probe_id. "
             "OpenOCD cannot enumerate probes; read the serial from the probe itself, or use a pyocd or stlink entry to discover it."
         ),

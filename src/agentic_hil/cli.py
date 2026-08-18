@@ -73,6 +73,7 @@ from agentic_hil.configwrite import (
 )
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator, nothing_standing_result
 from agentic_hil.devices import config_devices
+from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, stdout_is_terminal, write_rendered
 from agentic_hil.knowledge import (
     CONFIG_GRANT_COMMAND,
     CONFIG_REOPEN_COMMAND,
@@ -221,23 +222,58 @@ def skill_agents() -> list[SkillAgent]:
 def entrypoint(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not getattr(args, "command", None):
+    command = getattr(args, "command", None)
+    if not command:
         parser.print_help(sys.stderr)
         return 2
+    # Decided once, here, and never per command. Every frontend answers with the
+    # same document; who is reading it is a property of this process, not of the
+    # command that ran, and a second decision anywhere below is a second answer
+    # waiting to differ from this one.
+    human = human_readable_output(command, json_requested=getattr(args, "json", False))
     try:
         result = dispatch(args)
     except ConfigError as error:
-        print_json(error.to_dict())
+        emit_result(error.to_dict(), command, human=human)
         return 1
     except CoordinationError as error:
-        print_json(error.result)
+        emit_result(error.result, command, human=human)
         return 1
     if isinstance(result, int):
         return result
     if result is not None:
-        print_json(result)
+        emit_result(result, command, human=human)
         return 0 if result_succeeded(result) else 1
     return 0
+
+
+def human_readable_output(command: str, *, json_requested: bool) -> bool:
+    """Whether this invocation renders its result for a person.
+
+    Three ways to answer no, and all of them are the machine contract: `--json`
+    says a machine is reading a terminal, a stdout that is not a terminal says a
+    pipe, a redirect or a subprocess is reading, and `mcp-stdio`/`com-stdio` own
+    stdout for a protocol rather than for a result. Anything else is somebody at
+    a shell.
+    """
+    if json_requested or command in PROTOCOL_COMMANDS:
+        return False
+    return stdout_is_terminal()
+
+
+def emit_result(result: JsonObject, command: str | None, *, human: bool) -> None:
+    """Print one result document, as the machine document or as prose.
+
+    The machine half goes through `print_json` untouched, which is what keeps it
+    byte-identical. The human half redacts through the same function first, so a
+    rendering can never publish a secret-named value the document would have
+    replaced.
+    """
+    if not human:
+        print_json(result)
+        return
+    redacted = redact_sensitive(result)
+    write_rendered(sys.stdout, render_result(redacted if isinstance(redacted, dict) else result, command))
 
 
 def result_succeeded(result: JsonObject) -> bool:
@@ -247,6 +283,7 @@ def result_succeeded(result: JsonObject) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentic-hil", description="Agentic Hardware-in-the-Loop (Agentic HIL) local MCP stdio server")
     parser.add_argument("--version", action="version", version=__version__)
+    parser.add_argument("--json", action="store_true", help=JSON_FLAG_HELP)
     subparsers = parser.add_subparsers(dest="command")
 
     init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted but the two flashing is interlocked against, and verify it with doctor. A config that is already there is kept, unchanged, and only the steps that do not touch it run")
@@ -384,6 +421,21 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     uninstall_parser.add_argument("--agent", action="append", default=[], help="take back only this agent's half, instead of every agent this installation set up; repeat for multiple agents. An agent that has nothing installed is reported and left alone.")
+
+    # `--json` on every subcommand as well as on the parser, so both
+    # `agentic-hil --json init` and the `agentic-hil init --json` everybody
+    # actually types are accepted. Added in one loop rather than at each
+    # `add_parser` call, because a subcommand added later must not be able to
+    # arrive without it. `SUPPRESS` is what makes the two spellings compose: a
+    # subparser default would otherwise overwrite the value the top-level flag
+    # already put on the namespace, and `agentic-hil --json init` would print
+    # prose.
+    added: set[int] = set()
+    for subparser in subparsers.choices.values():
+        if id(subparser) in added:
+            continue
+        added.add(id(subparser))
+        subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help=JSON_FLAG_HELP)
 
     return parser
 
@@ -862,12 +914,14 @@ def _registration_restart(agent: SkillAgent, mcp_result: JsonObject) -> JsonObje
 
 
 def _with_restart_notice(result: JsonObject) -> JsonObject:
-    """Put the restart sentence where a person reading the terminal sees it.
+    """Put the restart sentence where anyone reading only one field sees it.
 
-    The CLI prints one JSON document and that is its human output, so a field
-    nobody reads first is a field a person scrolls past. `summary` is the line
-    both a person and an agent read, so the sentence goes there as well as into
-    its own key."""
+    `summary` is the line every caller reads, and a field beside it is a field
+    an agent, a script or a transcript scrolls past, so the sentence goes there
+    as well as into its own key. It stays duplicated now that a terminal gets a
+    rendering rather than the document: the document is the machine contract and
+    does not move for a change in presentation. The renderer prints the notice
+    once, dropping its own section when the summary already carries it."""
     notice = result.get("restart_notice")
     if isinstance(notice, str) and isinstance(result.get("summary"), str):
         result["summary"] = f"{result['summary']} {notice}"
@@ -2276,14 +2330,15 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
 
 def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
     granted_step = (
-        "Every permission in this file is true — probing, flashing, resetting, and serial and CAN writes — except "
-        "allow_raw_debugger_commands and allow_mass_erase, which are false so that flashing works. Read the "
-        "permissions blocks and decide which of the rest this bench should not have."
+        "Every permission in this file is true, including probing, flashing, resetting, resuming a halted debug "
+        "session, and serial and CAN writes, except allow_raw_debugger_commands and allow_mass_erase, which are "
+        "false so that flashing works. Read the permissions blocks and decide which of the rest this bench should "
+        "not have."
         if not narrowed
-        else "Every permission in this file is true — probing, flashing, resetting, and serial and CAN writes — except "
-        "allow_raw_debugger_commands and allow_mass_erase, which are false so that flashing works, and the ones your "
-        "project profile set to false (" + ", ".join(narrowed) + "). Read the permissions blocks and decide which of "
-        "the rest this bench should not have."
+        else "Every permission in this file is true, including probing, flashing, resetting, resuming a halted "
+        "debug session, and serial and CAN writes, except allow_raw_debugger_commands and allow_mass_erase, which "
+        "are false so that flashing works, and the ones your project profile set to false (" + ", ".join(narrowed) + "). "
+        "Read the permissions blocks and decide which of the rest this bench should not have."
     )
     next_steps = [
         f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",

@@ -209,6 +209,7 @@ def test_generated_configuration_grants_everything_at_all(tmp_path: Path, monkey
         assert document["debuggers"]["dut"]["permissions"] == {
             "allow_flash": True,
             "allow_reset": True,
+            "allow_debug_execution": True,
             # False, and that is what makes allow_flash above mean anything:
             # either one true refuses flash_firmware on this probe.
             "allow_raw_debugger_commands": False,
@@ -942,6 +943,7 @@ def test_a_narrowed_configuration_cannot_be_reopened_by_an_agent(tmp_path: Path,
         "allow_flash": True,
         # The narrowing this test made, which no later call could put back.
         "allow_reset": False,
+        "allow_debug_execution": True,
         # The generated default, false before anything narrowed anything.
         "allow_raw_debugger_commands": False,
         "allow_mass_erase": False,

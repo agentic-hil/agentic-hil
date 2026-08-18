@@ -14,6 +14,49 @@ pytest
 
 Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
+### Running the suite on all cores
+
+A bare `pytest` is one process. The same suite across the cores the machine
+already has is about five times faster: seven and a half minutes became a minute
+and a half on a fourteen-core developer machine.
+
+```bash
+pytest -n auto
+```
+
+`addopts` deliberately does not carry `-n auto`: a bare `pytest` stays one
+process, so a failure can be read without a worker id in front of it, and what
+CI runs stays a separate decision from what a developer types.
+
+Nothing has to be marked to make this safe. Every test already gets its own
+HOME, config, state and temporary storage, and its device-lock root, its CAN
+broker endpoint and its run records all follow that HOME, so two workers cannot
+meet in a configuration, a lock, a socket or a scratch file. Three things a new
+test has to keep true for that to stay so:
+
+- Assert about your own entries, never about a listing of a shared directory.
+  The system temp root that holds the sandboxes is the one directory every
+  process on the machine shares; the single test that has to look at the whole
+  of it plants its fixtures under names carrying its pid and asserts about
+  those.
+- Take a port by holding it, never by binding and closing. A closed port is a
+  number the kernel is free to hand to somebody else, which is what
+  `ReservedTcpPort` in `backends/gdbdebug.py` exists to stop.
+- Reap what you started by its own handle. A detached run is ended through the
+  record its own test wrote, never by sweeping a directory of records.
+
+No test currently needs a machine to itself. A test that genuinely does gets
+`@pytest.mark.xdist_group("<why>")` — but that marker only pins a group to one
+worker under `--dist loadgroup`. `-n auto` above is `pytest-xdist`'s own
+shortcut for `--dist load --tx auto*popen`, and under plain `load` balancing a
+named group can still be split across workers, so the marker needs `pytest -n
+auto --dist loadgroup`, not the bare command this section otherwise
+recommends. The marker is registered by pytest-xdist, so it needs no entry in
+`pyproject.toml`. Keep that list short, give every entry a reason in the group
+name, and add `--dist loadgroup` to whichever command line is meant to honor
+it (CI, `tools/ci_linux.py`, or a developer's own invocation) once a test
+actually uses it.
+
 ### Working on Windows
 
 Part of this suite only runs on POSIX, and that part is where the platform bugs

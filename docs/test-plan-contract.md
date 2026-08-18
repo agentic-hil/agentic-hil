@@ -134,7 +134,7 @@ says, and it says it once for every plan that runs on that bench.
 | Hardware identity | `debuggers.<name>.probe_id`, `com_ports.<name>.device` / `serial_number` / `identity_source`, `can_buses.<name>.adapter` / `channel` |
 | Toolchain | `debuggers.<name>.type`, `executable`, `interface_cfg`, `target_cfg`, `timeout_s` |
 | Electrical and link settings | `baudrate`, `encoding`, `assert_dtr`, `assert_rts`, `bitrate`, `fd`, `listen_only`, `max_buffer_frames` |
-| Permissions | every `permissions` block: `allow_flash`, `allow_reset`, `allow_raw_debugger_commands`, `allow_mass_erase`, per-port and per-bus `allow_write` (and `allow_read` / `allow_probe` on a configuration older than the read-free version, where exclusivity had not yet taken that load) |
+| Permissions | every `permissions` block: `allow_flash`, `allow_reset`, `allow_debug_execution`, `allow_raw_debugger_commands`, `allow_mass_erase`, per-port and per-bus `allow_write` (and `allow_read` / `allow_probe` on a configuration older than the read-free version, where exclusivity had not yet taken that load) |
 | Reach | `workspace_root`, `state_root`, `artifacts.allowed_roots`, `allowed_extensions`, `debug.allowed_symbols`, `debug.allow_all_symbols` |
 | Bench behaviour | `reports.directory`, `logs.directory`, `recovery.auto_recover`, the per-probe `target` override |
 

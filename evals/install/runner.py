@@ -297,9 +297,14 @@ def job_payload(
         target["expected_package_digest"] = source_digest(source_root / "src" / "agentic_hil")
     elif matrix.target.mode == "published":
         # A released wheel is built, not checked out, so no tree here digests to
-        # it. What ties the install to this release is the recorded version and
-        # the absence of a direct reference, both checked separately.
-        target["expected_package_digest"] = None
+        # it directly -- but when this clone carries the release tag,
+        # `released_package_digest` archives `src/agentic_hil` from that commit
+        # the same way `validate_source_matches_release` already trusts it for
+        # local mode, giving the verifier a real reference to hold the
+        # installed bytes to instead of a check nothing can ever satisfy. A
+        # clone without the tag still names no reference; the verifier treats
+        # that as unverified rather than as a mismatch.
+        target["expected_package_digest"] = released_package_digest(host_source_root, matrix.target.expected_version)
     else:
         target["expected_package_digest"] = committed_package_digest(host_source_root, matrix.target.expected_commit)
     target["source_git"] = git_metadata(host_source_root)

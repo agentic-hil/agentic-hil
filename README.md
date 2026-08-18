@@ -58,6 +58,14 @@ agentic-hil agent-install --agent claude-code    # or: codex / opencode
 
 [Installation](docs/installation.md) has `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend; [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
 
+### It proves itself on the board
+
+One restart after the install line, in a freshly created firmware project: the first sentence makes the agent set the bench up itself, the second makes the board say Hello World and prove it said it.
+
+<!-- demo-video: drop agentic-hil-vscode-proof.mp4 here (drag the file into this line in GitHub's web editor; the uploaded attachment renders as an inline player) -->
+
+Nothing in that run is staged: the configuration is created over MCP with the permissions reported out loud, the firmware is written on the spot, `flash_firmware` and `com_read` go through the gate, the twelve bytes come back off the wire, and the plan it pins is run once green and once against a wrong expectation, because a test that cannot fail proves nothing. What remains in the project afterwards is the plan as a reviewable file and the run's own report: lease released, safe state confirmed, nothing quarantined.
+
 ## Why
 
 A green build is not enough in embedded development: firmware has to behave correctly on the real board. Classic tools automate single steps (flash here, read a log there), but the moment real hardware has to respond, a human is back in the loop. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible. Agentic HIL closes the gap with a small, auditable gate:

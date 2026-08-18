@@ -164,6 +164,11 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # comment records. Neither file pins a version anything installs against.
     "tests/fixtures/fake_openocd.py": "prose reference to the release a defect shipped in",
     "tests/test_agentic_hil.py": "prose reference to the release a defect shipped in",
+    # The container proof's comment names the release from which agent-install
+    # accepts a home-directory cwd (#235), so a reader knows why the line is
+    # typed in $HOME rather than a made-up subdirectory. Prose about a behaviour,
+    # not a pin anything installs against.
+    "tests/test_install_scripts.py": "prose reference to the release a behaviour changed in",
     # OpenOCD's own current release is 0.12.0. These state the debugger's
     # version, in its banner or as an example of one, and must never follow
     # ours; they became visible to the sweep the day our release number caught

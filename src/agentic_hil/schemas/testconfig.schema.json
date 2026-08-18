@@ -44,9 +44,9 @@
     "debugger": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a debuggers.<name> entry. Optional when the project configures exactly one debugger; required when it configures several." },
     "portId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a com_ports.<name> entry." },
     "busId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a can_buses.<name> entry." },
-    "path": { "type": "string", "minLength": 1 },
+    "path": { "type": "string", "minLength": 1, "description": "A file this step reads or writes. A relative path resolves against `workspace_root`, and no permission relaxes containment: a traversal segment, or a path that resolves outside the workspace by any route including a link, is refused before the run starts rather than on a board that is already halted." },
     "symbol": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$", "description": "The name of a symbol in the flashed image, in the one spelling every symbol tool here accepts. A plan may name only a symbol the bench allows: `debug.allowed_symbols` is the operator's statement about what may be read off this board, and a step naming anything outside it is refused before the run starts unless the configuration sets `debug.allow_all_symbols`." },
-    "timeout": { "type": "number", "minimum": 0 },
+    "timeout": { "type": "number", "minimum": 0, "description": "How long this step waits, in seconds. Zero is allowed here and asks for no wait at all, which is a reading a step can have when waiting is not the whole of what it does. A step that exists in order to wait refuses zero instead, and says so on its own `timeout_s`." },
     "positiveTimeout": { "type": "number", "exclusiveMinimum": 0, "description": "A deadline a step waits out. Zero is refused rather than read as 'do not wait': a step whose whole purpose is to wait has no useful reading of no time at all." },
     "comparator": {
       "type": "object",
@@ -130,6 +130,7 @@
       }
     },
     "location": {
+      "description": "Where the breakpoint goes, written one of four ways: a bare symbol name, `{symbol: <name>}`, `{function: <name>}`, or `{file: <path>, line: <number>}`. The first three name something `debug.allowed_symbols` has to carry, exactly as a dump does. The fourth names no symbol at all, so it is refused unless the configuration sets `debug.allow_all_symbols`: a file and a line can be made to stand anywhere in the image, and an allowlist that a line number walks around is not one. Every breakpoint the reactor sets is removed again after the step, passed or failed.",
       "oneOf": [
         { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$" },
         {
@@ -163,12 +164,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["action", "image_path"],
+      "description": "Program the target through the named debugger, exactly as the `flash_firmware` tool does: the same `permissions.allow_flash` on that probe, the same artifact validation, and the same refusal while `allow_raw_debugger_commands` or `allow_mass_erase` is true on it.",
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "flash" },
-        "image_path": { "$ref": "#/$defs/path" },
-        "reset_after_flash": { "type": "boolean", "default": false }
+        "image_path": { "$ref": "#/$defs/path", "description": "The firmware to program. Held to `artifacts.allowed_roots` and `artifacts.allowed_extensions` where `validation` requires them, hashed, and staged privately before the backend sees it, all before the run starts." },
+        "reset_after_flash": { "type": "boolean", "default": false, "description": "Whether the target is reset once the image is on it. Flashing on its own leaves the board where the backend left it, so a plan that expects a fresh boot asks for one here. It additionally requires `permissions.allow_reset` on the same probe." }
       }
     },
     "reset": {
@@ -187,6 +189,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["action"],
+      "description": "Open a configured serial line for this plan, exactly as `com_session_start` opens it. Every later `uart_write`, `uart_read` and `uart_expect` on that line runs inside this session, and a plan that reads a line it never opened is refused before the run starts. The line stays open across a `repeat` block's iterations.",
       "anyOf": [{ "required": ["device"] }, { "required": ["port_id"] }],
       "properties": {
         "device": { "$ref": "#/$defs/device" },
@@ -270,6 +273,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["action"],
+      "description": "Open a configured CAN bus for this plan, exactly as `can_session_start` opens it. Every later `can_send` and `can_read` on that bus runs inside this session, and a plan that reads a bus it never opened is refused before the run starts. The session stays open across a `repeat` block's iterations.",
       "anyOf": [{ "required": ["device"] }, { "required": ["bus_id"] }],
       "properties": {
         "device": { "$ref": "#/$defs/device" },
@@ -300,10 +304,10 @@
         "device": { "$ref": "#/$defs/device" },
         "bus_id": { "$ref": "#/$defs/busId" },
         "action": { "const": "can_send" },
-        "frame_id": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "string", "pattern": "^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$" }] },
-        "extended": { "type": "boolean", "default": false },
-        "rtr": { "type": "boolean", "default": false },
-        "data_hex": { "type": "string", "pattern": "^[0-9A-Fa-f\\s]*$", "default": "" }
+        "frame_id": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "string", "pattern": "^(?:0[xX][0-9A-Fa-f]+|[0-9]+)$" }], "description": "The identifier this frame carries, as an integer or a hexadecimal string such as `0x123`. The two spellings are the same number; the string is there because a protocol document writes identifiers in hexadecimal and a plan should be diffable against it." },
+        "extended": { "type": "boolean", "default": false, "description": "Which identifier namespace the frame is sent in. A standard 0x123 and an extended 0x123 are two different frames on the wire, so a receiver waiting for one never sees the other." },
+        "rtr": { "type": "boolean", "default": false, "description": "Send a remote transmission request, which asks another node for that identifier's data rather than carrying any of its own." },
+        "data_hex": { "type": "string", "pattern": "^[0-9A-Fa-f\\s]*$", "default": "", "description": "The payload, as hexadecimal. Whitespace and case are ignored, so `01 FF` and `01ff` are the same two bytes. Defaults to the empty string, which sends a frame carrying no data." }
       }
     },
     "canRead": {
@@ -330,12 +334,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["action", "image_path"],
+      "description": "Open this plan's one debug session, exactly as the `debug_start_session` tool does. Every typed debug step below runs inside it and on the debugger that started it; the plan needs no explicit `debug_stop`, because end-of-run cleanup closes the session whether the plan reached that step or a step before it failed. Typed debug sessions are OpenOCD's, and the other backends refuse them with `not_supported`.",
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "debug_start" },
-        "image_path": { "$ref": "#/$defs/path" },
-        "mode": { "type": "string", "enum": ["attach", "reset_halt", "load"], "default": "attach" },
+        "image_path": { "$ref": "#/$defs/path", "description": "The ELF the session resolves symbols out of. It has to be an `.elf` whatever the configured artifact extensions allow, because a session without debug information has no symbol to break on or read." },
+        "mode": { "type": "string", "enum": ["attach", "reset_halt", "load"], "default": "attach", "description": "What the session does to the target as it opens. 'attach' takes the board as it is. 'reset_halt' resets it and holds the core stopped, which is how a plan reaches a symbol that is written before main. 'load' additionally writes the image through the session." },
         "timeout_s": { "$ref": "#/$defs/timeout" }
       }
     },
@@ -343,6 +348,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["action", "location"],
+      "description": "Set one breakpoint, let the target run, and wait for it to stop there, exactly as `debug_continue` does: the same `permissions.allow_debug_execution` on the debugger that started the session. A stop somewhere else is reported as the stop reason it was rather than as a pass, and a target that never arrives fails at `timeout_s`. The breakpoint is removed afterwards either way, so a plan leaves none behind.",
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
@@ -355,12 +361,13 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["action", "symbol", "output_path"],
+      "description": "Write what one allowed symbol holds to a file, as Intel HEX, exactly as the `debug_dump_symbol_ihex` tool writes it: the same allowlist and the same `debug.max_dump_size_bytes` ceiling. This is how a plan keeps a buffer for something outside the run to look at; `read_symbol` is what claims a value inside the run.",
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
         "action": { "const": "dump_memory" },
         "symbol": { "$ref": "#/$defs/symbol" },
-        "output_path": { "$ref": "#/$defs/path" }
+        "output_path": { "$ref": "#/$defs/path", "description": "Where the bytes are written. Held to the workspace like every path here, and to a `.hex` or `.ihex` extension, before the run starts. Its parent directory has to exist already; this step creates no directories." }
       }
     },
     "readSymbol": {
@@ -382,6 +389,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["action"],
+      "description": "Close the debug session on the debugger that started it. Optional, for the reason `uart_close` and `can_close` are: end-of-run cleanup closes it anyway. Keep an explicit stop where the plan means to close the session and go on doing something else with the board.",
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },

@@ -77,6 +77,8 @@ agentic-hil test-reactor --test-config .agentic-hil/testconfig.yaml
 
 See [`examples/testconfig.example.yaml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/testconfig.example.yaml) for the expanded form.
 
+An agent writing a plan reads the format over the connection it already has, not out of this page and never out of the installed package. `agentic-hil://reference/test-plan` is the whole of it: where the file goes, how `test_config_path` and `workspace_root` resolve its path, which version admits which step, every step with the entry it routes to and its required and optional keys, the comparator families with their rules, and two plans that run. `agentic-hil://reference/test-plan-schema` serves the schema itself, and the document is generated from that schema at read time, so neither can drift from what the reactor validates against.
+
 ### The two ways to run a plan
 
 An agent runs a plan with the `test_reactor_run` MCP tool; an operator runs it with `agentic-hil test-reactor` at a shell. Both reach the same code, so a plan behaves identically whichever one started it: the same preflight before the first hardware action, the same devices locked for the same duration, the same permission judged per step, the same report at the end. The tool takes `test_config_path` where the command takes `--test-config`, holds it to `workspace_root` the same way, and `detach: true` where the command takes `--detach`. `test_reactor_status` and `test_reactor_stop` answer as `test-reactor-status` and `test-reactor-stop` do.

@@ -230,6 +230,23 @@ def target_mcp_tools(target: dict[str, Any]) -> set[str]:
     return set(names)
 
 
+def package_digest_matches(installed_digest: str | None, expected_digest: str | None) -> bool:
+    """Whether the installed package's digest proves it is the trusted source.
+
+    expected_digest is None when the caller found no trusted reference to
+    compare against: a published-mode job whose clone carries no tag for the
+    release it names, the one case `released_package_digest` cannot answer for
+    offline. A digest that merely computed is not a match against nothing, and
+    staging those unverified bytes as "trusted" is exactly what this refusal
+    exists to stop; refuse honestly instead, the same way a skill with no
+    reference copy is "not checked" rather than waved through. The caller
+    treats that gap as unverified, not as a mismatch -- see `verify`.
+    """
+    if expected_digest is None:
+        return False
+    return installed_digest == expected_digest
+
+
 def run_trusted(
     arguments: list[str],
     *,
@@ -508,6 +525,8 @@ def origin_matches(target: dict[str, Any], metadata: dict[str, Any]) -> tuple[bo
         # What must not happen is a third party's package of the same name.
         if direct is None:
             return True, "installed from a package index"
+        if not isinstance(direct, dict):
+            return False, "direct_url.json is not an object"
         url = str(direct.get("url") or "")
         official = url.removesuffix(".git").rstrip("/").endswith("github.com/agentic-hil/agentic-hil")
         if official:
@@ -1645,13 +1664,29 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
                 package_tree_detail = f"{type(error).__name__}: {error}"
         expected_digest = target["expected_package_digest"]
         if expected_digest is None:
-            # Published mode: nothing on this host digests to a released wheel.
-            package_matches = installed_digest is not None
-            digest_detail = f"digest={installed_digest or '<unavailable>'}; no local source to compare a release against"
+            # Published mode without the release tag in this clone: there is no
+            # trusted reference offline to hold the installed bytes to, the same
+            # gap `validate_source_matches_release` warns about instead of
+            # failing over for local mode. A missing reference is not evidence
+            # of a mismatch, so this does not fail the run, and unlike a real
+            # mismatch it also does not stage the installed bytes as trusted.
+            package_matches = False
+            checks.append(
+                Check(
+                    "installed package matches trusted source",
+                    True,
+                    f"digest={installed_digest or '<unavailable>'}; no release tag in this clone to compare a published install against, so not verified",
+                )
+            )
         else:
-            package_matches = installed_digest == expected_digest
-            digest_detail = f"digest={installed_digest or '<unavailable>'}; {package_tree_detail}"
-        checks.append(Check("installed package matches trusted source", package_matches, digest_detail))
+            package_matches = package_digest_matches(installed_digest, expected_digest)
+            checks.append(
+                Check(
+                    "installed package matches trusted source",
+                    package_matches,
+                    f"digest={installed_digest or '<unavailable>'}; {package_tree_detail}",
+                )
+            )
         if package_matches and evidence_ok and inspected_package is not None:
             try:
                 prepare_trusted_package(inspected_package)
