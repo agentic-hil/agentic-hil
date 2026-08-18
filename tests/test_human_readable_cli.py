@@ -320,7 +320,12 @@ def test_doctor_names_the_skipped_debugger_check_nothing_else_would_say() -> Non
     }
     out = _rendered(skipped, "doctor")
     assert "Debugger check" in out
-    assert "set `debuggers.<name>.executable` to your OpenOCD binary." in out
+    # Wrap-insensitive, like the other renderer assertions in this module: a
+    # worker process under `pytest -n auto` has no parent terminal, and the
+    # renderer wraps this sentence at whatever width it falls back to, which
+    # reproducibly split it between "OpenOCD" and "binary" under xdist while
+    # every serial run kept it on one line.
+    assert "set `debuggers.<name>.executable` to your OpenOCD binary." in " ".join(out.split())
 
 
 def test_the_restart_notice_is_printed_once_however_the_document_carries_it() -> None:
