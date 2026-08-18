@@ -904,7 +904,12 @@ def test_a_probe_enumeration_timeout_that_names_its_abort_point_still_refuses(tm
 
 
 def peak_config(tmp_path: Path):
-    return config_for(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "peak"\n    channel: "can0"\n')
+    # A PCANBasic handle, not a SocketCAN netdev name: this bus has to stay on
+    # the `pcan` path, because the `SetValue`-after-`Initialize` failure it
+    # exercises is a PCAN-only phase. A `can0`-shaped channel is now routed to
+    # socketcan instead (a peak_usb netdev python-can's PcanBus cannot open),
+    # which never reaches this code at all.
+    return config_for(tmp_path, can_buses_yaml='can_buses:\n  bench:\n    adapter: "peak"\n    channel: "PCAN_USBBUS1"\n')
 
 
 class LoadablePcanBasic:
