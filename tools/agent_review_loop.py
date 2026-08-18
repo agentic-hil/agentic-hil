@@ -290,6 +290,69 @@ def _taskkill_tree(pid: int) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
+def _process_parent_map() -> dict[int, int] | None:
+    """pid -> parent pid for every process running right now, or None if the
+    query itself could not be trusted.
+
+    One snapshot of the whole table, walked in Python, rather than a query per
+    pid: a tree several layers deep then costs one process spawn instead of one
+    per layer. PowerShell's CIM process class rather than wmic -- wmic is what
+    Windows is actively removing, and a host that drops it keeps taskkill and
+    PowerShell working.
+    """
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId)\" }"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        return None
+    parents: dict[int, int] = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        fields = line.split(",")
+        if len(fields) != 2:
+            return None
+        try:
+            parents[int(fields[0])] = int(fields[1])
+        except ValueError:
+            return None
+    return parents
+
+
+def _process_tree_pids(root_pid: int, parents: dict[int, int]) -> list[int]:
+    """root_pid and everything descended from it, per a `_process_parent_map` snapshot."""
+    members = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent_pid in parents.items():
+            if parent_pid in members and pid not in members:
+                members.add(pid)
+                changed = True
+    return sorted(members)
+
+
+def _all_confirmed_gone(pids: list[int]) -> bool | None:
+    """Whether every pid in pids is confirmed absent from the process list, or
+    None if tasklist itself could not be trusted to answer.
+
+    One bulk listing rather than one query per pid, in `/FO CSV` so a locale
+    that translates tasklist's own status prose still leaves each row's PID
+    field a bare, quoted number to look for -- the same reasoning that keeps
+    this module off taskkill's own textual output elsewhere.
+    """
+    result = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        return None
+    listed = result.stdout
+    return not any(f'"{pid}"' in listed for pid in pids)
+
+
 def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> None:
     """Kill the agent and everything it spawned, or raise CleanupUnconfirmed.
 
@@ -329,9 +392,22 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> 
         # question is asked again rather than answered once. A member that had
         # already gone is not in the next walk; one that is genuinely beyond us
         # is, and keeps saying so until the deadline.
+        #
+        # A retry's own 128 is not the same proof a first call's is, though.
+        # taskkill enumerates the tree fresh from the pid it is given, so once
+        # an earlier attempt has force-killed that pid, a descendant that
+        # resisted *that* attempt is orphaned from any walk still rooted there
+        # -- the next call reports "not found" without ever seeing it. The
+        # membership taskkill would have walked is captured before the first
+        # kill, while the root is still alive to be walked from, so a 128 that
+        # follows a real (non-128) failure can be checked against it instead of
+        # trusted on its own.
+        original_members = _process_parent_map()
         deadline = time.monotonic() + grace_s
         result = _taskkill_tree(process.pid)
+        retried = False
         while result.returncode not in (0, 128) and time.monotonic() < deadline:
+            retried = True
             time.sleep(TASKKILL_CONFIRM_INTERVAL_S)
             result = _taskkill_tree(process.pid)
         process.kill()
@@ -341,6 +417,21 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> 
                 f"taskkill could not confirm the process tree for pid {process.pid} was killed "
                 f"(exit {result.returncode}): {(result.stderr or '').strip()}"
             )
+        if retried and result.returncode == 128:
+            if original_members is None:
+                raise CleanupUnconfirmed(
+                    f"taskkill reported pid {process.pid} not found after an earlier attempt reported a "
+                    f"member it could not terminate, and the tree's original members could not be "
+                    f"independently re-enumerated to confirm none survived"
+                )
+            members = _process_tree_pids(process.pid, original_members)
+            gone = _all_confirmed_gone(members)
+            if gone is not True:
+                raise CleanupUnconfirmed(
+                    f"taskkill reported pid {process.pid} not found after an earlier attempt reported a "
+                    f"member it could not terminate, but the tree's original members {members} could not be "
+                    f"independently confirmed gone"
+                )
         # The one member no exit code speaks for. taskkill reporting a clean
         # sweep says nothing about the agent still being here afterwards, and the
         # agent is the process most likely to be holding the working tree open.

@@ -1536,6 +1536,31 @@ def test_terminate_tree_reports_cleanup_unconfirmed_when_taskkill_cannot_confirm
         agent_review_loop._terminate_tree(_FakeProcess(), grace_s=0.1)  # type: ignore[arg-type]
 
 
+def _win32_kill_fake(monkeypatch: pytest.MonkeyPatch, *, taskkill_codes: list[int], parent_map_stdout: str = "", tasklist_stdout: str = "", parent_map_ok: bool = True, tasklist_ok: bool = True) -> list[list[str]]:
+    """Route `subprocess.run` for the win32 branch of `_terminate_tree` by which
+    tool is being asked, the way a real Windows host would answer taskkill, the
+    PowerShell process-table snapshot, and tasklist as three different things --
+    not one canned response replayed for whichever of them is called next.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(*arguments: object, **_keywords: object) -> subprocess.CompletedProcess:
+        argv = list(arguments[0])  # type: ignore[index]
+        calls.append(argv)
+        if argv[0] == "taskkill":
+            index = sum(1 for call in calls if call[0] == "taskkill") - 1
+            code = taskkill_codes[min(index, len(taskkill_codes) - 1)]
+            return subprocess.CompletedProcess(argv, code, "", "" if code in (0, 128) else "no running instance")
+        if argv[0] == "powershell":
+            return subprocess.CompletedProcess(argv, 0 if parent_map_ok else 1, parent_map_stdout, "")
+        if argv[0] == "tasklist":
+            return subprocess.CompletedProcess(argv, 0 if tasklist_ok else 1, tasklist_stdout, "")
+        raise AssertionError(f"unexpected command in the win32 kill path: {argv}")
+
+    monkeypatch.setattr(agent_review_loop.subprocess, "run", fake_run)
+    return calls
+
+
 def test_terminate_tree_asks_again_when_a_tree_member_left_between_the_walk_and_the_kill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1545,18 +1570,13 @@ def test_terminate_tree_asks_again_when_a_tree_member_left_between_the_walk_and_
     reports the same failure for a member that resisted and for one that exited
     in between. On a loaded machine the second is the common case -- ten of forty
     kills, against none of forty on an idle one -- and reading it as the first
-    aborted the round and threw away its work. The second walk is what tells them
-    apart: the process that had gone is not in it.
+    aborted the round and threw away its work. The retry's own 128 is no longer
+    trusted on its own either (see the next two tests); here the independent
+    check finds the tree's original members gone too, so the benign case still
+    goes through.
     """
     monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
-    walks: list[list[str]] = []
-
-    def taskkill(*arguments, **_keywords) -> subprocess.CompletedProcess:
-        walks.append(list(arguments[0]))
-        # First walk: a member vanished under it. Second: nothing left to report.
-        return subprocess.CompletedProcess(arguments[0], 255 if len(walks) == 1 else 128, "", "no running instance")
-
-    monkeypatch.setattr(agent_review_loop.subprocess, "run", taskkill)
+    calls = _win32_kill_fake(monkeypatch, taskkill_codes=[255, 128])
 
     class _FakeProcess:
         pid = 4243
@@ -1572,7 +1592,72 @@ def test_terminate_tree_asks_again_when_a_tree_member_left_between_the_walk_and_
 
     agent_review_loop._terminate_tree(_FakeProcess(), grace_s=5.0)  # type: ignore[arg-type]
 
-    assert [walk[:2] for walk in walks] == [["taskkill", "/F"], ["taskkill", "/F"]]
+    taskkill_calls = [call for call in calls if call[0] == "taskkill"]
+    assert [call[:2] for call in taskkill_calls] == [["taskkill", "/F"], ["taskkill", "/F"]]
+
+
+def test_terminate_tree_does_not_trust_a_retrys_not_found_when_a_member_actually_survived(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review finding: the ambiguous case the benign one above must not paper over.
+
+    `taskkill /T` walks the tree from the pid it is given. Once the first call
+    has force-killed that root while a descendant resisted, the root is gone and
+    a retry walking from it reports "not found" -- 128 -- whether or not that
+    descendant is still alive, because there is no longer a root to walk from to
+    find out. A 128 that follows a real failure must be checked against the
+    tree taskkill would have walked, captured before anything was killed; here
+    that check finds a survivor, so this must not be read as a clean kill.
+    """
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    survivor_pid = 4321
+    _win32_kill_fake(
+        monkeypatch,
+        taskkill_codes=[255, 128],
+        parent_map_stdout=f"{survivor_pid},4243\n",
+        tasklist_stdout=f'"python.exe","{survivor_pid}","Console","1","10,000 K"\n',
+    )
+
+    class _FakeProcess:
+        pid = 4243
+
+        def kill(self) -> None:
+            pass
+
+        def poll(self) -> int:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired("agent", timeout or 0)
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed, match="could not be independently confirmed gone"):
+        agent_review_loop._terminate_tree(_FakeProcess(), grace_s=5.0)  # type: ignore[arg-type]
+
+
+def test_terminate_tree_refuses_to_confirm_when_the_original_tree_cannot_be_re_enumerated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail safe, not fail available: if the independent check itself cannot
+    answer (PowerShell missing, tasklist refusing), a retry's 128 following a
+    real failure must not be read as a clean kill just because nothing
+    contradicted it."""
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    _win32_kill_fake(monkeypatch, taskkill_codes=[255, 128], parent_map_ok=False)
+
+    class _FakeProcess:
+        pid = 4243
+
+        def kill(self) -> None:
+            pass
+
+        def poll(self) -> int:
+            return 1
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 1
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed, match="could not be independently re-enumerated"):
+        agent_review_loop._terminate_tree(_FakeProcess(), grace_s=5.0)  # type: ignore[arg-type]
 
 
 def test_taskkill_tree_decodes_with_the_same_care_as_git_and_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:
