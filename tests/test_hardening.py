@@ -3574,6 +3574,125 @@ def test_pyocd_probe_naming_no_other_debugger_is_unaffected_by_the_collision_che
     assert service.backend._resolved_probe_uid == "PYOCD123"
 
 
+def test_pyocd_collision_check_does_not_apply_pyocds_substring_rule_to_an_openocd_peer(tmp_path: Path) -> None:
+    # An OpenOCD entry passes its configured probe_id straight to OpenOCD as an
+    # exact serial ("adapter serial 123"), never as a pyOCD-style substring.
+    # "123" is a substring of "PYOCD123" but is not an OpenOCD serial that
+    # resolves to it, so this must not be reported as a collision -- unlike
+    # test_pyocd_refuses_two_debuggers_that_resolve_to_one_physical_probe,
+    # where the peer is itself type pyocd and the same "123" genuinely does
+    # collide (#review finding 7).
+    from agentic_hil.config import bind_debugger
+
+    config = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_type="pyocd",
+            debugger_name="probe_x",
+            probe_id="OCD1",
+            auto_probe_ids=False,
+            debuggers_yaml='debuggers:\n  probe_y:\n    type: openocd\n    probe_id: "123"\n',
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert service.backend._resolved_probe_uid == "PYOCD123"
+
+
+def test_pyocd_collision_check_still_catches_an_openocd_peer_with_the_exact_same_serial(tmp_path: Path) -> None:
+    # The other half: an OpenOCD (or ST-Link) peer configured with the *exact*
+    # resolved UID as its own serial would still resolve to the same physical
+    # probe under its own backend's exact-match semantics, so this must still
+    # be refused as a collision.
+    #
+    # Built by replacing the loaded config's debuggers directly rather than
+    # through YAML: any peer whose exact probe_id equals what a pyocd entry
+    # resolves to necessarily contains that entry's own (substring-matched)
+    # needle, so config-load's own static guard (validate_debuggers) already
+    # refuses that combination as text before any hardware is enumerated --
+    # correctly, since it cannot yet know the peer's type-based matching rule
+    # differs at the hardware boundary. This is the runtime check
+    # (`_cross_debugger_identity_collision`) in isolation, on the exact-match
+    # rule this fix adds for a non-pyocd peer.
+    import dataclasses
+
+    from agentic_hil.config import bind_debugger
+
+    config = bind_debugger(
+        load_test_config(tmp_path, debugger_type="pyocd", debugger_name="probe_x", probe_id="OCD1", auto_probe_ids=False),
+        "probe_x",
+    )
+    peer = dataclasses.replace(config.debuggers["probe_x"], type="openocd", probe_id="PYOCD123", executable=None, resource_id=None)
+    config = dataclasses.replace(config, debuggers={**config.debuggers, "probe_y": peer})
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "adapter_not_found"
+    assert result["other_debugger"] == "probe_y"
+    assert result["other_probe_id"] == "PYOCD123"
+    assert service.backend._resolved_probe_uid is None
+
+
+def test_pyocd_reconfigure_re_checks_collisions_after_only_a_peers_selector_changes(tmp_path: Path) -> None:
+    # Review finding 6: the cache used to be invalidated only when the *bound*
+    # debugger's own probe_id changed. A project config reload that changes
+    # only the *other* debugger's selector into one that now collides has to
+    # invalidate it too, or a resolution cached before the reload keeps being
+    # reused as if the collision check had already cleared it against the new
+    # configuration.
+    from agentic_hil.config import bind_debugger
+
+    first = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_type="pyocd",
+            debugger_name="probe_x",
+            probe_id="OCD1",
+            auto_probe_ids=False,
+            debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "NOT-CONNECTED"\n',
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(first)
+    try:
+        clean = service.call("probe_target")
+        assert clean["ok"] is True, clean
+        assert service.backend._resolved_probe_uid == "PYOCD123"
+
+        second = bind_debugger(
+            load_test_config(
+                tmp_path,
+                debugger_type="pyocd",
+                debugger_name="probe_x",
+                probe_id="OCD1",
+                auto_probe_ids=False,
+                debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "123"\n',
+            ),
+            "probe_x",
+        )
+        service.backend.reconfigure(second)
+        assert service.backend._resolved_probe_uid is None
+
+        collided = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert collided["ok"] is False
+    assert collided["error_type"] == "adapter_not_found"
+    assert collided["other_debugger"] == "probe_y"
+    assert service.backend._resolved_probe_uid is None
+
+
 def test_unnamed_probe_refusal_no_longer_reasons_from_a_debugger_count(tmp_path: Path) -> None:
     # The refusal exists because this call cannot tell the bound, unnamed
     # debugger apart from another configured one - not because some number of

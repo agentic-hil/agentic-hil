@@ -82,11 +82,28 @@ class PyOCDBackend:
         self._target_types: JsonObject | None = None
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
-        if config.debugger is None or self.config.debugger is None or config.debugger.probe_id != self.config.debugger.probe_id:
+        if self._probe_selector_map(config) != self._probe_selector_map(self.config):
             self._resolved_probe_uid = None
         if config.debugger is None or self.config.debugger is None or config.debugger.executable != self.config.debugger.executable:
             self._target_types = None
         self.config = config
+
+    @staticmethod
+    def _probe_selector_map(config: AgenticHILConfig) -> dict[str, str | None]:
+        """Every configured debugger's own selector, exactly as
+        `_cross_debugger_identity_collision` reads it via `probe_selector_key`
+        (which folds `type` in along with `probe_id`, since pyOCD's `<type>:`
+        prefix-stripping only applies to a `pyocd` entry).
+
+        `_resolved_probe_uid` is cached on the claim that its resolution
+        collides with no *other* configured debugger's selector. A reload that
+        changes only a peer's `type` or `probe_id` -- not this debugger's own
+        -- can make that claim stop holding just as surely as a change to its
+        own probe_id can, so both must invalidate the cache the same way. A
+        map of every debugger's selector, not only this one's, is what makes
+        `reconfigure` see either kind of change.
+        """
+        return {name: probe_selector_key(debugger) for name, debugger in config.debuggers.items()}
 
     def info(self) -> JsonObject:
         resolved = self._resolve_executable()
@@ -496,7 +513,19 @@ class PyOCDBackend:
         backend's entry may also have been given the serial of. Resolved
         against the same attached hardware this entry just enumerated, so an
         entry naming a probe that is not actually here never collides with
-        one that is."""
+        one that is.
+
+        Matched by the *peer's own* backend rule, not pyOCD's. Substring
+        containment is pyOCD's own quirk (`pyocd.probe.aggregator` matching
+        `--uid` as a case-insensitive substring); OpenOCD and ST-Link hand
+        their configured `probe_id` straight to their own tool as an exact
+        serial (`adapter serial <id>`, `sn=<id>`) and neither does substring
+        selection at all. Applying pyOCD's rule to an OpenOCD or ST-Link
+        entry can report a collision neither backend would ever produce --
+        `123` is a substring of `PYOCD123` but is not an OpenOCD serial that
+        resolves to it -- and falsely blocking a bound pyOCD probe over an
+        absent peer's unrelated, similarly-named one is exactly the failure
+        mode `validate_debuggers` already lets through to here."""
         debugger_id = self.config.debugger_id
         for name, other in self.config.debuggers.items():
             if name == debugger_id or other.probe_id is None:
@@ -504,7 +533,10 @@ class PyOCDBackend:
             needle = probe_selector_key(other)
             if needle is None:
                 continue
-            other_matches = [uid for uid in available if needle in uid.lower()]
+            if other.type == "pyocd":
+                other_matches = [uid for uid in available if needle in uid.lower()]
+            else:
+                other_matches = [uid for uid in available if needle == uid.lower()]
             if len(other_matches) == 1 and other_matches[0] == resolved_uid:
                 return name, other.probe_id
         return None
