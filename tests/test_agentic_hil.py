@@ -2206,7 +2206,7 @@ def test_both_halves_are_reachable_from_the_command_line(
     monkeypatch.chdir(outside)
     _trusted_test_mcp_command(monkeypatch)
 
-    assert entrypoint(["agent-install", "--agent", "claude-code"]) == 0
+    assert entrypoint(["agent-install", "--agent", "claude-code", "--json"]) == 0
     user_scope = json.loads(capsys.readouterr().out)
     assert user_scope["scope"] == "user"
 
@@ -2214,7 +2214,7 @@ def test_both_halves_are_reachable_from_the_command_line(
     workspace.mkdir()
     monkeypatch.chdir(workspace)
 
-    assert entrypoint(["init", "--agent", "claude-code"]) == 0
+    assert entrypoint(["init", "--agent", "claude-code", "--json"]) == 0
     project = json.loads(capsys.readouterr().out)
     assert project["scope"] == "project"
     assert project["steps"]["doctor"]["ok"] is True
@@ -3706,7 +3706,7 @@ def test_uninstall_is_reachable_from_the_command_line(
     assert install_agent(agent="claude-code")["ok"] is True
     capsys.readouterr()
 
-    assert entrypoint(["uninstall", "--agent", "claude"]) == 0
+    assert entrypoint(["uninstall", "--agent", "claude", "--json"]) == 0
 
     result = json.loads(capsys.readouterr().out)
     assert result["tool"] == "agentic_hil_uninstall"
@@ -4889,7 +4889,7 @@ def test_debugger_probes_cli_uses_authoritative_config(
     write_authoritative_config(tmp_path, monkeypatch, debugger_type="stlink")
     monkeypatch.chdir(tmp_path)
 
-    exit_code = entrypoint(["debugger-probes"])
+    exit_code = entrypoint(["debugger-probes", "--json"])
 
     result = json.loads(capsys.readouterr().out)
     assert exit_code == 0
@@ -4926,7 +4926,7 @@ def test_debugger_probes_answers_through_bootstrap_without_a_configuration(
     monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: str(Path("C:/ST/STM32_Programmer_CLI.exe")))
     monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
 
-    exit_code = entrypoint(["debugger-probes"])
+    exit_code = entrypoint(["debugger-probes", "--json"])
 
     result = json.loads(capsys.readouterr().out)
     assert exit_code == 0, result
