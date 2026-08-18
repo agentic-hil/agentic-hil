@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import json
 import os
 import re
@@ -66,6 +67,7 @@ import sys
 import tempfile
 import threading
 import time
+from ctypes import wintypes
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -279,6 +281,254 @@ def _pump(stream: IO[str], prefix: str, log_handle: IO[str], progress: Progress)
 # grace period the rest of the cleanup gets. See _terminate_tree.
 TASKKILL_CONFIRM_INTERVAL_S = 0.05
 
+# How often the Windows Job Object tracking an agent is asked whether it has
+# emptied out after TerminateJobObject. See _terminate_tree.
+JOB_CONFIRM_INTERVAL_S = 0.05
+
+# Win32 API constants for the Job Object tracking path below. Not sourced from
+# `subprocess` (it only defines the Windows creation-flag constants when built
+# on Windows itself, so on any other host the names simply do not exist) or
+# from `ctypes.wintypes` (it has no JOBOBJECTINFOCLASS or job-limit values --
+# those are plain #define'd integers in the Windows SDK headers, not types).
+_CREATE_SUSPENDED = 0x00000004
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS = 1
+_TH32CS_SNAPTHREAD = 0x00000004
+_THREAD_SUSPEND_RESUME = 0x0002
+_THREAD32_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_ulonglong),
+        ("WriteOperationCount", ctypes.c_ulonglong),
+        ("OtherOperationCount", ctypes.c_ulonglong),
+        ("ReadTransferCount", ctypes.c_ulonglong),
+        ("WriteTransferCount", ctypes.c_ulonglong),
+        ("OtherTransferCount", ctypes.c_ulonglong),
+    ]
+
+
+class _JobObjectBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_void_p),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _JobObjectExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobObjectBasicLimitInformation),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class _JobObjectBasicAccountingInformation(ctypes.Structure):
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_longlong),
+        ("TotalKernelTime", ctypes.c_longlong),
+        ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+        ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+        ("TotalPageFaultCount", wintypes.DWORD),
+        ("TotalProcesses", wintypes.DWORD),
+        ("ActiveProcesses", wintypes.DWORD),
+        ("TotalTerminatedProcesses", wintypes.DWORD),
+    ]
+
+
+class _ThreadEntry32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ThreadID", wintypes.DWORD),
+        ("th32OwnerProcessID", wintypes.DWORD),
+        ("tpBasePri", ctypes.c_long),
+        ("tpDeltaPri", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
+def _kernel32() -> ctypes.WinDLL:
+    """kernel32, loaded fresh rather than cached at import time so importing this
+    module never touches `ctypes.windll` -- an attribute that plain `ctypes`
+    does not even define outside Windows -- and the whole job-tracking path
+    below stays a set of ordinary functions the test suite can monkeypatch
+    from a forced `sys.platform == "win32"`, the same way `_taskkill_tree` and
+    `_process_parent_map` already are for the taskkill walk.
+    """
+    return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+def _create_job_object() -> int | None:
+    """A fresh, unnamed Job Object with KILL_ON_JOB_CLOSE set, or None if it
+    could not be created or configured. KILL_ON_JOB_CLOSE means a handle leak
+    on this module's part still cannot strand a member running: closing the
+    last handle to the job kills whatever is still in it.
+    """
+    kernel32 = _kernel32()
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    info = _JobObjectExtendedLimitInformation()
+    info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.SetInformationJobObject.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+    if not kernel32.SetInformationJobObject(
+        job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS, ctypes.byref(info), ctypes.sizeof(info)
+    ):
+        _close_handle(job)
+        return None
+    return job
+
+
+def _assign_process_to_job(job: int, process_handle: int) -> bool:
+    kernel32 = _kernel32()
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    return bool(kernel32.AssignProcessToJobObject(job, process_handle))
+
+
+def _job_active_process_count(job: int) -> int | None:
+    """How many processes the job currently has, or None if the job itself could
+    not be queried. The kernel keeps this count itself as members are created
+    and exit, so -- unlike a `tasklist` snapshot -- there is no gap between
+    counting and answering for a member born in between to hide in.
+    """
+    kernel32 = _kernel32()
+    info = _JobObjectBasicAccountingInformation()
+    returned = wintypes.DWORD(0)
+    kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+    kernel32.QueryInformationJobObject.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    ok = kernel32.QueryInformationJobObject(
+        job,
+        _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+        ctypes.byref(returned),
+    )
+    if not ok:
+        return None
+    return int(info.ActiveProcesses)
+
+
+def _terminate_job(job: int) -> bool:
+    kernel32 = _kernel32()
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = (ctypes.c_void_p, wintypes.UINT)
+    return bool(kernel32.TerminateJobObject(job, 1))
+
+
+def _close_handle(handle: int) -> None:
+    kernel32 = _kernel32()
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle(handle)
+
+
+def _resume_process_threads(pid: int) -> bool:
+    """Resume every thread belonging to `pid`, after it was launched suspended so
+    it could be assigned to a Job Object before it could execute a single
+    instruction. A freshly created suspended process has exactly one thread --
+    it has not run yet, so it cannot have started another -- but every thread
+    the snapshot finds for the pid is resumed rather than assuming that,
+    against a future Windows that ever starts one differently.
+
+    `subprocess.Popen` closes the thread handle `CreateProcess` itself returns
+    before this module ever sees it (`_execute_child` always does, whether or
+    not `CREATE_SUSPENDED` was requested), so there is no handle left to resume
+    directly; the thread is instead found again by walking a toolhelp32
+    snapshot for `pid`, the same kind of independent re-enumeration
+    `_process_parent_map` already relies on for the taskkill path below.
+    """
+    kernel32 = _kernel32()
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+    if not snapshot or snapshot == _THREAD32_INVALID_HANDLE_VALUE:
+        return False
+    try:
+        kernel32.Thread32First.restype = wintypes.BOOL
+        kernel32.Thread32First.argtypes = (ctypes.c_void_p, ctypes.POINTER(_ThreadEntry32))
+        kernel32.Thread32Next.restype = wintypes.BOOL
+        kernel32.Thread32Next.argtypes = (ctypes.c_void_p, ctypes.POINTER(_ThreadEntry32))
+        kernel32.OpenThread.restype = ctypes.c_void_p
+        kernel32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.ResumeThread.restype = wintypes.DWORD
+        kernel32.ResumeThread.argtypes = (ctypes.c_void_p,)
+
+        resumed_any = False
+        entry = _ThreadEntry32()
+        entry.dwSize = ctypes.sizeof(_ThreadEntry32)
+        found = bool(kernel32.Thread32First(snapshot, ctypes.byref(entry)))
+        while found:
+            if entry.th32OwnerProcessID == pid:
+                thread_handle = kernel32.OpenThread(_THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                if thread_handle:
+                    if kernel32.ResumeThread(thread_handle) != 0xFFFFFFFF:
+                        resumed_any = True
+                    _close_handle(thread_handle)
+            entry = _ThreadEntry32()
+            entry.dwSize = ctypes.sizeof(_ThreadEntry32)
+            found = bool(kernel32.Thread32Next(snapshot, ctypes.byref(entry)))
+        return resumed_any
+    finally:
+        _close_handle(snapshot)
+
+
+def _track_in_job_object(process: subprocess.Popen[str]) -> int | None:
+    """Assign `process` -- launched suspended with `_CREATE_SUSPENDED` -- to a
+    fresh Job Object and resume it, so every descendant it will ever create is
+    a job member from the instant it exists, not from whenever this module's
+    next `tasklist` snapshot happens to run.
+
+    This is what closes review round 2 finding 1: `_resnapshot` narrows the gap
+    a fresh arrival can hide in down to the time between the last snapshot and
+    taskkill's own walk, but cannot close it, because both are polling a
+    snapshot rather than asking something that was tracking membership the
+    whole time. A Job Object is that something -- the kernel updates its
+    member count as processes are created and exit, and a process cannot be
+    created and exit invisibly to a job it was already in before it ran its
+    first instruction.
+
+    Returns the job handle on success, so `_terminate_tree` can ask it whether
+    it is empty instead of walking `tasklist`. On any failure -- a job could not
+    be created, the process already belongs to a job that forbids nesting, or
+    anything else -- this still resumes the process (it must run either way)
+    and returns None, and `_terminate_tree` falls back to the taskkill walk. A
+    best-effort upgrade must never leave the agent stuck suspended, or turn
+    into the reason a round produces nothing for the whole timeout.
+    """
+    job = None
+    try:
+        job = _create_job_object()
+        if job is not None and not _assign_process_to_job(job, process._handle):  # noqa: SLF001 -- see _resume_process_threads
+            _close_handle(job)
+            job = None
+    except Exception:
+        job = None
+    finally:
+        _resume_process_threads(process.pid)
+    return job
+
 
 def _taskkill_tree(pid: int) -> subprocess.CompletedProcess[str]:
     # encoding/errors as in git() and run_agent()'s own Popen above: taskkill is a
@@ -353,7 +603,7 @@ def _all_confirmed_gone(pids: list[int]) -> bool | None:
     return not any(f'"{pid}"' in listed for pid in pids)
 
 
-def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> None:
+def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job: int | None = None) -> None:
     """Kill the agent and everything it spawned, or raise CleanupUnconfirmed.
 
     An agent that hit the timeout is usually blocked inside a child shell it
@@ -363,10 +613,16 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> 
     this call races that commit, so it has to be gone, not merely signalled,
     before this returns.
 
-    On Windows `taskkill /T` walks the tree from the agent's pid, and is asked
-    until it stops reporting a member it could not terminate, because the walk
-    and the kill are two steps and a member that leaves between them is reported
-    as a member that resisted. On POSIX the
+    On Windows, `job` -- the Job Object `run_agent` assigned this process to
+    while it was still suspended, via `_track_in_job_object` -- is terminated as
+    one kernel call and its member count polled until it reads zero: the job has
+    tracked every process born under it since before the first one ever ran, so
+    its own count is authoritative the instant it is asked, with no snapshot to
+    go stale between being taken and being trusted. Without a job (creation
+    failed, or nesting is unavailable), `taskkill /T` walks the tree from the
+    agent's pid instead, and is asked until it stops reporting a member it could
+    not terminate, because the walk and the kill are two steps and a member that
+    leaves between them is reported as a member that resisted. On POSIX the
     agent leads its own process group (``start_new_session`` on the `Popen`), so
     its shells and their children share its pgid; the whole group is signalled,
     the leader reaped so the group can empty, and the group waited out. A plain
@@ -379,6 +635,31 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> 
     tell the caller the tree is safe to commit when a process may still be editing
     it, which is the race this exists to prevent.
     """
+    if sys.platform == "win32" and job is not None:
+        try:
+            terminated = _terminate_job(job)
+            deadline = time.monotonic() + grace_s
+            remaining = _job_active_process_count(job)
+            while remaining is not None and remaining > 0 and time.monotonic() < deadline:
+                time.sleep(JOB_CONFIRM_INTERVAL_S)
+                remaining = _job_active_process_count(job)
+            if remaining != 0:
+                detail = "" if terminated else "; TerminateJobObject itself reported failure"
+                raise CleanupUnconfirmed(
+                    f"the Windows Job Object tracking pid {process.pid} could not be confirmed empty after "
+                    f"TerminateJobObject and a {grace_s:.0f}s wait (active process count: {remaining}){detail}"
+                )
+            # As below: no exit code, not even a job's own member count, speaks
+            # for the agent handle `run_agent` is actually holding a pipe open
+            # against.
+            process.kill()
+            _reap_leader(process, grace_s)
+            if process.poll() is None:
+                raise CleanupUnconfirmed(f"the agent process {process.pid} was still running after its job was terminated")
+            return
+        finally:
+            _close_handle(job)
+
     if sys.platform == "win32":
         # 0 is a kill; 128 is "process not found", i.e. already gone. Any other
         # code means at least one member of the tree taskkill walked was not
@@ -606,12 +887,18 @@ def run_agent(
             errors="replace",
             bufsize=1,
             env=env,
-            # POSIX only (a no-op on Windows, which walks the tree by pid with
-            # taskkill /T). The agent leads its own session and process group, so
-            # `_terminate_tree` can signal the shells and test processes it spawns
-            # as one group rather than reaching only the agent itself.
+            # POSIX: a new session/group, so `_terminate_tree` can signal the
+            # shells and test processes the agent spawns as one group rather than
+            # reaching only the agent itself; a no-op on Windows. Windows:
+            # launched suspended (`_CREATE_SUSPENDED`; a no-op on POSIX, where
+            # `creationflags` must stay 0 or Popen itself rejects it) so it
+            # cannot spawn anything before the next line assigns it to a Job
+            # Object and resumes it -- see `_track_in_job_object` and
+            # `_terminate_tree`.
             start_new_session=True,
+            creationflags=_CREATE_SUSPENDED if sys.platform == "win32" else 0,
         )
+        job = _track_in_job_object(process) if sys.platform == "win32" else None
         assert process.stdin is not None and process.stdout is not None
         reader = threading.Thread(target=_pump, args=(process.stdout, prefix, log_handle, progress), daemon=True)
         reader.start()
@@ -621,7 +908,7 @@ def run_agent(
         except OSError as error:  # the agent exited before reading the prompt
             # It may still be alive and holding the working tree; do not leave it
             # running just because it stopped listening.
-            _terminate_tree(process)
+            _terminate_tree(process, job=job)
             reader.join(timeout=10)
             raise AgentError(f"{prefix} refused the prompt: {error}") from error
 
@@ -629,7 +916,7 @@ def run_agent(
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                _terminate_tree(process)
+                _terminate_tree(process, job=job)
                 reader.join(timeout=10)
                 raise AgentTimeout(f"{prefix} exceeded --timeout of {timeout:.0f}s")
             try:
