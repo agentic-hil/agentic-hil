@@ -171,7 +171,7 @@ Every case prompt names both the guide and the install source, `{install_spec}`:
 and "the current release" in published mode, which is what the guide's own
 sentence about a link already means. A prompt naming only the guide sent every
 obedient agent to the package index, which in local mode is a different package
-from the one under test, and that was 117 of the 147 failures in the 0.15.0
+from the one under test, and that was 117 of the 147 failures in the 0.16.0
 matrix.
 
 A local matrix is refused before it starts when `src/agentic_hil` has moved past
@@ -412,7 +412,7 @@ For release evaluation, use `target.mode: "remote"` with immutable values:
 ```json
 {
   "mode": "remote",
-  "expected_version": "0.15.0",
+  "expected_version": "0.16.0",
   "install_spec": "git+https://github.com/agentic-hil/agentic-hil@0123456789abcdef0123456789abcdef01234567",
   "expected_commit": "0123456789abcdef0123456789abcdef01234567"
 }
