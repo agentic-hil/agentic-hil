@@ -93,6 +93,14 @@ EXPECTED_VERSION_FIELD = re.compile(r"""["']expected_version["']\s*:\s*["']([^"'
 # `actions/checkout@v4` and every other third-party pin carries somebody
 # else's version and must stay invisible to this gate.
 TAG_PIN = re.compile(r"""([^\s"'`@]+)@v(\d+\.\d+\.\d+)(?![\w.])""")
+# The release each one-line installer installs, and the version an installation
+# already on the machine has to reach to be left alone. Both are a single
+# constant at the top of their script, and both have to follow the release: an
+# installer holding a number below it answers "nothing to install" to the very
+# person re-running the line to get current, and then registers the skill out of
+# the copy it kept.
+INSTALL_SH_RELEASE = re.compile(r'^RELEASE="(\d+\.\d+\.\d+)"$', re.MULTILINE)
+INSTALL_PS1_RELEASE = re.compile(r"^\$Release = '(\d+\.\d+\.\d+)'$", re.MULTILINE)
 
 # The sweep walks the working tree, so it meets whatever else lives there.
 SKIPPED_DIRECTORIES = frozenset(
@@ -436,6 +444,16 @@ def locations(root: Path) -> list[Location]:
             "evals/install/matrix.full.json",
             "target.expected_version: the install-eval runner refuses to start when it disagrees",
             (str(full_matrix["target"]["expected_version"]),),
+        ),
+        Location(
+            "install.sh",
+            "RELEASE: the release the one-line installer installs, and the version an installation already here has to reach to be kept",
+            tuple(INSTALL_SH_RELEASE.findall(_read(root, "install.sh"))),
+        ),
+        Location(
+            "install.ps1",
+            "$Release: the release the one-line installer installs, and the version an installation already here has to reach to be kept",
+            tuple(INSTALL_PS1_RELEASE.findall(_read(root, "install.ps1"))),
         ),
         Location(
             "evals/install/README.md",

@@ -8,7 +8,13 @@
 
 set -eu
 
-FLOOR="0.4.0"
+# The release this script installs, and the version an installation already
+# here has to reach to be left alone. Deliberately not a capability floor: the
+# line that installs Agentic HIL is the same line people re-run to get current,
+# and step 4 registers the skill out of whatever copy step 1 decided to keep, so
+# a floor left a returning user on an old package and an old skill at once. A
+# development tree reports X.Y.Z.devN, which compares as X.Y.Z and stays put.
+RELEASE="0.16.0"
 
 AGENT=""
 WITH_AGENT_INSTALL=1
@@ -198,16 +204,16 @@ package_spec() {
 }
 
 # Does a freshly installed copy's reported version answer what this run asked
-# for: exactly the pin when one was given, at least the floor otherwise. The pin
+# for: exactly the pin when one was given, at least the release otherwise. The pin
 # must match exactly -- a newer copy left in the manager's bin is not the pinned
 # release this run wrote, and the documented --version contract is an exact
 # release, not a floor. Without a pin the manager only ever writes the newest, so
-# any copy at or above the floor is the one just installed.
+# any copy at or above the release is the one just installed.
 version_matches_request() {
     if [ -n "$PINNED" ]; then
         version_exactly "$1" "$PINNED"
     else
-        version_at_least "$1" "$FLOOR"
+        version_at_least "$1" "$RELEASE"
     fi
 }
 
@@ -439,11 +445,11 @@ elif ! installed=$(agentic-hil --version 2>/dev/null); then
     step 1 "probe: an agentic-hil on this PATH does not answer, installing it again"
 elif [ -n "$PINNED" ]; then
     step 1 "probe: agentic-hil $installed is here, and --version $PINNED was asked for, so the package is installed again"
-elif version_at_least "$installed" "$FLOOR"; then
-    step 1 "probe: agentic-hil $installed is here and at least $FLOOR, skipping the package install"
+elif version_at_least "$installed" "$RELEASE"; then
+    step 1 "probe: agentic-hil $installed is here and not older than $RELEASE, skipping the package install"
     NEEDS_PACKAGE=0
 else
-    step 1 "probe: agentic-hil $installed is older than $FLOOR, upgrading it"
+    step 1 "probe: agentic-hil $installed is older than $RELEASE, upgrading it"
 fi
 
 # Step 2: install the package, user-local, never as root.

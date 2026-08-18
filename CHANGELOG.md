@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- **The one-line installer kept whatever agentic-hil it found and told a returning user each step was done.** Step 1 compared an installation already on `PATH` against a floor of `0.4.0`, the release that first shipped `agent-install`, and skipped the package install for anything at or above it. That answers whether the copy can run step 4, not whether it is the copy the person typing the line asked for, and the same line is what README hands a stranger and what a returning user re-runs to get current. The cost was not only an old package: step 4 installs the skill out of the copy step 1 decided to keep, so a bench on 0.11.0 was left on 0.11.0 and written a 0.11.0 skill, five releases behind, with every step reported as done. Both scripts now compare against the release they install, so an older copy goes through the upgrade step 2 already performs and a copy at or above the release is kept as before; a development tree reports `X.Y.Z.devN`, which the existing comparison reads as `X.Y.Z`, so an editable install is still left alone. The number is a release position now rather than a constant two people have to remember: `tools/check_version_consistency.py` carries an entry for each script and fails the build when either falls behind. (#291)
+
 ## [0.16.0] - 2026-08-18
 
 ### Added

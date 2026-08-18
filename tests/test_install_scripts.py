@@ -964,6 +964,102 @@ def test_both_scripts_require_an_exact_match_for_a_version_pin() -> None:
     assert "Test-VersionMatchesRequest" in powershell
 
 
+def test_both_scripts_install_the_same_release() -> None:
+    """The version an installation already here has to reach, stated once per script.
+
+    It is the release now, not the capability floor it used to be. Both scripts
+    have to move together for the same line to mean the same thing on either
+    platform; tools/check_version_consistency.py holds the number to the release,
+    and this holds the two scripts to each other.
+    """
+    shell = re.search(r'^RELEASE="(\d+\.\d+\.\d+)"$', _shell_source(), re.MULTILINE)
+    powershell = re.search(r"^\$Release = '(\d+\.\d+\.\d+)'$", _powershell_source(), re.MULTILINE)
+    assert shell is not None, "install.sh states no RELEASE"
+    assert powershell is not None, "install.ps1 states no $Release"
+    assert shell.group(1) == powershell.group(1)
+
+
+def test_an_installation_below_the_release_is_upgraded_rather_than_kept(tmp_path: Path) -> None:
+    """The returning user, run end to end through a POSIX shell.
+
+    Step 1 compared against a capability floor of 0.4.0, so every copy installed
+    since answered "skipping the package install" and step 4 registered the skill
+    out of that copy: the one line the README hands a stranger left a 0.11.0 bench
+    on 0.11.0 and wrote it a 0.11.0 skill, silently, while reporting success. The
+    comparison is against the release now, so an older copy is upgraded and the
+    machine half runs out of the fresh one.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    user_bin = home / ".local" / "bin"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, user_bin, uv_bin, tools):
+        directory.mkdir(parents=True)
+
+    marker = tmp_path / "who-ran-agent-install"
+
+    # A real earlier release: far above the floor step 1 used to accept, far
+    # below the release it compares against now.
+    _stub_executable(
+        user_bin / "agentic-hil",
+        'case "$1" in\n'
+        '  --version) echo "0.11.0" ;;\n'
+        f'  agent-install) echo "stale" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n",
+    )
+    _stub_executable(tools / "claude", "exit 0\n")
+    _stub_executable(
+        tools / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "99.0.0" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:{user_bin}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-can"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "skipping the package install" not in transcript, transcript
+    assert "0.11.0 is older than" in transcript, transcript
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+
+
 # The container run, end to end: a machine with nothing on it, the real package
 # from the index, a stub `claude` on PATH so agent detection has something to
 # find, and then the four questions that decide whether the line did its job.

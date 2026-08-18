@@ -18,7 +18,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Floor = '0.4.0'
+# The release this script installs, and the version an installation already
+# here has to reach to be left alone. Deliberately not a capability floor: the
+# line that installs Agentic HIL is the same line people re-run to get current,
+# and step 4 registers the skill out of whatever copy step 1 decided to keep, so
+# a floor left a returning user on an old package and an old skill at once. A
+# development tree reports X.Y.Z.devN, which compares as X.Y.Z and stays put.
+$Release = '0.16.0'
 $StepTotal = 5
 
 function Write-Say {
@@ -177,12 +183,12 @@ function Test-VersionExactly {
 function Test-VersionMatchesRequest {
     param([string]$Found)
     # Does a freshly installed copy's reported version answer what this run asked
-    # for: exactly the pin when one was given, at least the floor otherwise. The
+    # for: exactly the pin when one was given, at least the release otherwise. The
     # pin must match exactly -- a newer copy left in the manager's bin is not the
     # pinned release this run wrote, and the documented --version contract is an
     # exact release, not a floor.
     if ($Version) { return (Test-VersionExactly -Found $Found -Wanted $Version) }
-    return (Test-VersionAtLeast -Found $Found -Floor $Floor)
+    return (Test-VersionAtLeast -Found $Found -Floor $Release)
 }
 
 function Get-UvBinDirectory {
@@ -317,11 +323,11 @@ if (Test-Executable 'agentic-hil') {
         Write-Step 1 'probe: an agentic-hil on this PATH does not answer, installing it again'
     } elseif ($Version) {
         Write-Step 1 "probe: agentic-hil $installed is here, and --version $Version was asked for, so the package is installed again"
-    } elseif (Test-VersionAtLeast -Found $installed -Floor $Floor) {
-        Write-Step 1 "probe: agentic-hil $installed is here and at least $Floor, skipping the package install"
+    } elseif (Test-VersionAtLeast -Found $installed -Floor $Release) {
+        Write-Step 1 "probe: agentic-hil $installed is here and not older than $Release, skipping the package install"
         $needsPackage = $false
     } else {
-        Write-Step 1 "probe: agentic-hil $installed is older than $Floor, upgrading it"
+        Write-Step 1 "probe: agentic-hil $installed is older than $Release, upgrading it"
     }
 } else {
     Write-Step 1 'probe: no agentic-hil on this PATH, installing it user-local'
