@@ -62,7 +62,7 @@ agentic-hil agent-install --agent claude-code    # or: codex / opencode
 
 One restart after the install line, in a freshly created firmware project: the first sentence makes the agent set the bench up itself, the second makes the board say Hello World and prove it said it.
 
-<!-- demo-video: drop agentic-hil-vscode-proof.mp4 here (drag the file into this line in GitHub's web editor; the uploaded attachment renders as an inline player) -->
+https://github.com/user-attachments/assets/d19b3b24-0250-4226-91c4-61bea65fa4b2
 
 Nothing in that run is staged: the configuration is created over MCP with the permissions reported out loud, the firmware is written on the spot, `flash_firmware` and `com_read` go through the gate, the twelve bytes come back off the wire, and the plan it pins is run once green and once against a wrong expectation, because a test that cannot fail proves nothing. What remains in the project afterwards is the plan as a reviewable file and the run's own report: lease released, safe state confirmed, nothing quarantined.
 
