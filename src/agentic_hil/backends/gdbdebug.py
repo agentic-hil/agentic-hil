@@ -60,6 +60,20 @@ STOP_SESSION_TIMEOUT_CAP_S = 5.0
 CLOSE_SESSION_TIMEOUT_S = 1.0
 INITIAL_STOP_POLL_TIMEOUT_S = 0.05
 OUTPUT_TAIL_CHARS = 65536
+# Keyed by (halt unconfirmed, detach-guard unconfirmed). A retry that could not
+# gather new evidence reports both as unconfirmed even when only one was the
+# original cause, so the phrasing has to make sense for that combination too,
+# not just for whichever single proof failed on the attempt that discovered it.
+_UNCONFIRMED_TEARDOWN_PROOFS = {
+    (True, False): "the target's halt could not be reconfirmed",
+    (False, True): "the backend's auto-resume-on-detach override could not be confirmed installed",
+    (True, True): "neither the target's halt nor the backend's auto-resume-on-detach override could be reconfirmed",
+}
+_UNCONFIRMED_TEARDOWN_CLOSE_REASONS = {
+    (True, False): "the target was halted",
+    (False, True): "the backend's auto-resume-on-detach override was installed",
+    (True, True): "the target was halted or the backend's auto-resume-on-detach override was installed",
+}
 
 
 class GdbDebugSession:
@@ -82,6 +96,14 @@ class GdbDebugSession:
         self.server_readers: list[threading.Thread] = []
         self.load_phase = "not_started"
         self.firmware_load_status = "not_started"
+        # Set only when a teardown leaves the target's own state (not merely
+        # process cleanup) unconfirmed: halt could not be reconfirmed, or the
+        # backend's auto-resume-on-detach override could not be verified
+        # installed. A retried teardown must not treat this the way it treats
+        # a status left `cleanup_required` by a plain process-cleanup failure
+        # (where the target state proof already succeeded) -- see
+        # `stop_session` and `close`.
+        self.hardware_state_unconfirmed = False
 
 
 class _AuditRefusedResponse:
@@ -287,25 +309,42 @@ class GdbDebugSessions:
         # connection down. See `_confirm_halted_before_end` and
         # `_pin_no_resume_on_detach` for why each step exists.
         #
-        # Skipped when the session already entered as cleanup_required: that
-        # status is never this call's own discovery, only ever left behind by
-        # an earlier failed start or a previous failed teardown attempt, and
-        # both already ran this same sequence over the connection before
-        # giving up on it. What happens to that incident from here (an
-        # operator's recovery, or a later machine recovery that reset and
-        # reread the target) is tracked at the lease level and is not
-        # something a retried teardown can prove anything new about by
-        # demanding a connection that is already, permanently gone.
+        # Skipped when the session already entered as cleanup_required *and*
+        # that state was left by a plain process-cleanup failure, not by a
+        # target-state incident (`session.hardware_state_unconfirmed`): a
+        # cleanup-only failure already ran this same sequence over the
+        # connection and got a real proof out of it before cleanup itself
+        # failed, so a retry only needs to finish tidying up, not re-prove
+        # what it already proved.
+        #
+        # A target-state incident is different: nothing about retrying this
+        # call can manufacture new evidence about a connection that is
+        # already, permanently gone, so `halt_confirmed`/`detach_pinned` stay
+        # false and the incident is preserved every time this is called again,
+        # until an operator's recovery or a later machine action that resets
+        # and rereads the target establishes the board state. That is tracked
+        # at the lease level, not synthesized here from a retry alone.
         already_unsettled = session.status == "cleanup_required"
-        halt_confirmed = True if already_unsettled else self._confirm_halted_before_end(session, timeout)
-        if not already_unsettled:
-            self._pin_no_resume_on_detach(session, timeout)
+        retry_without_new_evidence = already_unsettled and session.hardware_state_unconfirmed
+        if retry_without_new_evidence:
+            halt_confirmed = False
+            detach_pinned = False
+        elif already_unsettled:
+            halt_confirmed = True
+            detach_pinned = True
+        else:
+            halt_confirmed = self._confirm_halted_before_end(session, timeout)
+            detach_pinned = self._pin_no_resume_on_detach(session, timeout)
         cleanup_error = self._cleanup_session(session, timeout)
         if cleanup_error is not None:
             session.status = "cleanup_required"
-            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "safe_state_confirmed": False, "halt_not_confirmed": not halt_confirmed, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed; ownership is retained for retry."})
-        if not halt_confirmed:
+            if not halt_confirmed or not detach_pinned:
+                session.hardware_state_unconfirmed = True
+            return self._report({"ok": False, "tool": tool, "backend": self.backend_name, "active": True, "status": "cleanup_required", "hardware_state": "unknown", "cleanup_required": True, "safe_state_confirmed": False, "halt_not_confirmed": not halt_confirmed, "detach_resume_guard_confirmed": detach_pinned, "error_type": "cleanup_failed", "cleanup_error": cleanup_error, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session cleanup failed; ownership is retained for retry."})
+        if not halt_confirmed or not detach_pinned:
             session.status = "cleanup_required"
+            session.hardware_state_unconfirmed = True
+            unconfirmed_what = _UNCONFIRMED_TEARDOWN_PROOFS[(not halt_confirmed, not detach_pinned)]
             return self._report({
                 "ok": False,
                 "tool": tool,
@@ -315,15 +354,17 @@ class GdbDebugSessions:
                 "hardware_state": "unknown",
                 "cleanup_required": True,
                 "safe_state_confirmed": False,
-                "halt_not_confirmed": True,
-                "error_type": "halt_not_confirmed",
+                "halt_not_confirmed": not halt_confirmed,
+                "detach_resume_guard_confirmed": detach_pinned,
+                "error_type": "halt_not_confirmed" if not halt_confirmed else "detach_resume_not_confirmed",
                 "session": self._session_status(session),
                 "log_path": display_path(self.config, session.log_path),
-                "summary": "Debug session processes were cleaned up, but the target's halt could not be reconfirmed before the session ended; ownership is retained for retry.",
+                "summary": f"Debug session processes were cleaned up, but {unconfirmed_what} before the session ended; ownership is retained for retry.",
             })
         session.status = "stopped"
+        session.hardware_state_unconfirmed = False
         self.session = None
-        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "safe_state_confirmed": True, "halt_not_confirmed": False, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped with the target confirmed halted."})
+        return self._report({"ok": True, "tool": tool, "backend": self.backend_name, "active": False, "status": "stopped", "safe_state_confirmed": True, "halt_not_confirmed": False, "detach_resume_guard_confirmed": True, "session": self._session_status(session), "log_path": display_path(self.config, session.log_path), "summary": "Debug session stopped with the target confirmed halted."})
 
     def get_session_status(self) -> JsonObject:
         session = self.session
@@ -620,21 +661,34 @@ class GdbDebugSessions:
         session = self.session
         if session is not None and session.status != "stopped":
             # See stop_session for why a session already entered as
-            # cleanup_required skips straight to tidying up: that status is
-            # never this call's own discovery, and the connection it names is
-            # already gone.
+            # cleanup_required skips straight to tidying up only when that
+            # status came from a plain process-cleanup failure, and why a
+            # target-state incident (hardware_state_unconfirmed) instead
+            # keeps demanding proof this call cannot manufacture.
             already_unsettled = session.status == "cleanup_required"
-            halt_confirmed = True if already_unsettled else self._confirm_halted_before_end(session, CLOSE_SESSION_TIMEOUT_S)
-            if not already_unsettled:
-                self._pin_no_resume_on_detach(session, CLOSE_SESSION_TIMEOUT_S)
+            retry_without_new_evidence = already_unsettled and session.hardware_state_unconfirmed
+            if retry_without_new_evidence:
+                halt_confirmed = False
+                detach_pinned = False
+            elif already_unsettled:
+                halt_confirmed = True
+                detach_pinned = True
+            else:
+                halt_confirmed = self._confirm_halted_before_end(session, CLOSE_SESSION_TIMEOUT_S)
+                detach_pinned = self._pin_no_resume_on_detach(session, CLOSE_SESSION_TIMEOUT_S)
             cleanup_error = self._cleanup_session(session, CLOSE_SESSION_TIMEOUT_S)
             if cleanup_error is not None:
                 session.status = "cleanup_required"
+                if not halt_confirmed or not detach_pinned:
+                    session.hardware_state_unconfirmed = True
                 raise RuntimeError(f"Debug session cleanup failed: {cleanup_error}")
-            if not halt_confirmed:
+            if not halt_confirmed or not detach_pinned:
                 session.status = "cleanup_required"
-                raise RuntimeError("Debug session closed without reconfirming the target was halted.")
+                session.hardware_state_unconfirmed = True
+                reason = _UNCONFIRMED_TEARDOWN_CLOSE_REASONS[(not halt_confirmed, not detach_pinned)]
+                raise RuntimeError(f"Debug session closed without reconfirming {reason}.")
             session.status = "stopped"
+            session.hardware_state_unconfirmed = False
         self.session = None
 
     def _start_permission(self, tool: str, mode: str) -> JsonObject:
@@ -985,9 +1039,9 @@ class GdbDebugSessions:
             session.stop_reason = {"stop_reason": "timeout", "backend_stop_reason": "timeout", "halt_confirmed": False}
         return confirmed
 
-    def _pin_no_resume_on_detach(self, session: GdbDebugSession, timeout_s: float) -> None:
-        """Best effort: tell OpenOCD not to resume the target on its own once
-        this GDB connection goes away.
+    def _pin_no_resume_on_detach(self, session: GdbDebugSession, timeout_s: float) -> bool:
+        """Tell OpenOCD not to resume the target on its own once this GDB
+        connection goes away, and report whether that was confirmed accepted.
 
         OpenOCD's ``gdb-detach`` and ``gdb-end`` target events resume the core
         by default the moment the last GDB connection ends, which is exactly
@@ -999,17 +1053,24 @@ class GdbDebugSessions:
 
         Fixed and sent every time a session ends, so a later change to this
         sequence has to edit this function to drop the override rather than
-        having it fall out of a reordering somewhere else. Best effort and
-        never allowed to overturn a halt already confirmed: `_gdb_command`
-        marks a failed command as a fresh ``debugger_error`` stop, and a
-        defensive command nobody asked for is not license to make a confirmed
-        halt read as lost, so a failure here restores the state this method
-        was called with instead of leaving that behind.
+        having it fall out of a reordering somewhere else. Never allowed to
+        overturn a halt already confirmed: `_gdb_command` marks a failed
+        command as a fresh ``debugger_error`` stop, and a defensive command
+        nobody asked for is not license to make a confirmed halt read as
+        lost, so a failure here restores the state this method was called
+        with instead of leaving that behind.
+
+        This is no longer best effort from the caller's point of view: a
+        session teardown that cannot verify this override is installed must
+        not report the target's post-detach state as safe, because OpenOCD's
+        default is to resume it. The caller decides what that means for the
+        overall result; this method only reports whether the override itself
+        was confirmed.
         """
         if session.load_phase in {"not_started", "server_spawned", "server_ready"}:
-            return
+            return True
         if session.gdb is None or not session.gdb.is_running():
-            return
+            return False
         prior_stop_reason = session.stop_reason
         prior_status = session.status
         response = self._gdb_command(
@@ -1021,6 +1082,8 @@ class GdbDebugSessions:
         if not response.ok:
             session.stop_reason = prior_stop_reason
             session.status = prior_status
+            return False
+        return True
 
     def _cleanup_session(self, session: GdbDebugSession, timeout_s: float) -> str | None:
         errors: list[tuple[str, BaseException]] = []
