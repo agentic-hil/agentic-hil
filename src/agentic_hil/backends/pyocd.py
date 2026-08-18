@@ -89,21 +89,26 @@ class PyOCDBackend:
         self.config = config
 
     @staticmethod
-    def _probe_selector_map(config: AgenticHILConfig) -> dict[str, str | None]:
-        """Every configured debugger's own selector, exactly as
-        `_cross_debugger_identity_collision` reads it via `probe_selector_key`
-        (which folds `type` in along with `probe_id`, since pyOCD's `<type>:`
-        prefix-stripping only applies to a `pyocd` entry).
+    def _probe_selector_map(config: AgenticHILConfig) -> dict[str, tuple[str, str | None]]:
+        """Every configured debugger's own (type, selector) pair, exactly as
+        `_cross_debugger_identity_collision` reads it: `probe_selector_key`
+        strips a `<type>:` prefix when *that* entry is itself type `pyocd`, but
+        the value it returns carries no trace of `type` afterwards, so an
+        OpenOCD peer with `probe_id: "123"` and a pyOCD peer with the same
+        `probe_id` fold to the identical key `"123"`. `type` is paired with the
+        key explicitly here so the two are distinguishable.
 
         `_resolved_probe_uid` is cached on the claim that its resolution
-        collides with no *other* configured debugger's selector. A reload that
-        changes only a peer's `type` or `probe_id` -- not this debugger's own
-        -- can make that claim stop holding just as surely as a change to its
-        own probe_id can, so both must invalidate the cache the same way. A
-        map of every debugger's selector, not only this one's, is what makes
-        `reconfigure` see either kind of change.
+        collides with no *other* configured debugger's selector under *that
+        debugger's own* matching rule (substring for pyOCD, exact for anyone
+        else). A reload that changes only a peer's `type` -- keeping its
+        `probe_id` byte-for-byte the same -- switches which rule applies to it
+        and can make that claim stop holding just as surely as a change to the
+        selector text can, so both must invalidate the cache the same way. A
+        map of every debugger's (type, selector), not only this one's selector,
+        is what makes `reconfigure` see either kind of change.
         """
-        return {name: probe_selector_key(debugger) for name, debugger in config.debuggers.items()}
+        return {name: (debugger.type, probe_selector_key(debugger)) for name, debugger in config.debuggers.items()}
 
     def info(self) -> JsonObject:
         resolved = self._resolve_executable()

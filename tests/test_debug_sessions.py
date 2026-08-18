@@ -709,6 +709,63 @@ def test_stop_session_detach_guard_failure_is_not_reported_safe_and_survives_ret
         service.coordinator.close()
 
 
+def test_reset_target_recovery_after_a_stuck_stop_lets_a_new_session_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review round 1, finding 3: once a failed stop sets
+    # session.hardware_state_unconfirmed, stop_session can never retire that
+    # session itself -- every later call takes retry_without_new_evidence,
+    # exactly as the two tests above establish. `reset_target` in halt mode is
+    # a different, independent way to settle the same incident: it drives the
+    # target into a defined state (or, as here, the coordinator's own
+    # automatic pre-dispatch recovery attempt settles it first with a
+    # cheaper read-only re-probe, since `debug_session_cleanup_unconfirmed`
+    # is one `RETRYABLE_CLEANUP_REASONS` answers without a reset) and clears
+    # the coordinator-level quarantine. Either way `_release_recovered_leases`
+    # is what runs, and that used to stop at the lease -- the GDB backend's
+    # own `session` stayed on file, so the next debug_start_session still
+    # refused with session_already_active, and service.close() still tried to
+    # reconfirm teardown proof a connection that no longer exists can give.
+    service = debug_service(tmp_path)
+    debug = service.backend._debug
+    original = debug._gdb_command
+
+    def refuse_detach_guard(session, command: str, timeout_s=None, **kwargs):
+        if "gdb-detach" in command:
+            return GdbMiCommandResult(result_class="error", line="", error_message="monitor command refused")
+        return original(session, command, timeout_s, **kwargs)
+
+    try:
+        assert start_debug_session(service, mode="attach")["ok"] is True
+        monkeypatch.setattr(debug, "_gdb_command", refuse_detach_guard)
+
+        stopped = service.call("debug_stop_session")
+        assert stopped["ok"] is False
+        assert stopped["error_type"] == "detach_resume_not_confirmed"
+        assert debug.session is not None
+        assert debug.session.hardware_state_unconfirmed is True
+        assert service.coordinator.blocked is True
+
+        monkeypatch.setattr(debug, "_gdb_command", original)
+
+        recovered = service.call("reset_target", {"mode": "halt"})
+        assert recovered["ok"] is True, recovered
+        assert recovered["cleanup_required"] is False
+        assert recovered["quarantined"] is False
+        assert recovered["lease_state"] == "released"
+        assert service.coordinator.blocked is False
+        assert service._debug_lease is None
+        # The core of the fix: the backend's own stale session is gone, not
+        # merely the service's lease handle to it.
+        assert debug.session is None
+
+        restarted = start_debug_session(service, mode="attach")
+        assert restarted["ok"] is True, restarted
+        assert restarted["session"]["status"] == "halted"
+    finally:
+        monkeypatch.setattr(debug, "_gdb_command", original)
+        service.close()
+        service.coordinator.close()
+
+
 def test_stop_session_halt_not_confirmed_survives_retry_without_new_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Review finding 2, reproduced on the exact path it named: a stop that
     # cannot reconfirm the target is halted closes the connection and reports

@@ -3693,6 +3693,63 @@ def test_pyocd_reconfigure_re_checks_collisions_after_only_a_peers_selector_chan
     assert service.backend._resolved_probe_uid is None
 
 
+def test_pyocd_reconfigure_re_checks_collisions_after_a_peers_type_changes(tmp_path: Path) -> None:
+    # Review round 1, finding 2: `_probe_selector_map` used to record only
+    # `probe_selector_key(debugger)`, and that key carries no trace of `type`
+    # once computed -- an OpenOCD peer with probe_id "123" and a pyOCD peer
+    # with the same probe_id both fold to the key "123". So reconfiguring only
+    # a peer's *type*, keeping its probe_id byte-for-byte the same, produced an
+    # identical selector map and never invalidated the cache, even though
+    # `_cross_debugger_identity_collision` matches an OpenOCD peer by exact
+    # serial and a pyOCD peer by substring -- two different rules over the same
+    # key. Here "123" is not an OpenOCD serial that resolves to PYOCD123 (no
+    # collision, exact-match rule) but is a substring that does (collision,
+    # pyOCD's own rule), so retyping probe_y from openocd to pyocd must flip
+    # the outcome, and the cached resolution from before the reload must not
+    # paper over that.
+    from agentic_hil.config import bind_debugger
+
+    first = bind_debugger(
+        load_test_config(
+            tmp_path,
+            debugger_type="pyocd",
+            debugger_name="probe_x",
+            probe_id="OCD1",
+            auto_probe_ids=False,
+            debuggers_yaml='debuggers:\n  probe_y:\n    type: openocd\n    probe_id: "123"\n',
+        ),
+        "probe_x",
+    )
+    service = AgenticHILToolService(first)
+    try:
+        clean = service.call("probe_target")
+        assert clean["ok"] is True, clean
+        assert service.backend._resolved_probe_uid == "PYOCD123"
+
+        second = bind_debugger(
+            load_test_config(
+                tmp_path,
+                debugger_type="pyocd",
+                debugger_name="probe_x",
+                probe_id="OCD1",
+                auto_probe_ids=False,
+                debuggers_yaml='debuggers:\n  probe_y:\n    type: pyocd\n    probe_id: "123"\n',
+            ),
+            "probe_x",
+        )
+        service.backend.reconfigure(second)
+        assert service.backend._resolved_probe_uid is None
+
+        collided = service.call("probe_target")
+    finally:
+        service.close()
+
+    assert collided["ok"] is False
+    assert collided["error_type"] == "adapter_not_found"
+    assert collided["other_debugger"] == "probe_y"
+    assert service.backend._resolved_probe_uid is None
+
+
 def test_unnamed_probe_refusal_no_longer_reasons_from_a_debugger_count(tmp_path: Path) -> None:
     # The refusal exists because this call cannot tell the bound, unnamed
     # debugger apart from another configured one - not because some number of

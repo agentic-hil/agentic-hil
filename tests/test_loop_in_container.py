@@ -1634,6 +1634,65 @@ def test_terminate_tree_does_not_trust_a_retrys_not_found_when_a_member_actually
         agent_review_loop._terminate_tree(_FakeProcess(), grace_s=5.0)  # type: ignore[arg-type]
 
 
+def test_terminate_tree_catches_a_descendant_spawned_after_the_first_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 1, finding 1: a snapshot taken only once, before the first
+    kill, cannot name a descendant that was not yet alive to be captured in it.
+    The root or a descendant can spawn another descendant after that snapshot
+    and before taskkill's own walk; if the first call kills everything it
+    captured but fails on that new arrival, the retry that follows is rooted at
+    a now-dead pid and can only ever answer 128, whether or not the new arrival
+    is still alive. Checking that 128 against the stale, pre-spawn snapshot
+    alone would find every member it names already gone and wrongly call the
+    tree clean. Here the snapshot is retaken before the retry, the survivor is
+    alive to be captured by then, and the check must still refuse.
+    """
+    monkeypatch.setattr(agent_review_loop.sys, "platform", "win32")
+    survivor_pid = 5000
+    calls: list[list[str]] = []
+
+    def fake_run(*arguments: object, **_keywords: object) -> subprocess.CompletedProcess:
+        argv = list(arguments[0])  # type: ignore[index]
+        calls.append(argv)
+        if argv[0] == "taskkill":
+            index = sum(1 for call in calls if call[0] == "taskkill") - 1
+            codes = [255, 128]
+            code = codes[min(index, len(codes) - 1)]
+            return subprocess.CompletedProcess(argv, code, "", "" if code in (0, 128) else "no running instance")
+        if argv[0] == "powershell":
+            index = sum(1 for call in calls if call[0] == "powershell") - 1
+            # The first snapshot, taken before the first kill, predates the
+            # survivor. Every snapshot after it is taken once the survivor
+            # already exists -- the same way a real retry's re-enumeration
+            # would see it.
+            stdout = "" if index == 0 else f"{survivor_pid},4243\n"
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+        if argv[0] == "tasklist":
+            return subprocess.CompletedProcess(argv, 0, f'"python.exe","{survivor_pid}","Console","1","10,000 K"\n', "")
+        raise AssertionError(f"unexpected command in the win32 kill path: {argv}")
+
+    monkeypatch.setattr(agent_review_loop.subprocess, "run", fake_run)
+
+    class _FakeProcess:
+        pid = 4243
+
+        def kill(self) -> None:
+            pass
+
+        def poll(self) -> int | None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired("agent", timeout or 0)
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed, match="could not be independently confirmed gone"):
+        agent_review_loop._terminate_tree(_FakeProcess(), grace_s=5.0)  # type: ignore[arg-type]
+
+    powershell_calls = sum(1 for call in calls if call[0] == "powershell")
+    assert powershell_calls >= 2, "the snapshot must be retaken at least once after the first, or the survivor is never seen"
+
+
 def test_terminate_tree_refuses_to_confirm_when_the_original_tree_cannot_be_re_enumerated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

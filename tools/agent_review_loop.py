@@ -402,13 +402,44 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> 
         # kill, while the root is still alive to be walked from, so a 128 that
         # follows a real (non-128) failure can be checked against it instead of
         # trusted on its own.
-        original_members = _process_parent_map()
+        #
+        # One snapshot before the first kill is not the whole story either: the
+        # root or a descendant can spawn another descendant after that snapshot
+        # and before taskkill's own walk, and if the first call kills everything
+        # captured but fails on that new arrival, the retry that follows reports
+        # 128 for a root that genuinely no longer exists to walk from -- a
+        # snapshot taken only once, before anything died, cannot name a process
+        # that was not yet alive to be named. So the snapshot is retaken before
+        # every subsequent attempt, and every snapshot merged into one combined
+        # parent map rather than the newest one replacing the last: a member
+        # already dead by a later snapshot no longer appears in it as a live
+        # process to walk from, and only the earlier snapshot that caught it
+        # while its own parent was still alive keeps that chain walkable. This
+        # narrows the window a fresh arrival can hide in from the whole kill
+        # sequence down to the gap between the last snapshot taken and
+        # taskkill's own walk in the call that follows it -- not a full close of
+        # the race (only tracking every process from the moment it is created,
+        # e.g. a Windows Job Object assigned before the agent can spawn
+        # anything, closes that gap), but materially narrower than one
+        # snapshot taken only at the very start.
+        combined_members: dict[int, int] = {}
+        any_snapshot_ok = False
+
+        def _resnapshot() -> None:
+            nonlocal any_snapshot_ok
+            snapshot = _process_parent_map()
+            if snapshot is not None:
+                any_snapshot_ok = True
+                combined_members.update(snapshot)
+
+        _resnapshot()
         deadline = time.monotonic() + grace_s
         result = _taskkill_tree(process.pid)
         retried = False
         while result.returncode not in (0, 128) and time.monotonic() < deadline:
             retried = True
             time.sleep(TASKKILL_CONFIRM_INTERVAL_S)
+            _resnapshot()
             result = _taskkill_tree(process.pid)
         process.kill()
         _reap_leader(process, grace_s)
@@ -418,13 +449,16 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0) -> 
                 f"(exit {result.returncode}): {(result.stderr or '').strip()}"
             )
         if retried and result.returncode == 128:
-            if original_members is None:
+            # One more snapshot, taken as close as possible to the confirmation
+            # check itself, narrows the same gap a final notch further.
+            _resnapshot()
+            if not any_snapshot_ok:
                 raise CleanupUnconfirmed(
                     f"taskkill reported pid {process.pid} not found after an earlier attempt reported a "
                     f"member it could not terminate, and the tree's original members could not be "
                     f"independently re-enumerated to confirm none survived"
                 )
-            members = _process_tree_pids(process.pid, original_members)
+            members = _process_tree_pids(process.pid, combined_members)
             gone = _all_confirmed_gone(members)
             if gone is not True:
                 raise CleanupUnconfirmed(

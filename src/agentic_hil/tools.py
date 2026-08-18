@@ -1482,7 +1482,13 @@ class AgenticHILToolService:
         Machine recovery only runs while no lease is active and it reaps this
         owner's debugger processes, so any debug session is definitively gone.
         Keeping its handle would let a later call act as if a live session were
-        still attached to the board.
+        still attached to the board. Dropping the service's own handle is not
+        enough on its own, though: the backend that actually owns the session
+        object (`GdbDebugSessions.session`) is told to discard it too, or a
+        session left `cleanup_required` with `hardware_state_unconfirmed` set
+        stays on file there and keeps refusing `debug_start_session` with
+        `session_already_active` even after the coordinator considers the
+        incident it raised settled.
 
         Returns whether every release confirmed. `HardwareLease.release()` fails
         closed: a release that cannot persist its own record re-quarantines the
@@ -1493,6 +1499,10 @@ class AgenticHILToolService:
         for lease in (self._debug_lease, self._quarantined_lease):
             if lease is not None and not any(lease is held for held in handles):
                 handles.append(lease)
+        if self._debug_lease is not None:
+            debug_sessions = getattr(self.backend, "_debug", None)
+            if debug_sessions is not None:
+                debug_sessions.discard_after_recovery()
         self._debug_lease = None
         self._quarantined_lease = None
         if self._debug_artifact is not None:

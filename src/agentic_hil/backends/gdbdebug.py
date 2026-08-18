@@ -691,6 +691,25 @@ class GdbDebugSessions:
             session.hardware_state_unconfirmed = False
         self.session = None
 
+    def discard_after_recovery(self) -> None:
+        """Retire whatever session is on file without asking it for teardown
+        proof it cannot give.
+
+        `stop_session` and `close()` both refuse to clear a session left
+        `cleanup_required` with `hardware_state_unconfirmed` set, on purpose:
+        nothing about calling either again can manufacture evidence about a
+        connection that is already gone. But an independent recovery --
+        `reset_target` verified into halt, or a machine/operator recovery that
+        reaped this owner's leftover processes and re-read the probe -- speaks
+        for the same hardware more directly than that stale session ever could,
+        and it is only ever called once that evidence has already cleared the
+        coordination-level incident this session's own failure raised. Holding
+        onto the session past that point serves nothing: it only makes the next
+        `debug_start_session` refuse with `session_already_active` over a
+        session the coordinator itself now considers settled, and makes a
+        later `close()` raise trying to reconfirm what recovery already did."""
+        self.session = None
+
     def _start_permission(self, tool: str, mode: str) -> JsonObject:
         permissions = self.config.debugger.permissions
         if not self.config.probe_allowed():
