@@ -128,6 +128,73 @@ def test_the_payload_expects_what_the_install_produces_not_what_the_matrix_names
     assert payload["target"]["expected_version"] != "0.0.1"
 
 
+def _tagged_source_tree(root: Path, version: str) -> None:
+    """A synthetic ``host_source_root`` this test process owns: everything
+    `job_payload` reads for a published-mode job, tagged as a release.
+
+    Built fresh under a tmp path rather than pointed at this repository's own
+    checkout: a real checkout here is root-owned while the test process is
+    not, and git's dubious-ownership guard refuses a `-C` command against it
+    once the isolated per-test ``HOME`` fixture stops carrying this host's
+    ``safe.directory`` exception.
+    """
+    import subprocess
+
+    package = root / "src" / "agentic_hil"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_bytes(b"__version__ = '1'\n")
+    contract = root / "evals" / "install" / "tools.list.expected"
+    contract.parent.mkdir(parents=True)
+    contract.write_text("one_tool\ntwo_tools\n", encoding="utf-8")
+    # The same pin this repository carries, so an archive of the tag hashes the
+    # same as the working tree beside it regardless of core.autocrlf.
+    (root / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    for command in (
+        ["init"],
+        ["add", "-A"],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "release"],
+        ["tag", f"v{version}"],
+    ):
+        assert subprocess.run(["git", "-C", str(root), *command], capture_output=True).returncode == 0
+
+
+def test_published_target_gets_a_real_digest_when_the_release_tag_is_present(tmp_path: Path) -> None:
+    """Review finding: published mode used to hand the verifier a check nothing
+    could ever satisfy, because the digest it was told to match was always
+    None. When this clone carries the release tag, the payload must carry the
+    same trusted reference `validate_source_matches_release` already trusts
+    for local mode -- not None.
+    """
+    from evals.install.runner import committed_package_digest
+
+    _tagged_source_tree(tmp_path, "0.4.0")
+    matrix = load_matrix(REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json")
+    published = dataclasses.replace(
+        matrix,
+        target=dataclasses.replace(matrix.target, mode="published", expected_version="0.4.0"),
+    )
+
+    payload = job_payload(published, published.cases[0], published.jobs[0], None, tmp_path)
+
+    assert payload["target"]["expected_package_digest"] is not None
+    assert payload["target"]["expected_package_digest"] == committed_package_digest(tmp_path, "v0.4.0")
+
+
+def test_published_target_without_the_release_tag_gets_no_digest_reference(tmp_path: Path) -> None:
+    """The honest fallback: a clone that cannot answer for the release still
+    names no reference, rather than one that would just never match."""
+    _tagged_source_tree(tmp_path, "0.4.0")
+    matrix = load_matrix(REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json")
+    published = dataclasses.replace(
+        matrix,
+        target=dataclasses.replace(matrix.target, mode="published", expected_version="999.999.999"),
+    )
+
+    payload = job_payload(published, published.cases[0], published.jobs[0], None, tmp_path)
+
+    assert payload["target"]["expected_package_digest"] is None
+
+
 def test_job_binds_mcp_contract_from_target_source() -> None:
     matrix = load_matrix(REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json")
     names = expected_mcp_tools(REPOSITORY_ROOT)
