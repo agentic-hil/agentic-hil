@@ -218,7 +218,7 @@ class CleanupUnconfirmed(AgentError):
     Distinct from AgentTimeout on purpose, and more serious. A timeout leaves an
     unfinished but *quiescent* tree, which `salvage_commit` can commit. This says
     the shells and test processes the agent spawned may still be running and
-    writing to the working tree — so nothing may `git add` it, and the run has to
+    writing to the working tree -- so nothing may `git add` it, and the run has to
     stop with the tree untouched rather than capture a half-written one as a
     round's work. It ends the loop where salvage would have raced the survivors.
     """
@@ -526,61 +526,126 @@ def _track_in_job_object(process: subprocess.Popen[str]) -> int:
     False or raises is not swallowed -- the process is still suspended, so it
     can have no descendants of its own yet, and is killed through the job it
     was just assigned to before this raises.
+
+    Everything acquired here is released by the one `finally` below, and only
+    the successful return hands the job over to `run_agent`. Review round 5
+    finding 1: the release used to be written as an `except Exception` per
+    step, so an exception that is not an `Exception` -- and the loop's is the
+    KeyboardInterrupt of an operator stopping an unattended run -- walked out
+    between assignment and return with the job neither terminated nor closed.
+    Worse than a leaked handle: `_resume_process_threads` can have already
+    resumed the agent by then, so the job left behind may hold a running
+    process rather than a suspended one. A `finally` runs for those too, so the
+    interrupt now gets the same release every other non-return path gets and
+    then carries on propagating -- unless the release itself cannot confirm the
+    tree gone, in which case CleanupUnconfirmed replaces it, because a
+    descendant that may still be writing to the working tree outranks the
+    reason this frame was leaving.
+
+    What no arrangement removes is the instant between a kernel call succeeding
+    and Python recording that it did -- the interpreter can raise the pending
+    interrupt at any bytecode boundary, including between `AssignProcessToJobObject`
+    returning and `job` being bound, or between the return below and
+    `run_agent` storing it. Those are bounded rather than closed, and by the
+    job's own KILL_ON_JOB_CLOSE: the loop process holds the only handle, so a
+    job it drops there dies with it, and an interrupt landing there is ending
+    the run anyway.
     """
     job: int | None = None
     created: int | None = None
     setup_error: Exception | None = None
+    handed_over = False
     try:
-        created = _create_job_object()
-        if created is not None and _assign_process_to_job(created, process._handle):  # noqa: SLF001 -- see _resume_process_threads
-            job = created
-    except Exception as error:
-        setup_error = error
-    finally:
-        if job is None and created is not None:
-            _close_handle(created)
+        try:
+            created = _create_job_object()
+            if created is not None and _assign_process_to_job(created, process._handle):  # noqa: SLF001 -- see _resume_process_threads
+                job, created = created, None
+        except Exception as error:
+            setup_error = error
 
-    if job is None:
-        # Creation failed, assignment failed, or a Win32 call raised: there is
-        # no kernel-tracked membership for this tree and there never will be
-        # one, because a process can only be assigned to a job it is not yet
-        # running ahead of. Kill it here rather than resume it. It is still
-        # suspended, so this is the whole tree -- one process that has executed
-        # no instruction -- and its death is confirmable, which is exactly what
-        # nothing later in the round would be able to say about it. A kill that
-        # errors is not raised over the answer below: it is the answer, and
-        # `poll()` gives it as the CleanupUnconfirmed a failed kill deserves
-        # rather than as an OSError nothing in the loop is looking for.
-        with contextlib.suppress(OSError, ValueError):
-            process.kill()
-        _reap_leader(process, grace_s=5.0)
-        if process.poll() is None:
-            raise CleanupUnconfirmed(
-                f"pid {process.pid} could not be placed under a Windows Job Object and then could not be "
-                "confirmed killed while it was still suspended"
+        if job is None:
+            # Creation failed, assignment failed, or a Win32 call raised: there
+            # is no kernel-tracked membership for this tree and there never will
+            # be one, because a process can only be assigned to a job it is not
+            # yet running ahead of. So the launch is failed rather than resumed,
+            # and the still-suspended root is killed on the way out by the
+            # release below -- while it has executed no instruction and its
+            # death is therefore still confirmable, which is exactly what
+            # nothing later in the round would be able to say about it. That
+            # release is also what turns a kill it cannot confirm into the
+            # CleanupUnconfirmed such a kill deserves, replacing this error.
+            raise AgentError(
+                f"pid {process.pid} could not be placed under a Windows Job Object, so nothing could ever confirm "
+                "its process tree gone; it was killed while still suspended rather than run untracked. Run the "
+                "loop through tools/loop_in_container.py, or from a host where this process is not already "
+                "confined to a job object that forbids nesting."
             ) from setup_error
-        raise AgentError(
-            f"pid {process.pid} could not be placed under a Windows Job Object, so nothing could ever confirm "
-            "its process tree gone; it was killed while still suspended rather than run untracked. Run the "
-            "loop through tools/loop_in_container.py, or from a host where this process is not already "
-            "confined to a job object that forbids nesting."
-        ) from setup_error
 
-    try:
-        resumed = _resume_process_threads(process.pid)
-        resume_error: Exception | None = None
-    except Exception as error:
-        resumed = False
-        resume_error = error
+        try:
+            resumed = _resume_process_threads(process.pid)
+            resume_error: Exception | None = None
+        except Exception as error:
+            resumed = False
+            resume_error = error
+        if not resumed:
+            raise AgentError(f"pid {process.pid} could not be resumed to start running") from resume_error
 
-    if resumed:
+        # The one path that does not release: ownership of the job moves to
+        # `run_agent`, whose own `finally` has held it ever since round 4
+        # finding 2.
+        handed_over = True
         return job
-
-    try:
-        _confirm_job_empty(job, process, grace_s=5.0)
     finally:
-        _close_handle(job)
-    raise AgentError(f"pid {process.pid} could not be resumed to start running") from resume_error
+        if not handed_over:
+            _release_untransferred(process, job=job, created=created)
+
+
+def _release_untransferred(process: subprocess.Popen[str], *, job: int | None, created: int | None) -> None:
+    """Give up whatever `_track_in_job_object` acquired on a path that is not
+    handing the job to `run_agent`, and confirm the agent's tree gone with it.
+
+    Three states reach this, and each has its own authoritative answer:
+
+    * The process is a member of `job`. Terminate the job, wait for the
+      kernel's own member count to read zero, collect the root, and close the
+      handle exactly once. This is the only state in which the agent can have
+      run at all, so it is the only one where descendants are possible, and the
+      job is what makes their absence knowable.
+    * A job was created but the process was never assigned to it (`created`).
+      Nothing is a member, so there is nothing to confirm; close the orphaned
+      handle rather than leak it, and answer for the root below.
+    * No job at all. Kill the still-suspended root directly: it has executed no
+      instruction, so it is the whole tree, and `poll()` is the confirmation. A
+      kill that errors is not raised over that answer -- it is that answer, and
+      `poll()` reports it as a CleanupUnconfirmed the loop is looking for
+      rather than as an OSError nothing in it is.
+
+    Raises CleanupUnconfirmed when the root outlives its own kill, and lets
+    `_confirm_job_empty`'s through. Called from a `finally`, that replaces
+    whatever was already propagating, which is the intended precedence: only
+    that type stops the caller from committing the tree underneath a survivor.
+    """
+    if job is not None:
+        try:
+            _confirm_job_empty(job, process, grace_s=5.0)
+            # The job says nothing is running; collect the agent's own exit so
+            # this does not walk away from an unreaped child, exactly as
+            # `run_agent`'s normal-exit cleanup does after the same call.
+            _reap_leader(process, grace_s=5.0)
+        finally:
+            _close_handle(job)
+        return
+
+    if created is not None:
+        _close_handle(created)
+    with contextlib.suppress(OSError, ValueError):
+        process.kill()
+    _reap_leader(process, grace_s=5.0)
+    if process.poll() is None:
+        raise CleanupUnconfirmed(
+            f"pid {process.pid} could not be placed under a Windows Job Object and then could not be "
+            "confirmed killed while it was still suspended"
+        )
 
 
 def _taskkill_tree(pid: int) -> subprocess.CompletedProcess[str]:
