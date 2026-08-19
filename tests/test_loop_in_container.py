@@ -2333,17 +2333,26 @@ def test_run_agent_never_runs_an_agent_it_could_not_place_under_a_job(
     assert not isinstance(excinfo.value, agent_review_loop.CleanupUnconfirmed)
 
 
-def _exploding_reader_thread(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+def _exploding_reader_thread(monkeypatch: pytest.MonkeyPatch, error: Exception, *, not_before: Path | None = None) -> None:
     """Fail `run_agent` between `_track_in_job_object` and its stdin/wait
     handling, where review round 4 finding 2 showed the job handle escaping
     every close path. Only the module's own `threading` reference is replaced,
-    never the real `threading.Thread`, which the test session itself needs."""
+    never the real `threading.Thread`, which the test session itself needs.
+
+    A thread that cannot be created is tied to no particular moment in the round,
+    so `not_before` is how a test chooses which moment it is reproducing: the
+    failure is held until the agent has written that file. Without it the agent
+    is usually still in its first instructions when the failure lands, which is
+    the one shape where there is nothing yet for the release to answer for."""
 
     class _ExplodingThread:
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
         def start(self) -> None:
+            deadline = time.monotonic() + 30
+            while not_before is not None and not not_before.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
             raise error
 
         def join(self, timeout: float | None = None) -> None:
@@ -2441,6 +2450,156 @@ def test_run_agent_reports_a_job_it_could_not_empty_over_the_failure_that_reache
     assert isinstance(excinfo.value.__context__, RuntimeError)
     assert job_calls["close"] == [42]
     assert started and all(process.poll() is not None for process in started)
+
+
+def _agent_with_a_descendant(tmp_path: Path) -> Path:
+    """An agent that starts one long-lived process in its own group, records both
+    pids, and then blocks for the rest of the round.
+
+    The descendant is the shell-with-a-test-runner the group kill exists to
+    reach: it is left in the agent's own process group (no `start_new_session`),
+    so signalling only the leader would leave it running and writing. The final
+    `sys.stdin.read()` is what keeps the agent there to be killed. It never
+    returns in these tests, because the failure they inject lands before
+    `run_agent` writes the prompt, and it is also why the agent never exits into
+    the EPIPE race an agent that stops reading hands the loop."""
+    script = tmp_path / "agent_with_a_descendant.py"
+    script.write_text(
+        "import os, pathlib, subprocess, sys\n"
+        "devnull = open(os.devnull, 'w')\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(120)'],\n"
+        "    stdout=devnull, stderr=devnull,\n"
+        ")\n"
+        "pathlib.Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+        "pathlib.Path('agent.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
+        "sys.stdin.read()\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process group is the POSIX half; Windows answers through a job")
+def test_run_agent_kills_a_posix_agent_that_a_failure_after_the_launch_left_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 4 finding 2 on the platform the loop actually runs on.
+
+    The Windows half of that finding was closed by giving `run_agent` one owner
+    for the job. On POSIX there is no job, and the same `finally` had nothing to
+    release, so the identical failure -- `reader.start()` raising, before a single
+    byte of the prompt has been written -- walked out with the agent and
+    everything it had already started still running. Nothing downstream picks
+    that up either: `main` catches what it recognises and goes on to remove the
+    reviewer checkout, sweep the scratch root and write the summary while the
+    agent edits the tree it is tidying. The release now signals the group the
+    agent leads, so the failure still reaches the caller and leaves nothing
+    behind it."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    agent = _agent_with_a_descendant(tmp_path)
+    _exploding_reader_thread(monkeypatch, RuntimeError("can't start new thread"), not_before=workdir / "agent.pid")
+
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        agent_review_loop.run_agent(
+            [sys.executable, str(agent)],
+            "prompt",
+            workdir,
+            "[claude r1]",
+            tmp_path / "log.txt",
+            timeout=30,
+            dry_run=False,
+            heartbeat=0,
+        )
+
+    agent_pid = int((workdir / "agent.pid").read_text())
+    child_pid = int((workdir / "child.pid").read_text())
+    assert not _pid_alive(agent_pid), "the agent survived the failure that ended its round"
+    assert not _pid_alive(child_pid), "a descendant survived the failure that ended its round"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process group is the POSIX half; Windows answers through a job")
+def test_run_agent_reports_a_posix_group_that_will_not_clear_over_the_failure_that_reached_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same injected failure, but the group will not read empty.
+
+    The precedence is the one the job path already applies, and it matters for
+    the same reason: a member that may still be writing to the tree outranks
+    whatever failed above it, and CleanupUnconfirmed is the only type that stops
+    `implement_round` from salvaging underneath it. The failure it replaced is
+    still attached as its context, so the transcript keeps saying what actually
+    went wrong.
+
+    Only the liveness answer is forced: both signals really are delivered to the
+    agent's group, which is what the recorded pair asserts. Whether the processes
+    have been collected yet is not asserted, because a member that has just been
+    killed is briefly a zombie and `kill(pid, 0)` cannot tell that from a live
+    one -- the waiting that normally settles it is exactly what this test has
+    taken away."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    agent = _agent_with_a_descendant(tmp_path)
+    _exploding_reader_thread(monkeypatch, RuntimeError("can't start new thread"), not_before=workdir / "agent.pid")
+    monkeypatch.setattr(agent_review_loop, "_group_gone", lambda pgid, *, deadline: False)
+    signalled: list[int] = []
+    delivering = agent_review_loop._signal_group
+    monkeypatch.setattr(
+        agent_review_loop, "_signal_group", lambda pgid, sig: signalled.append(sig) or delivering(pgid, sig)
+    )
+
+    with pytest.raises(agent_review_loop.CleanupUnconfirmed) as excinfo:
+        agent_review_loop.run_agent(
+            [sys.executable, str(agent)],
+            "prompt",
+            workdir,
+            "[claude r1]",
+            tmp_path / "log.txt",
+            timeout=30,
+            dry_run=False,
+            heartbeat=0,
+        )
+
+    assert isinstance(excinfo.value.__context__, RuntimeError)
+    assert "still had a member after SIGKILL" in str(excinfo.value)
+    assert signalled == [agent_review_loop.signal.SIGTERM, agent_review_loop.signal.SIGKILL]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process group is the POSIX half; Windows answers through a job")
+def test_run_agent_does_not_signal_the_group_of_a_posix_agent_that_exited_on_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one POSIX state the release deliberately says nothing about.
+
+    A process group's id is its leader's pid, and the kernel reserves it only
+    while the group still has a member. An agent that exited on its own has been
+    reaped by `process.wait()` before the release runs, so if its group is empty
+    that number is already free for somebody else's group and `killpg` on it
+    would signal strangers -- which is worse than the survivor it was aimed at,
+    and would be aimed at nothing in the overwhelmingly common case where the
+    agent left nothing behind. So the release asks `poll()` first and signals
+    only an agent still there to answer for. What that leaves open is the POSIX
+    half of review round 4 finding 1, which needs an identity for the tree rather
+    than a number for it, the way the Windows job handle is one."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    agent = tmp_path / "agent.py"
+    agent.write_text("import sys\nsys.stdin.read()\nsys.stdout.write('done\\n')\n", encoding="utf-8")
+    killed: list[int] = []
+    monkeypatch.setattr(agent_review_loop, "_terminate_tree", lambda process, **kwargs: killed.append(process.pid))
+
+    agent_review_loop.run_agent(
+        [sys.executable, str(agent)],
+        "prompt",
+        workdir,
+        "[claude r1]",
+        tmp_path / "log.txt",
+        timeout=30,
+        dry_run=False,
+        heartbeat=0,
+    )
+
+    assert killed == []
 
 
 def test_run_agent_leaves_no_live_agent_when_the_launch_is_interrupted(

@@ -492,8 +492,8 @@ def _resume_process_threads(pid: int) -> bool:
 @dataclass
 class _AgentJob:
     """One agent launch and everything acquired for it that something has to
-    answer for: the process itself, the Windows Job Object tracking it, and
-    whether it has ever been allowed to run.
+    answer for: the process itself, the Windows Job Object tracking it, whether
+    it has ever been allowed to run, and on POSIX the process group it leads.
 
     Review round 6 finding 1: ownership of the job used to move on
     `_track_in_job_object`'s return. That call released everything it had
@@ -526,16 +526,24 @@ class _AgentJob:
     * `suspended` -- `process` has never been resumed, so it has executed no
       instruction, is the entirety of its own tree, and releasing it means
       killing it directly. False on POSIX, where nothing is launched suspended.
+    * `group_leader` -- `process` leads a process group of its own
+      (`start_new_session` on the `Popen`), so every shell and test runner it
+      starts shares its pgid, and releasing it means signalling that group. True
+      on POSIX and False on Windows, where a job rather than a group is what a
+      tree is answered for through.
 
     `member` and `suspended` never both act. A member is answered for through its
     job whether or not the resume that follows assignment ever ran, and a Windows
-    non-member has provably never been resumed.
+    non-member has provably never been resumed. `group_leader` acts alongside
+    neither: both of those are set only on the Windows tracking path, and no job
+    is ever created on POSIX.
     """
 
     process: subprocess.Popen[str] | None = None
     handle: int | None = None
     member: bool = False
     suspended: bool = False
+    group_leader: bool = False
 
 
 def _track_in_job_object(agent_job: _AgentJob) -> None:
@@ -649,16 +657,20 @@ def _release_job(agent_job: _AgentJob) -> None:
     The one release for one owner: `run_agent` calls this from the `finally` it
     entered before the agent existed, so it runs for a successful round, an
     ordinary nonzero exit, a timeout, a failure inside the tracking call, and an
-    operator's Ctrl-C landing anywhere in between. Four states reach it, and each
+    operator's Ctrl-C landing anywhere in between. Five states reach it, and each
     has its own authoritative answer:
 
     * No process. `Popen` itself raised, so nothing was launched and nothing is
       owed.
+    * The process leads its own group and has not been reaped. POSIX, where no
+      job can be had at all: signal the group, reap the leader and wait the group
+      out through `_terminate_tree`, so a failure that got past the stdin and
+      wait handling does not walk out leaving the agent running.
     * The process is a member of `handle`. Terminate the job, wait for the
       kernel's own member count to read zero, collect the root, and close the
-      handle exactly once. This is the only state in which the agent can have run
-      at all, so it is the only one where descendants are possible, and the job
-      is what makes their absence knowable.
+      handle exactly once. This is the only Windows state in which the agent can
+      have run at all, so it is the only one where descendants are possible, and
+      the job is what makes their absence knowable.
     * A job was created but the process was never assigned to it. Nothing is a
       member, so there is nothing to confirm; close the orphaned handle rather
       than leak it, and answer for the root below.
@@ -669,20 +681,57 @@ def _release_job(agent_job: _AgentJob) -> None:
       CleanupUnconfirmed the loop is looking for rather than as an OSError
       nothing in it is.
 
-    Clearing the record first makes this idempotent: a second call has nothing
-    left to close and nothing left to kill. On POSIX `suspended` is False and no
-    handle is ever recorded, so this is the no-op the platform wants -- the
-    process group, not a job, is what `_terminate_tree` answers for there.
+    On POSIX this was a no-op until now, so review round 4 finding 2 stayed live
+    there for the whole time it was closed on Windows: an exception between the
+    launch and the stdin and wait handling -- `reader.start()` raising, an
+    unexpected `process.wait()` failure, a heartbeat `print` onto a broken
+    stdout, a `reader.join()` that will not -- walked out of `run_agent` past a
+    `finally` that had nothing to do, and `main` then went on through checkout
+    cleanup, scratch removal and summary writing with the agent still editing the
+    tree it was tidying. The group is signalled for exactly that, and only while
+    `process.poll()` is None, because that is the whole of the case: an agent
+    still there to answer for.
 
-    Raises CleanupUnconfirmed when the root outlives its own kill, and lets
-    `_confirm_job_empty`'s through. Called from a `finally`, that replaces
-    whatever was already propagating, which is the intended precedence: only that
-    type stops the caller from committing the tree underneath a survivor.
+    That guard is also what keeps the signal from straying. A process group's id
+    is its leader's pid, and the kernel reserves it only while the group still
+    has a member; once the leader has both exited and been reaped, the id is free
+    for somebody else's group and `killpg` on it would signal strangers.
+    `poll()` returning None says this process has not reaped the leader, and
+    nothing else can, so the reservation holds. A leader that exits in the
+    instant between that answer and the signal becomes a zombie, which is still a
+    member, so it holds the reservation too.
+
+    What that leaves open is the POSIX half of review round 4 finding 1, and it
+    is left open rather than half-answered: an agent that exited on its own may
+    have detached a descendant, and by the time anything here can ask, the leader
+    is reaped and the group has no reuse-proof name left to signal. Windows
+    answers that with a job handle, which is an identity rather than a number.
+    POSIX needs its own equivalent -- a cgroup, or a pidfd taken before the wait
+    -- rather than a harder look at a pgid, and that is a design rather than a
+    fix. The two paths that call `_terminate_tree` themselves reach this with the
+    leader already reaped, so it adds nothing there; a `_terminate_tree` that
+    could not even deliver a signal leaves the leader alive and gets the same
+    refusal a second time, which is the same answer twice rather than a new one.
+
+    Clearing the record first makes this idempotent: a second call has nothing
+    left to close, nothing left to kill and no group left to signal.
+
+    Raises CleanupUnconfirmed when the root outlives its own kill or a POSIX
+    group will not clear, and lets `_confirm_job_empty`'s through. Called from a
+    `finally`, that replaces whatever was already propagating, which is the
+    intended precedence: only that type stops the caller from committing the tree
+    underneath a survivor.
     """
     process, handle = agent_job.process, agent_job.handle
     member, suspended = agent_job.member, agent_job.suspended
-    agent_job.handle, agent_job.member, agent_job.suspended = None, False, False
+    leader = agent_job.group_leader
+    agent_job.handle, agent_job.member, agent_job.suspended, agent_job.group_leader = None, False, False, False
     if process is None:
+        return
+
+    if leader:
+        if process.poll() is None:
+            _terminate_tree(process, grace_s=5.0)
         return
 
     if handle is not None:
@@ -748,7 +797,10 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job
     still writing to the working tree. Killing only the agent leaves them running,
     and `salvage_commit` runs the moment this returns: a descendant that outlives
     this call races that commit, so it has to be gone, not merely signalled,
-    before this returns.
+    before this returns. The timeout is where this is reached from most often but
+    not the only place: `_release_job` calls it for a POSIX agent an exception
+    left running, which is the same tree in the same danger, reached through a
+    failure rather than through a deadline.
 
     On Windows, `job` -- the Job Object `run_agent` assigned this process to
     while it was still suspended, via `_track_in_job_object` -- is terminated as
@@ -949,7 +1001,14 @@ def run_agent(
         # record holds the process and the job from the moment each exists, the
         # helpers below write into it, and `_release_job` in the `finally` is the
         # only thing that terminates, confirms, closes or kills.
-        agent_job = _AgentJob(suspended=sys.platform == "win32")
+        #
+        # Which of the two lifetime states the launch below will be in is decided
+        # by the platform rather than by anything that can fail, so both are set
+        # here: on Windows the process is launched suspended and answered for
+        # through a job, on POSIX it leads a process group and is answered for
+        # through that. Neither says a launch happened -- `_release_job` reads
+        # `process` for that -- only which question to ask if one did.
+        agent_job = _AgentJob(suspended=sys.platform == "win32", group_leader=sys.platform != "win32")
         try:
             # The record's attribute is bound before the local -- Python assigns
             # chained targets left to right -- so an exception raised between the
@@ -1016,7 +1075,10 @@ def run_agent(
             # every exception, interrupt included, that got past any of them.
             # They all need the same thing and all get it here: terminate the
             # job, wait for the kernel's own member count to read zero, and close
-            # the handle exactly once. Confirming rather than closing and
+            # the handle exactly once. On POSIX, where there is no job to hold
+            # any of that, the same call answers for the process group instead,
+            # so an exception on its way past this frame no longer leaves the
+            # agent running. Confirming rather than closing and
             # trusting KILL_ON_JOB_CLOSE is deliberate: that kill is
             # asynchronous, the same reason `_terminate_tree` does not close and
             # trust it either. A CleanupUnconfirmed raised here does replace an
