@@ -65,7 +65,9 @@ from agentic_hil.cli import (
 )
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import (
+    CONFIG_ENV,
     ConfigError,
+    authoritative_config_target,
     load_config,
     project_config_directory,
     project_config_path,
@@ -3178,6 +3180,114 @@ def test_a_project_configuration_that_will_not_read_costs_no_other_project_its_r
     assert abandoned in _deny_rules(settings)
 
 
+def _external_project_record() -> Path:
+    """Where the record of projects the projects directory does not hold goes.
+
+    Spelled out here rather than imported, because it is a file on an operator's
+    disk: a release that moved it quietly would leave every project an earlier
+    release recorded unfindable, and unfindable is the whole of #246.
+    """
+    return project_config_directory().parent / "external-projects.json"
+
+
+def test_a_second_projects_refresh_keeps_the_rule_for_a_project_the_override_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#246: a project the projects directory does not hold still wants its rule.
+
+    `AGENTIC_HIL_CONFIG` binds the first bench to a configuration the walk over
+    that directory never comes across, while its `state_root` sits inside the
+    root this tool creates for itself, where the namespace claim does recognise
+    the rule. The second bench keeps its configuration where the walk finds it
+    and moved its own state root elsewhere, so nothing the second run could see
+    named the first bench's tree: it read a live protection as a leftover, took
+    it off a bench that was in use, and the first bench's next `init --agent`
+    wrote it again.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    namespace = _tool_state_namespace()
+    # The path the override actually produces, rather than one that looks like it.
+    monkeypatch.setenv(CONFIG_ENV, str(tmp_path / "benches" / "alpha" / "config.yaml"))
+    bound = authoritative_config_target(workspace)
+    assert bound == tmp_path / "benches" / "alpha" / "config.yaml"
+    bound.parent.mkdir(parents=True)
+    bound.write_text(f"state_root: {(namespace / 'alpha-state').as_posix()!r}\n", encoding="utf-8")
+    discovered = project_config_directory() / "beta-0123456789" / "config.yaml"
+    discovered.parent.mkdir(parents=True)
+    discovered.write_text(f"state_root: {(namespace / 'beta-state').as_posix()!r}\n", encoding="utf-8")
+    settings = _claude_settings(home, ["Bash(curl *)"])
+    assert restrict_agent_write_access("claude-code", bound, namespace / "alpha-state")["ok"] is True
+    standing = _deny_rules(settings)
+
+    # The second bench is set up in a shell that never heard of the override.
+    monkeypatch.delenv(CONFIG_ENV)
+    refresh = restrict_agent_write_access("claude-code", discovered, namespace / "beta-state")
+
+    assert refresh["ok"] is True
+    assert refresh["removed"] == []
+    assert _deny_rules(settings)[: len(standing)] == standing
+    # Only the project the walk cannot find is written down, and once.
+    assert json.loads(_external_project_record().read_text(encoding="utf-8")) == {"configurations": [str(bound)]}
+
+
+def test_a_recorded_project_configuration_that_will_not_read_takes_nothing_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absent is not abandoned, wherever the configuration lives.
+
+    A configuration `AGENTIC_HIL_CONFIG` binds can be on a volume that is not
+    mounted this morning, and from here that is the same absence as a bench the
+    operator decommissioned. Only one of the two has stopped wanting its rule, so
+    the answer stays incomplete and nothing is taken back at all, which is what
+    an unreadable configuration in the projects directory already costs.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    namespace = _tool_state_namespace()
+    record = _external_project_record()
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"configurations": [str(tmp_path / "not-mounted" / "config.yaml")]}) + "\n", encoding="utf-8")
+    abandoned = f"Edit(/{_posix_filesystem_path(namespace / 'state-of-a-bench-that-is-gone')}/**)"
+    settings = _claude_settings(home, [abandoned])
+
+    restriction = restrict_agent_write_access("claude-code", project_config_directory() / "gamma-0123456789" / "config.yaml", namespace / "state")
+
+    assert restriction["ok"] is True
+    assert restriction["removed"] == []
+    assert abandoned in _deny_rules(settings)
+
+
+def test_the_write_restriction_refuses_a_rule_it_could_not_account_for_later(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rule nothing can attribute afterwards is worse than no rule.
+
+    The record is what keeps the next project's setup from reading this bench's
+    tree as one nobody names, so with a record that will not read there is
+    nothing to write the rule against, and the refusal is the answer. The record
+    is left exactly as it is, because replacing it would throw away whichever
+    projects it does name, and the settings file is not opened for writing at all.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    record = _external_project_record()
+    record.parent.mkdir(parents=True, exist_ok=True)
+    theirs = "[not the record this tool writes]\n"
+    record.write_text(theirs, encoding="utf-8")
+    settings = _claude_settings(home, ["Bash(curl *)"])
+
+    restriction = restrict_agent_write_access("claude-code", tmp_path / "benches" / "alpha" / "config.yaml", tmp_path / "state")
+
+    assert restriction["ok"] is False
+    assert restriction["error_type"] == "agent_project_record_unreadable"
+    assert _deny_rules(settings) == ["Bash(curl *)"]
+    assert record.read_text(encoding="utf-8") == theirs
+
+
 def test_the_deny_rule_cleanup_settles_after_one_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3193,6 +3303,9 @@ def test_the_deny_rule_cleanup_settles_after_one_run(
 
     assert (second["added"], second["removed"]) == ([], [])
     assert settings.read_text(encoding="utf-8") == migrated
+    # The record of the projects the projects directory does not hold settles
+    # with them: this configuration is named once, not once per run.
+    assert json.loads(_external_project_record().read_text(encoding="utf-8")) == {"configurations": [str(config_path)]}
 
 
 def _uninstall_paths(result: dict, key: str) -> list[str]:
@@ -3531,6 +3644,37 @@ def test_uninstall_leaves_a_write_refusal_it_cannot_attribute(
     assert result["ok"] is True, result
     assert _deny_rules(settings) == [unattributable]
     assert len(result["removed"]) == 1
+
+
+def test_uninstall_takes_back_the_rule_for_a_project_the_override_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of #246: what could not be attributed was left standing.
+
+    A configuration directory outside this tool's per-user roots is never claimed
+    by the namespace, so the only thing that recognises a rule for one is the
+    exact text a configuration still on disk derives it from. The projects
+    directory does not hold this project's, and the record is what says where it
+    is. The record goes with the rules it explains, since after this there is no
+    rule of this tool's left for any refresh to weigh, and a file this
+    installation wrote is exactly what this command exists to take back.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    namespace = _tool_state_namespace()
+    bound = tmp_path / "benches" / "alpha" / "config.yaml"
+    bound.parent.mkdir(parents=True)
+    bound.write_text(f"state_root: {(namespace / 'alpha-state').as_posix()!r}\n", encoding="utf-8")
+    settings = _claude_settings(home, ["Bash(curl *)"])
+    assert restrict_agent_write_access("claude-code", bound, namespace / "alpha-state")["ok"] is True
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert _deny_rules(settings) == ["Bash(curl *)"]
+    assert [item["what"] for item in result["removed"]] == ["write refusal", "write refusal", "project record"]
+    assert not _external_project_record().exists()
 
 
 def test_uninstall_keeps_the_configuration_and_the_state_root_and_names_both(

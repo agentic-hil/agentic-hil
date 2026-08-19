@@ -1406,11 +1406,33 @@ def _remove_agent_deny_rules(agent: SkillAgent) -> JsonObject:
     if agent.id != "claude-code":
         return _uninstall_step(f"{_OPENCODE_UNRESTRICTED} Nothing was written there, so nothing is taken back.", mode="operator-managed", path=str(path))
     if not _path_entry_exists(path):
-        return _uninstall_step(f"{agent.display_name} has no settings file, so there are no write refusals to take back.", path=str(path))
-    with secure_user_file_lock(path):
-        result = _remove_claude_code_deny_rules(agent, path)
-    _release_lock_sidecar(path)
-    return result
+        result = _uninstall_step(f"{agent.display_name} has no settings file, so there are no write refusals to take back.", path=str(path))
+    else:
+        with secure_user_file_lock(path):
+            result = _remove_claude_code_deny_rules(agent, path)
+        _release_lock_sidecar(path)
+    return _with_external_project_record_taken_back(result)
+
+
+def _with_external_project_record_taken_back(result: JsonObject) -> JsonObject:
+    """Take back the record of externally bound projects with the rules it explains.
+
+    It exists so that a refresh can tell a project bound by `AGENTIC_HIL_CONFIG`
+    from a bench that is gone, and after this step there is no rule of this
+    tool's left in that settings file for any refresh to weigh. Leaving it would
+    leave a file this installation wrote standing in a directory of its own,
+    which is the leftover this command exists to take back, and the projects it
+    names are untouched: the record says where a configuration is, never what it
+    grants.
+
+    A step that refused and left the settings file alone keeps the record, since
+    the rules it explains are still standing.
+    """
+    path = _external_project_record_path()
+    if not result["ok"] or not _path_entry_exists(path):
+        return result
+    secure_remove_file(path)
+    return {**result, "removed": [*result["removed"], _removed_entry("project record", path)]}
 
 
 def _remove_claude_code_deny_rules(agent: SkillAgent, path: Path) -> JsonObject:
@@ -1449,13 +1471,24 @@ def _project_written_deny_rules() -> set[str]:
     the same argument `_superseded_claude_code_deny_rules` makes, over the same
     strings, and never over a shape.
 
+    A project bound by `AGENTIC_HIL_CONFIG` is reached through the record
+    `init --agent` leaves for it, and nothing else here could reach it: its
+    configuration directory is outside this tool's per-user roots, so the
+    namespace claim never claims it, and the walk over the projects directory
+    never comes across it either. Before that record existed, the rule for such a
+    project's own configuration directory was the one leftover this command could
+    not take back (#246).
+
     A configuration that cannot be read contributes nothing rather than stopping
-    the removal. `_protected_trees_still_wanted` answers `None` there because an
+    the removal, and a record that cannot be read costs the same nothing.
+    `_protected_trees_still_wanted` answers `None` on either because an
     incomplete answer could take protection off a bench that still wants it; the
     incompleteness costs the opposite here, which is one rule left standing.
     """
     rules: set[str] = set()
-    for config_path, state_root in _visible_project_configurations():
+    configurations = _visible_project_configurations()
+    configurations += [(path, _configured_state_root(path)) for path in _recorded_external_configurations() or []]
+    for config_path, state_root in configurations:
         if state_root is None:
             continue
         rules |= _superseded_claude_code_deny_rules(config_path, state_root)
@@ -1467,9 +1500,9 @@ def _visible_project_configurations() -> list[tuple[Path, Path | None]]:
     """Every project configuration under the config root, with the state root it names.
 
     `None` for one that cannot be read. A configuration bound by
-    `AGENTIC_HIL_CONFIG` is invisible here and nothing on disk records where it
-    is, which is the same blind spot `_protected_trees_still_wanted` has and for
-    the same reason.
+    `AGENTIC_HIL_CONFIG` lives wherever the operator put it and this walk never
+    comes across it; `_recorded_external_configurations` is what says where those
+    are, and every caller that has to know the whole set reads both.
     """
     found: list[tuple[Path, Path | None]] = []
     directory = project_config_directory()
@@ -2633,13 +2666,26 @@ def _protected_trees_still_wanted(config_path: Path, state_root: Path) -> set[st
     back at all. One unreadable project configuration is not a reason to drop
     another project's rule.
 
-    What it cannot see is a project bound by `AGENTIC_HIL_CONFIG`: that
-    configuration is wherever the operator put it and nothing on disk records
-    where. Its configuration directory is outside these roots and so is never
-    claimed either way, but a `state_root` of its own that does lie inside them
-    is kept only while some visible project names that tree as well. It is the
-    one case where a rule can be taken back from a bench that still wants it, and
-    that project's next `init --agent` writes it again.
+    Which configurations this user has is the projects directory plus
+    `_recorded_external_configurations`, and it takes both. A project bound by
+    `AGENTIC_HIL_CONFIG` keeps its configuration wherever the operator put it, so
+    the walk below never comes across it, and before that record existed a
+    `state_root` of its own inside this tool's roots was read here as a tree
+    nobody names any more: another project's setup took that rule back while the
+    bench still wanted it, and the bench's own next `init --agent` wrote it
+    again (#246).
+
+    A recorded configuration that will not read refuses rather than guesses,
+    exactly as an unreadable one in the projects directory does. From here "the
+    operator decommissioned that bench" and "the volume its configuration lives
+    on is not mounted this morning" are the same absence, and only one of them
+    means the bench has stopped wanting its rule. So the answer stays incomplete,
+    which costs stale rules and no protection; `agentic-hil uninstall` is what
+    takes the record back with the rules it explains.
+
+    This run's own configuration is skipped where the record names it. Its two
+    trees are in the answer from the arguments already, so reading the file again
+    could only make the refresh depend on a read the run does not need.
     """
     wanted = {config_path.parent, state_root}
     directory = project_config_directory()
@@ -2656,7 +2702,133 @@ def _protected_trees_still_wanted(config_path: Path, state_root: Path) -> set[st
             if configured is None:
                 return None
             wanted |= {entry, configured}
+    recorded = _recorded_external_configurations()
+    if recorded is None:
+        return None
+    own = os.path.normcase(str(absolute_without_symlinks(config_path)))
+    for configuration in recorded:
+        if os.path.normcase(str(configuration)) == own:
+            continue
+        configured = _configured_state_root(configuration)
+        if configured is None:
+            return None
+        wanted |= {configuration.parent, configured}
     return {_deny_tree_key(spelling) for tree in wanted for spelling in _deny_pattern_spellings(tree)}
+
+
+# The record of the projects the walk above cannot find, one file per user. It
+# sits beside the projects directory rather than in it, because everything in
+# there is one project's own directory and this is a single record about the
+# projects that directory does not hold.
+EXTERNAL_PROJECT_RECORD_FILENAME = "external-projects.json"
+
+
+def _external_project_record_path() -> Path:
+    return project_config_directory().parent / EXTERNAL_PROJECT_RECORD_FILENAME
+
+
+def _configuration_the_projects_walk_finds(config_path: Path) -> bool:
+    """Whether walking the projects directory comes across this configuration.
+
+    `project_config_path` builds every discovered configuration as
+    `<projects>/<name>-<digest>/config.yaml`, and that shape is exactly what
+    `_visible_project_configurations` looks for, so the question is whether this
+    file has it. `AGENTIC_HIL_CONFIG` may well name a file inside that directory,
+    and one that is there needs no record of its own.
+
+    Answering "yes" wrongly would leave a project unrecorded, which is the defect
+    itself, so a spelling that reaches the same directory some other way answers
+    "no" and costs one entry in the record that the walk also finds.
+    """
+    candidate = absolute_without_symlinks(config_path)
+    if candidate.name != PROJECT_CONFIG_FILENAME:
+        return False
+    return os.path.normcase(str(candidate.parent.parent)) == os.path.normcase(str(project_config_directory()))
+
+
+def _recorded_external_configurations() -> list[Path] | None:
+    """Every configuration rules were written for that the projects walk misses.
+
+    `init --agent` for a project bound by `AGENTIC_HIL_CONFIG` derives its rules
+    from a configuration outside the projects directory, and without this nothing
+    on disk would say that project exists. The entries the walk does find are
+    dropped here, so this answers only what the walk cannot, and a configuration
+    the operator later moved under the projects directory is read from there
+    rather than from a record of where it used to be.
+
+    `None` means the file is there and is not the record this tool writes, and
+    every caller treats that as an answer it could not establish rather than as
+    an empty one. A relative entry is that same case: this writes absolute paths
+    only, and resolving one against whatever directory the process happens to
+    stand in would invent a tree.
+
+    Nothing is trusted out of this file beyond which configurations to go and
+    read, and it lives under the same owner-only config root the project
+    configurations themselves do, so it opens no door that directory did not.
+
+    A plain read rather than `secure_optional_read_text`, which builds the
+    directory chain it reads through. This is asked on profiles whose whole
+    configuration lives somewhere else, and a question about a record must not
+    plant the root it would have lived under.
+    """
+    try:
+        raw = _external_project_record_path().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError):
+        return None
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    entries = document.get("configurations") if isinstance(document, dict) else None
+    if not isinstance(entries, list) or not all(isinstance(entry, str) and Path(entry).is_absolute() for entry in entries):
+        return None
+    found = [absolute_without_symlinks(Path(entry)) for entry in entries]
+    return [path for path in found if not _configuration_the_projects_walk_finds(path)]
+
+
+def _record_external_configuration(config_path: Path) -> JsonObject | None:
+    """Record that rules were written for a configuration the walk cannot find.
+
+    `None` when the record names it afterwards, and a refusal payload when it
+    does not, in which case the caller writes no rule either: a rule this tool
+    can recognise and then reads as nobody's is worse than no rule, and the
+    operator gets the refusal instead of a bench that quietly loses its
+    protection the next time another project is set up.
+
+    An existing record that will not read is left exactly as it is, for the same
+    reason `_load_json_object`'s callers leave a settings file they cannot parse:
+    replacing it would throw away whichever projects it does name.
+
+    Recording is a separate act from writing the rules, and it happens first, so
+    a rule is never written for a project this cannot vouch for. The other order
+    would be a record naming a project whose rules were then refused, which costs
+    nothing at all, since a recorded configuration only ever keeps rules standing.
+    """
+    path = _external_project_record_path()
+    recorded = _recorded_external_configurations()
+    if recorded is None:
+        return {
+            "ok": False,
+            "error_type": "agent_project_record_unreadable",
+            "summary": f"{path} is not the record of Agentic HIL projects it has to be, so this project could not be recorded and no deny rule was written; left untouched.",
+            "path": str(path),
+        }
+    absolute = absolute_without_symlinks(config_path)
+    if any(os.path.normcase(str(entry)) == os.path.normcase(str(absolute)) for entry in recorded):
+        return None
+    document = {"configurations": sorted(str(entry) for entry in [*recorded, absolute])}
+    try:
+        secure_atomic_write_text(path, json.dumps(document, indent=2) + "\n")
+    except (OSError, ConfigError) as error:
+        return {
+            "ok": False,
+            "error_type": "agent_project_record_unwritable",
+            "summary": f"{path} could not be written ({error}), so this project could not be recorded and no deny rule was written.",
+            "path": str(path),
+        }
+    return None
 
 
 def _configured_state_root(config_path: Path) -> Path | None:
@@ -2763,6 +2935,13 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
     `_protected_trees_still_wanted`; between them the operator's own rules are
     never touched, and neither is another project's.
 
+    That second question is answered out of the configurations this user has, so
+    a project whose configuration `AGENTIC_HIL_CONFIG` binds outside the projects
+    directory is written down before its rules are, in
+    `_record_external_configuration`. Nothing else on disk would say that project
+    is there, and a later run that could not see it read its `state_root` as a
+    tree nobody names any more (#246).
+
     Only claude-code gets a rule written. On opencode the operator decides for
     themselves, and nothing is written on their behalf: its permission model
     hands the decision to whoever answers the prompt anyway — one "always" adds a
@@ -2792,6 +2971,10 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
         deny = permissions.setdefault("deny", [])
         if not isinstance(deny, list):
             return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-list deny entry; left untouched.", "path": str(path)}
+        if not _configuration_the_projects_walk_finds(config_path):
+            unrecorded = _record_external_configuration(config_path)
+            if unrecorded is not None:
+                return unrecorded
         superseded = _superseded_claude_code_deny_rules(config_path, state_root)
         wanted = _protected_trees_still_wanted(config_path, state_root)
         # `isinstance` first: the list belongs to another program, and an entry
