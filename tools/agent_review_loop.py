@@ -2674,9 +2674,27 @@ def main(argv: list[str] | None = None) -> int:
                 # earlier round ever saw. Following it first is what keeps the
                 # filter below from reading `git mv` as "committed or taken
                 # back". Applied every round, so a path renamed twice arrives.
-                outstanding_paths = {moved.get(path, path) for path in outstanding_paths}
-                outstanding_paths = {path for path in outstanding_paths if path in present_dirty}
-                if kept_uncommitted:
+                followed = {moved.get(path, path) for path in outstanding_paths}
+                survived = {path for path in followed if path in present_dirty}
+                # An outstanding name that leaves the dirty set is safe to drop
+                # only when its work reached a commit a review read or came back
+                # out of the tree. Porcelain records a rename git has content to
+                # detect -- a staged or committed one, followed above -- but an
+                # untracked file moved on the filesystem leaves none, so its name
+                # vanishes while the work lives on under a name this round did not
+                # start with, among `present_dirty - inherited_dirty`. The commit
+                # diff cannot tell that apart from a committed one: the same
+                # pathname can reach a commit as an unrelated new file while the
+                # moved content sits untracked under its new name, so membership
+                # in the diff is no proof the outstanding object was committed.
+                # Whenever a followed name disappears with no porcelain rename to
+                # explain it, carry the round's new dirt. A round that genuinely
+                # finished the work left a clean tree, so `present_dirty` holds
+                # nothing new to carry; one that moved the work away left it dirty
+                # under its new name, and carrying keeps it from slipping the guard.
+                carry_new = bool(kept_uncommitted) or bool(followed - survived)
+                outstanding_paths = survived
+                if carry_new:
                     outstanding_paths |= present_dirty - inherited_dirty
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")

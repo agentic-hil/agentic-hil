@@ -1712,6 +1712,128 @@ def test_renaming_the_stalled_file_a_round_later_does_not_slip_a_clean_run_past_
     assert "the review never saw" in f"{captured.out}{captured.err}"
 
 
+_WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING = (
+    f"pathlib.Path('fix.py').write_text({FIX!r}, encoding='utf-8')\n"
+    "sys.stdout.write('wrote an untracked fix.py, then never came back to commit it\\n')\n"
+)
+_RENAMES_THE_UNTRACKED_STALLED_FILE_AND_COMMITS_ANOTHER = (
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    # Move the untracked stalled path on the filesystem: git never tracked it, so
+    # there is no rename record to carry the source across. The work is still
+    # there, still uncommitted, under a name round 1 never saw.
+    "pathlib.Path('fix.py').rename('renamed.py')\n"
+    "sys.stdout.write('committed only other.py and moved the untracked stalled file\\n')\n"
+)
+
+
+def test_moving_an_untracked_stalled_file_a_round_later_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A rename git cannot see still must not smuggle the work past the guard.
+
+    Round 1 stalls with an untracked `fix.py` and its review requests changes, so
+    the run goes on. Round 2 commits only an unrelated `other.py`, then moves
+    `fix.py` to `renamed.py` on the filesystem. An untracked file has no source
+    identity in porcelain -- `?? renamed.py` is all the tree reports, with no
+    rename record to follow -- so the name the guard was holding simply vanished
+    from the dirty paths. The round produced a commit, so the declined-stall carry
+    never ran and nothing added `renamed.py` back; round 2's clean verdict on a
+    range that is only the `other.py` commit then ended the run at exit 0 with the
+    work still uncommitted and never reviewed. An outstanding path that vanished
+    with no commit to explain it keeps this round's new dirt outstanding, so the
+    run stops as stalled instead.
+    """
+    repository = _repository(tmp_path)
+    agent = _agent(
+        tmp_path,
+        "stalls_then_moves_untracked",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _RENAMES_THE_UNTRACKED_STALLED_FILE_AND_COMMITS_ANOTHER,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_moves_untracked") == 2
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["other.py"]
+    # The moved work is untracked, uncommitted, and outside every reviewed range.
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_A_DIFFERENT_FIX = "# a different fix.py, unrelated to the stalled one\n"
+_REUSES_THE_MOVED_NAME_FOR_A_DIFFERENT_COMMIT = (
+    # Move the untracked stalled fix.py aside on the filesystem first -- git never
+    # tracked it, so there is no rename record and the work lives on as
+    # `?? renamed.py`, under a name round 1 never saw.
+    "pathlib.Path('fix.py').rename('renamed.py')\n"
+    # Then write a *different* fix.py and commit it. The old source name is reused
+    # by an unrelated file, so `fix.py` reaches this round's commit diff while the
+    # stalled content sits untracked under renamed.py, committed nowhere.
+    f"pathlib.Path('fix.py').write_text({_A_DIFFERENT_FIX!r}, encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: a different fix.py entirely'], check=True)\n"
+    "sys.stdout.write('reused the untracked name for a different committed file\\n')\n"
+)
+
+
+def test_reusing_the_moved_untracked_name_for_a_different_commit_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A commit under the old name is no proof the moved content was committed.
+
+    Round 1 stalls with an untracked `fix.py` and its review requests changes, so
+    the run goes on. Round 2 moves that file to `renamed.py` on the filesystem --
+    untracked, so no rename record to follow -- then writes a *different* `fix.py`
+    and commits it. The old source name now appears in the round's commit diff, so
+    a guard that reads pathname membership there as "the outstanding object was
+    committed" drops `fix.py`, never carries `renamed.py`, and lets round 2's clean
+    verdict end the run at exit 0 with the stalled work still untracked and never
+    reviewed. Pathname membership is no such proof: a followed name that vanished
+    with no porcelain rename keeps this round's new dirt outstanding, so the run
+    stops as stalled with the moved content still in the tree.
+    """
+    repository = _repository(tmp_path)
+    agent = _agent(
+        tmp_path,
+        "stalls_then_reuses_the_name",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _REUSES_THE_MOVED_NAME_FOR_A_DIFFERENT_COMMIT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_reuses_the_name") == 2
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: a different fix.py entirely"
+    # The committed fix.py is the unrelated round 2 file, not the stalled work.
+    assert _in(repository, "show", "HEAD:fix.py") == _A_DIFFERENT_FIX
+    # The stalled work is untracked, uncommitted, and outside every reviewed range.
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
 def test_the_second_attempt_is_told_what_is_in_the_tree_and_keeps_the_first_ones_transcript(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
