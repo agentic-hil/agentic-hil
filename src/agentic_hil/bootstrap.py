@@ -13,6 +13,19 @@ from agentic_hil.types import JsonObject, fold_hardware_id
 
 PROJECT_PROFILE = "agentic-hil.config.example.yaml"
 
+# The whole of what `apply_discovery_to_template` reads off a profile. A key that
+# is not one of these is read past without a word, which is tolerable for a file
+# an operator wrote and not for one this project ships: the demo profile opened
+# with `workspace_root` and `state_root`, both of which look exactly like
+# settings and neither of which is one. Both roots are decided by the caller that
+# generates the configuration (`agentic-hil init` binds the workspace it ran in,
+# `project_config_create` does the same over MCP) and written over whatever a
+# profile said, so an operator editing either placeholder got no effect, no
+# warning and no line saying the value had been read and discarded. The keys are
+# named here so a test can hold every shipped profile to them, and so the
+# silence has an edge a reader can see.
+PROFILE_KEYS_READ = ("target", "debuggers", "artifacts", "com_ports")
+
 # The probe flags a generated configuration decides, and the value it writes for
 # each, both read from `generated_permissions` — the one place that also drives
 # `grant_every_permission` and the skeleton. A second list here would be the one
@@ -302,6 +315,15 @@ def profile_baudrate(profile_port: JsonObject, port_name: str) -> int:
 
 
 def apply_discovery_to_template(template: JsonObject, profile: JsonObject, discovery: JsonObject) -> JsonObject:
+    """Fill a configuration skeleton from one discovered bench and one profile.
+
+    The profile is consulted for the keys in ``PROFILE_KEYS_READ`` and for
+    nothing else. Everything the caller decides is decided by the caller: both
+    roots, the backend, the probe serial, the executable and the port device all
+    come from the discovery and the workspace this ran in, so a profile naming
+    one of them is read past rather than honoured. That is why the shipped
+    profile carries none, and why a test keeps it that way.
+    """
     target_profile = profile.get("target") if isinstance(profile.get("target"), dict) else {}
     detected_target = discovery.get("target") if isinstance(discovery.get("target"), dict) else {}
     profile_controller = str(target_profile.get("controller", ""))
