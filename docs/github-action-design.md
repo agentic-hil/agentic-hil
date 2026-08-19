@@ -296,11 +296,14 @@ the benches this serves run on all three platforms.
 
 It runs `agentic-hil test-reactor --test-config <plan> --junit-xml <path>
 [--wait-s N]` in `working-directory` and reads the single JSON object the
-command writes to standard output. That is the report, and the CLI's exit status is already the
-composite success predicate: a run is successful only when `ok` is true and
-nothing else in the result contradicts it, so the action does not re-derive
-success from `ok` alone. It also reads the persisted report from
-`reports.directory` when the process was interrupted and printed nothing.
+command writes to standard output. That is the report, and the CLI's exit
+status is already the composite success predicate: a run is successful only
+when `ok` is true and nothing else in the result contradicts it, so the action
+does not re-derive success from `ok` alone. It also reads the persisted report
+from `reports.directory` when the process was interrupted and printed nothing.
+The JUnit file is written by the same command, on the refusing and failing
+paths as well as the passing one, so the upload step has something to take
+whatever the run did.
 
 Concurrency is the workflow's to declare. The bench lock is machine-wide and
 independent of the repository, so a second job on the same runner is refused
