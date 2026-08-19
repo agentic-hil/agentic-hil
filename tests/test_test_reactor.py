@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -3097,6 +3098,35 @@ def test_every_plan_this_repository_ships_loads(tmp_path: Path) -> None:
     assert [step.action for step in demo.steps] == ["flash", "uart_open", "reset", "uart_read"]
     assert [step.device for step in demo.steps] == ["dut", "dut_uart", "dut", "dut_uart"]
     assert demo.steps[3].arguments["comparator"] == {"equals": "Hello World"}
+
+
+DEMO_PLAN_STEP_COUNTS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+
+# A step count a document states about the demo plan: the written number in
+# front of "steps", close enough behind the plan's own file name to be a claim
+# about that plan rather than about steps in general. The prose is read with its
+# line breaks collapsed first, so a sentence that reflows still reads as one.
+DEMO_PLAN_COUNT = re.compile(rf"testconfig\.yaml.{{0,240}}?\b({'|'.join(DEMO_PLAN_STEP_COUNTS.values())}) steps\b")
+
+
+@pytest.mark.parametrize("document", ["docs/test-plan-contract.md", "examples/nucleo-f446re_demo/tests/test_firmware.py"])
+def test_a_document_that_counts_the_demo_plan_counts_the_plan_it_names(document: str) -> None:
+    """Two documents introduce the demo plan by its size, and neither sits next
+    to it. The contract page invited a reader to review the plan by eye and said
+    it was five steps; the plan has four, and the pytest docstring repeated the
+    five to the audience most likely to open it next. The count is read off the
+    plan here, so a step added or dropped fails a test rather than a reader.
+    """
+    repository_root = Path(__file__).resolve().parents[1]
+    demo = load_test_config(str(repository_root / "examples" / "nucleo-f446re_demo" / "testconfig.yaml"), str(repository_root))
+    written = DEMO_PLAN_STEP_COUNTS.get(len(demo.steps))
+    assert written is not None, f"the demo plan has {len(demo.steps)} steps, more than this test can spell"
+
+    prose = re.sub(r"\s+", " ", (repository_root / document).read_text(encoding="utf-8"))
+    counted = DEMO_PLAN_COUNT.findall(prose)
+
+    assert counted, f"{document} no longer counts the demo plan; drop it from this test rather than leaving it unchecked"
+    assert set(counted) == {written}, f"{document} counts the demo plan as {sorted(set(counted))}; it has {len(demo.steps)} steps"
 
 
 # --- the repeat block step, plan format version 4 --------------------------
