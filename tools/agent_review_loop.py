@@ -1172,6 +1172,21 @@ def newly_uncommitted(inherited: str, present: str) -> str:
     return "\n".join(line for line in present.splitlines() if line not in already)
 
 
+def still_present(recorded: str, present: str) -> str:
+    """Which of `recorded`'s porcelain lines the working tree still holds.
+
+    The inverse of what `newly_uncommitted` keeps: there the question is what the
+    tree gained, here it is which lines the tree has not since lost. Outstanding
+    stalled work is cleared from this the moment its line leaves `git status` --
+    committed into a range a review reads, or taken back out -- and what remains
+    is work still sitting unreviewed in the tree. Two identical porcelain lines
+    are one state, matching `newly_uncommitted`, so this composes with it: a line
+    it added is a line this can find again next round.
+    """
+    here = set(present.splitlines())
+    return "\n".join(line for line in recorded.splitlines() if line in here)
+
+
 def listed(entries: str, limit: int) -> str:
     """`entries` as at most `limit` lines, with a count standing in for the rest."""
     lines = entries.splitlines()
@@ -2492,6 +2507,11 @@ def main(argv: list[str] | None = None) -> int:
     exit_code = EXIT_ROUNDS_EXHAUSTED
     last_head = baseline
     checkout: Path | None = None
+    # Stalled work that no review has seen, carried across rounds. A round that
+    # leaves its own work uncommitted adds to this; a later round that commits or
+    # removes that work drops it. While anything is in here a clean verdict cannot
+    # end the run, however many rounds after the stall it arrives.
+    outstanding_uncommitted = ""
 
     try:
         if not options.dry_run:
@@ -2552,11 +2572,11 @@ def main(argv: list[str] | None = None) -> int:
             left_behind = (
                 "" if new_commits or options.dry_run else newly_uncommitted(inherited, uncommitted(repo, paperwork))
             )
-            # The round's own work, still uncommitted in the tree because the retry
-            # was declined. The review below runs on a commit-only range -- and in
-            # the default separate checkout these files do not exist at all -- so a
-            # clean verdict this round never inspected them. The guard after the
-            # review refuses to call the run clean while this holds a path.
+            # This round's share of work left uncommitted because the retry was
+            # declined. It is folded into `outstanding_uncommitted` below, which
+            # carries such work across rounds: the review runs on a commit-only
+            # range -- and in the default separate checkout these files do not
+            # exist at all -- so no round's clean verdict ever inspects it.
             kept_uncommitted = ""
             if left_behind and options.stall_retry:
                 try:
@@ -2571,6 +2591,17 @@ def main(argv: list[str] | None = None) -> int:
                 report_stall(record, number, left_behind)
                 print("not handing it back: --no-stall-retry. The work stays exactly where it is.")
                 kept_uncommitted = left_behind
+            # Reconcile the run's outstanding stalled work against the tree as it
+            # stands now. Prior rounds' leftovers that a later round committed into
+            # a reviewed range, or took back out, have left `git status` and drop
+            # off here; this round's own `kept_uncommitted` joins what remains. The
+            # guard after the review reads the total, not just this round's share.
+            if not options.dry_run:
+                carried = still_present(outstanding_uncommitted, uncommitted(repo, paperwork)).splitlines()
+                for line in kept_uncommitted.splitlines():
+                    if line not in carried:
+                        carried.append(line)
+                outstanding_uncommitted = "\n".join(carried)
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
@@ -2592,17 +2623,18 @@ def main(argv: list[str] | None = None) -> int:
 
             verdict, review_path = reviewed
             if verdict.is_clean:
-                if kept_uncommitted:
-                    # A clean verdict cannot terminate the run while this round's
-                    # own work is sitting uncommitted and unreviewed: the review
-                    # measured committed history, so calling that clean would exit
-                    # 0 over changes nobody looked at. Stop as stalled instead, and
-                    # leave the work exactly where the round left it.
+                if outstanding_uncommitted:
+                    # A clean verdict cannot terminate the run while a stalled
+                    # round's work is still sitting uncommitted and unreviewed --
+                    # whether this round left it or an earlier one did. Every
+                    # review measured committed history, so calling that clean
+                    # would exit 0 over changes nobody looked at. Stop as stalled
+                    # instead, and leave the work exactly where it is.
                     print(
-                        f"\nround {number}: the review came back clean, but this round left "
-                        f"{len(kept_uncommitted.splitlines())} path(s) uncommitted that the review never saw; "
-                        "stopping as stalled rather than calling the run clean. Commit the work, or drop "
-                        "--continue-on-no-commit.",
+                        f"\nround {number}: the review came back clean, but "
+                        f"{len(outstanding_uncommitted.splitlines())} path(s) a stalled round left uncommitted "
+                        "are still in the tree, and the review never saw them; stopping as stalled rather than "
+                        "calling the run clean. Commit the work, or drop --continue-on-no-commit.",
                         file=sys.stderr,
                     )
                     exit_code = EXIT_STALLED

@@ -1506,6 +1506,98 @@ def test_a_stalled_file_cannot_produce_a_clean_run_under_the_default_checkout(
     assert "the review never saw" in f"{captured.out}{captured.err}"
 
 
+def _requested_then_clean(
+    setup: agent_review_loop.ReviewSetup,
+    record: agent_review_loop.RoundRecord,
+    number: int,
+    _range: str,
+    _previous: Path | None,
+    _commit: str,
+) -> tuple[agent_review_loop.Verdict, Path]:
+    """Round 1 requests changes so the run goes on; every round after comes back clean.
+
+    The two-round shape the carried-across guard needs: the stall is in round 1,
+    whose findings keep the loop alive, and the clean verdict that must not end
+    the run arrives a round later, once the stall is a round in the past.
+    """
+    if number == 1:
+        review = setup.review_dir / f"round-{number:02d}.md"
+        review.write_text("REVIEW_STATUS: CHANGES_REQUESTED\n", encoding="utf-8")
+        record.findings = 1
+        record.status = agent_review_loop.CHANGES_REQUESTED
+        return agent_review_loop.Verdict(agent_review_loop.CHANGES_REQUESTED, 1, str(review), ""), review
+    return _clean_verdict(setup, record, number, _range, _previous, _commit)
+
+
+def test_a_stall_that_outlives_its_round_still_blocks_a_clean_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The guard has to remember the stall across rounds, not only within the one that stalled.
+
+    Round 1 stalls under `--no-stall-retry --continue-on-no-commit`: it writes
+    `fix.py`, never commits it, and its review requests changes, so the run goes
+    on with the file still dirty. Round 2's implementer declines -- no change, no
+    commit -- so nothing is *newly* uncommitted this round, and its review, which
+    measures committed history under the default clone checkout, never sees
+    `fix.py` and comes back clean. That work was left by round 1 and no review has
+    ever inspected it, so the run must stop as stalled rather than exit 0 -- which
+    is exactly what a per-round record of the leftover forgot the moment round 2
+    began.
+    """
+    repository = _repository(tmp_path)
+    agent = _stalling_agent(tmp_path, then=_DECLINES)
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    # No --review-checkout: the default clone, where round 1's file is absent from
+    # the reviewer's tree entirely.
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    # Round 1's work is still exactly where it was left, and never became a commit.
+    assert (repository / "fix.py").read_text(encoding="utf-8") == FIX
+    assert _in(repository, "status", "--porcelain").strip() == "?? fix.py"
+    assert "fix.py" not in _in(repository, "log", "--name-only", "--format=")
+    # Round 1 is the stall; round 2 merely declined, so only the first is marked.
+    records = _round_records(repository)
+    assert (records[0]["stalled"], records[0]["retried"]) == (True, False)
+    assert (records[1]["stalled"], records[1]["retried"]) == (False, False)
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+def test_committing_the_stalled_work_a_round_later_lets_the_run_end_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The carried guard clears once the work is committed into a range a review reads.
+
+    The mirror of the block: a stalled round's leftover stops a clean exit only
+    while it is *still* uncommitted and unseen. Round 1 stalls with `fix.py` dirty
+    and its review requests changes; round 2 commits `fix.py`, so it lands in that
+    round's diff range and its clean verdict is a verdict on it. The run ends
+    clean rather than clinging to a stall the tree no longer holds.
+    """
+    repository = _repository(tmp_path)
+    agent = _stalling_agent(tmp_path, then=_COMMITS)
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_CLEAN
+    # The work is committed and reviewed, and nothing is left dirty to block on.
+    assert _in(repository, "show", "HEAD:fix.py") == FIX
+    assert _in(repository, "status", "--porcelain").strip() == ""
+
+
 def test_the_second_attempt_is_told_what_is_in_the_tree_and_keeps_the_first_ones_transcript(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
