@@ -43,9 +43,23 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--agentic-hil-config",
         action="store",
         default=None,
-        help="Deprecated config selector; must resolve to the discovered authoritative config.",
+        # What it does rather than what it is. It is accepted only while it
+        # names the configuration discovery already found, and it does not
+        # degrade to a warning: anything else fails the session, so a reader who
+        # meets this line in `--help` learns that before CI does.
+        help=(
+            "Deprecated. Accepted only while it resolves to the discovered authoritative config; "
+            f"any other path fails the session. Drop it, or set {CONFIG_ENV} for an operator-controlled override."
+        ),
     )
-    parser.addini("agentic_hil_config", help="Deprecated Agentic HIL config selector.", default=None)
+    parser.addini(
+        "agentic_hil_config",
+        help=(
+            "Deprecated. Same rule as --agentic-hil-config: accepted only while it resolves to the "
+            f"discovered authoritative config, and any other path fails the session. Drop it, or set {CONFIG_ENV}."
+        ),
+        default=None,
+    )
 
 
 def resolve_plugin_config_path(config: pytest.Config) -> str:
@@ -81,9 +95,25 @@ def agentic_hil_config(request: pytest.FixtureRequest) -> AgenticHILConfig:
     authoritative_path = Path(os.environ.get(CONFIG_ENV) or project_config_path(request.config.rootpath)).resolve()
     legacy_selector = configured_legacy_selector(request.config)
     if legacy_selector is not None and Path(legacy_selector).resolve() != authoritative_path:
+        # Failing is the answer, not a step on the way to one: a
+        # repository-controlled flag that redirected policy authority would
+        # decide what this bench may be told to do, and degrading to the
+        # discovered file with a warning would run the suite under a policy
+        # nobody chose.
+        #
+        # The message says all three things a reader needs, because until now it
+        # said only the last one and no page in the tree said any of them: that
+        # the option is deprecated, that it fails rather than falls back, and
+        # which two ways of selecting a configuration are supported instead.
         pytest.fail(
-            "Deprecated Agentic HIL config selector cannot change policy authority. "
-            f"Set {CONFIG_ENV} to the absolute external config path or remove the legacy option.",
+            "Deprecated Agentic HIL config selector cannot change policy authority.\n"
+            "--agentic-hil-config / the agentic_hil_config ini key are deprecated. They\n"
+            "are accepted only while they resolve to the discovered authoritative config,\n"
+            "and any other path fails the session rather than falling back to it.\n"
+            f"  selector:      {legacy_selector}\n"
+            f"  authoritative: {authoritative_path}\n"
+            "Drop the option and let the configuration be discovered from the workspace,\n"
+            f"or set {CONFIG_ENV} to an absolute operator-controlled config path.",
             pytrace=False,
         )
     if not os.environ.get(CONFIG_ENV) and not authoritative_path.is_file():

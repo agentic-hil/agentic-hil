@@ -108,3 +108,16 @@ Killing the worker instead is the case this exists to replace. A process that di
 Installing `agentic_hil` registers the `agentic_hil` pytest plugin, so CI regression suites can drive the same permission-gated tools without an MCP client.
 
 The `agentic_hil` fixture uses the same discovered config or absolute-path override as every other entry point and verifies that its `workspace_root` matches the pytest rootdir. Tests using the fixture skip when no config exists and fail loudly when an available config is invalid. Pytest executes project code and is therefore not a sandbox or security boundary; real unattended hardware runners must still use OS isolation and host-managed invocation. COM and CAN sessions opened during a test are stopped afterwards so stimulus state cannot leak between tests. See [examples/nucleo-f446re_demo/](https://github.com/agentic-hil/agentic-hil/tree/master/examples/nucleo-f446re_demo) for the complete loop on real hardware.
+
+### `--agentic-hil-config` is deprecated, and it fails rather than degrades
+
+The plugin accepts a `--agentic-hil-config` option and a matching `agentic_hil_config` ini key. Both are deprecated, and neither is the way to select a configuration. They are accepted only while they resolve to the configuration discovery has already found; a path that resolves anywhere else **fails the session** before the first test runs, with `cannot change policy authority` and both paths printed. It does not warn and carry on, and it does not fall back to the discovered file.
+
+That is deliberate. These options live in the repository, in a command line or a `pytest.ini` a pull request can edit, and the authoritative configuration deliberately does not. An option that could point the suite at a different policy would let repository-controlled data decide what this bench may be told to do; one that silently fell back to the discovered file would run the suite under a policy nobody in that pull request asked for, and report it as a pass. Failing is the only remaining answer, so it is the one you get.
+
+There are two supported ways to say which configuration a run uses, and neither is an option on this command line:
+
+* **Say nothing.** The authoritative configuration is discovered from the pytest rootdir, which is the project root, exactly as `doctor`, `mcp-stdio` and `test-reactor` discover it from their own project working directory. This is what a CI job wants: remove the option and the ini key, and the plugin finds the file the rest of the tooling finds.
+* **Set `AGENTIC_HIL_CONFIG`** to an absolute path when an operator-controlled override is wanted, in the runner's own environment rather than in a repository-controlled file. See [Where it is found](configuration.md#where-it-is-found).
+
+A suite that passes one of the deprecated selectors and resolves it to the discovered file still runs, unchanged. It is the only case in which they do anything at all, which is why removing them costs that suite nothing.
