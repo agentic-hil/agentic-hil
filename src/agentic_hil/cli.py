@@ -726,6 +726,23 @@ def _agent_permission_config_path(agent_id: str) -> Path | None:
     return _external_user_path(paths[agent_id], "Agent permission configuration")
 
 
+def _working_directory_holds_home() -> bool:
+    """Whether the working directory is the home directory or a directory above it.
+
+    One question, asked in one place, because the two halves of the setup answer
+    it in opposite directions and must never disagree about it. Home is not a
+    project: it is where this user's own files live, this tool's installed ones
+    included. So the user-wide half has no workspace to keep out of here
+    (`_workspace_boundary`, #235) and the project half has no project to bind a
+    configuration to here (`_project_workspace`, #245). A host that cannot name a
+    home directory answers false, which leaves each half on its strict rule, and
+    for each of them that is the safe direction.
+    """
+    with suppress(RuntimeError):
+        return is_path_within_frozen(absolute_without_symlinks(Path.home()), absolute_without_symlinks(Path.cwd()))
+    return False
+
+
 def _workspace_boundary() -> Path | None:
     """The project directory the user-wide half must stay out of, or None.
 
@@ -742,11 +759,69 @@ def _workspace_boundary() -> Path | None:
     every directory that is not home or above it keeps the strict boundary. A
     host that cannot name a home directory keeps it too.
     """
-    workspace = absolute_without_symlinks(Path.cwd())
-    with suppress(RuntimeError):
-        if is_path_within_frozen(absolute_without_symlinks(Path.home()), workspace):
-            return None
-    return workspace
+    if _working_directory_holds_home():
+        return None
+    return absolute_without_symlinks(Path.cwd())
+
+
+_PROJECT_AT_HOME_NEXT_STEP = (
+    "Change into the project this bench belongs to and run the command again, or create that directory first "
+    "(`mkdir my-project`, then `cd my-project`). "
+    "The half that does belong here is unaffected: `agentic-hil agent-install --agent <agent>` installs the skill and "
+    "the MCP registration for this user from any directory, the home directory included, and writes nothing "
+    "project-local."
+)
+
+
+def _project_workspace() -> Path:
+    """The directory the project half binds a configuration to, or the refusal.
+
+    `init` and `setup` write one authoritative configuration whose
+    `workspace_root` is this directory, and everything downstream reads that key
+    as "the project": the configuration itself and the state root are refused
+    inside it, a configured file inside it is repository content, and the agent
+    is asked to refuse its own write tools on the paths it names. Rooted at the
+    home directory, all of that turns on the user's whole profile at once. The
+    two files that have to sit outside the workspace have nowhere left to go,
+    because on a default profile both live under home; the launcher the
+    installer put in `~/.local/bin` becomes repository content; and every other
+    project this user has sits inside this one's tree. It is also, and mostly, a
+    typo: an operator who meant to set up a firmware project typed the command
+    one `cd` too early, and what they would get is a configuration keyed to a
+    directory nobody looks in again.
+
+    Which of those an operator met used to depend on their profile, and that is
+    the other half of why this is decided here rather than left to fall out.
+    With the config root under home the write was refused by `config_invalid`
+    naming an `%APPDATA%` path they never chose; with a redirected profile that
+    put the config and state roots elsewhere nothing refused at all and the
+    project was bound to home. One mistake, two answers, neither of them about
+    the mistake.
+
+    So the project half refuses in exactly the place the user-wide half collapses
+    its boundary (#235). That is not two rules pulling against each other, it is
+    one statement read from both sides: home is not a project, so there is
+    nothing here to keep those files out of, and nothing here to bind them to.
+    The refusal names the `cd` that fixes it, and nothing has been written when
+    it is raised, so `setup` keeps the user-wide half it installed a moment
+    earlier.
+
+    A configuration that already names home as its workspace keeps loading. This
+    decides where a new one may be created; rewriting policy an operator already
+    has, over a decision about new projects, is not this command's to make.
+    """
+    if _working_directory_holds_home():
+        home = absolute_without_symlinks(Path.home())
+        workspace = absolute_without_symlinks(Path.cwd())
+        relation = "is the home directory" if workspace == home else "contains the home directory"
+        raise ConfigError(
+            "workspace_is_home",
+            f"This directory {relation}, which is not a project: `init` and `setup` bind one authoritative "
+            "configuration to the directory they run in, and rooted here that would be every project on this machine "
+            "at once. Nothing was written.",
+            {"workspace_root": str(workspace), "home": str(home), "next_step": _PROJECT_AT_HOME_NEXT_STEP},
+        )
+    return Path.cwd().resolve()
 
 
 def _external_user_path(path: Path, label: str) -> Path:
@@ -1568,7 +1643,7 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
     alternative would be `init --force`, which rewrites operator policy and is
     not a remedy.
     """
-    workspace = Path.cwd().resolve()
+    workspace = _project_workspace()
     resolved_agent: SkillAgent | None = None
     if agent is not None:
         resolved_agent = resolve_skill_agent(agent)
@@ -1971,7 +2046,11 @@ def _init_lease_note(unleased: str | None) -> JsonObject:
 
 
 def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False) -> JsonObject:
-    workspace = Path.cwd().resolve()
+    # Asked again rather than taken from the caller: this is the function that
+    # writes `workspace_root`, so the one directory a project may not be rooted
+    # in is settled here as well as in `init_project`, and a later caller cannot
+    # arrive with the check skipped.
+    workspace = _project_workspace()
     target_path = initialized_config_path(workspace)
     validate_legacy_config_selector(config_path, workspace, target_path)
     if _path_entry_exists(target_path) and not force:

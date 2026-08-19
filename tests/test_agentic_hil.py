@@ -1618,6 +1618,103 @@ def test_agent_install_runs_where_the_install_line_is_typed(
     assert _registered_claude_command() == command
 
 
+@pytest.mark.parametrize("where", ["home", "filesystem-root"])
+def test_init_refuses_to_root_a_project_at_the_home_directory(
+    where: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the same statement: home is not a project.
+
+    The user-wide half stops drawing a workspace boundary at home so that it can
+    run where an install line is typed (#235), and behind that refusal sat this
+    one: `setup` typed in the home directory then reached the project half and
+    would bind an authoritative configuration to it. A `workspace_root` at home
+    is not a smaller version of a project, it is a different thing: the
+    configuration and the state root both have to live outside the workspace and
+    on a default profile both live under home, the installed launcher becomes
+    repository content, and every other project this user has is inside this
+    one's tree. Far more often it is simply one `cd` too early. So the project
+    half refuses in exactly the place the user half collapses its boundary, and
+    the refusal names the directory change that fixes it. (#245)
+    """
+    home = Path.home()
+    monkeypatch.chdir(home if where == "home" else Path(home.anchor))
+    _trusted_test_mcp_command(monkeypatch)
+
+    with pytest.raises(ConfigError) as excinfo:
+        init_project(agent="claude-code")
+
+    refusal = excinfo.value.to_dict()
+    assert refusal["error_type"] == "workspace_is_home"
+    assert "cd my-project" in refusal["next_step"]
+    # The half that does run from here is named, because after a `setup` it is
+    # already installed and the operator has to be told it stays.
+    assert "agentic-hil agent-install" in refusal["next_step"]
+    # Refused before anything was written, config and state root alike.
+    assert not project_config_path(home).exists()
+    assert not project_config_path(Path(home.anchor)).exists()
+    assert not _default_state_root().exists()
+    # And the same refusal from the function that actually writes
+    # `workspace_root`, so the rule does not rest on `init_project` staying its
+    # only caller.
+    with pytest.raises(ConfigError) as direct:
+        init_config()
+
+    assert direct.value.error_type == "workspace_is_home"
+
+
+def test_setup_from_home_installs_the_agent_and_refuses_the_project_half(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`setup` in the home directory is the command the decision was about.
+
+    It is the composition of both halves, so it is where the two answers meet:
+    the user-wide half belongs here and finishes, the project half has nothing
+    here to bind and says so. Nothing project-local is written and nothing the
+    user half installed is rolled back, which is the split `setup` promises
+    everywhere else it fails. (#245)
+    """
+    monkeypatch.chdir(Path.home())
+    command = _trusted_test_mcp_command(monkeypatch)
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is False
+    assert result["scopes"]["user"]["ok"] is True
+    assert result["steps"]["skill_install"]["ok"] is True
+    assert result["steps"]["mcp_config"]["ok"] is True
+    assert result["steps"]["config"]["error_type"] == "workspace_is_home"
+    # The remedy has to survive the composition: `steps.config` is where an
+    # operator reading a failed `setup` looks for what to do.
+    assert "cd my-project" in result["steps"]["config"]["next_step"]
+    assert result["rollback"]["ok"] is True
+    # The agent is installed for this user and stays installed.
+    assert _claude_skill_path().is_file()
+    assert _registered_claude_command() == command
+    assert not project_config_path(Path.home()).exists()
+
+
+def test_a_project_directory_under_home_is_a_project_like_any_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Home and the directories above it are the whole of the refusal.
+
+    Nearly every real project sits somewhere under the home directory, so a
+    refusal that read "under home" rather than "is home, or holds it" would
+    refuse the ordinary case and leave only projects on another volume working.
+    """
+    workspace = Path.home() / "firmware-project"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["steps"]["config"]["ok"] is True
+    assert initialized_config_path(workspace).is_file()
+
+
 def test_agent_install_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     elsewhere = tmp_path / "not-a-project"
     elsewhere.mkdir()
