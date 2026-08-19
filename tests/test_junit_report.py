@@ -195,6 +195,30 @@ def test_preflight_refusal_skips_every_step_and_carries_the_refusal_as_an_error(
         assert "refused before any step ran" in (cases[name].find("skipped").get("message") or "")
 
 
+def test_a_run_refused_the_bench_skips_its_steps_without_a_validation_error() -> None:
+    # A device another run holds is refused before the first step, and that
+    # refusal carries no `validation_error`: the plan is fine, the bench is busy.
+    # The result itself is the refusal then, and the plan's steps are still
+    # skipped rather than absent, because a reader has to see what did not run.
+    refused = {
+        "ok": False,
+        "tool": "test_reactor",
+        "name": "demo-plan",
+        "error_type": "device_busy",
+        "summary": "A device this plan declares is unavailable. No step ran.",
+        "steps": [],
+        "cleanup": [],
+        "cleanup_ok": True,
+        "declared_devices": ["probe:0673FF", "com:COM7"],
+    }
+
+    document = junit_xml_document(refused, plan_steps=PLAN_STEPS)
+
+    suite = suite_of(document)
+    assert (suite.get("tests"), suite.get("failures"), suite.get("errors"), suite.get("skipped")) == ("4", "0", "1", "3")
+    assert cases_of(document)["preflight"].find("error").get("type") == "device_busy"
+
+
 def test_a_run_that_never_reached_a_plan_still_produces_one_error_case() -> None:
     refusal = {
         "ok": False,
