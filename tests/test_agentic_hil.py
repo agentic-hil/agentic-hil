@@ -2503,17 +2503,29 @@ def test_the_host_guide_prints_the_registrations_agent_install_writes(tmp_path: 
     assert documented_lines == written_lines
 
 
-def test_the_host_guide_describes_the_project_file_mcp_config_writes() -> None:
+def test_the_host_guide_describes_the_project_file_mcp_config_writes(monkeypatch: pytest.MonkeyPatch) -> None:
     """`mcp-config` writes a fourth shape, which the page describes in prose
     rather than printing: the Claude Code block above it, without the `type`.
-    A `type` added to one and not the other makes that sentence wrong."""
+    A `type` added to one and not the other makes that sentence wrong.
+
+    The launcher is stubbed the way every neighbouring test that reaches a
+    registration stubs it, and for the same reason. `mcp_config_text` resolves a
+    trusted persistent executable and fails closed when there is none, so on a
+    machine with neither a uv tool nor a pipx installation this asked the
+    question and got a refusal instead of the document the page is held to.
+    """
     from agentic_hil import cli as cli_module
+
+    command = _trusted_test_mcp_command(monkeypatch)
 
     generated = json.loads(cli_module.mcp_config_text())["mcpServers"]["agentic-hil"]
     documented = json.loads(_host_guide_block("Claude Code", "json"))["mcpServers"]["agentic-hil"]
 
-    assert set(generated) == set(documented) - {"type"}
-    assert generated["args"] == documented["args"]
+    # The whole entry, not a subset of its keys: the page's block with the
+    # placeholder resolved and the one field the prose claims is missing taken
+    # out. A key gained on either side fails here.
+    assert generated == {**{key: value for key, value in documented.items() if key != "type"}, "command": command}
+    assert "type" in documented and "type" not in generated
     assert "and no `type`" in HOST_GUIDE.read_text(encoding="utf-8")
 
 
