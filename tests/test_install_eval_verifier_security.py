@@ -1288,6 +1288,7 @@ def _fake_cli_that_renders_prose_unless_json(path: Path) -> None:
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="trusted_environment() is the container's environment, and a Windows child cannot start without SystemRoot")
 def test_the_trusted_doctor_probe_asks_for_the_json_document(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A successful trusted doctor, run as a real subprocess, must be read as a document.
 
@@ -1295,6 +1296,15 @@ def test_the_trusted_doctor_probe_asks_for_the_json_document(monkeypatch: pytest
     the probe calls `json.loads` on doctor's stdout. Without the flag a green
     doctor prints a report that does not parse, `add_probe` catches the
     `JSONDecodeError`, and a sound install fails a check it should have passed.
+
+    A real subprocess is the point: the flag has to survive into a process whose
+    stdout is a pipe, which is the shape the probe meets. That means running
+    under `trusted_environment()`, which builds the evaluation container's
+    environment from nothing and therefore carries no `SystemRoot`; CPython on
+    Windows cannot seed its hash randomisation without it and dies before it
+    reaches the CLI. The evaluator only ever runs on Linux, so the honest place
+    for this is there rather than in an environment bent into a shape the thing
+    under test never has.
     """
     fake = tmp_path / "fake_cli.py"
     _fake_cli_that_renders_prose_unless_json(fake)
