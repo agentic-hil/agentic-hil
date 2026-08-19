@@ -22,7 +22,6 @@ comes back as something readable rather than as a wall of braces.
 from __future__ import annotations
 
 import shutil
-import sys
 import textwrap
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
@@ -32,10 +31,15 @@ from agentic_hil.types import JsonObject
 
 # What `--json` says on every `--help` page. One text, because the flag is added
 # to the top-level parser and to every subcommand and the two must not drift.
+# Every result is rendered for a person unless this says otherwise. Who is
+# reading is declared rather than guessed: sniffing stdout got it wrong for
+# every wrapper that captures the output in order to act on it and then shows
+# a person what came back, which is what the installer does and what most
+# things that run this command do.
 JSON_FLAG_HELP = (
-    "print the JSON document instead of the human-readable rendering. The document is what an agent, a script or "
-    "the installer reads, and it is already what is printed whenever stdout is not a terminal, so a pipe or a "
-    "redirect needs no flag"
+    "print the JSON document instead of the rendering. The document is the machine contract, field for field, "
+    "and every caller that parses this command has to ask for it: a pipe, a redirect and a subprocess are "
+    "rendered like anything else"
 )
 
 # The two commands that own stdout for a protocol rather than for a result. They
@@ -50,24 +54,6 @@ _FALLBACK_WIDTH = 88
 # Fields whose place in the rendering is fixed, so the generic pass over
 # "everything else" must not print them a second time.
 _HANDLED_EVERYWHERE = frozenset({"ok", "tool", "summary", "next_step", "next_steps", "remediation", "do_not", "warnings", "error_type", "meaning"})
-
-
-def stdout_is_terminal() -> bool:
-    """Whether a person is watching stdout right now.
-
-    Everything POSIX-only stays out of this on purpose: Windows PowerShell is a
-    first-class host here, and `sys.stdout.isatty()` answers on every platform.
-    A stream that has been closed or replaced by something without the method is
-    not a terminal, which is the safe answer in both directions: it prints the
-    machine document, which is what every non-interactive caller expects.
-    """
-    isatty = getattr(sys.stdout, "isatty", None)
-    if isatty is None:
-        return False
-    try:
-        return bool(isatty())
-    except (ValueError, OSError):
-        return False
 
 
 def render_result(result: JsonObject, command: str | None = None) -> str:

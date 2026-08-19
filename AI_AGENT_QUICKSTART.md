@@ -99,7 +99,7 @@ The registration lands at the next session start, not in this one. An agent CLI 
 | Frequency | once per user and agent | once per project |
 | Writes | the agent's skill, the user-level MCP registration | the authoritative config, with every permission granted except the two flashing is interlocked against; with `--agent claude-code`, that agent's refusal of its own write tools on the config and state root. For opencode nothing is written and the step reports that, see SECURITY.md; Codex needs nothing |
 | Also | checks that a persistent trusted executable exists to register | runs `doctor` |
-| Cwd | anywhere; needs and creates no workspace and no config | the firmware project root |
+| Cwd | anywhere; needs and creates no workspace and no config | the firmware project root, and never the home directory or a directory above it: a project rooted there would be every project on this machine at once, so it is refused with `workspace_is_home` before anything is written |
 
 Each half rolls back only its own writes; **a failing project half never removes an installed skill or MCP registration.** Where the config location cannot be used (a symlinked or non-directory component in the chain, a redirected profile the tool cannot create under; MCP resource `agentic-hil://reference/platform-paths` has where each file lives), `setup` returns `ok: false` with `scopes.user.ok: true`; the agent is installed and working. Fix the location `steps.config` names, run `init` alone, do not rerun `agent-install`, and do not read the refusal as "nothing was installed".
 
@@ -109,7 +109,7 @@ The external config binds `workspace_root` and is written at `version: 3`: readi
 
 Bootstrap uses fixed read-only setup commands, not MCP or `probe_target`. No profile means the skeleton, which grants everything but the two flashing is interlocked against.
 
-**`mcp_config_conflict` or `skill_conflict` is the finished answer.** Something under this name is already there and Agentic HIL did not write it. Do not hand-edit the config, delete the entry, or rerun with `--force`: `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, stop.
+**`mcp_config_conflict` or `skill_conflict` is the finished answer.** Something under this name is already there and Agentic HIL did not write it. Do not hand-edit the config, delete the entry, or rerun with `--force`: `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, and on an MCP conflict name the `existing_command` the refusal read out of it so the operator can tell whose entry it is, then stop.
 
 Write a project `.mcp.json` only if the operator asks (`agentic-hil mcp-config --output .mcp.json`). Unprompted it is a second registration inside the repository, naming the program that answers as the hardware gate in a file anyone with write access can change.
 

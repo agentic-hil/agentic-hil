@@ -8,12 +8,21 @@
 
 set -eu
 
-FLOOR="0.4.0"
+# The release this script installs, and the version an installation already
+# here has to reach to be left alone. Deliberately not a capability floor: the
+# line that installs Agentic HIL is the same line people re-run to get current,
+# and step 4 registers the skill out of whatever copy step 1 decided to keep, so
+# a floor left a returning user on an old package and an old skill at once. A
+# development tree reports X.Y.Z.devN, which compares as X.Y.Z and stays put.
+RELEASE="0.16.0"
 
 AGENT=""
 WITH_AGENT_INSTALL=1
 PINNED=""
 WITH_CAN=1
+# auto, always or never: whether this machine's own certificate store is
+# reached for, and whether it takes a failed attempt first.
+SYSTEM_CERTS="auto"
 STEP_TOTAL=5
 
 say() {
@@ -55,6 +64,14 @@ Options:
   --can               Install the [can] extra for PEAK and SocketCAN adapters.
                       This is the default.
   --no-can            Install without the [can] extra.
+  --system-certs      Validate TLS against this machine's own certificate
+                      store, the one curl and apt already read, from the start.
+                      Rarely needed: a failure that carries the signature of a
+                      TLS-intercepting proxy is retried against that store by
+                      itself. This only skips the first attempt.
+  --no-system-certs   Never reach for this machine's store, not even after such
+                      a failure. The install fails instead.
+                      Neither flag disables verification. Nothing here does.
   --help              Print this text and exit.
 USAGE
 }
@@ -95,6 +112,14 @@ while [ $# -gt 0 ]; do
             WITH_CAN=0
             shift
             ;;
+        --system-certs)
+            SYSTEM_CERTS="always"
+            shift
+            ;;
+        --no-system-certs)
+            SYSTEM_CERTS="never"
+            shift
+            ;;
         --help | -h)
             usage
             exit 0
@@ -106,6 +131,101 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+
+# The certificate store a TLS-intercepting proxy needs, and the only concession
+# this script makes to one. uv validates against roots bundled in its own
+# binary, so on a managed network it fails where curl and apt on the same host
+# keep working, which is what makes the cause recognisable; this points it at
+# the store those two already read. pip takes a file rather than a switch, so
+# the usual locations are tried and whichever is found is named.
+#
+# Nobody has to know any of that in advance. The failed install is the
+# detection: a package manager that came back with one of the signatures below
+# is retried once against this machine's store, and only that. Verification is
+# on in both attempts, and this is not a way to reach a switch that turns it
+# off: --allow-insecure-host, --insecure and --trusted-host are not options this
+# script offers, and no path through it arrives at one.
+system_cert_bundle() {
+    for candidate in \
+        /etc/ssl/certs/ca-certificates.crt \
+        /etc/pki/tls/certs/ca-bundle.crt \
+        /etc/ssl/ca-bundle.pem \
+        /etc/ssl/cert.pem; do
+        if [ -r "$candidate" ]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# What a chain that ends outside the manager's own roots looks like, from uv
+# (rustls), pip (OpenSSL) and curl. A failure that says none of this is a
+# failure about something else, and is never retried.
+trust_failure() {
+    case "$1" in
+        *"invalid peer certificate"* | *UnknownIssuer* | *"self-signed certificate"* | *"self signed certificate"* | *"certificate verify failed"* | *CERTIFICATE_VERIFY_FAILED* | *"unable to get local issuer certificate"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+use_system_certs() {
+    UV_SYSTEM_CERTS=1
+    export UV_SYSTEM_CERTS
+    if [ -n "${PIP_CERT:-}" ]; then
+        say "certificates: uv reads this machine's own store; pip keeps the PIP_CERT already set here"
+    elif pip_cert_bundle=$(system_cert_bundle); then
+        PIP_CERT="$pip_cert_bundle"
+        export PIP_CERT
+        say "certificates: uv and pip read this machine's own store ($pip_cert_bundle)"
+    else
+        say "certificates: uv reads this machine's own store; no bundle file was found here for pip, so set PIP_CERT to one if pip is what fails"
+    fi
+}
+
+# Whether a PIP_CERT already in the environment names this machine's own store
+# rather than a bundle the operator chose for themselves. The list is the one
+# system_cert_bundle reaches for, so an inherited PIP_CERT that equals any of
+# those paths is the same reach --no-system-certs forbids.
+is_system_cert_bundle() {
+    for candidate in \
+        /etc/ssl/certs/ca-certificates.crt \
+        /etc/pki/tls/certs/ca-bundle.crt \
+        /etc/ssl/ca-bundle.pem \
+        /etc/ssl/cert.pem; do
+        if [ "$1" = "$candidate" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# --no-system-certs promises never to reach for this machine's own store, and it
+# can only keep that promise by clearing an inherited override as well as by not
+# setting one. TROUBLESHOOTING.md recommends exporting UV_SYSTEM_CERTS so future
+# upgrades keep working behind a proxy, so an operator who then passes
+# --no-system-certs would still have uv reading the machine store from that
+# variable. A PIP_CERT the operator aimed at a bundle of their own is their
+# choice and stays; one that already points at this machine's system bundle is
+# the same reach the flag refuses, and goes with UV_SYSTEM_CERTS.
+clear_system_certs() {
+    if [ -n "${UV_SYSTEM_CERTS:-}" ]; then
+        unset UV_SYSTEM_CERTS
+        say "certificates: --no-system-certs; cleared the inherited UV_SYSTEM_CERTS so uv does not read this machine's own store"
+    fi
+    if [ -n "${PIP_CERT:-}" ] && is_system_cert_bundle "${PIP_CERT}"; then
+        unset PIP_CERT
+        say "certificates: --no-system-certs; cleared the inherited system-bundle PIP_CERT so pip does not read this machine's own store"
+    fi
+}
+
+if [ "$SYSTEM_CERTS" = "always" ]; then
+    use_system_certs
+elif [ "$SYSTEM_CERTS" = "never" ]; then
+    clear_system_certs
+fi
 
 # The leading run of digits of one dot-separated field, so a development version
 # spelled X.Y.Z.devN compares as X.Y.Z instead of refusing to parse.
@@ -198,16 +318,16 @@ package_spec() {
 }
 
 # Does a freshly installed copy's reported version answer what this run asked
-# for: exactly the pin when one was given, at least the floor otherwise. The pin
+# for: exactly the pin when one was given, at least the release otherwise. The pin
 # must match exactly -- a newer copy left in the manager's bin is not the pinned
 # release this run wrote, and the documented --version contract is an exact
 # release, not a floor. Without a pin the manager only ever writes the newest, so
-# any copy at or above the floor is the one just installed.
+# any copy at or above the release is the one just installed.
 version_matches_request() {
     if [ -n "$PINNED" ]; then
         version_exactly "$1" "$PINNED"
     else
-        version_at_least "$1" "$FLOOR"
+        version_at_least "$1" "$RELEASE"
     fi
 }
 
@@ -296,8 +416,29 @@ user_bin_on_path() {
     export PATH
 }
 
+# uv's output is captured rather than streamed, because the text of a failure is
+# what decides whether there is a second attempt to make.
 install_with_uv() {
-    uv tool install --upgrade "$(package_spec)"
+    if uv_output=$(uv tool install --upgrade "$(package_spec)" 2>&1); then
+        printf '%s\n' "$uv_output"
+        return 0
+    fi
+    printf '%s\n' "$uv_output" >&2
+    if [ "$SYSTEM_CERTS" = "auto" ] && trust_failure "$uv_output"; then
+        say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
+        use_system_certs
+        SYSTEM_CERTS="always"
+        if uv_output=$(uv tool install --upgrade "$(package_spec)" 2>&1); then
+            printf '%s\n' "$uv_output"
+            return 0
+        fi
+        printf '%s\n' "$uv_output" >&2
+        fail "package: uv could not install $(package_spec) against this machine's own store either; the proxy's own CA is missing from that store, and installing it there is the fix; TROUBLESHOOTING.md section 1 has the rest"
+    fi
+    if [ "$SYSTEM_CERTS" = "never" ] && trust_failure "$uv_output"; then
+        fail "package: uv could not install $(package_spec), and that is a certificate failure this run was told not to retry against this machine's own store; drop --no-system-certs, or install the proxy's CA where uv can be pointed at it; TROUBLESHOOTING.md section 1 has the rest"
+    fi
+    fail "package: uv could not install $(package_spec); TROUBLESHOOTING.md section 1 has the fallbacks"
 }
 
 install_with_pip() {
@@ -307,6 +448,18 @@ install_with_pip() {
         return 0
     fi
     printf '%s\n' "$pip_output" >&2
+    if [ "$SYSTEM_CERTS" = "auto" ] && trust_failure "$pip_output"; then
+        use_system_certs
+        SYSTEM_CERTS="always"
+        if [ -n "${PIP_CERT:-}" ]; then
+            say "certificates: retrying pip once against this machine's own store, with verification still on"
+            if pip_output=$("$python_bin" -m pip install --user --upgrade "$(package_spec)" 2>&1); then
+                printf '%s\n' "$pip_output"
+                return 0
+            fi
+            printf '%s\n' "$pip_output" >&2
+        fi
+    fi
     case "$pip_output" in
         *externally-managed-environment* | *"externally managed"*)
             # PEP 668: the distribution owns this interpreter. The answer is an
@@ -439,11 +592,11 @@ elif ! installed=$(agentic-hil --version 2>/dev/null); then
     step 1 "probe: an agentic-hil on this PATH does not answer, installing it again"
 elif [ -n "$PINNED" ]; then
     step 1 "probe: agentic-hil $installed is here, and --version $PINNED was asked for, so the package is installed again"
-elif version_at_least "$installed" "$FLOOR"; then
-    step 1 "probe: agentic-hil $installed is here and at least $FLOOR, skipping the package install"
+elif version_at_least "$installed" "$RELEASE"; then
+    step 1 "probe: agentic-hil $installed is here and not older than $RELEASE, skipping the package install"
     NEEDS_PACKAGE=0
 else
-    step 1 "probe: agentic-hil $installed is older than $FLOOR, upgrading it"
+    step 1 "probe: agentic-hil $installed is older than $RELEASE, upgrading it"
 fi
 
 # Step 2: install the package, user-local, never as root.
@@ -502,10 +655,20 @@ ensure_resolved_for_agent_install() {
 # diagnosis, so then it is printed whole and this stops. The top-level "ok" is
 # read at its own indentation, so a true nested inside a failed report cannot
 # stand in for the answer.
+# One agent registered, reported as a result rather than as a document. On
+# success the operator needs one line; on failure the report is the diagnosis
+# and is printed whole, which is why it is captured rather than streamed: three
+# agent CLIs would otherwise put a hundred and fifty lines of detail inside a
+# transcript whose whole job is to say five calm things.
+#
+# The verdict is the exit status, which is `overall_success` computed inside the
+# CLI. It used to be that status and a match on the top-level `ok` at its own
+# indentation, from back when the report arrived as JSON whoever was reading. It
+# is prose now, addressed to the operator who is about to read it, and a text
+# match on prose would be a worse check than the status it was doubling.
 register_agent() {
     registering_agent="$1"
-    if agent_install_report=$("$AGENTIC_HIL_CMD" agent-install --agent "$registering_agent" 2>&1) &&
-        printf '%s\n' "$agent_install_report" | grep -q '^  "ok": true'; then
+    if agent_install_report=$("$AGENTIC_HIL_CMD" agent-install --agent "$registering_agent" 2>&1); then
         say "agent: $registering_agent registered (skill and MCP server, restart pending)"
         return 0
     fi

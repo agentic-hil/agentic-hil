@@ -46,6 +46,8 @@ DOCUMENTED_FLAGS = (
     "--version",
     "--can",
     "--no-can",
+    "--system-certs",
+    "--no-system-certs",
     "--help",
 )
 
@@ -531,30 +533,48 @@ def test_the_powershell_installer_never_invokes_a_bare_agentic_hil_for_agent_ins
     assert "-File $AgenticHilCmd" in code
 
 
-def test_step_four_reports_a_result_and_does_not_print_the_agent_install_document() -> None:
-    """One line per agent on success, the whole document only when it is the diagnosis.
+def test_step_four_reports_a_result_and_does_not_stream_the_agent_install_report() -> None:
+    """One line per agent on success, the whole report only when it is the diagnosis.
 
-    `agent-install` answers with a JSON report of every path it touched. Streamed,
-    a machine with three agent CLIs turned a successful install into roughly a
-    hundred and fifty lines of machine-readable detail inside a five-step
-    transcript. Captured, the operator gets one line per agent and still gets the
-    document whole on a failure, where it is the only thing that says which half
-    broke. Both scripts read the top-level `ok` at its own indentation, so a `true`
-    nested inside a failed report cannot answer for the report.
+    `agent-install` answers with a report of every path it touched. Streamed, a
+    machine with three agent CLIs turned a successful install into roughly a
+    hundred and fifty lines of detail inside a five-step transcript. Captured,
+    the operator gets one line per agent and still gets the report whole on a
+    failure, where it is the only thing that says which half broke.
+
+    The verdict is the exit status and nothing else. Both scripts used to also
+    match the top-level `ok` at its own indentation, which was a check on a
+    document; the report is prose now, addressed to the operator who is going to
+    read it, and matching text in prose would be weaker than the status it was
+    doubling.
     """
     shell = _code_only(_shell_source())
     assert "register_agent" in shell
     assert f'"agent: $registering_agent {REGISTERED_LINE}"' in shell
-    assert "agent_install_report=$(" in shell, "install.sh streams the document instead of capturing it"
-    assert '^  "ok": true' in shell, "install.sh does not read the top-level ok at its own indentation"
-    assert '"$agent_install_report" >&2' in shell, "install.sh does not print the document on a failure"
+    assert "agent_install_report=$(" in shell, "install.sh streams the report instead of capturing it"
+    assert '"$agent_install_report" >&2' in shell, "install.sh does not print the report on a failure"
+    assert '"ok": true' not in shell, "install.sh still matches a document it is no longer handed"
 
     powershell = _code_only(_powershell_source())
     assert "function Register-Agent" in powershell
     assert f'"agent: $AgentId {REGISTERED_LINE}"' in powershell
-    assert "Invoke-Captured -File $AgenticHilCmd" in powershell, "install.ps1 streams the document instead of capturing it"
+    assert "Invoke-Captured -File $AgenticHilCmd" in powershell, "install.ps1 streams the report instead of capturing it"
     assert "Invoke-Checked -File $AgenticHilCmd" not in powershell
-    assert '(?m)^  "ok": true' in powershell, "install.ps1 does not read the top-level ok at its own indentation"
+    assert '"ok": true' not in powershell, "install.ps1 still matches a document it is no longer handed"
+
+
+def test_neither_script_asks_agent_install_for_a_rendering_it_gets_anyway() -> None:
+    """Rendering is the default, so the frontend that shows a person says nothing.
+
+    This was a flag for a while, on the reasoning that capturing the output is
+    indistinguishable from a machine reading it. The reasoning held and the
+    conclusion was backwards: a wrapper that shows a person what came back is
+    what almost every caller is, so the rendering is the default and `--json` is
+    what the few that parse ask for. Neither script parses.
+    """
+    for name, code in _both_code().items():
+        assert "--human" not in code, f"{name} asks for what it is given"
+        assert "--json" not in code, f"{name} asks for a document it does not read"
 
 
 def test_the_powershell_capture_unwraps_a_stderr_error_record() -> None:
@@ -962,6 +982,465 @@ def test_both_scripts_require_an_exact_match_for_a_version_pin() -> None:
     powershell = _code_only(_powershell_source())
     assert "Test-VersionExactly" in powershell
     assert "Test-VersionMatchesRequest" in powershell
+
+
+def test_both_scripts_install_the_same_release() -> None:
+    """The version an installation already here has to reach, stated once per script.
+
+    It is the release now, not the capability floor it used to be. Both scripts
+    have to move together for the same line to mean the same thing on either
+    platform; tools/check_version_consistency.py holds the number to the release,
+    and this holds the two scripts to each other.
+    """
+    shell = re.search(r'^RELEASE="(\d+\.\d+\.\d+)"$', _shell_source(), re.MULTILINE)
+    powershell = re.search(r"^\$Release = '(\d+\.\d+\.\d+)'$", _powershell_source(), re.MULTILINE)
+    assert shell is not None, "install.sh states no RELEASE"
+    assert powershell is not None, "install.ps1 states no $Release"
+    assert shell.group(1) == powershell.group(1)
+
+
+def test_an_installation_below_the_release_is_upgraded_rather_than_kept(tmp_path: Path) -> None:
+    """The returning user, run end to end through a POSIX shell.
+
+    Step 1 compared against a capability floor of 0.4.0, so every copy installed
+    since answered "skipping the package install" and step 4 registered the skill
+    out of that copy: the one line the README hands a stranger left a 0.11.0 bench
+    on 0.11.0 and wrote it a 0.11.0 skill, silently, while reporting success. The
+    comparison is against the release now, so an older copy is upgraded and the
+    machine half runs out of the fresh one.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    user_bin = home / ".local" / "bin"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, user_bin, uv_bin, tools):
+        directory.mkdir(parents=True)
+
+    marker = tmp_path / "who-ran-agent-install"
+
+    # A real earlier release: far above the floor step 1 used to accept, far
+    # below the release it compares against now.
+    _stub_executable(
+        user_bin / "agentic-hil",
+        'case "$1" in\n'
+        '  --version) echo "0.11.0" ;;\n'
+        f'  agent-install) echo "stale" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n",
+    )
+    _stub_executable(tools / "claude", "exit 0\n")
+    _stub_executable(
+        tools / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "99.0.0" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:{user_bin}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-can"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "skipping the package install" not in transcript, transcript
+    assert "0.11.0 is older than" in transcript, transcript
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+
+
+def test_neither_script_offers_a_way_to_disable_certificate_verification() -> None:
+    """A proxied network is answered by a trust store, never by a switch.
+
+    `--system-certs` exists because uv validates against roots bundled in its own
+    binary and a TLS-intercepting proxy is not in them. The neighbouring switches
+    that make the same symptom go away do it by not checking, and one of them
+    reaching a script a stranger pipes into a shell would be the whole promise of
+    these two files gone. Comments are stripped first, so the comment that names
+    what must never be passed is not read as passing it.
+    """
+    for name, code in _both_code().items():
+        for forbidden in ("--allow-insecure-host", "--trusted-host", "--insecure", "-SkipCertificateCheck", "ServerCertificateValidationCallback"):
+            assert forbidden not in code, f"{name} carries {forbidden}"
+
+
+def test_both_scripts_point_the_package_manager_at_the_system_store() -> None:
+    """The flag sets the variable rather than passing a switch to one command.
+
+    `agentic-hil upgrade` shells out to `uv tool upgrade` and passes no TLS flags
+    of its own, so a proxied host whose install command carried the switch would
+    lose the upgrade path the next time. An exported variable is inherited by
+    both, which is the shape TROUBLESHOOTING.md already recommends.
+    """
+    shell = _code_only(_shell_source())
+    assert "UV_SYSTEM_CERTS" in shell
+    assert "export UV_SYSTEM_CERTS" in shell
+    # pip takes a file rather than a switch, so the flag has to find one.
+    assert "PIP_CERT" in shell
+    powershell = _code_only(_powershell_source())
+    assert "UV_SYSTEM_CERTS" in powershell
+
+
+def test_the_system_certs_flag_reaches_the_package_manager(tmp_path: Path) -> None:
+    """`--system-certs`, run end to end through a POSIX shell.
+
+    A static read can show the variable is set somewhere in the file. It cannot
+    show that the process which needs it is started after that, and inherits it.
+    The stub uv records what it was given.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, uv_bin, tools):
+        directory.mkdir(parents=True)
+
+    seen = tmp_path / "what-uv-was-given"
+
+    _stub_executable(
+        tools / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'  echo "${{UV_SYSTEM_CERTS:-unset}}" > "{seen}"\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "99.0.0" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--system-certs", "--no-can", "--no-agent-install"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert seen.is_file(), transcript
+    assert seen.read_text(encoding="utf-8").strip() == "1", transcript
+    assert "certificates: uv" in transcript, transcript
+
+
+def _proxied_uv_stub(attempts: Path) -> str:
+    """A uv that fails the way a TLS-intercepting proxy makes it fail.
+
+    It records what it was given on each attempt, refuses the install while it
+    is validating against roots of its own, and writes the console script once
+    it is pointed at the machine's store.
+    """
+    return (
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'  echo "${{UV_SYSTEM_CERTS:-unset}}" >> "{attempts}"\n'
+        '  if [ -z "${UV_SYSTEM_CERTS:-}" ]; then\n'
+        '    echo "error: Failed to fetch: https://pypi.org/simple/agentic-hil/" >&2\n'
+        '    echo "  Caused by: invalid peer certificate: UnknownIssuer" >&2\n'
+        "    exit 2\n"
+        "  fi\n"
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "99.0.0" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+def test_both_scripts_recognise_a_trust_failure_by_its_own_words() -> None:
+    """The retry is decided by what the failure says, not by trying twice always.
+
+    A second attempt against a different set of roots is only ever an answer to
+    a chain that ended outside the first set. Anything else that can fail an
+    install, a proxy refusing the host, an index that is down, a version that
+    does not exist, is not helped by it and must not spend a second attempt on
+    it. Both scripts carry the words each manager uses for the one case.
+    """
+    for name, code in _both_code().items():
+        assert "invalid peer certificate" in code, name
+        assert "UnknownIssuer" in code, name
+        assert "certificate verify failed" in code, name
+
+
+def test_a_certificate_failure_is_retried_against_the_system_store(tmp_path: Path) -> None:
+    """The proxied machine, run end to end through a POSIX shell.
+
+    The person typing the line does not know that uv carries its own roots, and
+    should not have to. The failed attempt is the detection: uv comes back
+    saying the chain ended outside them, and the second attempt validates
+    against the store this machine already trusts for everything else. The stub
+    records what it was given on each attempt.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, uv_bin, tools):
+        directory.mkdir(parents=True)
+
+    attempts = tmp_path / "attempts"
+
+    _stub_executable(tools / "uv", _proxied_uv_stub(attempts))
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-can", "--no-agent-install"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert attempts.read_text(encoding="utf-8").split() == ["unset", "1"], transcript
+    assert "retrying once against this machine's own store" in transcript, transcript
+
+
+def test_the_retry_is_refused_when_it_was_told_to_be(tmp_path: Path) -> None:
+    """`--no-system-certs` keeps the install on uv's own roots and lets it fail.
+
+    The automatic retry reaches for a different set of trust anchors, and an
+    operator who wants that decision made by nobody but themselves has to be
+    able to say so. Then the install fails, and the refusal says which flag
+    stopped the second attempt rather than leaving the reader with uv's message
+    alone.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, uv_bin, tools):
+        directory.mkdir(parents=True)
+
+    attempts = tmp_path / "attempts"
+
+    _stub_executable(tools / "uv", _proxied_uv_stub(attempts))
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+    }
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-system-certs", "--no-can", "--no-agent-install"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode != 0, transcript
+    assert attempts.read_text(encoding="utf-8").split() == ["unset"], transcript
+    assert "--no-system-certs" in transcript, transcript
+
+
+def _recording_uv_stub(seen: Path) -> str:
+    """A uv that always succeeds and records the two cert variables it inherited.
+
+    Real uv reads only UV_SYSTEM_CERTS, but a shell stub can read any variable in
+    its environment, so it records PIP_CERT too: --no-system-certs clears both
+    before the manager runs, and this is where that clearing is observed.
+    """
+    return (
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'  echo "${{UV_SYSTEM_CERTS:-unset}} ${{PIP_CERT:-unset}}" > "{seen}"\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "99.0.0" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+def _no_system_certs_run(tmp_path: Path, pip_cert: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run install.sh with --no-system-certs and the two cert variables already set.
+
+    The environment starts the way a host does that took TROUBLESHOOTING.md's
+    advice and exported UV_SYSTEM_CERTS for future upgrades. Returns the process
+    and the file the stub uv wrote the variables it saw into.
+    """
+    shell = _posix_shell()
+    home = tmp_path / "home"
+    project = home / "project"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, uv_bin, tools):
+        directory.mkdir(parents=True)
+    seen = tmp_path / "what-uv-inherited"
+    _stub_executable(tools / "uv", _recording_uv_stub(seen))
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+        "UV_SYSTEM_CERTS": "1",
+        "PIP_CERT": pip_cert,
+    }
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-system-certs", "--no-can", "--no-agent-install"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    return result, seen
+
+
+def test_no_system_certs_clears_an_inherited_machine_store_override(tmp_path: Path) -> None:
+    """The flag has to override the environment, not merely decline to set it.
+
+    A host that exported UV_SYSTEM_CERTS for future upgrades, and a PIP_CERT that
+    already points at this machine's own bundle, would otherwise have uv and pip
+    reading that store even as the operator passes --no-system-certs. The stub uv
+    records what it inherited; both must be gone.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, seen = _no_system_certs_run(tmp_path, pip_cert="/etc/ssl/cert.pem")
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert seen.read_text(encoding="utf-8").split() == ["unset", "unset"], transcript
+    assert "cleared the inherited UV_SYSTEM_CERTS" in transcript, transcript
+    assert "cleared the inherited system-bundle PIP_CERT" in transcript, transcript
+
+
+def test_no_system_certs_keeps_a_pip_cert_the_operator_chose_for_themselves(tmp_path: Path) -> None:
+    """"Never reach for this machine's store" is not "throw away my own bundle."
+
+    A PIP_CERT that names a file of the operator's, rather than this machine's
+    system bundle, is their deliberate choice and not the reach the flag refuses.
+    The inherited UV_SYSTEM_CERTS still goes, because that one does point uv at
+    the machine store.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    own_bundle = tmp_path / "my-proxy-ca.pem"
+    own_bundle.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+
+    result, seen = _no_system_certs_run(tmp_path, pip_cert=str(own_bundle))
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert seen.read_text(encoding="utf-8").split() == ["unset", str(own_bundle)], transcript
+    assert "cleared the inherited system-bundle PIP_CERT" not in transcript, transcript
+
+
+def test_both_scripts_clear_an_inherited_machine_store_override_when_refused() -> None:
+    """Both installers, not just the one this platform can run end to end.
+
+    The PowerShell flow is not exercised as a subprocess here, so its half of the
+    contract is pinned structurally: --no-system-certs clears the inherited
+    UV_SYSTEM_CERTS rather than only declining to set it.
+    """
+    shell = _code_only(_shell_source())
+    assert "unset UV_SYSTEM_CERTS" in shell
+    # And the clearing is what "never" reaches, not the "always" path.
+    assert re.search(r'SYSTEM_CERTS"?\s*=\s*"never"[^\n]*\n\s*clear_system_certs', shell), shell
+
+    powershell = _code_only(_powershell_source())
+    assert r"Remove-Item Env:\UV_SYSTEM_CERTS" in powershell
+    assert re.search(r"SystemCertsMode -eq 'never'[^\n]*Clear-SystemCerts", powershell), powershell
 
 
 # The container run, end to end: a machine with nothing on it, the real package

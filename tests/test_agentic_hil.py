@@ -65,7 +65,9 @@ from agentic_hil.cli import (
 )
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import (
+    CONFIG_ENV,
     ConfigError,
+    authoritative_config_target,
     load_config,
     project_config_directory,
     project_config_path,
@@ -402,7 +404,7 @@ def test_upgrade_uses_running_python_and_refreshes_the_agent_it_had_set_up(
     assert calls[0][0][:3] == [sys.executable, "-m", "pip"] and "--dry-run" in calls[0][0]
     assert calls[1][0] == PIP_UPGRADE_COMMAND
     assert calls[2] == ([sys.executable, "-m", "agentic_hil", "--version"], None)
-    assert calls[3][0] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]
+    assert calls[3][0] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force", "--json"]
     assert calls[3][1] is not None
 
 
@@ -1063,7 +1065,7 @@ def test_a_successful_upgrade_refreshes_only_the_agents_this_installation_had_se
     # Exactly one refresh, run out of the new package rather than in this
     # process, which still holds the release that was just replaced.
     invocations = [command for command, _cwd in calls if "agent-install" in command]
-    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]]
+    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force", "--json"]]
 
 
 def test_a_registration_that_exists_without_a_skill_is_refreshed_too(
@@ -1081,7 +1083,7 @@ def test_a_registration_that_exists_without_a_skill_is_refreshed_too(
     result = upgrade_installation([])
 
     invocations = [command for command, _cwd in calls if "agent-install" in command]
-    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "claude-code", "--force"]]
+    assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "claude-code", "--force", "--json"]]
     assert result["summary"].endswith("The MCP registration was rewritten for Claude Code, so restart Claude Code to load it.")
 
 
@@ -1123,7 +1125,7 @@ def test_a_refresh_that_failed_is_reported_and_does_not_fail_the_upgrade(
     assert entry["ok"] is False
     assert entry["skill"] is False
     assert entry["registration"] is False
-    assert entry["command"] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force"]
+    assert entry["command"] == [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "opencode", "--force", "--json"]
     assert "could not be refreshed for opencode" in result["summary"]
 
 
@@ -1614,6 +1616,103 @@ def test_agent_install_runs_where_the_install_line_is_typed(
     assert result["steps"]["mcp_config"]["ok"] is True
     assert _claude_skill_path().is_file()
     assert _registered_claude_command() == command
+
+
+@pytest.mark.parametrize("where", ["home", "filesystem-root"])
+def test_init_refuses_to_root_a_project_at_the_home_directory(
+    where: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the same statement: home is not a project.
+
+    The user-wide half stops drawing a workspace boundary at home so that it can
+    run where an install line is typed (#235), and behind that refusal sat this
+    one: `setup` typed in the home directory then reached the project half and
+    would bind an authoritative configuration to it. A `workspace_root` at home
+    is not a smaller version of a project, it is a different thing: the
+    configuration and the state root both have to live outside the workspace and
+    on a default profile both live under home, the installed launcher becomes
+    repository content, and every other project this user has is inside this
+    one's tree. Far more often it is simply one `cd` too early. So the project
+    half refuses in exactly the place the user half collapses its boundary, and
+    the refusal names the directory change that fixes it. (#245)
+    """
+    home = Path.home()
+    monkeypatch.chdir(home if where == "home" else Path(home.anchor))
+    _trusted_test_mcp_command(monkeypatch)
+
+    with pytest.raises(ConfigError) as excinfo:
+        init_project(agent="claude-code")
+
+    refusal = excinfo.value.to_dict()
+    assert refusal["error_type"] == "workspace_is_home"
+    assert "cd my-project" in refusal["next_step"]
+    # The half that does run from here is named, because after a `setup` it is
+    # already installed and the operator has to be told it stays.
+    assert "agentic-hil agent-install" in refusal["next_step"]
+    # Refused before anything was written, config and state root alike.
+    assert not project_config_path(home).exists()
+    assert not project_config_path(Path(home.anchor)).exists()
+    assert not _default_state_root().exists()
+    # And the same refusal from the function that actually writes
+    # `workspace_root`, so the rule does not rest on `init_project` staying its
+    # only caller.
+    with pytest.raises(ConfigError) as direct:
+        init_config()
+
+    assert direct.value.error_type == "workspace_is_home"
+
+
+def test_setup_from_home_installs_the_agent_and_refuses_the_project_half(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`setup` in the home directory is the command the decision was about.
+
+    It is the composition of both halves, so it is where the two answers meet:
+    the user-wide half belongs here and finishes, the project half has nothing
+    here to bind and says so. Nothing project-local is written and nothing the
+    user half installed is rolled back, which is the split `setup` promises
+    everywhere else it fails. (#245)
+    """
+    monkeypatch.chdir(Path.home())
+    command = _trusted_test_mcp_command(monkeypatch)
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is False
+    assert result["scopes"]["user"]["ok"] is True
+    assert result["steps"]["skill_install"]["ok"] is True
+    assert result["steps"]["mcp_config"]["ok"] is True
+    assert result["steps"]["config"]["error_type"] == "workspace_is_home"
+    # The remedy has to survive the composition: `steps.config` is where an
+    # operator reading a failed `setup` looks for what to do.
+    assert "cd my-project" in result["steps"]["config"]["next_step"]
+    assert result["rollback"]["ok"] is True
+    # The agent is installed for this user and stays installed.
+    assert _claude_skill_path().is_file()
+    assert _registered_claude_command() == command
+    assert not project_config_path(Path.home()).exists()
+
+
+def test_a_project_directory_under_home_is_a_project_like_any_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Home and the directories above it are the whole of the refusal.
+
+    Nearly every real project sits somewhere under the home directory, so a
+    refusal that read "under home" rather than "is home, or holds it" would
+    refuse the ordinary case and leave only projects on another volume working.
+    """
+    workspace = Path.home() / "firmware-project"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["steps"]["config"]["ok"] is True
+    assert initialized_config_path(workspace).is_file()
 
 
 def test_agent_install_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2117,6 +2216,51 @@ def test_a_failed_project_half_leaves_the_user_wide_installation_intact(
     assert skill_path.is_file()
 
 
+def test_a_failed_claude_project_half_rolls_back_the_external_project_record_it_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback that claims the project half went back must include the record it wrote.
+
+    For a project `AGENTIC_HIL_CONFIG` binds outside the projects directory, the
+    restriction step writes `external-projects.json` first — the one file on disk
+    that says the project exists. If a late failure rolls the project half back
+    while that record stays, the run reports its changes reversed and leaves a
+    stale entry standing, which a later refresh reads as a configuration gone
+    missing. The record is in the project half's mutation set, so it goes back
+    with the config and the settings file (#246 the other way round).
+    """
+    from agentic_hil import cli as cli_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+    override = Path.home() / "operator-policy" / "config.yaml"
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(override))
+    record = project_config_directory().parent / "external-projects.json"
+    assert not record.exists()
+    real_restrict = cli_module.restrict_agent_write_access
+
+    def write_then_fail(*args: object, **kwargs: object) -> dict:
+        written = real_restrict(*args, **kwargs)
+        assert written["ok"] is True
+        # The record the real step just wrote is what the rollback must not leave.
+        assert record.exists()
+        return {"ok": False, "error_type": "injected_failure", "summary": "late restriction failure"}
+
+    monkeypatch.setattr("agentic_hil.cli.restrict_agent_write_access", write_then_fail)
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is False
+    assert result["rollback"]["ok"] is True
+    # The record went back with the rest of the project half's own writes...
+    assert not record.exists()
+    # ...as did the config the half wrote at the bound location.
+    assert not override.exists()
+
+
 def test_a_failed_user_half_leaves_an_existing_project_config_intact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2206,7 +2350,7 @@ def test_both_halves_are_reachable_from_the_command_line(
     monkeypatch.chdir(outside)
     _trusted_test_mcp_command(monkeypatch)
 
-    assert entrypoint(["agent-install", "--agent", "claude-code"]) == 0
+    assert entrypoint(["agent-install", "--agent", "claude-code", "--json"]) == 0
     user_scope = json.loads(capsys.readouterr().out)
     assert user_scope["scope"] == "user"
 
@@ -2214,7 +2358,7 @@ def test_both_halves_are_reachable_from_the_command_line(
     workspace.mkdir()
     monkeypatch.chdir(workspace)
 
-    assert entrypoint(["init", "--agent", "claude-code"]) == 0
+    assert entrypoint(["init", "--agent", "claude-code", "--json"]) == 0
     project = json.loads(capsys.readouterr().out)
     assert project["scope"] == "project"
     assert project["steps"]["doctor"]["ok"] is True
@@ -2589,6 +2733,91 @@ def test_a_foreign_mcp_entry_refusal_says_the_refusal_is_the_answer(
     assert "Report it" in step
     # The wording that once taught a model to rewrite the file must not return.
     assert "ask the operator to change" not in step.lower()
+
+
+@pytest.mark.parametrize(
+    ("agent", "relative_path", "existing", "expected_command"),
+    [
+        (
+            "codex",
+            Path(".codex/config.toml"),
+            '[mcp_servers.agentic-hil]\ncommand = "/operator/wrapper.sh"\nargs = []\n',
+            "/operator/wrapper.sh",
+        ),
+        (
+            "claude-code",
+            Path(".claude.json"),
+            '{"mcpServers": {"agentic-hil": {"type": "stdio", "command": "/operator/wrapper.sh", "args": []}}}',
+            "/operator/wrapper.sh",
+        ),
+        (
+            "opencode",
+            Path(".config/opencode/opencode.json"),
+            '{"mcp": {"agentic-hil": {"type": "local", "command": ["/operator/wrapper.sh", "--profile", "bench"], "enabled": true}}}',
+            ["/operator/wrapper.sh", "--profile", "bench"],
+        ),
+    ],
+)
+def test_a_foreign_mcp_entry_refusal_names_the_command_it_found(
+    agent: str,
+    relative_path: Path,
+    existing: str,
+    expected_command: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The file alone does not say whose entry this is; the command does.
+
+    An operator reading only the path cannot tell their own deliberate wrapper
+    from an entry an older release wrote whose launcher has since moved.
+    Answering that took a hand-written JSON read of their own agent config, so
+    the refusal carries the configured command, in the shape the format stores
+    it: a string for Codex and Claude, opencode's list as it stands.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    path = home / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(existing, encoding="utf-8")
+
+    result = register_agent_mcp(agent, force=True)
+
+    assert result["error_type"] == "mcp_config_conflict"
+    assert result["existing_command"] == expected_command
+    assert path.read_text(encoding="utf-8") == existing
+    # Naming the command must stay reporting. The sentence that measured out the
+    # rewrites says the conflict is the answer, and it says nothing about the
+    # entry's command, which is what an agent would read as a thing to act on.
+    step = result["next_step"]
+    assert "This conflict is the answer to the request" in step
+    assert "/operator/wrapper.sh" not in step
+
+
+def test_a_foreign_mcp_entry_refusal_omits_a_command_it_cannot_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A TOML value that is not a command is left out, not guessed at.
+
+    TOML admits dates, tables and numbers where a command should be, and none of
+    them survives being written into the JSON this result is printed as. The
+    refusal stands either way, because it never depended on reading the entry.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    path = home / ".codex" / "config.toml"
+    path.parent.mkdir(parents=True)
+    existing = "[mcp_servers.agentic-hil]\ncommand = 1979-05-27T07:32:00Z\n"
+    path.write_text(existing, encoding="utf-8")
+
+    result = register_agent_mcp("codex", force=True)
+
+    assert result["error_type"] == "mcp_config_conflict"
+    assert "existing_command" not in result
+    assert json.dumps(result)
+    assert path.read_text(encoding="utf-8") == existing
 
 
 def test_register_agent_mcp_codex_rejects_invalid_toml_without_changes(
@@ -3093,6 +3322,114 @@ def test_a_project_configuration_that_will_not_read_costs_no_other_project_its_r
     assert abandoned in _deny_rules(settings)
 
 
+def _external_project_record() -> Path:
+    """Where the record of projects the projects directory does not hold goes.
+
+    Spelled out here rather than imported, because it is a file on an operator's
+    disk: a release that moved it quietly would leave every project an earlier
+    release recorded unfindable, and unfindable is the whole of #246.
+    """
+    return project_config_directory().parent / "external-projects.json"
+
+
+def test_a_second_projects_refresh_keeps_the_rule_for_a_project_the_override_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#246: a project the projects directory does not hold still wants its rule.
+
+    `AGENTIC_HIL_CONFIG` binds the first bench to a configuration the walk over
+    that directory never comes across, while its `state_root` sits inside the
+    root this tool creates for itself, where the namespace claim does recognise
+    the rule. The second bench keeps its configuration where the walk finds it
+    and moved its own state root elsewhere, so nothing the second run could see
+    named the first bench's tree: it read a live protection as a leftover, took
+    it off a bench that was in use, and the first bench's next `init --agent`
+    wrote it again.
+    """
+    workspace = _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    namespace = _tool_state_namespace()
+    # The path the override actually produces, rather than one that looks like it.
+    monkeypatch.setenv(CONFIG_ENV, str(tmp_path / "benches" / "alpha" / "config.yaml"))
+    bound = authoritative_config_target(workspace)
+    assert bound == tmp_path / "benches" / "alpha" / "config.yaml"
+    bound.parent.mkdir(parents=True)
+    bound.write_text(f"state_root: {(namespace / 'alpha-state').as_posix()!r}\n", encoding="utf-8")
+    discovered = project_config_directory() / "beta-0123456789" / "config.yaml"
+    discovered.parent.mkdir(parents=True)
+    discovered.write_text(f"state_root: {(namespace / 'beta-state').as_posix()!r}\n", encoding="utf-8")
+    settings = _claude_settings(home, ["Bash(curl *)"])
+    assert restrict_agent_write_access("claude-code", bound, namespace / "alpha-state")["ok"] is True
+    standing = _deny_rules(settings)
+
+    # The second bench is set up in a shell that never heard of the override.
+    monkeypatch.delenv(CONFIG_ENV)
+    refresh = restrict_agent_write_access("claude-code", discovered, namespace / "beta-state")
+
+    assert refresh["ok"] is True
+    assert refresh["removed"] == []
+    assert _deny_rules(settings)[: len(standing)] == standing
+    # Only the project the walk cannot find is written down, and once.
+    assert json.loads(_external_project_record().read_text(encoding="utf-8")) == {"configurations": [str(bound)]}
+
+
+def test_a_recorded_project_configuration_that_will_not_read_takes_nothing_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absent is not abandoned, wherever the configuration lives.
+
+    A configuration `AGENTIC_HIL_CONFIG` binds can be on a volume that is not
+    mounted this morning, and from here that is the same absence as a bench the
+    operator decommissioned. Only one of the two has stopped wanting its rule, so
+    the answer stays incomplete and nothing is taken back at all, which is what
+    an unreadable configuration in the projects directory already costs.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    namespace = _tool_state_namespace()
+    record = _external_project_record()
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"configurations": [str(tmp_path / "not-mounted" / "config.yaml")]}) + "\n", encoding="utf-8")
+    abandoned = f"Edit(/{_posix_filesystem_path(namespace / 'state-of-a-bench-that-is-gone')}/**)"
+    settings = _claude_settings(home, [abandoned])
+
+    restriction = restrict_agent_write_access("claude-code", project_config_directory() / "gamma-0123456789" / "config.yaml", namespace / "state")
+
+    assert restriction["ok"] is True
+    assert restriction["removed"] == []
+    assert abandoned in _deny_rules(settings)
+
+
+def test_the_write_restriction_refuses_a_rule_it_could_not_account_for_later(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rule nothing can attribute afterwards is worse than no rule.
+
+    The record is what keeps the next project's setup from reading this bench's
+    tree as one nobody names, so with a record that will not read there is
+    nothing to write the rule against, and the refusal is the answer. The record
+    is left exactly as it is, because replacing it would throw away whichever
+    projects it does name, and the settings file is not opened for writing at all.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    record = _external_project_record()
+    record.parent.mkdir(parents=True, exist_ok=True)
+    theirs = "[not the record this tool writes]\n"
+    record.write_text(theirs, encoding="utf-8")
+    settings = _claude_settings(home, ["Bash(curl *)"])
+
+    restriction = restrict_agent_write_access("claude-code", tmp_path / "benches" / "alpha" / "config.yaml", tmp_path / "state")
+
+    assert restriction["ok"] is False
+    assert restriction["error_type"] == "agent_project_record_unreadable"
+    assert _deny_rules(settings) == ["Bash(curl *)"]
+    assert record.read_text(encoding="utf-8") == theirs
+
+
 def test_the_deny_rule_cleanup_settles_after_one_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3108,6 +3445,9 @@ def test_the_deny_rule_cleanup_settles_after_one_run(
 
     assert (second["added"], second["removed"]) == ([], [])
     assert settings.read_text(encoding="utf-8") == migrated
+    # The record of the projects the projects directory does not hold settles
+    # with them: this configuration is named once, not once per run.
+    assert json.loads(_external_project_record().read_text(encoding="utf-8")) == {"configurations": [str(config_path)]}
 
 
 def _uninstall_paths(result: dict, key: str) -> list[str]:
@@ -3448,6 +3788,76 @@ def test_uninstall_leaves_a_write_refusal_it_cannot_attribute(
     assert len(result["removed"]) == 1
 
 
+def test_uninstall_takes_back_the_rule_for_a_project_the_override_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of #246: what could not be attributed was left standing.
+
+    A configuration directory outside this tool's per-user roots is never claimed
+    by the namespace, so the only thing that recognises a rule for one is the
+    exact text a configuration still on disk derives it from. The projects
+    directory does not hold this project's, and the record is what says where it
+    is. The record goes with the rules it explains, since after this there is no
+    rule of this tool's left for any refresh to weigh, and a file this
+    installation wrote is exactly what this command exists to take back.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    namespace = _tool_state_namespace()
+    bound = tmp_path / "benches" / "alpha" / "config.yaml"
+    bound.parent.mkdir(parents=True)
+    bound.write_text(f"state_root: {(namespace / 'alpha-state').as_posix()!r}\n", encoding="utf-8")
+    settings = _claude_settings(home, ["Bash(curl *)"])
+    assert restrict_agent_write_access("claude-code", bound, namespace / "alpha-state")["ok"] is True
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert _deny_rules(settings) == ["Bash(curl *)"]
+    assert [item["what"] for item in result["removed"]] == ["write refusal", "write refusal", "project record"]
+    assert not _external_project_record().exists()
+
+
+def test_uninstall_still_names_an_externally_bound_configuration_and_its_state_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record is taken back, but what it named is still left standing and named.
+
+    A project `AGENTIC_HIL_CONFIG` bound outside the projects directory, and a
+    `state_root` it points to on a volume that is not this tool's own, are trees
+    the uninstall deliberately keeps. The walk over the projects directory never
+    comes across either, and the record that did is removed with the rules it
+    explained — so unless `kept` reads that record before it goes, both trees drop
+    out of the accounting the contract promises. They are read first, and named.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    external_state = tmp_path / "off-volume-state"
+    (external_state / "coordination" / "records").mkdir(parents=True)
+    bound = tmp_path / "benches" / "alpha" / "config.yaml"
+    bound.parent.mkdir(parents=True)
+    bound.write_text(f"state_root: {external_state.as_posix()!r}\n", encoding="utf-8")
+    settings = _claude_settings(home, ["Bash(curl *)"])
+    assert restrict_agent_write_access("claude-code", bound, external_state)["ok"] is True
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    # The operator's own rule stays; only this tool's went, record and all.
+    assert _deny_rules(settings) == ["Bash(curl *)"]
+    kept = _uninstall_kept(result)
+    # Both the external configuration and its off-volume state root are named...
+    assert str(bound) in kept
+    assert str(external_state) in kept
+    # ...and both are still on disk, which is the whole of what "kept" promises.
+    assert bound.is_file()
+    assert (external_state / "coordination" / "records").is_dir()
+    # The record that named them was taken back with the rules it explained.
+    assert not _external_project_record().exists()
+
+
 def test_uninstall_keeps_the_configuration_and_the_state_root_and_names_both(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3706,7 +4116,7 @@ def test_uninstall_is_reachable_from_the_command_line(
     assert install_agent(agent="claude-code")["ok"] is True
     capsys.readouterr()
 
-    assert entrypoint(["uninstall", "--agent", "claude"]) == 0
+    assert entrypoint(["uninstall", "--agent", "claude", "--json"]) == 0
 
     result = json.loads(capsys.readouterr().out)
     assert result["tool"] == "agentic_hil_uninstall"
@@ -4889,7 +5299,7 @@ def test_debugger_probes_cli_uses_authoritative_config(
     write_authoritative_config(tmp_path, monkeypatch, debugger_type="stlink")
     monkeypatch.chdir(tmp_path)
 
-    exit_code = entrypoint(["debugger-probes"])
+    exit_code = entrypoint(["debugger-probes", "--json"])
 
     result = json.loads(capsys.readouterr().out)
     assert exit_code == 0
@@ -4926,7 +5336,7 @@ def test_debugger_probes_answers_through_bootstrap_without_a_configuration(
     monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: str(Path("C:/ST/STM32_Programmer_CLI.exe")))
     monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
 
-    exit_code = entrypoint(["debugger-probes"])
+    exit_code = entrypoint(["debugger-probes", "--json"])
 
     result = json.loads(capsys.readouterr().out)
     assert exit_code == 0, result

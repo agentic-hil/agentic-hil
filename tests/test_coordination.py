@@ -854,7 +854,7 @@ def test_coordination_cli_structures_corrupt_marker_errors(
     coordinator._record_path(coordinator.project_key).write_text('{"version": 999}\n', encoding="utf-8")
     monkeypatch.setattr("agentic_hil.cli.load_cli_authoritative_config", lambda path: config)
 
-    exit_code = entrypoint(arguments)
+    exit_code = entrypoint([*arguments, "--json"])
 
     result = json.loads(capsys.readouterr().out)
     assert exit_code == 1
@@ -1491,7 +1491,7 @@ def test_corrupt_coordination_records_are_structured_at_cli(
     monkeypatch.setattr("agentic_hil.cli.load_cli_authoritative_config", lambda path: config)
 
     for arguments in (["lease-status"], ["recover", "--confirm-safe-state", "--quarantine-id", "incident"]):
-        exit_code = entrypoint(arguments)
+        exit_code = entrypoint([*arguments, "--json"])
         captured = capsys.readouterr()
         result = json.loads(captured.out)
         assert exit_code == 1
@@ -1636,7 +1636,7 @@ def test_lease_status_output_carries_no_secret_named_field(tmp_path: Path, monke
     lease = owner.acquire("physical:secret-leak")
     try:
         monkeypatch.setattr("agentic_hil.cli.load_cli_authoritative_config", lambda path: config)
-        entrypoint(["lease-status"])
+        entrypoint(["lease-status", "--json"])
         printed = capsys.readouterr().out
         # No secret-named key ("*_token"/"*secret"/"password") appears in the
         # operator-facing output; the ownership marker is renamed to a

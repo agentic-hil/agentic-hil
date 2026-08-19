@@ -73,7 +73,7 @@ from agentic_hil.configwrite import (
 )
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator, nothing_standing_result
 from agentic_hil.devices import config_devices
-from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, stdout_is_terminal, write_rendered
+from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, write_rendered
 from agentic_hil.knowledge import (
     CONFIG_GRANT_COMMAND,
     CONFIG_REOPEN_COMMAND,
@@ -113,6 +113,10 @@ AGENTIC_HIL_REGISTRATION_END = "<!-- Agentic HIL skill registration end -->"
 # obstacle to clear. Ten runs rewrote the operator's entry by hand and reran
 # setup, and reported success. Say whose the entry is and that the refusal is
 # the answer — and name no action that could be mistaken for a way through.
+# What the entry runs is reported beside the file, in `existing_command`, so an
+# operator can recognise their own decision without reading their agent config
+# by hand. That is the report's half of the work; this sentence keeps the
+# refusal a refusal, and nothing about the entry's command belongs in it.
 CONFLICT_NEXT_STEP = (
     "That entry belongs to the operator, and --force does not apply to a foreign entry. Editing the "
     "file yourself or removing the entry is not the resolution either: it hands the hardware gate to "
@@ -248,17 +252,20 @@ def entrypoint(argv: list[str] | None = None) -> int:
 
 
 def human_readable_output(command: str, *, json_requested: bool) -> bool:
-    """Whether this invocation renders its result for a person.
+    """Whether this invocation renders its result for a person. It usually is.
 
-    Three ways to answer no, and all of them are the machine contract: `--json`
-    says a machine is reading a terminal, a stdout that is not a terminal says a
-    pipe, a redirect or a subprocess is reading, and `mcp-stdio`/`com-stdio` own
-    stdout for a protocol rather than for a result. Anything else is somebody at
-    a shell.
+    Two ways to answer no, and both are declared rather than guessed. `--json`
+    is a caller stating that it parses this command, and `mcp-stdio`/`com-stdio`
+    own stdout for a protocol rather than for a result. Everything else is
+    rendered, including through a pipe, a redirect and a subprocess.
+
+    Sniffing stdout used to make this decision, and it was wrong about the whole
+    class of callers that captures the output in order to act on it and then
+    puts what came back in front of a person. The installer is one, and it was
+    handing operators the machine document on the one path where the report is
+    all they get. A caller that parses says so; nobody else has to.
     """
-    if json_requested or command in PROTOCOL_COMMANDS:
-        return False
-    return stdout_is_terminal()
+    return command not in PROTOCOL_COMMANDS and not json_requested
 
 
 def emit_result(result: JsonObject, command: str | None, *, human: bool) -> None:
@@ -644,7 +651,9 @@ def _refresh_one_agent(agent: SkillAgent, maintenance_cwd: str) -> JsonObject:
     # Through the module rather than a name imported above: `upgrade` is the one
     # place a test replaces the subprocess runner, and a second binding here
     # would be the copy that kept running the real thing.
-    command = [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", agent.id, "--force"]
+    # `--json` because this parses the child's stdout. A caller that reads the
+    # result asks for the document; everything else is handed the rendering.
+    command = [sys.executable, "-m", "agentic_hil", "agent-install", "--agent", agent.id, "--force", "--json"]
     outcome: JsonObject = {"agent": agent.id, "command": command}
     try:
         completed = upgrade._run_upgrade_process(command, cwd=maintenance_cwd)
@@ -717,6 +726,23 @@ def _agent_permission_config_path(agent_id: str) -> Path | None:
     return _external_user_path(paths[agent_id], "Agent permission configuration")
 
 
+def _working_directory_holds_home() -> bool:
+    """Whether the working directory is the home directory or a directory above it.
+
+    One question, asked in one place, because the two halves of the setup answer
+    it in opposite directions and must never disagree about it. Home is not a
+    project: it is where this user's own files live, this tool's installed ones
+    included. So the user-wide half has no workspace to keep out of here
+    (`_workspace_boundary`, #235) and the project half has no project to bind a
+    configuration to here (`_project_workspace`, #245). A host that cannot name a
+    home directory answers false, which leaves each half on its strict rule, and
+    for each of them that is the safe direction.
+    """
+    with suppress(RuntimeError):
+        return is_path_within_frozen(absolute_without_symlinks(Path.home()), absolute_without_symlinks(Path.cwd()))
+    return False
+
+
 def _workspace_boundary() -> Path | None:
     """The project directory the user-wide half must stay out of, or None.
 
@@ -733,11 +759,69 @@ def _workspace_boundary() -> Path | None:
     every directory that is not home or above it keeps the strict boundary. A
     host that cannot name a home directory keeps it too.
     """
-    workspace = absolute_without_symlinks(Path.cwd())
-    with suppress(RuntimeError):
-        if is_path_within_frozen(absolute_without_symlinks(Path.home()), workspace):
-            return None
-    return workspace
+    if _working_directory_holds_home():
+        return None
+    return absolute_without_symlinks(Path.cwd())
+
+
+_PROJECT_AT_HOME_NEXT_STEP = (
+    "Change into the project this bench belongs to and run the command again, or create that directory first "
+    "(`mkdir my-project`, then `cd my-project`). "
+    "The half that does belong here is unaffected: `agentic-hil agent-install --agent <agent>` installs the skill and "
+    "the MCP registration for this user from any directory, the home directory included, and writes nothing "
+    "project-local."
+)
+
+
+def _project_workspace() -> Path:
+    """The directory the project half binds a configuration to, or the refusal.
+
+    `init` and `setup` write one authoritative configuration whose
+    `workspace_root` is this directory, and everything downstream reads that key
+    as "the project": the configuration itself and the state root are refused
+    inside it, a configured file inside it is repository content, and the agent
+    is asked to refuse its own write tools on the paths it names. Rooted at the
+    home directory, all of that turns on the user's whole profile at once. The
+    two files that have to sit outside the workspace have nowhere left to go,
+    because on a default profile both live under home; the launcher the
+    installer put in `~/.local/bin` becomes repository content; and every other
+    project this user has sits inside this one's tree. It is also, and mostly, a
+    typo: an operator who meant to set up a firmware project typed the command
+    one `cd` too early, and what they would get is a configuration keyed to a
+    directory nobody looks in again.
+
+    Which of those an operator met used to depend on their profile, and that is
+    the other half of why this is decided here rather than left to fall out.
+    With the config root under home the write was refused by `config_invalid`
+    naming an `%APPDATA%` path they never chose; with a redirected profile that
+    put the config and state roots elsewhere nothing refused at all and the
+    project was bound to home. One mistake, two answers, neither of them about
+    the mistake.
+
+    So the project half refuses in exactly the place the user-wide half collapses
+    its boundary (#235). That is not two rules pulling against each other, it is
+    one statement read from both sides: home is not a project, so there is
+    nothing here to keep those files out of, and nothing here to bind them to.
+    The refusal names the `cd` that fixes it, and nothing has been written when
+    it is raised, so `setup` keeps the user-wide half it installed a moment
+    earlier.
+
+    A configuration that already names home as its workspace keeps loading. This
+    decides where a new one may be created; rewriting policy an operator already
+    has, over a decision about new projects, is not this command's to make.
+    """
+    if _working_directory_holds_home():
+        home = absolute_without_symlinks(Path.home())
+        workspace = absolute_without_symlinks(Path.cwd())
+        relation = "is the home directory" if workspace == home else "contains the home directory"
+        raise ConfigError(
+            "workspace_is_home",
+            f"This directory {relation}, which is not a project: `init` and `setup` bind one authoritative "
+            "configuration to the directory they run in, and rooted here that would be every project on this machine "
+            "at once. Nothing was written.",
+            {"workspace_root": str(workspace), "home": str(home), "next_step": _PROJECT_AT_HOME_NEXT_STEP},
+        )
+    return Path.cwd().resolve()
 
 
 def _external_user_path(path: Path, label: str) -> Path:
@@ -793,12 +877,23 @@ def _project_mutation_paths(agent: SkillAgent | None, config_path: Path) -> list
     registered the MCP server in. Snapshots are taken when this half starts,
     after the user-wide half has finished, so restoring it restores the
     registration rather than removing it.
+
+    A claude-code project whose configuration `AGENTIC_HIL_CONFIG` binds outside
+    the projects directory is also written into `external-projects.json`, in the
+    same restriction step and before its deny rules — the one record on disk that
+    says the project exists. That record is here so that a rollback restores its
+    exact prior bytes, or removes one this run created; leaving it out let a
+    failed restriction step claim the project's changes were rolled back while
+    the new entry stayed behind, which a later refresh then reads as a
+    configuration that has gone missing (#246 the other way round).
     """
     paths = [config_path]
     if agent is not None:
         permission_path = _agent_permission_config_path(agent.id)
         if permission_path is not None:
             paths.append(permission_path)
+        if agent.id == "claude-code" and not _configuration_the_projects_walk_finds(config_path):
+            paths.append(_external_project_record_path())
     return _unique_paths(paths)
 
 
@@ -1042,10 +1137,16 @@ def uninstall_agent_integration(agents: list[str] | None = None) -> JsonObject:
         return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know one or more requested agents.", "agents": invalid, "allowed_agents": supported_skill_agents()}
 
     wanted = {resolved.id for name in requested if (resolved := resolve_skill_agent(name)) is not None}
+    # Read before the agent removal below, which takes back the record these are
+    # named in: a project bound by `AGENTIC_HIL_CONFIG` outside the projects
+    # directory, and any external `state_root` it points at, are trees this
+    # command deliberately leaves standing, and `kept` has to still account for
+    # them once the record that named them is gone.
+    external_configurations = _recorded_external_configurations()
     reports = [_uninstall_one_agent(agent) for agent in skill_agents() if not wanted or agent.id in wanted]
     removed = [item for report in reports for item in report["removed"]]
     left_alone = [item for report in reports for item in report["left_alone"]]
-    kept = _uninstall_kept_trees()
+    kept = _uninstall_kept_trees(external_configurations)
     failed = [report["agent"] for report in reports if not report["ok"]]
 
     command = upgrade.removal_command()
@@ -1397,11 +1498,33 @@ def _remove_agent_deny_rules(agent: SkillAgent) -> JsonObject:
     if agent.id != "claude-code":
         return _uninstall_step(f"{_OPENCODE_UNRESTRICTED} Nothing was written there, so nothing is taken back.", mode="operator-managed", path=str(path))
     if not _path_entry_exists(path):
-        return _uninstall_step(f"{agent.display_name} has no settings file, so there are no write refusals to take back.", path=str(path))
-    with secure_user_file_lock(path):
-        result = _remove_claude_code_deny_rules(agent, path)
-    _release_lock_sidecar(path)
-    return result
+        result = _uninstall_step(f"{agent.display_name} has no settings file, so there are no write refusals to take back.", path=str(path))
+    else:
+        with secure_user_file_lock(path):
+            result = _remove_claude_code_deny_rules(agent, path)
+        _release_lock_sidecar(path)
+    return _with_external_project_record_taken_back(result)
+
+
+def _with_external_project_record_taken_back(result: JsonObject) -> JsonObject:
+    """Take back the record of externally bound projects with the rules it explains.
+
+    It exists so that a refresh can tell a project bound by `AGENTIC_HIL_CONFIG`
+    from a bench that is gone, and after this step there is no rule of this
+    tool's left in that settings file for any refresh to weigh. Leaving it would
+    leave a file this installation wrote standing in a directory of its own,
+    which is the leftover this command exists to take back, and the projects it
+    names are untouched: the record says where a configuration is, never what it
+    grants.
+
+    A step that refused and left the settings file alone keeps the record, since
+    the rules it explains are still standing.
+    """
+    path = _external_project_record_path()
+    if not result["ok"] or not _path_entry_exists(path):
+        return result
+    secure_remove_file(path)
+    return {**result, "removed": [*result["removed"], _removed_entry("project record", path)]}
 
 
 def _remove_claude_code_deny_rules(agent: SkillAgent, path: Path) -> JsonObject:
@@ -1440,13 +1563,24 @@ def _project_written_deny_rules() -> set[str]:
     the same argument `_superseded_claude_code_deny_rules` makes, over the same
     strings, and never over a shape.
 
+    A project bound by `AGENTIC_HIL_CONFIG` is reached through the record
+    `init --agent` leaves for it, and nothing else here could reach it: its
+    configuration directory is outside this tool's per-user roots, so the
+    namespace claim never claims it, and the walk over the projects directory
+    never comes across it either. Before that record existed, the rule for such a
+    project's own configuration directory was the one leftover this command could
+    not take back (#246).
+
     A configuration that cannot be read contributes nothing rather than stopping
-    the removal. `_protected_trees_still_wanted` answers `None` there because an
+    the removal, and a record that cannot be read costs the same nothing.
+    `_protected_trees_still_wanted` answers `None` on either because an
     incomplete answer could take protection off a bench that still wants it; the
     incompleteness costs the opposite here, which is one rule left standing.
     """
     rules: set[str] = set()
-    for config_path, state_root in _visible_project_configurations():
+    configurations = _visible_project_configurations()
+    configurations += [(path, _configured_state_root(path)) for path in _recorded_external_configurations() or []]
+    for config_path, state_root in configurations:
         if state_root is None:
             continue
         rules |= _superseded_claude_code_deny_rules(config_path, state_root)
@@ -1458,9 +1592,9 @@ def _visible_project_configurations() -> list[tuple[Path, Path | None]]:
     """Every project configuration under the config root, with the state root it names.
 
     `None` for one that cannot be read. A configuration bound by
-    `AGENTIC_HIL_CONFIG` is invisible here and nothing on disk records where it
-    is, which is the same blind spot `_protected_trees_still_wanted` has and for
-    the same reason.
+    `AGENTIC_HIL_CONFIG` lives wherever the operator put it and this walk never
+    comes across it; `_recorded_external_configurations` is what says where those
+    are, and every caller that has to know the whole set reads both.
     """
     found: list[tuple[Path, Path | None]] = []
     directory = project_config_directory()
@@ -1473,7 +1607,7 @@ def _visible_project_configurations() -> list[tuple[Path, Path | None]]:
     return found
 
 
-def _uninstall_kept_trees() -> list[JsonObject]:
+def _uninstall_kept_trees(external_configurations: list[Path] | None) -> list[JsonObject]:
     """The trees this command names and does not remove, with the reason on each.
 
     Named rather than counted, because "state root" is an abstraction and a path
@@ -1481,8 +1615,18 @@ def _uninstall_kept_trees() -> list[JsonObject]:
     are the ones this tool creates for itself, reported only where they are
     actually there; a `state_root` a configuration points somewhere else is
     added from the configuration that names it.
+
+    `external_configurations` are the projects `AGENTIC_HIL_CONFIG` bound outside
+    the projects directory, read from the record before the agent removal took it
+    back. The walk over the projects directory never comes across them, so each
+    one still on disk is named here, with the external `state_root` it points at,
+    or the report would claim to account for every tree left standing while
+    missing exactly the ones nothing else on disk can find (#246). `None` is a
+    record that could not be read, and costs the same nothing here as everywhere
+    else: those trees go unnamed rather than the command stopping.
     """
     configurations = _visible_project_configurations()
+    external = external_configurations or []
     kept: list[JsonObject] = [
         {
             "what": "project configurations",
@@ -1491,8 +1635,18 @@ def _uninstall_kept_trees() -> list[JsonObject]:
             "reason": _KEPT_CONFIGURATION,
         }
     ]
+    kept.extend(
+        {"what": "externally bound project configuration", "path": str(config_path), "reason": _KEPT_CONFIGURATION}
+        for config_path in external
+        if _path_entry_exists(config_path)
+    )
     trees: dict[str, Path] = {}
-    for path in [*tool_owned_user_roots(), *(state_root for _config, state_root in configurations if state_root is not None)]:
+    external_state_roots = [state for state in (_configured_state_root(path) for path in external) if state is not None]
+    for path in [
+        *tool_owned_user_roots(),
+        *(state_root for _config, state_root in configurations if state_root is not None),
+        *external_state_roots,
+    ]:
         if _path_entry_exists(path):
             trees.setdefault(os.path.normcase(str(path)), path)
     kept.extend({"what": "tree Agentic HIL created for itself", "path": str(path), "reason": _KEPT_TOOL_TREE} for path in trees.values())
@@ -1526,7 +1680,7 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
     alternative would be `init --force`, which rewrites operator policy and is
     not a remedy.
     """
-    workspace = Path.cwd().resolve()
+    workspace = _project_workspace()
     resolved_agent: SkillAgent | None = None
     if agent is not None:
         resolved_agent = resolve_skill_agent(agent)
@@ -1929,7 +2083,11 @@ def _init_lease_note(unleased: str | None) -> JsonObject:
 
 
 def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False) -> JsonObject:
-    workspace = Path.cwd().resolve()
+    # Asked again rather than taken from the caller: this is the function that
+    # writes `workspace_root`, so the one directory a project may not be rooted
+    # in is settled here as well as in `init_project`, and a later caller cannot
+    # arrive with the check skipped.
+    workspace = _project_workspace()
     target_path = initialized_config_path(workspace)
     validate_legacy_config_selector(config_path, workspace, target_path)
     if _path_entry_exists(target_path) and not force:
@@ -2624,13 +2782,26 @@ def _protected_trees_still_wanted(config_path: Path, state_root: Path) -> set[st
     back at all. One unreadable project configuration is not a reason to drop
     another project's rule.
 
-    What it cannot see is a project bound by `AGENTIC_HIL_CONFIG`: that
-    configuration is wherever the operator put it and nothing on disk records
-    where. Its configuration directory is outside these roots and so is never
-    claimed either way, but a `state_root` of its own that does lie inside them
-    is kept only while some visible project names that tree as well. It is the
-    one case where a rule can be taken back from a bench that still wants it, and
-    that project's next `init --agent` writes it again.
+    Which configurations this user has is the projects directory plus
+    `_recorded_external_configurations`, and it takes both. A project bound by
+    `AGENTIC_HIL_CONFIG` keeps its configuration wherever the operator put it, so
+    the walk below never comes across it, and before that record existed a
+    `state_root` of its own inside this tool's roots was read here as a tree
+    nobody names any more: another project's setup took that rule back while the
+    bench still wanted it, and the bench's own next `init --agent` wrote it
+    again (#246).
+
+    A recorded configuration that will not read refuses rather than guesses,
+    exactly as an unreadable one in the projects directory does. From here "the
+    operator decommissioned that bench" and "the volume its configuration lives
+    on is not mounted this morning" are the same absence, and only one of them
+    means the bench has stopped wanting its rule. So the answer stays incomplete,
+    which costs stale rules and no protection; `agentic-hil uninstall` is what
+    takes the record back with the rules it explains.
+
+    This run's own configuration is skipped where the record names it. Its two
+    trees are in the answer from the arguments already, so reading the file again
+    could only make the refresh depend on a read the run does not need.
     """
     wanted = {config_path.parent, state_root}
     directory = project_config_directory()
@@ -2647,7 +2818,133 @@ def _protected_trees_still_wanted(config_path: Path, state_root: Path) -> set[st
             if configured is None:
                 return None
             wanted |= {entry, configured}
+    recorded = _recorded_external_configurations()
+    if recorded is None:
+        return None
+    own = os.path.normcase(str(absolute_without_symlinks(config_path)))
+    for configuration in recorded:
+        if os.path.normcase(str(configuration)) == own:
+            continue
+        configured = _configured_state_root(configuration)
+        if configured is None:
+            return None
+        wanted |= {configuration.parent, configured}
     return {_deny_tree_key(spelling) for tree in wanted for spelling in _deny_pattern_spellings(tree)}
+
+
+# The record of the projects the walk above cannot find, one file per user. It
+# sits beside the projects directory rather than in it, because everything in
+# there is one project's own directory and this is a single record about the
+# projects that directory does not hold.
+EXTERNAL_PROJECT_RECORD_FILENAME = "external-projects.json"
+
+
+def _external_project_record_path() -> Path:
+    return project_config_directory().parent / EXTERNAL_PROJECT_RECORD_FILENAME
+
+
+def _configuration_the_projects_walk_finds(config_path: Path) -> bool:
+    """Whether walking the projects directory comes across this configuration.
+
+    `project_config_path` builds every discovered configuration as
+    `<projects>/<name>-<digest>/config.yaml`, and that shape is exactly what
+    `_visible_project_configurations` looks for, so the question is whether this
+    file has it. `AGENTIC_HIL_CONFIG` may well name a file inside that directory,
+    and one that is there needs no record of its own.
+
+    Answering "yes" wrongly would leave a project unrecorded, which is the defect
+    itself, so a spelling that reaches the same directory some other way answers
+    "no" and costs one entry in the record that the walk also finds.
+    """
+    candidate = absolute_without_symlinks(config_path)
+    if candidate.name != PROJECT_CONFIG_FILENAME:
+        return False
+    return os.path.normcase(str(candidate.parent.parent)) == os.path.normcase(str(project_config_directory()))
+
+
+def _recorded_external_configurations() -> list[Path] | None:
+    """Every configuration rules were written for that the projects walk misses.
+
+    `init --agent` for a project bound by `AGENTIC_HIL_CONFIG` derives its rules
+    from a configuration outside the projects directory, and without this nothing
+    on disk would say that project exists. The entries the walk does find are
+    dropped here, so this answers only what the walk cannot, and a configuration
+    the operator later moved under the projects directory is read from there
+    rather than from a record of where it used to be.
+
+    `None` means the file is there and is not the record this tool writes, and
+    every caller treats that as an answer it could not establish rather than as
+    an empty one. A relative entry is that same case: this writes absolute paths
+    only, and resolving one against whatever directory the process happens to
+    stand in would invent a tree.
+
+    Nothing is trusted out of this file beyond which configurations to go and
+    read, and it lives under the same owner-only config root the project
+    configurations themselves do, so it opens no door that directory did not.
+
+    A plain read rather than `secure_optional_read_text`, which builds the
+    directory chain it reads through. This is asked on profiles whose whole
+    configuration lives somewhere else, and a question about a record must not
+    plant the root it would have lived under.
+    """
+    try:
+        raw = _external_project_record_path().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError):
+        return None
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    entries = document.get("configurations") if isinstance(document, dict) else None
+    if not isinstance(entries, list) or not all(isinstance(entry, str) and Path(entry).is_absolute() for entry in entries):
+        return None
+    found = [absolute_without_symlinks(Path(entry)) for entry in entries]
+    return [path for path in found if not _configuration_the_projects_walk_finds(path)]
+
+
+def _record_external_configuration(config_path: Path) -> JsonObject | None:
+    """Record that rules were written for a configuration the walk cannot find.
+
+    `None` when the record names it afterwards, and a refusal payload when it
+    does not, in which case the caller writes no rule either: a rule this tool
+    can recognise and then reads as nobody's is worse than no rule, and the
+    operator gets the refusal instead of a bench that quietly loses its
+    protection the next time another project is set up.
+
+    An existing record that will not read is left exactly as it is, for the same
+    reason `_load_json_object`'s callers leave a settings file they cannot parse:
+    replacing it would throw away whichever projects it does name.
+
+    Recording is a separate act from writing the rules, and it happens first, so
+    a rule is never written for a project this cannot vouch for. The other order
+    would be a record naming a project whose rules were then refused, which costs
+    nothing at all, since a recorded configuration only ever keeps rules standing.
+    """
+    path = _external_project_record_path()
+    recorded = _recorded_external_configurations()
+    if recorded is None:
+        return {
+            "ok": False,
+            "error_type": "agent_project_record_unreadable",
+            "summary": f"{path} is not the record of Agentic HIL projects it has to be, so this project could not be recorded and no deny rule was written; left untouched.",
+            "path": str(path),
+        }
+    absolute = absolute_without_symlinks(config_path)
+    if any(os.path.normcase(str(entry)) == os.path.normcase(str(absolute)) for entry in recorded):
+        return None
+    document = {"configurations": sorted(str(entry) for entry in [*recorded, absolute])}
+    try:
+        secure_atomic_write_text(path, json.dumps(document, indent=2) + "\n")
+    except (OSError, ConfigError) as error:
+        return {
+            "ok": False,
+            "error_type": "agent_project_record_unwritable",
+            "summary": f"{path} could not be written ({error}), so this project could not be recorded and no deny rule was written.",
+            "path": str(path),
+        }
+    return None
 
 
 def _configured_state_root(config_path: Path) -> Path | None:
@@ -2754,6 +3051,13 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
     `_protected_trees_still_wanted`; between them the operator's own rules are
     never touched, and neither is another project's.
 
+    That second question is answered out of the configurations this user has, so
+    a project whose configuration `AGENTIC_HIL_CONFIG` binds outside the projects
+    directory is written down before its rules are, in
+    `_record_external_configuration`. Nothing else on disk would say that project
+    is there, and a later run that could not see it read its `state_root` as a
+    tree nobody names any more (#246).
+
     Only claude-code gets a rule written. On opencode the operator decides for
     themselves, and nothing is written on their behalf: its permission model
     hands the decision to whoever answers the prompt anyway — one "always" adds a
@@ -2783,6 +3087,10 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
         deny = permissions.setdefault("deny", [])
         if not isinstance(deny, list):
             return {"ok": False, "error_type": "agent_permissions_unreadable", "summary": f"{path} has a non-list deny entry; left untouched.", "path": str(path)}
+        if not _configuration_the_projects_walk_finds(config_path):
+            unrecorded = _record_external_configuration(config_path)
+            if unrecorded is not None:
+                return unrecorded
         superseded = _superseded_claude_code_deny_rules(config_path, state_root)
         wanted = _protected_trees_still_wanted(config_path, state_root)
         # `isinstance` first: the list belongs to another program, and an entry
@@ -2869,6 +3177,30 @@ def _parse_toml(text: str) -> tuple[dict | None, str | None]:
     return loaded if isinstance(loaded, dict) else None, None
 
 
+def _existing_command_field(entry: object) -> JsonObject:
+    """What the entry already in the file runs, for a conflict to report.
+
+    The refusal names the file, and the file alone does not settle the question
+    the operator has to answer: whether this is the wrapper they wrote
+    themselves, an entry an older release wrote whose path has since moved, or
+    something they have never seen. The configured command settles it, and it is
+    their own data read back to them, so the refusal carries it instead of
+    sending them to parse their agent config by hand. It changes nothing about
+    the refusal: the entry belongs to the operator whatever it runs, and naming
+    it is reporting, not a step towards editing it.
+
+    Only the two shapes an agent config keeps a command in, a string and the
+    list opencode stores, and the list exactly as stored. Any other shape is
+    left out rather than quoted back: a TOML table admits values (a date, a
+    nested table) that would not survive being written into a JSON result, and a
+    value this code cannot recognise is not one it can name as the command.
+    """
+    configured = entry.get("command") if isinstance(entry, dict) else None
+    if isinstance(configured, str) or (isinstance(configured, list) and all(isinstance(item, str) for item in configured)):
+        return {"existing_command": configured}
+    return {}
+
+
 def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     path = _agent_mcp_config_path("codex")
     block = "\n".join(
@@ -2894,7 +3226,7 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     entry = servers.get("agentic-hil") if isinstance(servers, dict) else None
     desired_entry = {"command": command, "args": ["mcp-stdio"], "enabled": True}
     if not has_managed and entry is not None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "An unmanaged Codex agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "codex", "format": "codex-toml", "path": str(path), **_existing_command_field(entry), "summary": "An unmanaged Codex agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
     if has_managed and not isinstance(entry, dict):
         return {"ok": False, "error_type": "config_invalid", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "The Agentic HIL managed markers do not contain an agentic-hil MCP table; left untouched."}
     if has_managed and entry == desired_entry:
@@ -2992,7 +3324,7 @@ def _register_opencode_mcp(command: str, force: bool) -> JsonObject:
     existing_entry = servers.get("agentic-hil")
     kind = _opencode_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
     if "agentic-hil" in servers and kind is None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "An unmanaged opencode agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "opencode", "format": "opencode-json", "path": str(path), **_existing_command_field(existing_entry), "summary": "An unmanaged opencode agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
     if kind == "current":
         return {"ok": True, "skipped": True, "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "opencode MCP entry already registered."}
     data.setdefault("$schema", "https://opencode.ai/config.json")
@@ -3013,7 +3345,7 @@ def _register_claude_mcp(command: str, force: bool) -> JsonObject:
     existing_entry = servers.get("agentic-hil")
     kind = _claude_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
     if "agentic-hil" in servers and kind is None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "An unmanaged Claude agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), **_existing_command_field(existing_entry), "summary": "An unmanaged Claude agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
     if kind == "current":
         return {"ok": True, "skipped": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "Claude MCP entry already registered."}
     servers["agentic-hil"] = desired_entry

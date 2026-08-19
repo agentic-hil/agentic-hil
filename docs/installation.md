@@ -259,25 +259,23 @@ Every one of them takes `--json`, before or after the subcommand.
 
 ## What a command prints
 
-Each command answers with one result document, and how it is printed depends on
-who is reading. At a terminal you get that document rendered for a person: the
-summary as prose, the steps and warnings as lines, permission changes named, and
-the next step at the end. A refusal renders its `error_type`, what happened, and
-the numbered remediation the tool already carries for that error.
+Each command answers with one result document, and by default you get it
+rendered for a person: the summary as prose, the steps and warnings as lines,
+permission changes named, and the next step at the end. A refusal renders its
+`error_type`, what happened, and the numbered remediation the tool already
+carries for that error. That is what a pipe, a redirect and a terminal all get,
+because a wrapper that captures this command and then shows somebody what came
+back is what almost every caller is.
 
-Whenever stdout is not a terminal, the same result is printed as the JSON
-document it has always been, unchanged and field for field, because that is what
-the installer, the agent and any script reading a field parse. Nothing has to be
-passed for that: a pipe, a redirect and a subprocess all answer `isatty` the same
-way.
-
-`--json` prints that document at a terminal too, which is what to reach for when
-you want to read a field yourself or hand the output to `jq`:
+`--json` prints the document itself instead, unchanged and field for field. Every
+caller that parses this command asks for it, and that is the whole of the
+machine contract:
 
 ```bash
 agentic-hil doctor                  # the health report, for a person
-agentic-hil doctor --json           # the document, at a terminal
-agentic-hil doctor > doctor.json    # the document, no flag needed
+agentic-hil doctor | less           # the same report, through a pipe
+agentic-hil doctor --json           # the document, for something that parses it
+agentic-hil doctor --json > out.json
 ```
 
 `mcp-stdio` and `com-stdio` are untouched by any of this: their stdout carries a

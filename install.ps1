@@ -11,6 +11,8 @@ param(
     [string]$Version = '',
     [switch]$Can,
     [switch]$NoCan,
+    [switch]$SystemCerts,
+    [switch]$NoSystemCerts,
     [switch]$Help,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
@@ -18,7 +20,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Floor = '0.4.0'
+# The release this script installs, and the version an installation already
+# here has to reach to be left alone. Deliberately not a capability floor: the
+# line that installs Agentic HIL is the same line people re-run to get current,
+# and step 4 registers the skill out of whatever copy step 1 decided to keep, so
+# a floor left a returning user on an old package and an old skill at once. A
+# development tree reports X.Y.Z.devN, which compares as X.Y.Z and stays put.
+$Release = '0.16.0'
 $StepTotal = 5
 
 function Write-Say {
@@ -53,16 +61,26 @@ Options:
   --can               Install the [can] extra for PEAK and SocketCAN adapters.
                       This is the default.
   --no-can            Install without the [can] extra.
+  --system-certs      Validate TLS against this machine's own certificate
+                      store, the one curl and apt already read, from the start.
+                      Rarely needed: a failure that carries the signature of a
+                      TLS-intercepting proxy is retried against that store by
+                      itself. This only skips the first attempt.
+  --no-system-certs   Never reach for this machine's store, not even after such
+                      a failure. The install fails instead.
+                      Neither flag disables verification. Nothing here does.
   --help              Print this text and exit.
 
 PowerShell spells the same flags -Agent, -NoAgentInstall, -Version, -Can,
--NoCan and -Help; both spellings bind to the same options.
+-NoCan, -SystemCerts, -NoSystemCerts and -Help; both spellings bind to the same
+options.
 '@
 }
 
 $WithCan = -not $NoCan
 $WithAgentInstall = -not $NoAgentInstall
 $ShowHelp = [bool]$Help
+$SystemCertsMode = if ($NoSystemCerts) { 'never' } elseif ($SystemCerts) { 'always' } else { 'auto' }
 
 # Two spellings carry an inner dash, which no PowerShell parameter name can, so
 # they arrive here rather than bound. Everything else binds by itself.
@@ -72,6 +90,8 @@ foreach ($token in @($Rest)) {
         '^--no-agent-install$' { $WithAgentInstall = $false }
         '^--no-can$' { $WithCan = $false }
         '^--can$' { $WithCan = $true }
+        '^--system-certs$' { $SystemCertsMode = 'always' }
+        '^--no-system-certs$' { $SystemCertsMode = 'never' }
         '^(--help|-h|/\?)$' { $ShowHelp = $true }
         default {
             Write-Host "agentic-hil install: unknown option: $token"
@@ -85,6 +105,71 @@ if ($Can) { $WithCan = $true }
 if ($ShowHelp) {
     Write-Usage
     exit 0
+}
+
+# The certificate store a TLS-intercepting proxy needs, and the only concession
+# this script makes to one. uv validates against roots bundled in its own
+# binary, so on a managed network it fails where a browser on the same machine
+# keeps working; this points it at the store Windows itself holds. pip takes a
+# file rather than a switch and Windows ships no bundle file, so PIP_CERT is the
+# operator's to set on the rare host where pip rather than uv does the install.
+#
+# Nobody has to know that in advance. The failed install is the detection: an
+# install that came back with one of the signatures below is retried once
+# against this machine's store, and only that. Verification is on in both
+# attempts, and this is not a way to reach a switch that turns it off:
+# -SkipCertificateCheck, --allow-insecure-host and --trusted-host are not
+# options this script offers, and no path through it arrives at one.
+# What a chain that ends outside the manager's own roots looks like, from uv
+# (rustls), pip (OpenSSL) and .NET. A failure that says none of this is a
+# failure about something else, and is never retried.
+function Test-TrustFailure {
+    param([string]$Output)
+    return $Output -match 'invalid peer certificate|UnknownIssuer|self.signed certificate|certificate verify failed|CERTIFICATE_VERIFY_FAILED|unable to get local issuer certificate'
+}
+
+function Enable-SystemCerts {
+    $env:UV_SYSTEM_CERTS = '1'
+    Write-Say "certificates: uv reads this machine's own certificate store"
+}
+
+function Clear-SystemCerts {
+    # --no-system-certs promises never to reach for this machine's own store, and
+    # keeps it only by clearing an inherited override as well as by not setting
+    # one. TROUBLESHOOTING.md recommends exporting UV_SYSTEM_CERTS so future
+    # upgrades keep working behind a proxy, so an operator who then passes
+    # --no-system-certs would still have uv reading the machine store from it.
+    if ($env:UV_SYSTEM_CERTS) {
+        Remove-Item Env:\UV_SYSTEM_CERTS
+        Write-Say "certificates: --no-system-certs; cleared the inherited UV_SYSTEM_CERTS so uv does not read this machine's own store"
+    }
+}
+
+function Install-WithUv {
+    # uv's output is captured rather than streamed, because the text of a
+    # failure is what decides whether there is a second attempt to make.
+    $result = Invoke-Captured -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
+    Write-Host $result.Output.TrimEnd()
+    if ($result.ExitCode -eq 0) { return }
+    if ($script:SystemCertsMode -eq 'auto' -and (Test-TrustFailure $result.Output)) {
+        Write-Say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
+        Enable-SystemCerts
+        $script:SystemCertsMode = 'always'
+        $retry = Invoke-Captured -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
+        Write-Host $retry.Output.TrimEnd()
+        if ($retry.ExitCode -eq 0) { return }
+        throw "uv could not install agentic-hil against this machine's own certificate store either; the proxy's own CA is missing from that store, and installing it there is the fix; TROUBLESHOOTING.md section 1 has the rest"
+    }
+    throw $UvInstallFailure
+}
+
+if ($SystemCertsMode -eq 'always') { Enable-SystemCerts }
+elseif ($SystemCertsMode -eq 'never') { Clear-SystemCerts }
+
+$UvInstallFailure = if ($SystemCertsMode -eq 'never') {
+    'uv could not install agentic-hil, and a certificate failure would not have been retried against this machine own store because --no-system-certs was given; TROUBLESHOOTING.md section 1 has the rest'
+} else {
+    'uv could not install agentic-hil; TROUBLESHOOTING.md section 1 has the fallbacks'
 }
 
 # Windows PowerShell 5.1 still negotiates TLS 1.0 by default, and every host
@@ -177,12 +262,12 @@ function Test-VersionExactly {
 function Test-VersionMatchesRequest {
     param([string]$Found)
     # Does a freshly installed copy's reported version answer what this run asked
-    # for: exactly the pin when one was given, at least the floor otherwise. The
+    # for: exactly the pin when one was given, at least the release otherwise. The
     # pin must match exactly -- a newer copy left in the manager's bin is not the
     # pinned release this run wrote, and the documented --version contract is an
     # exact release, not a floor.
     if ($Version) { return (Test-VersionExactly -Found $Found -Wanted $Version) }
-    return (Test-VersionAtLeast -Found $Found -Floor $Floor)
+    return (Test-VersionAtLeast -Found $Found -Floor $Release)
 }
 
 function Get-UvBinDirectory {
@@ -317,11 +402,11 @@ if (Test-Executable 'agentic-hil') {
         Write-Step 1 'probe: an agentic-hil on this PATH does not answer, installing it again'
     } elseif ($Version) {
         Write-Step 1 "probe: agentic-hil $installed is here, and --version $Version was asked for, so the package is installed again"
-    } elseif (Test-VersionAtLeast -Found $installed -Floor $Floor) {
-        Write-Step 1 "probe: agentic-hil $installed is here and at least $Floor, skipping the package install"
+    } elseif (Test-VersionAtLeast -Found $installed -Floor $Release) {
+        Write-Step 1 "probe: agentic-hil $installed is here and not older than $Release, skipping the package install"
         $needsPackage = $false
     } else {
-        Write-Step 1 "probe: agentic-hil $installed is older than $Floor, upgrading it"
+        Write-Step 1 "probe: agentic-hil $installed is older than $Release, upgrading it"
     }
 } else {
     Write-Step 1 'probe: no agentic-hil on this PATH, installing it user-local'
@@ -336,7 +421,7 @@ if (-not $needsPackage) {
     Write-Step 2 'package: nothing to install'
 } elseif (Test-Executable 'uv') {
     Write-Step 2 "package: uv is here, installing $(Get-PackageSpec) user-local with uv tool install"
-    Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure 'uv could not install agentic-hil'
+    Install-WithUv
     $packageManager = 'uv'
 } else {
     $pythonCommand = Find-Python
@@ -354,7 +439,7 @@ if (-not $needsPackage) {
                 if (-not (Test-Executable 'uv')) { Install-Uv }
                 Add-UserBinToPath
                 if (-not (Test-Executable 'uv')) { throw 'uv installed but does not resolve yet; open a new shell and run this again' }
-                Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure 'uv could not install agentic-hil'
+                Install-WithUv
                 $packageManager = 'uv'
             } else {
                 throw "pip could not install $(Get-PackageSpec); TROUBLESHOOTING.md section 1 has the fallbacks"
@@ -367,7 +452,7 @@ if (-not $needsPackage) {
         Install-Uv
         if (-not (Test-Executable 'uv')) { throw 'uv installed but does not resolve yet; open a new shell and run this again' }
         Write-Say "package: installing $(Get-PackageSpec) user-local with uv tool install"
-        Invoke-Checked -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec)) -Failure 'uv could not install agentic-hil'
+        Install-WithUv
         $packageManager = 'uv'
     }
 }
@@ -439,16 +524,21 @@ function Assert-ResolvedForAgentInstall {
 
 function Register-Agent {
     # One agent registered, reported as a result rather than as a document.
-    # `agent-install` answers with a JSON report of every path it touched, and on
-    # a machine with three agent CLIs that is roughly a hundred and fifty lines of
-    # machine-readable detail inside a transcript whose whole job is to say five
-    # calm things. On success the operator needs one line. On failure the document
-    # is the diagnosis, so then it is printed whole and this stops. The top-level
-    # "ok" is read at its own indentation, so a true nested inside a failed report
-    # cannot stand in for the answer.
+    # `agent-install` answers with a report of every path it touched, and on a
+    # machine with three agent CLIs the machine-readable form of it is roughly a
+    # hundred and fifty lines inside a transcript whose whole job is to say five
+    # calm things. On success the operator needs one line. On failure the report
+    # is the diagnosis, so then it is printed whole and this stops.
+    #
+    # The verdict is the exit status, which is `overall_success` computed inside
+    # the CLI. It used to be that status and a match on the top-level "ok" at its
+    # own indentation, from back when the report arrived as JSON whoever was
+    # reading. It is prose now, addressed to the operator who is about to read
+    # it, and a text match on prose would be a worse check than the status it was
+    # doubling.
     param([string]$AgentId)
     $result = Invoke-Captured -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $AgentId)
-    if ($result.ExitCode -eq 0 -and $result.Output -match '(?m)^  "ok": true') {
+    if ($result.ExitCode -eq 0) {
         Write-Say "agent: $AgentId registered (skill and MCP server, restart pending)"
         return
     }

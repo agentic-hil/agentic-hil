@@ -3122,6 +3122,7 @@ Each half owns its rollback set. A project step that fails leaves the installed 
 |---|---|---|
 | authoritative configuration | `%APPDATA%\\agentic-hil\\projects\\<name>-<digest>\\config.yaml` | `$XDG_CONFIG_HOME/agentic-hil/projects/<name>-<digest>/config.yaml` |
 | `state_root` | `%LOCALAPPDATA%\\agentic-hil` | `$XDG_STATE_HOME/agentic-hil` |
+| record of configurations bound by `AGENTIC_HIL_CONFIG` | `%APPDATA%\\agentic-hil\\external-projects.json` | `$XDG_CONFIG_HOME/agentic-hil/external-projects.json` |
 | device locks | `%USERPROFILE%\\.agentic-hil\\device-locks`, fixed | `~/.agentic-hil/device-locks`, fixed |
 
 The device lock directory is not configurable and has no environment override. It is the one place every process on this machine agrees to look for who holds a board, and an override is how two sessions stop seeing each other — which is the failure it exists to prevent. The home directory is chosen because every process of one user reaches it without having to agree on a configuration first.
@@ -3144,6 +3145,7 @@ The one rule that does not bend: set `AGENTIC_HIL_CONFIG` in the host's user-lev
 Rules that hold on both platforms:
 
 - `AGENTIC_HIL_CONFIG` is optional and must be an absolute path to the configuration file.
+- `agentic-hil init --agent <agent>` writes the location of a configuration bound this way into `external-projects.json` beside the projects directory, and it holds nothing but locations. The write refusals that run leaves in the agent's own settings are refreshed on every later run, and a project whose configuration the projects directory does not hold would otherwise be read there as a bench that is gone, so its rule would be taken back while the bench still wanted it. A recorded configuration that cannot be read leaves that question open and no rule is taken back at all; `agentic-hil uninstall` takes the record back together with the rules it explains.
 - `workspace_root` and `state_root` are both mandatory and absolute, and must not overlap in either direction.
 - The discovered default configuration path is derived from the workspace path, so it is canonical per workspace; a config found elsewhere is only accepted through `AGENTIC_HIL_CONFIG`.
 - Whether an agent may write the configuration is decided by the configuration, in `permissions.allow_config_write`, and by nothing else. There is no second state store: what holds is what a person reads in the file. A workspace with no configuration lets an agent generate one, and a configuration deleted out of band lets it generate a fresh one — the generated skeleton again, at the generated defaults, so the round trip discards every narrowing the operator had asked for and produces the file `agentic-hil init` would have written.

@@ -366,6 +366,90 @@ def test_a_sandbox_root_is_swept_only_once_nobody_is_using_it() -> None:
         shutil.rmtree(stale, ignore_errors=True)
 
 
+def test_a_test_that_undoes_its_own_monkeypatch_keeps_the_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one line that once aimed the whole suite at the operator's profile.
+
+    `monkeypatch.undo()` reverts everything recorded on the test's own instance,
+    and the HOME redirect used to be recorded there: a scratch test called it
+    mid-run, the three CLI calls that followed resolved their user-level paths
+    out of the real environment, and the `uninstall` among them removed all three
+    installed agent skills and their MCP registrations from a live machine. The
+    fixture keeps an instance of its own now, so a test's undo has nothing here
+    to reach.
+
+    That this test is reported as passing rather than as an escape is the other
+    half of the proof: the guard wrapped around every test body asks the same
+    question after this one returns.
+    """
+    from conftest import SANDBOX_ROOT
+    from support import REAL_HOME
+
+    monkeypatch.undo()
+
+    assert Path.home() != REAL_HOME
+    assert SANDBOX_ROOT in Path.home().parents
+
+
+def test_a_test_pointed_back_at_the_real_home_is_failed_by_name(request: pytest.FixtureRequest) -> None:
+    """What the guard says when a redirect is gone, and about which test.
+
+    A suite that quietly writes into the real profile is worse than a suite that
+    fails, so the failure has to name the test that arrived there: whoever reads
+    it hours later has nothing else to go on. Reverting HOME is enough to reach
+    `~/.claude.json` and the two skill directories beside it, and both variables
+    are set because `Path.home()` reads USERPROFILE on Windows and HOME
+    everywhere else.
+
+    The redirect is put back inside the test body, not at teardown, because the
+    guard checks this test too: a `monkeypatch` fixture would restore it after
+    the check had already run and this test would report the escape it is here to
+    describe.
+    """
+    from conftest import SandboxEscaped, assert_still_sandboxed, pytest_runtest_call
+    from support import REAL_HOME
+
+    with pytest.MonkeyPatch.context() as reverted:
+        reverted.setenv("HOME", str(REAL_HOME))
+        reverted.setenv("USERPROFILE", str(REAL_HOME))
+
+        with pytest.raises(SandboxEscaped) as refused:
+            next(pytest_runtest_call(request.node))
+
+    assert request.node.nodeid in str(refused.value)
+    assert str(REAL_HOME) in str(refused.value)
+    assert "uninstalls from" in str(refused.value), "the message says what is at stake, not that an assertion failed"
+    assert_still_sandboxed("with the redirect back in place")
+
+
+def test_the_guard_watches_the_configuration_root_and_not_only_the_home() -> None:
+    """HOME is not the only variable that decides where user-level files land.
+
+    The authoritative configurations `agentic-hil init` writes, and the state
+    root under them, are read out of `%APPDATA%` and `%LOCALAPPDATA%` on Windows
+    and out of `$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` on POSIX. A redirect that
+    lost one of those while HOME stayed sandboxed would leave every home-shaped
+    check looking correct while a project's policy file landed in the operator's
+    own configuration directory.
+
+    The value written here is the fallback the tool derives from the real home
+    rather than whatever this machine's variable happens to say, because that
+    fallback is a real user path on any profile and is therefore the one spelling
+    this assertion can make on every machine the suite runs on.
+    """
+    from conftest import SandboxEscaped, assert_still_sandboxed
+    from support import REAL_HOME
+
+    variable, real_root = ("APPDATA", REAL_HOME / "AppData" / "Roaming") if os.name == "nt" else ("XDG_CONFIG_HOME", REAL_HOME / ".config")
+
+    with pytest.MonkeyPatch.context() as reverted:
+        reverted.setenv(variable, str(real_root))
+
+        with pytest.raises(SandboxEscaped) as refused:
+            assert_still_sandboxed("in this test")
+
+    assert str(real_root / "agentic-hil") in str(refused.value)
+
+
 def test_stdio_rejects_oversized_message_and_keeps_serving(tmp_path: Path) -> None:
     config = load_test_config(tmp_path)
     oversized = '{"jsonrpc": "2.0", "id": 1, "method": "ping", "pad": "' + "x" * 5000 + '"}'

@@ -643,7 +643,7 @@ def test_cli_uses_authoritative_config_and_repository_local_test_plan(
     test_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: shell}\n")
     monkeypatch.chdir(tmp_path)
 
-    exit_code = entrypoint(["test-reactor", "--test-config", str(test_path)])
+    exit_code = entrypoint(["test-reactor", "--test-config", str(test_path), "--json"])
 
     result = json.loads(capsys.readouterr().out)
     assert exit_code == 1
@@ -653,7 +653,7 @@ def test_cli_uses_authoritative_config_and_repository_local_test_plan(
 def test_cli_returns_failure_for_audit_failed_result(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr("agentic_hil.cli.run_test_reactor", lambda _path, **_kwargs: {"ok": True, "audit_ok": False})
 
-    exit_code = entrypoint(["test-reactor"])
+    exit_code = entrypoint(["test-reactor", "--json"])
 
     assert exit_code == 1
     assert json.loads(capsys.readouterr().out)["audit_ok"] is False

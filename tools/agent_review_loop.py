@@ -16,13 +16,18 @@ outside that checkout is the review document the next implementer round reads.
 Four further properties make it safe to run unattended:
 
 * Every round must produce at least one commit, and a round that produced none is
-  classified against the working tree rather than assumed. A clean tree is an
-  implementer that looked and declined: a stalled loop rather than progress, so
-  the run stops instead of burning the remaining rounds on an agent that has
-  given up. A dirty tree is the opposite case, and was read as the same one: a
-  round's work sitting uncommitted because the implementer stopped between its
-  last edit and its `git commit`. That work is handed back to be finished and
-  committed, and committed here if it comes back uncommitted a second time.
+  classified against the working tree rather than assumed. A tree holding nothing
+  the round did not start with is an implementer that looked and declined: a
+  stalled loop rather than progress, so the run stops instead of burning the
+  remaining rounds on an agent that has given up. Anything new is the opposite
+  case, and was read as the same one: a round's work sitting uncommitted because
+  the implementer stopped between its last edit and its `git commit`. That work
+  is handed back to be finished and committed, and committed here if it comes
+  back uncommitted a second time. What the tree already held is subtracted rather
+  than counted, because under `--review-checkout none` the reviewer works in that
+  same tree and its leavings would otherwise make every declined round a stall;
+  `--no-stall-retry` reports such a round instead of handing it back, for a run
+  that cannot spare the second invocation.
 * The verdict is parsed from a JSON schema Codex is required to satisfy, not from
   prose. Prose like "looks good apart from ..." has no stable meaning to a loop
   condition, and guessing at it is how a loop exits one round before the bug.
@@ -492,8 +497,8 @@ def _resume_process_threads(pid: int) -> bool:
 @dataclass
 class _AgentJob:
     """One agent launch and everything acquired for it that something has to
-    answer for: the process itself, the Windows Job Object tracking it, and
-    whether it has ever been allowed to run.
+    answer for: the process itself, the Windows Job Object tracking it, whether
+    it has ever been allowed to run, and on POSIX the process group it leads.
 
     Review round 6 finding 1: ownership of the job used to move on
     `_track_in_job_object`'s return. That call released everything it had
@@ -526,16 +531,24 @@ class _AgentJob:
     * `suspended` -- `process` has never been resumed, so it has executed no
       instruction, is the entirety of its own tree, and releasing it means
       killing it directly. False on POSIX, where nothing is launched suspended.
+    * `group_leader` -- `process` leads a process group of its own
+      (`start_new_session` on the `Popen`), so every shell and test runner it
+      starts shares its pgid, and releasing it means signalling that group. True
+      on POSIX and False on Windows, where a job rather than a group is what a
+      tree is answered for through.
 
     `member` and `suspended` never both act. A member is answered for through its
     job whether or not the resume that follows assignment ever ran, and a Windows
-    non-member has provably never been resumed.
+    non-member has provably never been resumed. `group_leader` acts alongside
+    neither: both of those are set only on the Windows tracking path, and no job
+    is ever created on POSIX.
     """
 
     process: subprocess.Popen[str] | None = None
     handle: int | None = None
     member: bool = False
     suspended: bool = False
+    group_leader: bool = False
 
 
 def _track_in_job_object(agent_job: _AgentJob) -> None:
@@ -649,16 +662,20 @@ def _release_job(agent_job: _AgentJob) -> None:
     The one release for one owner: `run_agent` calls this from the `finally` it
     entered before the agent existed, so it runs for a successful round, an
     ordinary nonzero exit, a timeout, a failure inside the tracking call, and an
-    operator's Ctrl-C landing anywhere in between. Four states reach it, and each
+    operator's Ctrl-C landing anywhere in between. Five states reach it, and each
     has its own authoritative answer:
 
     * No process. `Popen` itself raised, so nothing was launched and nothing is
       owed.
+    * The process leads its own group and has not been reaped. POSIX, where no
+      job can be had at all: signal the group, reap the leader and wait the group
+      out through `_terminate_tree`, so a failure that got past the stdin and
+      wait handling does not walk out leaving the agent running.
     * The process is a member of `handle`. Terminate the job, wait for the
       kernel's own member count to read zero, collect the root, and close the
-      handle exactly once. This is the only state in which the agent can have run
-      at all, so it is the only one where descendants are possible, and the job
-      is what makes their absence knowable.
+      handle exactly once. This is the only Windows state in which the agent can
+      have run at all, so it is the only one where descendants are possible, and
+      the job is what makes their absence knowable.
     * A job was created but the process was never assigned to it. Nothing is a
       member, so there is nothing to confirm; close the orphaned handle rather
       than leak it, and answer for the root below.
@@ -669,20 +686,57 @@ def _release_job(agent_job: _AgentJob) -> None:
       CleanupUnconfirmed the loop is looking for rather than as an OSError
       nothing in it is.
 
-    Clearing the record first makes this idempotent: a second call has nothing
-    left to close and nothing left to kill. On POSIX `suspended` is False and no
-    handle is ever recorded, so this is the no-op the platform wants -- the
-    process group, not a job, is what `_terminate_tree` answers for there.
+    On POSIX this was a no-op until now, so review round 4 finding 2 stayed live
+    there for the whole time it was closed on Windows: an exception between the
+    launch and the stdin and wait handling -- `reader.start()` raising, an
+    unexpected `process.wait()` failure, a heartbeat `print` onto a broken
+    stdout, a `reader.join()` that will not -- walked out of `run_agent` past a
+    `finally` that had nothing to do, and `main` then went on through checkout
+    cleanup, scratch removal and summary writing with the agent still editing the
+    tree it was tidying. The group is signalled for exactly that, and only while
+    `process.poll()` is None, because that is the whole of the case: an agent
+    still there to answer for.
 
-    Raises CleanupUnconfirmed when the root outlives its own kill, and lets
-    `_confirm_job_empty`'s through. Called from a `finally`, that replaces
-    whatever was already propagating, which is the intended precedence: only that
-    type stops the caller from committing the tree underneath a survivor.
+    That guard is also what keeps the signal from straying. A process group's id
+    is its leader's pid, and the kernel reserves it only while the group still
+    has a member; once the leader has both exited and been reaped, the id is free
+    for somebody else's group and `killpg` on it would signal strangers.
+    `poll()` returning None says this process has not reaped the leader, and
+    nothing else can, so the reservation holds. A leader that exits in the
+    instant between that answer and the signal becomes a zombie, which is still a
+    member, so it holds the reservation too.
+
+    What that leaves open is the POSIX half of review round 4 finding 1, and it
+    is left open rather than half-answered: an agent that exited on its own may
+    have detached a descendant, and by the time anything here can ask, the leader
+    is reaped and the group has no reuse-proof name left to signal. Windows
+    answers that with a job handle, which is an identity rather than a number.
+    POSIX needs its own equivalent -- a cgroup, or a pidfd taken before the wait
+    -- rather than a harder look at a pgid, and that is a design rather than a
+    fix. The two paths that call `_terminate_tree` themselves reach this with the
+    leader already reaped, so it adds nothing there; a `_terminate_tree` that
+    could not even deliver a signal leaves the leader alive and gets the same
+    refusal a second time, which is the same answer twice rather than a new one.
+
+    Clearing the record first makes this idempotent: a second call has nothing
+    left to close, nothing left to kill and no group left to signal.
+
+    Raises CleanupUnconfirmed when the root outlives its own kill or a POSIX
+    group will not clear, and lets `_confirm_job_empty`'s through. Called from a
+    `finally`, that replaces whatever was already propagating, which is the
+    intended precedence: only that type stops the caller from committing the tree
+    underneath a survivor.
     """
     process, handle = agent_job.process, agent_job.handle
     member, suspended = agent_job.member, agent_job.suspended
-    agent_job.handle, agent_job.member, agent_job.suspended = None, False, False
+    leader = agent_job.group_leader
+    agent_job.handle, agent_job.member, agent_job.suspended, agent_job.group_leader = None, False, False, False
     if process is None:
+        return
+
+    if leader:
+        if process.poll() is None:
+            _terminate_tree(process, grace_s=5.0)
         return
 
     if handle is not None:
@@ -748,7 +802,10 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job
     still writing to the working tree. Killing only the agent leaves them running,
     and `salvage_commit` runs the moment this returns: a descendant that outlives
     this call races that commit, so it has to be gone, not merely signalled,
-    before this returns.
+    before this returns. The timeout is where this is reached from most often but
+    not the only place: `_release_job` calls it for a POSIX agent an exception
+    left running, which is the same tree in the same danger, reached through a
+    failure rather than through a deadline.
 
     On Windows, `job` -- the Job Object `run_agent` assigned this process to
     while it was still suspended, via `_track_in_job_object` -- is terminated as
@@ -949,7 +1006,14 @@ def run_agent(
         # record holds the process and the job from the moment each exists, the
         # helpers below write into it, and `_release_job` in the `finally` is the
         # only thing that terminates, confirms, closes or kills.
-        agent_job = _AgentJob(suspended=sys.platform == "win32")
+        #
+        # Which of the two lifetime states the launch below will be in is decided
+        # by the platform rather than by anything that can fail, so both are set
+        # here: on Windows the process is launched suspended and answered for
+        # through a job, on POSIX it leads a process group and is answered for
+        # through that. Neither says a launch happened -- `_release_job` reads
+        # `process` for that -- only which question to ask if one did.
+        agent_job = _AgentJob(suspended=sys.platform == "win32", group_leader=sys.platform != "win32")
         try:
             # The record's attribute is bound before the local -- Python assigns
             # chained targets left to right -- so an exception raised between the
@@ -1016,7 +1080,10 @@ def run_agent(
             # every exception, interrupt included, that got past any of them.
             # They all need the same thing and all get it here: terminate the
             # job, wait for the kernel's own member count to read zero, and close
-            # the handle exactly once. Confirming rather than closing and
+            # the handle exactly once. On POSIX, where there is no job to hold
+            # any of that, the same call answers for the process group instead,
+            # so an exception on its way past this frame no longer leaves the
+            # agent running. Confirming rather than closing and
             # trusting KILL_ON_JOB_CLOSE is deliberate: that kill is
             # asynchronous, the same reason `_terminate_tree` does not close and
             # trust it either. A CleanupUnconfirmed raised here does replace an
@@ -1067,6 +1134,119 @@ def uncommitted(repo: Path, paperwork: tuple[Path, ...] = ()) -> str:
     with contextlib.suppress(AgentError):
         return git(repo, "status", "--porcelain", *excluding(repo, paperwork))
     return ""
+
+
+def newly_uncommitted(inherited: str, present: str) -> str:
+    """What the tree holds now that it did not hold when the round started.
+
+    "The implementer produced no commit" is classified against the working tree,
+    and until now the whole tree counted. Under `--review-checkout none` the
+    reviewer works in the implementer's own tree, so anything the previous
+    round's reviewer left there -- a file it wrote in the repository instead of
+    in its scratch directory, a cache a test run built -- is still lying there
+    when the next implementer looks at the findings and declines. That round then
+    read as a stall: it cost a second implementer invocation, up to another whole
+    `--timeout`, to be told there was nothing to finish, and `run.json` recorded
+    `stalled` for a round that was declined, which is the wrong sentence for
+    somebody reading it days later. The same leftovers made the other end of the
+    recovery misfire too: a retry that committed everything it was handed still
+    left them in the tree, so "it finished the job" read false and the loop made
+    a work-in-progress commit over a round that was actually complete. Both stop
+    once the question is what changed rather than what is there. `--allow-dirty`
+    inherits the same benefit: the operator's own uncommitted changes are no
+    longer read as this round's work either.
+
+    Two identical porcelain lines are one state, so a path that was already dirty
+    and that the implementer then edited further is not by itself news. That is
+    the direction to be wrong in: such a round still reports that it produced no
+    commit and still stops unless `--continue-on-no-commit` says otherwise, so
+    nothing is lost that was not already lost before the recovery existed, and an
+    implementer that really did a round's work has to have touched something the
+    reviewer had not.
+
+    Deciding is all this does. Once the loop does decide a round's work is in the
+    tree, `salvage_commit` still commits the tree, leftovers included, exactly as
+    an agent's own `git add -A` already would.
+    """
+    already = set(inherited.splitlines())
+    return "\n".join(line for line in present.splitlines() if line not in already)
+
+
+def _porcelain_z_records(raw: str) -> tuple[set[str], dict[str, str]]:
+    """The pathnames in `git status --porcelain -z` output, and what a rename moved.
+
+    Each record is `XY<space><path>` terminated by NUL; a rename or copy carries
+    its source in a second NUL field. The destination is the name the tree now
+    holds, so it is the path; the source is no longer in the tree, so it is not,
+    but it is the name a previous round knew the same work by, and that is the
+    second return value: source to destination.
+
+    The two-character status is dropped on purpose: a path is the same
+    outstanding work whether it is untracked, staged or modified, and
+    identifying it by name is what keeps it from being lost the round its status
+    changes. A rename changes the name itself, which is the one move that
+    identity cannot survive on its own, so the caller is handed the way across.
+    NUL delimiters keep a path with a space or a newline in it whole, which the
+    newline-split `--porcelain` text cannot promise.
+    """
+    fields = raw.split("\0")
+    paths: set[str] = set()
+    moved: dict[str, str] = {}
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if len(record) < 4:
+            continue  # the empty field after the final NUL, or nothing parseable
+        destination = record[3:]
+        paths.add(destination)
+        if "R" in record[:2] or "C" in record[:2]:
+            if index < len(fields):
+                # A copy leaves the source in the tree and a rename does not, but
+                # either way this is the name the work was known by, and pointing
+                # it at the destination costs nothing when the source is still
+                # there under its own name as well.
+                moved[fields[index]] = destination
+            index += 1
+    return paths, moved
+
+
+def _porcelain_z_paths(raw: str) -> set[str]:
+    """Just the pathnames, for a caller with no round to carry across."""
+    return _porcelain_z_records(raw)[0]
+
+
+def dirty_paths(repo: Path, paperwork: tuple[Path, ...] = ()) -> set[str]:
+    """The set of work-tree paths git reports as dirty, the loop's paperwork aside."""
+    return dirty_records(repo, paperwork)[0]
+
+
+def dirty_records(repo: Path, paperwork: tuple[Path, ...] = ()) -> tuple[set[str], dict[str, str]]:
+    """Those same paths, and where a rename in this status moved one of them.
+
+    Outstanding stalled work is tracked by pathname rather than by the porcelain
+    line that carries it: a file that was untracked (`?? fix.py`) one round and
+    staged (`A  fix.py`) the next is the same unreviewed path, and forgetting it
+    when its two-character status changed is how a clean verdict once exited over
+    work no review had read. `--porcelain -z` is what makes the name the whole of
+    the identity -- read raw, not through `git`'s stripping, because the leading
+    space of a ` M` status is part of the first record and `strip()` would eat it.
+
+    Takes the same pathspecs as `uncommitted`, so the loop's own review documents
+    and transcripts are not read as the implementer's work. A git that will not
+    answer is an empty set, matching `uncommitted`: nothing is then carried, and
+    no tree is touched on the strength of a question that could not be asked.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "-z", *excluding(repo, paperwork)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        return set(), {}
+    return _porcelain_z_records(result.stdout)
 
 
 def listed(entries: str, limit: int) -> str:
@@ -1828,9 +2008,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--continue-on-no-commit",
         action="store_true",
         help=(
-            "Keep looping when an implementation round produces no commit and leaves nothing in the working "
-            "tree, instead of stopping as stalled. A round that left uncommitted work behind is recovered "
-            "rather than reported as no commit, whatever this is set to."
+            "Keep looping when an implementation round produces no commit and leaves nothing new in the "
+            "working tree, instead of stopping as stalled. A round that left uncommitted work behind is "
+            "recovered rather than reported as no commit, unless --no-stall-retry says otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--stall-retry",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        # The recovery is worth its cost by default: the round it rescues is a
+        # finished one, and the alternative was a hand salvage the next morning.
+        # It is not always worth it, though, and until now there was no way to
+        # say so. The second invocation is another --timeout at worst, which for
+        # an overnight run of an hour a round is a real slice of the night spent
+        # on a round that has already failed once to commit what it wrote.
+        help=(
+            "Hand a round that left uncommitted work back to the implementer to finish and commit. "
+            "--no-stall-retry reports the stall and the paths instead, leaves the work exactly where it "
+            "is, and lets the no-commit rule above decide whether the run goes on."
         ),
     )
     parser.add_argument("--dry-run", action="store_true", help="Print the agent commands without running them.")
@@ -1998,6 +2194,24 @@ def implement_round(
         raise
 
 
+def report_stall(record: RoundRecord, number: int, leftover: str) -> None:
+    """Say what the round left in the tree, and record it, before anything is done about it.
+
+    Shared by the two ways a stall is handled, because what the round *is* does
+    not depend on which one runs: `run.json` says `stalled` either way, and the
+    paths are named on the console and in the summary either way. Only `retried`
+    tells the two apart, which is the whole of the difference.
+    """
+    print(
+        f"\nround {number}: implementer stalled with uncommitted work. It produced no commit and left "
+        f"{len(leftover.splitlines())} path(s) in the working tree:"
+    )
+    for line in listed(leftover, 20).splitlines():
+        print(f"  {line}")
+    record.stalled = True
+    record.uncommitted_paths = leftover.splitlines()
+
+
 def recover_stalled_round(
     setup: ReviewSetup,
     record: RoundRecord,
@@ -2006,16 +2220,20 @@ def recover_stalled_round(
     branch: str,
     previous_review: Path | None,
     paperwork: tuple[Path, ...],
+    inherited: str,
 ) -> None:
     """Get the work of a round that produced no commit but left a dirty tree into history.
 
     "The implementer produced no commit" is two rounds, not one, and the working
-    tree is what tells them apart. A clean tree is an implementer that looked at
-    the findings and declined the round; that is the caller's business and this is
-    never reached. A dirty tree is a round that was finished and never committed,
-    because the implementer stopped between its last edit and its `git commit` --
-    an agent waiting on a notification its harness never delivered, which was
-    watched happening and cost a hand salvage the next morning.
+    tree is what tells them apart. A tree holding nothing the round did not start
+    with is an implementer that looked at the findings and declined the round;
+    that is the caller's business and this is never reached. Anything new is a
+    round that was finished and never committed, because the implementer stopped
+    between its last edit and its `git commit` -- an agent waiting on a
+    notification its harness never delivered, which was watched happening and
+    cost a hand salvage the next morning. `inherited` is what the tree held
+    before this round's implementer ran, so the question stays "what did this
+    round add" rather than "what is lying here"; see `newly_uncommitted`.
 
     Recovery is the round's own step, not a new mechanism: the implementer is
     handed its own uncommitted work and asked for the commit it never made. Only
@@ -2028,17 +2246,10 @@ def recover_stalled_round(
     disk, and every path out of this leaves it there or commits it.
     """
     repo = setup.repo
-    leftover = uncommitted(repo, paperwork)
-    print(
-        f"\nround {number}: implementer stalled with uncommitted work. It produced no commit and left "
-        f"{len(leftover.splitlines())} path(s) in the working tree:"
-    )
-    for line in listed(leftover, 20).splitlines():
-        print(f"  {line}")
+    leftover = newly_uncommitted(inherited, uncommitted(repo, paperwork))
+    report_stall(record, number, leftover)
     print("handing it back to be finished and committed; the work stays exactly where it is.")
 
-    record.stalled = True
-    record.uncommitted_paths = leftover.splitlines()
     record.retried = True
     before = git(repo, "rev-parse", "HEAD")
     scratch = round_scratch(setup.scratch_root, number, "claude-finish")
@@ -2052,7 +2263,7 @@ def recover_stalled_round(
         stage="finish",
     )
     moved = git(repo, "rev-parse", "HEAD") != before
-    still_uncommitted = uncommitted(repo, paperwork)
+    still_uncommitted = newly_uncommitted(inherited, uncommitted(repo, paperwork))
     if moved and not still_uncommitted:
         return  # it finished the job; the round has its commits and goes to review
     if not moved and not still_uncommitted:
@@ -2318,6 +2529,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"max rounds : {options.max_rounds}")
     if options.stop_after_flat_rounds:
         print(f"stop early : after {options.stop_after_flat_rounds} rounds that do not reduce the finding count")
+    if not options.stall_retry:
+        # Only when it is off. The retry is the default and saying so every run
+        # would be a line nobody reads; the run that will not make it is the one
+        # whose header has to say so before an operator waits for it.
+        print("stall retry: off (--no-stall-retry); a round that leaves work uncommitted is reported, not finished")
     print(f"starts with: {options.start_with}")
     if has_network:
         print(f"network    : reviewer has network (codex --sandbox {options.codex_sandbox})")
@@ -2353,6 +2569,12 @@ def main(argv: list[str] | None = None) -> int:
     exit_code = EXIT_ROUNDS_EXHAUSTED
     last_head = baseline
     checkout: Path | None = None
+    # Paths of stalled work that no review has seen, carried across rounds by
+    # name. A round that leaves its own work uncommitted adds its paths; a later
+    # round that commits or removes one drops it, whatever porcelain status it wore
+    # in between. While anything is in here a clean verdict cannot end the run,
+    # however many rounds after the stall it arrives.
+    outstanding_paths: set[str] = set()
 
     try:
         if not options.dry_run:
@@ -2391,6 +2613,15 @@ def main(argv: list[str] | None = None) -> int:
                 prompt = implement_prompt(task, review_dir, branch, scratch)
             else:
                 prompt = fix_prompt(task, previous_review, number, branch, scratch)
+            # What the tree already held before this round's implementer touched
+            # it. Under --review-checkout none the reviewer shares that tree, and
+            # under --allow-dirty the operator's own changes are in it, so this
+            # is what keeps either from being read as the round's own work.
+            inherited = "" if options.dry_run else uncommitted(repo, paperwork)
+            # The same "what did this round start with" question by pathname, for
+            # reconciling the carried-across stall below independently of porcelain
+            # status; see `dirty_paths`.
+            inherited_dirty = set() if options.dry_run else dirty_paths(repo, paperwork)
             try:
                 implement_round(setup, record, number, prompt, scratch, paperwork)
             except AgentError:
@@ -2402,17 +2633,51 @@ def main(argv: list[str] | None = None) -> int:
 
             head, new_commits = (last_head, []) if options.dry_run else commits_since(repo, last_head)
             record.commits = new_commits
-            if not new_commits and not options.dry_run and uncommitted(repo, paperwork):
-                # Not a round that was declined: a round whose work is sitting in
-                # the tree because the implementer never reached its own commit.
+            # Anything here is not a round that was declined: it is a round whose
+            # work is sitting in the tree because the implementer never reached
+            # its own commit.
+            left_behind = (
+                "" if new_commits or options.dry_run else newly_uncommitted(inherited, uncommitted(repo, paperwork))
+            )
+            # This round's share of work left uncommitted because the retry was
+            # declined. Its paths are folded into `outstanding_paths` below, which
+            # carries such work across rounds: the review runs on a commit-only
+            # range -- and in the default separate checkout these files do not
+            # exist at all -- so no round's clean verdict ever inspects it.
+            kept_uncommitted = ""
+            if left_behind and options.stall_retry:
                 try:
-                    recover_stalled_round(setup, record, number, task, branch, previous_review, paperwork)
+                    recover_stalled_round(setup, record, number, task, branch, previous_review, paperwork, inherited)
                 except AgentError:
                     if record.salvaged is not None:
                         last_head = git(repo, "rev-parse", "HEAD")
                     raise
                 head, new_commits = commits_since(repo, last_head)
                 record.commits = new_commits
+            elif left_behind:
+                report_stall(record, number, left_behind)
+                print("not handing it back: --no-stall-retry. The work stays exactly where it is.")
+                kept_uncommitted = left_behind
+            # Reconcile the run's outstanding stalled work against the tree as it
+            # stands now, by pathname. Prior rounds' leftovers that a later round
+            # committed into a reviewed range, or took back out, have left the
+            # working-tree status and drop off here; one whose only change was its
+            # porcelain status -- untracked to staged, say -- is still dirty and so
+            # is kept. This round's own leftover joins what remains: the paths dirty
+            # now that the round did not start with, added when it was not handed
+            # back. The guard after the review reads the total, not just this
+            # round's share.
+            if not options.dry_run:
+                present_dirty, moved = dirty_records(repo, paperwork)
+                # A rename is the one change a name cannot survive: the work is
+                # still there, uncommitted and unreviewed, under a name no
+                # earlier round ever saw. Following it first is what keeps the
+                # filter below from reading `git mv` as "committed or taken
+                # back". Applied every round, so a path renamed twice arrives.
+                outstanding_paths = {moved.get(path, path) for path in outstanding_paths}
+                outstanding_paths = {path for path in outstanding_paths if path in present_dirty}
+                if kept_uncommitted:
+                    outstanding_paths |= present_dirty - inherited_dirty
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
@@ -2434,6 +2699,22 @@ def main(argv: list[str] | None = None) -> int:
 
             verdict, review_path = reviewed
             if verdict.is_clean:
+                if outstanding_paths:
+                    # A clean verdict cannot terminate the run while a stalled
+                    # round's work is still sitting uncommitted and unreviewed --
+                    # whether this round left it or an earlier one did. Every
+                    # review measured committed history, so calling that clean
+                    # would exit 0 over changes nobody looked at. Stop as stalled
+                    # instead, and leave the work exactly where it is.
+                    print(
+                        f"\nround {number}: the review came back clean, but "
+                        f"{len(outstanding_paths)} path(s) a stalled round left uncommitted "
+                        "are still in the tree, and the review never saw them; stopping as stalled rather than "
+                        "calling the run clean. Commit the work, or drop --continue-on-no-commit.",
+                        file=sys.stderr,
+                    )
+                    exit_code = EXIT_STALLED
+                    break
                 print(f"\nreview came back clean after {number} round(s).")
                 exit_code = EXIT_CLEAN
                 break
@@ -2489,6 +2770,7 @@ def main(argv: list[str] | None = None) -> int:
         "initial_range": initial_range or None,
         "max_rounds": options.max_rounds,
         "stop_after_flat_rounds": options.stop_after_flat_rounds,
+        "stall_retry": options.stall_retry,
         "reviewer_network": has_network,
         "exit_code": exit_code,
         "rounds": [vars(record) for record in rounds],
