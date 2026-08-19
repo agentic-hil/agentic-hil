@@ -1598,6 +1598,62 @@ def test_committing_the_stalled_work_a_round_later_lets_the_run_end_clean(
     assert _in(repository, "status", "--porcelain").strip() == ""
 
 
+_WRITES_FIX_WITHOUT_COMMITTING = (
+    f"pathlib.Path('fix.py').write_text({FIX!r}, encoding='utf-8')\n"
+    "sys.stdout.write('wrote the fix, then never came back to commit it\\n')\n"
+)
+_STAGES_STALLED_AND_COMMITS_ANOTHER = (
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    # Stage the stalled path after that commit: '?? fix.py' becomes 'A  fix.py',
+    # the same path under a new porcelain status, still uncommitted and unreviewed.
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "sys.stdout.write('committed only other.py and staged the stalled fix.py\\n')\n"
+)
+
+
+def test_staging_the_stalled_file_a_round_later_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Remembering the stall by its whole porcelain line lost it the round its status changed.
+
+    Round 1 stalls with `?? fix.py` dirty and its review requests changes, so the
+    run goes on. Round 2 stages that same file -- `?? fix.py` becomes `A  fix.py`
+    -- and commits only an unrelated `other.py`. A guard that carried the whole
+    porcelain line no longer recognised the staged line as the work it was holding,
+    dropped it, and let round 2's clean verdict (on a range that is only the
+    `other.py` commit) end the run at exit 0 with `fix.py` staged and never
+    reviewed. Tracked by name, the path is still outstanding and the run stops as
+    stalled.
+    """
+    repository = _repository(tmp_path)
+    agent = _agent(
+        tmp_path, "stalls_then_stages", _WRITES_FIX_WITHOUT_COMMITTING, _STAGES_STALLED_AND_COMMITS_ANOTHER
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    # No --review-checkout: the default clone, where the staged fix.py is absent
+    # from the reviewer's tree entirely.
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_stages") == 2
+    # The unrelated commit landed; the stalled file is staged but never committed.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["other.py"]
+    assert "fix.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "A  fix.py"
+    assert (repository / "fix.py").read_text(encoding="utf-8") == FIX
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
 def test_the_second_attempt_is_told_what_is_in_the_tree_and_keeps_the_first_ones_transcript(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1172,19 +1172,57 @@ def newly_uncommitted(inherited: str, present: str) -> str:
     return "\n".join(line for line in present.splitlines() if line not in already)
 
 
-def still_present(recorded: str, present: str) -> str:
-    """Which of `recorded`'s porcelain lines the working tree still holds.
+def _porcelain_z_paths(raw: str) -> set[str]:
+    """The pathnames in `git status --porcelain -z` output, statuses aside.
 
-    The inverse of what `newly_uncommitted` keeps: there the question is what the
-    tree gained, here it is which lines the tree has not since lost. Outstanding
-    stalled work is cleared from this the moment its line leaves `git status` --
-    committed into a range a review reads, or taken back out -- and what remains
-    is work still sitting unreviewed in the tree. Two identical porcelain lines
-    are one state, matching `newly_uncommitted`, so this composes with it: a line
-    it added is a line this can find again next round.
+    Each record is `XY<space><path>` terminated by NUL; a rename or copy carries
+    its source in a second NUL field, which is skipped -- the destination is the
+    name the tree now holds. The two-character status is dropped on purpose: a
+    path is the same outstanding work whether it is untracked, staged or modified,
+    and identifying it by name is what keeps it from being lost the round its
+    status changes. NUL delimiters keep a path with a space or a newline in it
+    whole, which the newline-split `--porcelain` text cannot promise.
     """
-    here = set(present.splitlines())
-    return "\n".join(line for line in recorded.splitlines() if line in here)
+    fields = raw.split("\0")
+    paths: set[str] = set()
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if len(record) < 4:
+            continue  # the empty field after the final NUL, or nothing parseable
+        paths.add(record[3:])
+        if "R" in record[:2] or "C" in record[:2]:
+            index += 1  # the following field is the rename/copy source, not in the tree
+    return paths
+
+
+def dirty_paths(repo: Path, paperwork: tuple[Path, ...] = ()) -> set[str]:
+    """The set of work-tree paths git reports as dirty, the loop's paperwork aside.
+
+    Outstanding stalled work is tracked by pathname rather than by the porcelain
+    line that carries it: a file that was untracked (`?? fix.py`) one round and
+    staged (`A  fix.py`) the next is the same unreviewed path, and forgetting it
+    when its two-character status changed is how a clean verdict once exited over
+    work no review had read. `--porcelain -z` is what makes the name the whole of
+    the identity -- read raw, not through `git`'s stripping, because the leading
+    space of a ` M` status is part of the first record and `strip()` would eat it.
+
+    Takes the same pathspecs as `uncommitted`, so the loop's own review documents
+    and transcripts are not read as the implementer's work. A git that will not
+    answer is an empty set, matching `uncommitted`: nothing is then carried, and
+    no tree is touched on the strength of a question that could not be asked.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "-z", *excluding(repo, paperwork)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        return set()
+    return _porcelain_z_paths(result.stdout)
 
 
 def listed(entries: str, limit: int) -> str:
@@ -2507,11 +2545,12 @@ def main(argv: list[str] | None = None) -> int:
     exit_code = EXIT_ROUNDS_EXHAUSTED
     last_head = baseline
     checkout: Path | None = None
-    # Stalled work that no review has seen, carried across rounds. A round that
-    # leaves its own work uncommitted adds to this; a later round that commits or
-    # removes that work drops it. While anything is in here a clean verdict cannot
-    # end the run, however many rounds after the stall it arrives.
-    outstanding_uncommitted = ""
+    # Paths of stalled work that no review has seen, carried across rounds by
+    # name. A round that leaves its own work uncommitted adds its paths; a later
+    # round that commits or removes one drops it, whatever porcelain status it wore
+    # in between. While anything is in here a clean verdict cannot end the run,
+    # however many rounds after the stall it arrives.
+    outstanding_paths: set[str] = set()
 
     try:
         if not options.dry_run:
@@ -2555,6 +2594,10 @@ def main(argv: list[str] | None = None) -> int:
             # under --allow-dirty the operator's own changes are in it, so this
             # is what keeps either from being read as the round's own work.
             inherited = "" if options.dry_run else uncommitted(repo, paperwork)
+            # The same "what did this round start with" question by pathname, for
+            # reconciling the carried-across stall below independently of porcelain
+            # status; see `dirty_paths`.
+            inherited_dirty = set() if options.dry_run else dirty_paths(repo, paperwork)
             try:
                 implement_round(setup, record, number, prompt, scratch, paperwork)
             except AgentError:
@@ -2573,7 +2616,7 @@ def main(argv: list[str] | None = None) -> int:
                 "" if new_commits or options.dry_run else newly_uncommitted(inherited, uncommitted(repo, paperwork))
             )
             # This round's share of work left uncommitted because the retry was
-            # declined. It is folded into `outstanding_uncommitted` below, which
+            # declined. Its paths are folded into `outstanding_paths` below, which
             # carries such work across rounds: the review runs on a commit-only
             # range -- and in the default separate checkout these files do not
             # exist at all -- so no round's clean verdict ever inspects it.
@@ -2592,16 +2635,19 @@ def main(argv: list[str] | None = None) -> int:
                 print("not handing it back: --no-stall-retry. The work stays exactly where it is.")
                 kept_uncommitted = left_behind
             # Reconcile the run's outstanding stalled work against the tree as it
-            # stands now. Prior rounds' leftovers that a later round committed into
-            # a reviewed range, or took back out, have left `git status` and drop
-            # off here; this round's own `kept_uncommitted` joins what remains. The
-            # guard after the review reads the total, not just this round's share.
+            # stands now, by pathname. Prior rounds' leftovers that a later round
+            # committed into a reviewed range, or took back out, have left the
+            # working-tree status and drop off here; one whose only change was its
+            # porcelain status -- untracked to staged, say -- is still dirty and so
+            # is kept. This round's own leftover joins what remains: the paths dirty
+            # now that the round did not start with, added when it was not handed
+            # back. The guard after the review reads the total, not just this
+            # round's share.
             if not options.dry_run:
-                carried = still_present(outstanding_uncommitted, uncommitted(repo, paperwork)).splitlines()
-                for line in kept_uncommitted.splitlines():
-                    if line not in carried:
-                        carried.append(line)
-                outstanding_uncommitted = "\n".join(carried)
+                present_dirty = dirty_paths(repo, paperwork)
+                outstanding_paths = {path for path in outstanding_paths if path in present_dirty}
+                if kept_uncommitted:
+                    outstanding_paths |= present_dirty - inherited_dirty
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
@@ -2623,7 +2669,7 @@ def main(argv: list[str] | None = None) -> int:
 
             verdict, review_path = reviewed
             if verdict.is_clean:
-                if outstanding_uncommitted:
+                if outstanding_paths:
                     # A clean verdict cannot terminate the run while a stalled
                     # round's work is still sitting uncommitted and unreviewed --
                     # whether this round left it or an earlier one did. Every
@@ -2632,7 +2678,7 @@ def main(argv: list[str] | None = None) -> int:
                     # instead, and leave the work exactly where it is.
                     print(
                         f"\nround {number}: the review came back clean, but "
-                        f"{len(outstanding_uncommitted.splitlines())} path(s) a stalled round left uncommitted "
+                        f"{len(outstanding_paths)} path(s) a stalled round left uncommitted "
                         "are still in the tree, and the review never saw them; stopping as stalled rather than "
                         "calling the run clean. Commit the work, or drop --continue-on-no-commit.",
                         file=sys.stderr,
