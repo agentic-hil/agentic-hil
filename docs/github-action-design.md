@@ -256,6 +256,13 @@ nothing is invented to make it look like one. And the suite's `timestamp` and
 `time` are read off the step results the run recorded, so a document written
 minutes after a run still says when the run happened.
 
+One run leaves no document, and it is the run that prints no JSON either: an
+interrupted one, the cancelled job and the dead runner of the table above. Its
+record is the report the reactor commits before the interrupt goes on out of the
+process, which the action already reads from `reports.directory` for exactly
+this case. Everything the command answers at all, refusals included, writes the
+file.
+
 ## Failure modes
 
 | Condition | Where it is caught | Job result |
