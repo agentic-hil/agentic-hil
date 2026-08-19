@@ -180,6 +180,32 @@ def test_stopped_run_says_the_stop_is_why_the_rest_never_ran() -> None:
     assert "stopped on request after step 1" in message
 
 
+def test_a_stop_before_the_first_step_is_a_stop_not_a_refusal() -> None:
+    # The reactor produces exactly this shape for a cooperative stop caught
+    # before step 1 ran: `stopped` set, `stopped_after_step` zero, and an empty
+    # `steps` list because nothing executed. It shares the empty-`steps` shape
+    # with a preflight refusal, but a stop reached the bench and closed it
+    # cleanly, so it must not be read as a refusal: no invented `preflight`
+    # error, every plan case skipped with the stop as its reason.
+    stopped = {
+        **green_result(),
+        "ok": False,
+        "error_type": "run_stopped",
+        "stopped": True,
+        "stopped_after_step": 0,
+        "steps": [],
+    }
+
+    document = junit_xml_document(stopped, plan_steps=PLAN_STEPS)
+
+    suite = suite_of(document)
+    assert (suite.get("tests"), suite.get("failures"), suite.get("errors"), suite.get("skipped")) == ("3", "0", "0", "3")
+    cases = cases_of(document)
+    assert "preflight" not in cases
+    for name in ("1.dut.flash", "2.dut_uart.uart_read", "3.dut.reset"):
+        assert "stopped on request after step 0" in (cases[name].find("skipped").get("message") or "")
+
+
 def test_preflight_refusal_skips_every_step_and_carries_the_refusal_as_an_error() -> None:
     document = junit_xml_document(preflight_refusal_result(), plan_steps=PLAN_STEPS)
 

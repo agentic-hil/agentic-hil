@@ -269,8 +269,13 @@ def _refusal(result: JsonObject) -> JsonObject | None:
     reactor's own `validation_error` from a plan refused at preflight, and a
     `ConfigError` document from a run that never got as far as a plan. Neither
     touched hardware, and the design is explicit that a reader must not mistake
-    either for a bench failure."""
-    if result.get("ok") is True or _step_records(result):
+    either for a bench failure.
+
+    A cooperative stop is not a refusal even when it stopped before step 1 and
+    so carries no step records: the reactor sets `stopped` on it, the run did
+    reach the bench and closed it cleanly, and the design maps it to skipped
+    steps with the stop as their reason, not to an invented `preflight` error."""
+    if result.get("ok") is True or result.get("stopped") is True or _step_records(result):
         return None
     detail = result.get("validation_error")
     return detail if isinstance(detail, dict) else result
