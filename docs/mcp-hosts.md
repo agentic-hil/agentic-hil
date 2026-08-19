@@ -170,7 +170,7 @@ If CLion uses the GitHub Copilot plugin instead of JetBrains AI Assistant, open 
 
 The AI Assistant and Copilot plugin use different JSON containers. Their server and tool semantics remain identical.
 
-Sources: [JetBrains AI Assistant MCP setup](https://www.jetbrains.com/help/ai-assistant/configure-an-mcp-server.html) and [GitHub Copilot MCP setup for JetBrains IDEs](https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp-in-your-ide/extend-copilot-chat-with-mcp#configuring-mcp-servers-in-jetbrains-ides).
+Sources: [JetBrains AI Assistant MCP setup](https://www.jetbrains.com/help/ai-assistant/configure-an-mcp-server.html) and [GitHub Copilot MCP setup for JetBrains IDEs](https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp-in-your-ide/extend-copilot-chat-with-mcp?tool=jetbrains).
 
 ## OpenAI Codex
 
