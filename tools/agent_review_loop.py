@@ -1172,33 +1172,57 @@ def newly_uncommitted(inherited: str, present: str) -> str:
     return "\n".join(line for line in present.splitlines() if line not in already)
 
 
-def _porcelain_z_paths(raw: str) -> set[str]:
-    """The pathnames in `git status --porcelain -z` output, statuses aside.
+def _porcelain_z_records(raw: str) -> tuple[set[str], dict[str, str]]:
+    """The pathnames in `git status --porcelain -z` output, and what a rename moved.
 
     Each record is `XY<space><path>` terminated by NUL; a rename or copy carries
-    its source in a second NUL field, which is skipped -- the destination is the
-    name the tree now holds. The two-character status is dropped on purpose: a
-    path is the same outstanding work whether it is untracked, staged or modified,
-    and identifying it by name is what keeps it from being lost the round its
-    status changes. NUL delimiters keep a path with a space or a newline in it
-    whole, which the newline-split `--porcelain` text cannot promise.
+    its source in a second NUL field. The destination is the name the tree now
+    holds, so it is the path; the source is no longer in the tree, so it is not,
+    but it is the name a previous round knew the same work by, and that is the
+    second return value: source to destination.
+
+    The two-character status is dropped on purpose: a path is the same
+    outstanding work whether it is untracked, staged or modified, and
+    identifying it by name is what keeps it from being lost the round its status
+    changes. A rename changes the name itself, which is the one move that
+    identity cannot survive on its own, so the caller is handed the way across.
+    NUL delimiters keep a path with a space or a newline in it whole, which the
+    newline-split `--porcelain` text cannot promise.
     """
     fields = raw.split("\0")
     paths: set[str] = set()
+    moved: dict[str, str] = {}
     index = 0
     while index < len(fields):
         record = fields[index]
         index += 1
         if len(record) < 4:
             continue  # the empty field after the final NUL, or nothing parseable
-        paths.add(record[3:])
+        destination = record[3:]
+        paths.add(destination)
         if "R" in record[:2] or "C" in record[:2]:
-            index += 1  # the following field is the rename/copy source, not in the tree
-    return paths
+            if index < len(fields):
+                # A copy leaves the source in the tree and a rename does not, but
+                # either way this is the name the work was known by, and pointing
+                # it at the destination costs nothing when the source is still
+                # there under its own name as well.
+                moved[fields[index]] = destination
+            index += 1
+    return paths, moved
+
+
+def _porcelain_z_paths(raw: str) -> set[str]:
+    """Just the pathnames, for a caller with no round to carry across."""
+    return _porcelain_z_records(raw)[0]
 
 
 def dirty_paths(repo: Path, paperwork: tuple[Path, ...] = ()) -> set[str]:
-    """The set of work-tree paths git reports as dirty, the loop's paperwork aside.
+    """The set of work-tree paths git reports as dirty, the loop's paperwork aside."""
+    return dirty_records(repo, paperwork)[0]
+
+
+def dirty_records(repo: Path, paperwork: tuple[Path, ...] = ()) -> tuple[set[str], dict[str, str]]:
+    """Those same paths, and where a rename in this status moved one of them.
 
     Outstanding stalled work is tracked by pathname rather than by the porcelain
     line that carries it: a file that was untracked (`?? fix.py`) one round and
@@ -1221,8 +1245,8 @@ def dirty_paths(repo: Path, paperwork: tuple[Path, ...] = ()) -> set[str]:
         errors="replace",
     )
     if result.returncode != 0:
-        return set()
-    return _porcelain_z_paths(result.stdout)
+        return set(), {}
+    return _porcelain_z_records(result.stdout)
 
 
 def listed(entries: str, limit: int) -> str:
@@ -2644,7 +2668,13 @@ def main(argv: list[str] | None = None) -> int:
             # back. The guard after the review reads the total, not just this
             # round's share.
             if not options.dry_run:
-                present_dirty = dirty_paths(repo, paperwork)
+                present_dirty, moved = dirty_records(repo, paperwork)
+                # A rename is the one change a name cannot survive: the work is
+                # still there, uncommitted and unreviewed, under a name no
+                # earlier round ever saw. Following it first is what keeps the
+                # filter below from reading `git mv` as "committed or taken
+                # back". Applied every round, so a path renamed twice arrives.
+                outstanding_paths = {moved.get(path, path) for path in outstanding_paths}
                 outstanding_paths = {path for path in outstanding_paths if path in present_dirty}
                 if kept_uncommitted:
                     outstanding_paths |= present_dirty - inherited_dirty

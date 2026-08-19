@@ -1092,12 +1092,12 @@ def test_a_long_tmpdir_still_yields_a_bindable_broker_endpoint(tmp_path: Path, m
 
     The filesystem socket path `<TMPDIR>/agentic-hil-can-<uid>/<tag>.sock` follows
     `TMPDIR`, and a sandbox or a long profile can push it past the ~108-byte
-    kernel cap so the socket cannot be bound at all — the failure a caller used to
+    kernel cap so the socket cannot be bound at all, the failure a caller used to
     meet as the broker start timeout elapsing. The endpoint must instead be one
     that fits, and a real broker must bind and serve on it with that same long
     `TMPDIR` inherited by the child. That escape exists on Windows (named pipes)
     and Linux (abstract sockets); a POSIX host without abstract sockets has
-    none, and there the honest answer is the named refusal — whose remediation,
+    none, and there the honest answer is the named refusal, whose remediation,
     a short `XDG_RUNTIME_DIR`, must itself work."""
     import tempfile as tempfile_module
 
@@ -1107,7 +1107,23 @@ def test_a_long_tmpdir_still_yields_a_bindable_broker_endpoint(tmp_path: Path, m
     bus_key = bus_lock_key(config, "bench")
     lock_root = BenchMutex().root
 
-    long_tmp = tmp_path / ("d" * 90) / ("e" * 60)
+    # Long enough to overflow the kernel's cap, and no longer. This used to be a
+    # fixed 150 characters hung off `tmp_path`, which made the length a property
+    # of the invocation rather than of the test: under xdist that root carries a
+    # `popen-gwNN` level a serial run does not, and on Windows the two together
+    # ran past MAX_PATH while this was still creating the directory, so the
+    # failure was in the setup and never reached the assertion.
+    padding = canbroker._UNIX_PATH_MAX + 40
+    if os.name == "nt":
+        # Windows answers with a named pipe, which no TMPDIR can lengthen, so
+        # here the directory only has to be long, not past a cap that does not
+        # apply. MAX_PATH does apply, and to this very `mkdir`.
+        padding = max(20, 240 - len(str(tmp_path)))
+    long_tmp = tmp_path
+    while padding > 0:
+        component = min(padding, 60)
+        long_tmp = long_tmp / ("d" * component)
+        padding -= component + 1
     long_tmp.mkdir(parents=True)
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     for variable in ("TMPDIR", "TEMP", "TMP"):

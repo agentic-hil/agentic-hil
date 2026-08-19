@@ -1654,6 +1654,64 @@ def test_staging_the_stalled_file_a_round_later_does_not_slip_a_clean_run_past_i
     assert "the review never saw" in f"{captured.out}{captured.err}"
 
 
+_MODIFIES_A_TRACKED_FILE_WITHOUT_COMMITTING = (
+    "pathlib.Path('README.md').write_text('start\\nround 1 work nobody committed\\n', encoding='utf-8')\n"
+    "sys.stdout.write('edited README.md and never came back to commit it\\n')\n"
+)
+
+_RENAMES_THE_STALLED_FILE_AND_COMMITS_ANOTHER = (
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    # The stalled path leaves under a new name after that commit: the work is
+    # still there, still uncommitted, and the name round 1 knew it by is gone.
+    "subprocess.run(['git', 'mv', 'README.md', 'renamed.md'], check=True)\n"
+    "sys.stdout.write('committed only other.py and renamed the stalled file\\n')\n"
+)
+
+
+def test_renaming_the_stalled_file_a_round_later_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Tracking by name lost the work to the one change a name cannot survive.
+
+    Round 1 stalls with `README.md` modified and its review requests changes, so
+    the run goes on. Round 2 renames that file and commits only an unrelated
+    `other.py`. Porcelain reports a rename as its destination and keeps the source
+    in a field of its own, so the name the guard was holding vanished from the
+    tree's paths, nothing added `renamed.md` back, and round 2's clean verdict on
+    a range that is only the `other.py` commit ended the run at exit 0 with the
+    work still uncommitted and never reviewed. Followed across the rename, the
+    path is still outstanding and the run stops as stalled.
+    """
+    repository = _repository(tmp_path)
+    agent = _agent(
+        tmp_path,
+        "stalls_then_renames",
+        _MODIFIES_A_TRACKED_FILE_WITHOUT_COMMITTING,
+        _RENAMES_THE_STALLED_FILE_AND_COMMITS_ANOTHER,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_renames") == 2
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["other.py"]
+    # The renamed work is staged, uncommitted, and outside every reviewed range.
+    assert "renamed.md" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip().startswith("R")
+    assert "round 1 work nobody committed" in (repository / "renamed.md").read_text(encoding="utf-8")
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
 def test_the_second_attempt_is_told_what_is_in_the_tree_and_keeps_the_first_ones_transcript(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
