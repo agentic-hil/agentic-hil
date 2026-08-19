@@ -1249,40 +1249,6 @@ def dirty_records(repo: Path, paperwork: tuple[Path, ...] = ()) -> tuple[set[str
     return _porcelain_z_records(result.stdout)
 
 
-def committed_paths(repo: Path, start: str, end: str) -> set[str]:
-    """The paths a round's commits touched, for telling a resolved stall from a lost one.
-
-    An outstanding path is tracked by name and dropped once it stops being dirty,
-    on the reading that it was committed into a range the review read or taken
-    back out. That reading is safe for every change a name survives, but not for
-    a rename git cannot see: an untracked file moved on the filesystem carries no
-    porcelain rename record for `dirty_records` to follow and lands in no commit,
-    so the outstanding name simply vanishes from the dirty paths while the work
-    lives on under a name no round ever saw. Distinguishing the two needs to know
-    whether the name reached one of this round's commits, which this answers.
-
-    An empty range -- a round that produced no commit -- touched nothing.
-    `--no-renames` keeps a committed rename's source name in the answer, so a
-    tracked path committed under a new name still reads as committed rather than
-    as one of the vanished ones. Read raw of `git`'s stripping, as `dirty_records`
-    is, so a path with leading or trailing spaces is compared whole; a git that
-    will not answer is an empty set, and nothing is then read as resolved on the
-    strength of a question that could not be asked.
-    """
-    if start == end:
-        return set()
-    result = subprocess.run(
-        ["git", "-C", str(repo), "diff", "--name-only", "--no-renames", "-z", f"{start}..{end}"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        return set()
-    return {path for path in result.stdout.split("\0") if path}
-
-
 def listed(entries: str, limit: int) -> str:
     """`entries` as at most `limit` lines, with a count standing in for the rest."""
     lines = entries.splitlines()
@@ -2710,20 +2676,23 @@ def main(argv: list[str] | None = None) -> int:
                 # back". Applied every round, so a path renamed twice arrives.
                 followed = {moved.get(path, path) for path in outstanding_paths}
                 survived = {path for path in followed if path in present_dirty}
-                # Porcelain only records a rename git has content to detect: a
-                # staged or committed one. An untracked file moved on the
-                # filesystem leaves none, so its outstanding name drops out of the
-                # survivors above under a name this round did not start with --
-                # among `present_dirty - inherited_dirty`. Reading that as "the
-                # work is gone" is only safe if the vanished name reached one of
-                # this round's commits; a name that landed in no commit was neither
-                # reviewed nor taken back, so carry the round's new dirt to keep
-                # the untracked rename from smuggling it past the guard.
-                carry_new = bool(kept_uncommitted)
-                lost = followed - survived
-                if lost and not carry_new:
-                    committed = committed_paths(repo, last_head, head)
-                    carry_new = any(path not in committed for path in lost)
+                # An outstanding name that leaves the dirty set is safe to drop
+                # only when its work reached a commit a review read or came back
+                # out of the tree. Porcelain records a rename git has content to
+                # detect -- a staged or committed one, followed above -- but an
+                # untracked file moved on the filesystem leaves none, so its name
+                # vanishes while the work lives on under a name this round did not
+                # start with, among `present_dirty - inherited_dirty`. The commit
+                # diff cannot tell that apart from a committed one: the same
+                # pathname can reach a commit as an unrelated new file while the
+                # moved content sits untracked under its new name, so membership
+                # in the diff is no proof the outstanding object was committed.
+                # Whenever a followed name disappears with no porcelain rename to
+                # explain it, carry the round's new dirt. A round that genuinely
+                # finished the work left a clean tree, so `present_dirty` holds
+                # nothing new to carry; one that moved the work away left it dirty
+                # under its new name, and carrying keeps it from slipping the guard.
+                carry_new = bool(kept_uncommitted) or bool(followed - survived)
                 outstanding_paths = survived
                 if carry_new:
                     outstanding_paths |= present_dirty - inherited_dirty
