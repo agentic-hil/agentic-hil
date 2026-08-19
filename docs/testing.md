@@ -85,6 +85,22 @@ An agent runs a plan with the `test_reactor_run` MCP tool; an operator runs it w
 
 The tool is the route for an agent because it is the only one an operator can see and audit: a plan run through a shell is a shell command, judged by whatever the agent host makes of it, while a plan run through the tool is coordinated and reported like every other hardware action here. A plan is also a run in its own right, so it needs no `bench_run_start` around it, and a call made while the bench is held by something else is refused with the holder named rather than queued.
 
+### A JUnit report for CI
+
+A run's report is this project's own JSON document, and no test-report reader understands it: a suite driven through the pytest fixtures inherits `--junitxml` for free, and the plan the examples recommend produced no such artifact at all. `--junit-xml` writes the second document those readers do understand, beside the report and without replacing it:
+
+```text
+agentic-hil test-reactor --test-config .agentic-hil/testconfig.yaml --junit-xml build/junit.xml
+```
+
+Everything else about the command is untouched: the same JSON result on standard output, the same report files under `reports.directory`, the same exit code. Without the flag nothing new is written at all.
+
+The document is one `<testsuite>` named after the plan and one `<testcase>` per plan step, named `<index>.<route>.<action>` in plan order and grouped under the plan name as their `classname`. A step that failed carries a `<failure>` whose type is its own `error_type`, whose message is its own summary and whose body is the step's whole record, comparator detail included; the steps after it are `<skipped>` with the reason, not passes, because they never ran. A plan refused at preflight has every case `<skipped>` and one `preflight` case carrying the refusal as an `<error>`, so a reader cannot mistake a refused plan for a failed bench, and a run refused before it reached a plan at all writes that `preflight` case on its own. A cleanup failure adds a `cleanup` case and a failed audit an `audit` case, because a run whose sessions did not close or whose record could not be written is not a passing run whatever its steps did. Timings are only ever the ones the run measured: a step whose backend reported no duration carries no `time`.
+
+The file is written wherever the command answers at all, which includes every way a run can be red: a plan that does not load, a bench with no configuration, a plan refused at preflight, a step that failed on the board. Parent directories are created, so a path under a folder the upload step will make is enough. A file that cannot be written after a run is named in the JSON result under `junit_xml_error` and pulls the exit code down with it, rather than leaving a CI job to discover the artifact is missing. The one exception is a run that was being refused anyway: there the refusal is what the operator has to read, and it is not replaced by a story about a file path.
+
+The one combination it refuses is `--detach`, and it says so: a detached start returns before the run has a report, so there is nothing to map yet, and no later command owns the path the start command was given. Run the plan synchronously to get the file, or follow the detached run with `test-reactor-status` and read the JSON report it names. The mapping itself is specified in [the GitHub action design](github-action-design.md#the-junit-mapping), which is what the planned action will pass a path to instead of holding a copy of.
+
 ### Detached runs, status and a cooperative stop
 
 A time-bounded endurance plan runs for hours, and a caller that has to sit in front of it for that long is a caller that cannot do anything else. `--detach` runs the plan in its own process and returns at once with a run handle and the path the report will be written to:
