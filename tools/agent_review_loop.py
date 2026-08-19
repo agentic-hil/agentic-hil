@@ -16,13 +16,18 @@ outside that checkout is the review document the next implementer round reads.
 Four further properties make it safe to run unattended:
 
 * Every round must produce at least one commit, and a round that produced none is
-  classified against the working tree rather than assumed. A clean tree is an
-  implementer that looked and declined: a stalled loop rather than progress, so
-  the run stops instead of burning the remaining rounds on an agent that has
-  given up. A dirty tree is the opposite case, and was read as the same one: a
-  round's work sitting uncommitted because the implementer stopped between its
-  last edit and its `git commit`. That work is handed back to be finished and
-  committed, and committed here if it comes back uncommitted a second time.
+  classified against the working tree rather than assumed. A tree holding nothing
+  the round did not start with is an implementer that looked and declined: a
+  stalled loop rather than progress, so the run stops instead of burning the
+  remaining rounds on an agent that has given up. Anything new is the opposite
+  case, and was read as the same one: a round's work sitting uncommitted because
+  the implementer stopped between its last edit and its `git commit`. That work
+  is handed back to be finished and committed, and committed here if it comes
+  back uncommitted a second time. What the tree already held is subtracted rather
+  than counted, because under `--review-checkout none` the reviewer works in that
+  same tree and its leavings would otherwise make every declined round a stall;
+  `--no-stall-retry` reports such a round instead of handing it back, for a run
+  that cannot spare the second invocation.
 * The verdict is parsed from a JSON schema Codex is required to satisfy, not from
   prose. Prose like "looks good apart from ..." has no stable meaning to a loop
   condition, and guessing at it is how a loop exits one round before the bug.
@@ -1131,6 +1136,42 @@ def uncommitted(repo: Path, paperwork: tuple[Path, ...] = ()) -> str:
     return ""
 
 
+def newly_uncommitted(inherited: str, present: str) -> str:
+    """What the tree holds now that it did not hold when the round started.
+
+    "The implementer produced no commit" is classified against the working tree,
+    and until now the whole tree counted. Under `--review-checkout none` the
+    reviewer works in the implementer's own tree, so anything the previous
+    round's reviewer left there -- a file it wrote in the repository instead of
+    in its scratch directory, a cache a test run built -- is still lying there
+    when the next implementer looks at the findings and declines. That round then
+    read as a stall: it cost a second implementer invocation, up to another whole
+    `--timeout`, to be told there was nothing to finish, and `run.json` recorded
+    `stalled` for a round that was declined, which is the wrong sentence for
+    somebody reading it days later. The same leftovers made the other end of the
+    recovery misfire too: a retry that committed everything it was handed still
+    left them in the tree, so "it finished the job" read false and the loop made
+    a work-in-progress commit over a round that was actually complete. Both stop
+    once the question is what changed rather than what is there. `--allow-dirty`
+    inherits the same benefit: the operator's own uncommitted changes are no
+    longer read as this round's work either.
+
+    Two identical porcelain lines are one state, so a path that was already dirty
+    and that the implementer then edited further is not by itself news. That is
+    the direction to be wrong in: such a round still reports that it produced no
+    commit and still stops unless `--continue-on-no-commit` says otherwise, so
+    nothing is lost that was not already lost before the recovery existed, and an
+    implementer that really did a round's work has to have touched something the
+    reviewer had not.
+
+    Deciding is all this does. Once the loop does decide a round's work is in the
+    tree, `salvage_commit` still commits the tree, leftovers included, exactly as
+    an agent's own `git add -A` already would.
+    """
+    already = set(inherited.splitlines())
+    return "\n".join(line for line in present.splitlines() if line not in already)
+
+
 def listed(entries: str, limit: int) -> str:
     """`entries` as at most `limit` lines, with a count standing in for the rest."""
     lines = entries.splitlines()
@@ -1890,9 +1931,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--continue-on-no-commit",
         action="store_true",
         help=(
-            "Keep looping when an implementation round produces no commit and leaves nothing in the working "
-            "tree, instead of stopping as stalled. A round that left uncommitted work behind is recovered "
-            "rather than reported as no commit, whatever this is set to."
+            "Keep looping when an implementation round produces no commit and leaves nothing new in the "
+            "working tree, instead of stopping as stalled. A round that left uncommitted work behind is "
+            "recovered rather than reported as no commit, unless --no-stall-retry says otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--stall-retry",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        # The recovery is worth its cost by default: the round it rescues is a
+        # finished one, and the alternative was a hand salvage the next morning.
+        # It is not always worth it, though, and until now there was no way to
+        # say so. The second invocation is another --timeout at worst, which for
+        # an overnight run of an hour a round is a real slice of the night spent
+        # on a round that has already failed once to commit what it wrote.
+        help=(
+            "Hand a round that left uncommitted work back to the implementer to finish and commit. "
+            "--no-stall-retry reports the stall and the paths instead, leaves the work exactly where it "
+            "is, and lets the no-commit rule above decide whether the run goes on."
         ),
     )
     parser.add_argument("--dry-run", action="store_true", help="Print the agent commands without running them.")
@@ -2060,6 +2117,24 @@ def implement_round(
         raise
 
 
+def report_stall(record: RoundRecord, number: int, leftover: str) -> None:
+    """Say what the round left in the tree, and record it, before anything is done about it.
+
+    Shared by the two ways a stall is handled, because what the round *is* does
+    not depend on which one runs: `run.json` says `stalled` either way, and the
+    paths are named on the console and in the summary either way. Only `retried`
+    tells the two apart, which is the whole of the difference.
+    """
+    print(
+        f"\nround {number}: implementer stalled with uncommitted work. It produced no commit and left "
+        f"{len(leftover.splitlines())} path(s) in the working tree:"
+    )
+    for line in listed(leftover, 20).splitlines():
+        print(f"  {line}")
+    record.stalled = True
+    record.uncommitted_paths = leftover.splitlines()
+
+
 def recover_stalled_round(
     setup: ReviewSetup,
     record: RoundRecord,
@@ -2068,16 +2143,20 @@ def recover_stalled_round(
     branch: str,
     previous_review: Path | None,
     paperwork: tuple[Path, ...],
+    inherited: str,
 ) -> None:
     """Get the work of a round that produced no commit but left a dirty tree into history.
 
     "The implementer produced no commit" is two rounds, not one, and the working
-    tree is what tells them apart. A clean tree is an implementer that looked at
-    the findings and declined the round; that is the caller's business and this is
-    never reached. A dirty tree is a round that was finished and never committed,
-    because the implementer stopped between its last edit and its `git commit` --
-    an agent waiting on a notification its harness never delivered, which was
-    watched happening and cost a hand salvage the next morning.
+    tree is what tells them apart. A tree holding nothing the round did not start
+    with is an implementer that looked at the findings and declined the round;
+    that is the caller's business and this is never reached. Anything new is a
+    round that was finished and never committed, because the implementer stopped
+    between its last edit and its `git commit` -- an agent waiting on a
+    notification its harness never delivered, which was watched happening and
+    cost a hand salvage the next morning. `inherited` is what the tree held
+    before this round's implementer ran, so the question stays "what did this
+    round add" rather than "what is lying here"; see `newly_uncommitted`.
 
     Recovery is the round's own step, not a new mechanism: the implementer is
     handed its own uncommitted work and asked for the commit it never made. Only
@@ -2090,17 +2169,10 @@ def recover_stalled_round(
     disk, and every path out of this leaves it there or commits it.
     """
     repo = setup.repo
-    leftover = uncommitted(repo, paperwork)
-    print(
-        f"\nround {number}: implementer stalled with uncommitted work. It produced no commit and left "
-        f"{len(leftover.splitlines())} path(s) in the working tree:"
-    )
-    for line in listed(leftover, 20).splitlines():
-        print(f"  {line}")
+    leftover = newly_uncommitted(inherited, uncommitted(repo, paperwork))
+    report_stall(record, number, leftover)
     print("handing it back to be finished and committed; the work stays exactly where it is.")
 
-    record.stalled = True
-    record.uncommitted_paths = leftover.splitlines()
     record.retried = True
     before = git(repo, "rev-parse", "HEAD")
     scratch = round_scratch(setup.scratch_root, number, "claude-finish")
@@ -2114,7 +2186,7 @@ def recover_stalled_round(
         stage="finish",
     )
     moved = git(repo, "rev-parse", "HEAD") != before
-    still_uncommitted = uncommitted(repo, paperwork)
+    still_uncommitted = newly_uncommitted(inherited, uncommitted(repo, paperwork))
     if moved and not still_uncommitted:
         return  # it finished the job; the round has its commits and goes to review
     if not moved and not still_uncommitted:
@@ -2380,6 +2452,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"max rounds : {options.max_rounds}")
     if options.stop_after_flat_rounds:
         print(f"stop early : after {options.stop_after_flat_rounds} rounds that do not reduce the finding count")
+    if not options.stall_retry:
+        # Only when it is off. The retry is the default and saying so every run
+        # would be a line nobody reads; the run that will not make it is the one
+        # whose header has to say so before an operator waits for it.
+        print("stall retry: off (--no-stall-retry); a round that leaves work uncommitted is reported, not finished")
     print(f"starts with: {options.start_with}")
     if has_network:
         print(f"network    : reviewer has network (codex --sandbox {options.codex_sandbox})")
@@ -2453,6 +2530,11 @@ def main(argv: list[str] | None = None) -> int:
                 prompt = implement_prompt(task, review_dir, branch, scratch)
             else:
                 prompt = fix_prompt(task, previous_review, number, branch, scratch)
+            # What the tree already held before this round's implementer touched
+            # it. Under --review-checkout none the reviewer shares that tree, and
+            # under --allow-dirty the operator's own changes are in it, so this
+            # is what keeps either from being read as the round's own work.
+            inherited = "" if options.dry_run else uncommitted(repo, paperwork)
             try:
                 implement_round(setup, record, number, prompt, scratch, paperwork)
             except AgentError:
@@ -2464,17 +2546,24 @@ def main(argv: list[str] | None = None) -> int:
 
             head, new_commits = (last_head, []) if options.dry_run else commits_since(repo, last_head)
             record.commits = new_commits
-            if not new_commits and not options.dry_run and uncommitted(repo, paperwork):
-                # Not a round that was declined: a round whose work is sitting in
-                # the tree because the implementer never reached its own commit.
+            # Anything here is not a round that was declined: it is a round whose
+            # work is sitting in the tree because the implementer never reached
+            # its own commit.
+            left_behind = (
+                "" if new_commits or options.dry_run else newly_uncommitted(inherited, uncommitted(repo, paperwork))
+            )
+            if left_behind and options.stall_retry:
                 try:
-                    recover_stalled_round(setup, record, number, task, branch, previous_review, paperwork)
+                    recover_stalled_round(setup, record, number, task, branch, previous_review, paperwork, inherited)
                 except AgentError:
                     if record.salvaged is not None:
                         last_head = git(repo, "rev-parse", "HEAD")
                     raise
                 head, new_commits = commits_since(repo, last_head)
                 record.commits = new_commits
+            elif left_behind:
+                report_stall(record, number, left_behind)
+                print("not handing it back: --no-stall-retry. The work stays exactly where it is.")
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
@@ -2551,6 +2640,7 @@ def main(argv: list[str] | None = None) -> int:
         "initial_range": initial_range or None,
         "max_rounds": options.max_rounds,
         "stop_after_flat_rounds": options.stop_after_flat_rounds,
+        "stall_retry": options.stall_retry,
         "reviewer_network": has_network,
         "exit_code": exit_code,
         "rounds": [vars(record) for record in rounds],

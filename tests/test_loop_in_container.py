@@ -1040,14 +1040,19 @@ _STALLS_AGAIN = "sys.stdout.write('and did not commit it this time either\\n')\n
 _REMOVES_IT = "pathlib.Path('fix.py').unlink()\nsys.stdout.write('that was not work worth keeping\\n')\n"
 
 
-def _one_round(repository: Path, script: Path, monkeypatch: pytest.MonkeyPatch) -> int:
-    """One implement round against a faked agent, with the review canned clean."""
+def _one_round(repository: Path, script: Path, monkeypatch: pytest.MonkeyPatch, *extra: str) -> int:
+    """One implement round against a faked agent, with the review canned clean.
+
+    `extra` goes on the end of the command line, so a test that is about one
+    option says only that option and inherits the rest of the shape every other
+    test here runs in.
+    """
     monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
     monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(script)])
     monkeypatch.setattr(agent_review_loop, "perform_review", _clean_verdict)
     return agent_review_loop.main(
         ["--repo", str(repository), "--task", "x", "--max-rounds", "1", "--heartbeat", "0"]
-        + ["--review-checkout", "none"]
+        + ["--review-checkout", "none", *extra]
     )
 
 
@@ -1244,6 +1249,226 @@ def test_an_implementer_that_takes_its_own_leftovers_back_out_ends_the_round_dec
     assert _in(repository, "rev-parse", "HEAD") == head  # nothing to preserve, so nothing is committed
     record = _round_records(repository)[0]
     assert (record["stalled"], record["retried"], record["salvaged"]) == (True, True, None)
+
+
+# What the reviewer leaves in the implementer's tree under --review-checkout
+# none. A scratch note it wrote in the repository instead of in its scratch
+# directory is the shape this was reported in; a cache a test run built is the
+# same thing with a longer name.
+REVIEWER_LEFTOVER = "codex-scratch.txt"
+
+
+def _reviewer_that_leaves_a_file(
+    setup: agent_review_loop.ReviewSetup,
+    record: agent_review_loop.RoundRecord,
+    number: int,
+    _range: str,
+    _previous: Path | None,
+    _commit: str,
+) -> tuple[agent_review_loop.Verdict, Path]:
+    """A reviewer that writes into the tree it just reviewed.
+
+    `--review-checkout none` is what lets it: the reviewer works in the
+    implementer's own tree rather than a checkout of its own, so what it leaves
+    is still lying there when the next round's implementer runs. The verdict is
+    CHANGES_REQUESTED because the loop has to reach that next round for any of
+    this to matter.
+    """
+    review = setup.review_dir / f"round-{number:02d}.md"
+    review.write_text("REVIEW_STATUS: CHANGES_REQUESTED\n", encoding="utf-8")
+    (setup.repo / REVIEWER_LEFTOVER).write_text("the reviewer's own scratch\n", encoding="utf-8")
+    record.findings = 1
+    record.status = agent_review_loop.CHANGES_REQUESTED
+    return agent_review_loop.Verdict(agent_review_loop.CHANGES_REQUESTED, 1, str(review), ""), review
+
+
+def _two_rounds(repository: Path, script: Path, monkeypatch: pytest.MonkeyPatch) -> int:
+    """Two rounds sharing one tree, with a reviewer that leaves something in it."""
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(script)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _reviewer_that_leaves_a_file)
+    return agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--review-checkout", "none"]
+    )
+
+
+def _agent(tmp_path: Path, name: str, *attempts: str) -> Path:
+    """An agent that does something different on each invocation of a run.
+
+    The stall tests above each need one script whose behaviour is a sequence, and
+    counting invocations in a file beside the script is how `_stalling_agent`
+    already does it. This is the same counter with the sequence spelled out by
+    the caller, because these tests care about the third invocation as much as
+    the first.
+    """
+    script = tmp_path / f"{name}.py"
+    counter = (tmp_path / f"{name}-attempts.txt").as_posix()
+    body = "".join(
+        f"if seen == {index}:\n" + "".join(f"    {line}\n" for line in step.splitlines()) + "    raise SystemExit(0)\n"
+        for index, step in enumerate(attempts)
+    )
+    script.write_text(
+        "import pathlib, subprocess, sys\n"
+        # As every fake agent here does, and as every real agent CLI does: an
+        # agent that exits without reading races the prompt the loop writes
+        # straight after the spawn and hands it EPIPE instead of a round.
+        "sys.stdin.read()\n"
+        f"attempts = pathlib.Path({counter!r})\n"
+        "seen = len(attempts.read_text(encoding='utf-8')) if attempts.exists() else 0\n"
+        "attempts.write_text('x' * (seen + 1), encoding='utf-8')\n" + body,
+        encoding="utf-8",
+    )
+    return script
+
+
+def _attempts(tmp_path: Path, name: str) -> int:
+    counter = tmp_path / f"{name}-attempts.txt"
+    return len(counter.read_text(encoding="utf-8")) if counter.exists() else 0
+
+
+_COMMIT_ROUND_ONE = (
+    f"pathlib.Path('fix.py').write_text({FIX!r}, encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: round one'], check=True)\n"
+)
+_DECLINES = "sys.stdout.write('the findings are wrong; changing nothing\\n')\n"
+_WRITES_WITHOUT_COMMITTING = (
+    "pathlib.Path('more.py').write_text('# round two, never committed\\n', encoding='utf-8')\n"
+    "sys.stdout.write('wrote it, then never came back to commit it\\n')\n"
+)
+_COMMITS_ONLY_ITS_OWN = (
+    "subprocess.run(['git', 'add', 'more.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: finish what the stalled attempt wrote'], check=True)\n"
+)
+
+
+def test_a_round_the_implementer_declined_is_not_a_stall_because_the_reviewer_left_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The misread `--review-checkout none` bought, and what it cost.
+
+    The reviewer shares the implementer's tree there, so its leavings are in that
+    tree when the next round's implementer looks at the findings and declines.
+    The classification asked whether the tree was dirty, so that declined round
+    read as a stall: a second implementer invocation, up to another whole
+    `--timeout`, to be told there was nothing to finish, and `run.json` recording
+    `stalled` for a round that was nothing of the kind. The question is what the
+    round added now, so the reviewer's file is inherited rather than counted, and
+    the round is reported as the declined round it is.
+    """
+    repository = _repository(tmp_path)
+    agent = _agent(tmp_path, "commits_then_declines", _COMMIT_ROUND_ONE, _DECLINES)
+
+    exit_code = _two_rounds(repository, agent, monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    # Two invocations, one per round: the third is the one this used to spend.
+    assert _attempts(tmp_path, "commits_then_declines") == 2
+    assert not list((repository / ".agentic-loop" / "logs").rglob("*-finish.log"))
+    captured = capsys.readouterr()
+    assert "round 2: Claude Code produced no commit." in captured.out
+    assert "stalled with uncommitted work" not in captured.out
+    declined = _round_records(repository)[1]
+    assert (declined["stalled"], declined["retried"], declined["salvaged"]) == (False, False, None)
+    # Round one's commit and nothing after it, and the reviewer's file is still
+    # exactly where the reviewer put it: this decides, it does not tidy.
+    assert _in(repository, "rev-list", "--count", "HEAD").strip() == "2"
+    assert _in(repository, "status", "--porcelain").strip() == f"?? {REVIEWER_LEFTOVER}"
+
+
+def test_a_retry_that_finished_the_job_is_not_salvaged_over_the_reviewers_leavings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same misread at the other end of the recovery.
+
+    Here the second round really did stall, and the retry really did commit what
+    it was handed. Asking the whole tree afterwards still found the reviewer's
+    file, so "it finished the job" read false and the loop put a work-in-progress
+    commit on top of a round that was complete, sweeping the reviewer's leavings
+    into it. Measured against what the round inherited, the retry's commit is the
+    end of it.
+    """
+    repository = _repository(tmp_path)
+    agent = _agent(
+        tmp_path,
+        "stalls_then_finishes",
+        _COMMIT_ROUND_ONE,
+        _WRITES_WITHOUT_COMMITTING,
+        _COMMITS_ONLY_ITS_OWN,
+    )
+
+    exit_code = _two_rounds(repository, agent, monkeypatch)
+
+    assert exit_code == agent_review_loop.EXIT_ROUNDS_EXHAUSTED  # the canned reviewer never comes back clean
+    assert _attempts(tmp_path, "stalls_then_finishes") == 3
+    stalled = _round_records(repository)[1]
+    assert (stalled["stalled"], stalled["retried"], stalled["salvaged"]) == (True, True, None)
+    # The retry's own commit is the last word; no wip commit was made over it.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: finish what the stalled attempt wrote"
+    assert "wip(review-loop)" not in _in(repository, "log", "--format=%s")
+    # And the reviewer's file was neither committed nor removed.
+    assert _in(repository, "status", "--porcelain").strip() == f"?? {REVIEWER_LEFTOVER}"
+
+
+def test_no_stall_retry_reports_the_stalled_round_instead_of_handing_it_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The switch the recovery never had.
+
+    The retry is worth its cost by default, but it is a second agent invocation
+    and it can take another whole `--timeout`; on an overnight run of an hour a
+    round that is a real slice of the night spent on a round that has already
+    failed once to commit what it wrote. `--no-stall-retry` restores the
+    stop-immediately behaviour that predated the recovery, with the report the
+    recovery brought with it: the round is named a stall, the paths are listed on
+    the console and in `run.json`, and the work is left exactly where it is
+    rather than committed on the implementer's behalf.
+    """
+    repository = _repository(tmp_path)
+    head = _in(repository, "rev-parse", "HEAD")
+
+    exit_code = _one_round(repository, _stalling_agent(tmp_path, then=_COMMITS), monkeypatch, "--no-stall-retry")
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    # One invocation: the agent that would have committed on a second one never
+    # gets it, which is the whole of what the flag buys.
+    assert (tmp_path / "attempts.txt").read_text(encoding="utf-8") == "x"
+    assert not list((repository / ".agentic-loop" / "logs").rglob("*-finish.log"))
+    # Nothing committed on its behalf, and nothing thrown away either.
+    assert _in(repository, "rev-parse", "HEAD") == head
+    assert (repository / "fix.py").read_text(encoding="utf-8") == FIX
+    out = capsys.readouterr().out
+    assert "round 1: implementer stalled with uncommitted work" in out
+    assert "?? fix.py" in out
+    assert "--no-stall-retry" in out
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["retried"], record["salvaged"]) == (True, False, None)
+    assert record["uncommitted_paths"] == ["?? fix.py"]
+    summary = next((repository / ".agentic-loop" / "logs").rglob("run.json")).read_text(encoding="utf-8")
+    assert json.loads(summary)["stall_retry"] is False
+
+
+def test_no_stall_retry_leaves_it_to_the_no_commit_rule_whether_the_run_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the retry a stalled round is a no-commit round, and that rule already exists.
+
+    So the two options compose rather than each having their own idea of when a
+    run ends: `--continue-on-no-commit` carries the round to review the same way
+    it carries a declined one, and the work stays in the tree for the next round
+    to pick up.
+    """
+    repository = _repository(tmp_path)
+
+    exit_code = _one_round(
+        repository, _stalling_agent(tmp_path, then=_COMMITS), monkeypatch, "--no-stall-retry", "--continue-on-no-commit"
+    )
+
+    assert exit_code == agent_review_loop.EXIT_CLEAN  # the canned review ran on the round and came back clean
+    assert (repository / "fix.py").read_text(encoding="utf-8") == FIX
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["retried"]) == (True, False)
 
 
 def test_the_second_attempt_is_told_what_is_in_the_tree_and_keeps_the_first_ones_transcript(
