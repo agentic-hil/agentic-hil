@@ -51,17 +51,18 @@ Before creating a release:
 ```text
 1. Bump the version in every position `python tools/check_version_consistency.py --list` prints, then run `python tools/check_version_consistency.py` until it is silent.
 2. Refresh the pinned Astral uv bootstrap in both installers, as described under "The uv Installer Pin" below.
-3. Run ruff check src tests evals tools and pytest.
-4. Run python -m build (or uv build) and inspect the packaged files.
-5. Open a pull request and let Required CI pass; the same check runs there, so a forgotten position is red before a release exists.
-6. Create a GitHub Release with a strict SemVer vX.Y.Z tag that exactly matches pyproject.toml.
-7. Let the publish workflow re-run the same check with the release tag before it builds, checks, and publishes to PyPI.
-8. Let the workflow verify the PyPI ownership marker and publish the matching `server.json` through GitHub OIDC.
-9. Verify: uvx --from agentic-hil agentic-hil --version resolves the new version from PyPI.
-10. Verify the release appears as `io.github.agentic-hil/agentic-hil` in the MCP Registry API.
-11. Attach the one-line installers *and* their checksums to the release, all four taken from the tagged commit: `install.sh`, `install.ps1`, and `sha256sum install.sh > install.sh.sha256` and `sha256sum install.ps1 > install.ps1.sha256`, uploaded under those names, in that format, because the verify-first path in docs/installation.md feeds them straight to `sha256sum -c`. The scripts belong there because the checksum can only speak for the file published beside it: the default branch moves between releases, so a recipe that pairs a release checksum with a default-branch script fails on the first fix that lands after a release.
-12. Start from GitHub auto-generated release notes, then edit for clarity.
-13. Move the tree to the next development version in pyproject.toml and src/agentic_hil/__init__.py, in the first commit after the release. Every other position keeps naming the release just published.
+3. Re-check every host registration block in docs/mcp-hosts.md against the documentation it links, then move the date at the top of that page, as described under "The Host Documentation Check" below.
+4. Run ruff check src tests evals tools and pytest.
+5. Run python -m build (or uv build) and inspect the packaged files.
+6. Open a pull request and let Required CI pass; the same check runs there, so a forgotten position is red before a release exists.
+7. Create a GitHub Release with a strict SemVer vX.Y.Z tag that exactly matches pyproject.toml.
+8. Let the publish workflow re-run the same check with the release tag before it builds, checks, and publishes to PyPI.
+9. Let the workflow verify the PyPI ownership marker and publish the matching `server.json` through GitHub OIDC.
+10. Verify: uvx --from agentic-hil agentic-hil --version resolves the new version from PyPI.
+11. Verify the release appears as `io.github.agentic-hil/agentic-hil` in the MCP Registry API.
+12. Attach the one-line installers *and* their checksums to the release, all four taken from the tagged commit: `install.sh`, `install.ps1`, and `sha256sum install.sh > install.sh.sha256` and `sha256sum install.ps1 > install.ps1.sha256`, uploaded under those names, in that format, because the verify-first path in docs/installation.md feeds them straight to `sha256sum -c`. The scripts belong there because the checksum can only speak for the file published beside it: the default branch moves between releases, so a recipe that pairs a release checksum with a default-branch script fails on the first fix that lands after a release.
+13. Start from GitHub auto-generated release notes, then edit for clarity.
+14. Move the tree to the next development version in pyproject.toml and src/agentic_hil/__init__.py, in the first commit after the release. Every other position keeps naming the release just published.
 ```
 
 ## The uv Installer Pin
@@ -107,6 +108,38 @@ pin cannot reach. Their PowerShell installer, as of the pinned release, has no
 checksum step at all, so on Windows our pin is the only integrity check between
 `astral.sh` and an executed script. If that ever changes on their side, the
 comment in `install.ps1` that says so is what needs correcting with it.
+
+## The Host Documentation Check
+
+`docs/mcp-hosts.md` prints one registration block per MCP host and links the
+upstream page each block was read from. Host configuration formats are exactly
+the kind of thing that moves without asking us, so the page carries the date it
+was last checked, and that sentence is what tells a reader how far to trust the
+syntax under each heading. Written once, it then survived every release and
+every edit of its own file, which is how a date stops being evidence and starts
+inviting trust it cannot support.
+
+So the check is a release chore, done by a person who can read what changed:
+
+```text
+1. Open every page linked from a "Sources:" line in docs/mcp-hosts.md.
+2. Compare each block against the shape that page documents now: the container
+   key, the transport field, whether `cwd` and `enabled` are still keys, and
+   which file the host reads them from. Where upstream moved, move our block and
+   the prose around it; where it did not, leave both alone.
+3. Follow a redirect to its destination and write the destination into the link.
+   A permanent redirect is upstream saying the page has moved.
+4. Move the date at the top of the page to the day the check was done, and only
+   then: the date speaks for the blocks, not for the release.
+5. Run pytest tests/test_tool_annotations.py tests/test_agentic_hil.py -k "host_documentation or host_guide",
+   which holds that page's tool table and its three generated registration
+   blocks against what this package advertises and writes.
+```
+
+A host whose documentation is unreachable that day is not silently blessed.
+Scope the sentence to the hosts that were checked and name the one that could
+not be, because a guide that says which of its blocks were verified is worth
+more than one that claims all of them.
 
 ## What the Release Gate Checks, and When
 

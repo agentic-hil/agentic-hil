@@ -2,7 +2,10 @@
 
 Agentic Hardware-in-the-Loop (Agentic HIL) exposes the same local MCP stdio server and the same tool semantics in every host. Only the host configuration syntax changes.
 
-This guide was verified against the linked host documentation on 2026-07-14.
+Every block below was verified against the linked host documentation on
+2026-08-19. Moving that date is a release chore, described under "The Host
+Documentation Check" in [Release Strategy](release-strategy.md), because a date
+nobody moves invites more trust than it can carry.
 
 ## Common Setup
 
@@ -15,7 +18,8 @@ agentic-hil setup --agent claude-code   # or: codex / opencode
 `setup` installs the skill, registers the host with a verified absolute
 executable path, and creates the external policy. Install it first if the
 command is missing: [AI_AGENT_QUICKSTART.md](https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md) has the
-complete install chain. The hosts below are the ones `setup` does not cover.
+complete install chain. The per-host blocks below are the reference for every
+host, the three `setup` registers itself included.
 
 `setup` composes two commands; either runs on its own:
 
@@ -182,7 +186,7 @@ enabled = true
 
 The configured `cwd` enables automatic config discovery. Start Codex with `AGENTIC_HIL_CONFIG` inherited only when an absolute-path override is required. Project-scoped configuration is unnecessary for this registration.
 
-Sources: [Codex MCP setup](https://developers.openai.com/codex/extend/mcp) and [Codex configuration reference](https://developers.openai.com/codex/config-file/config-reference).
+Sources: [Codex MCP setup](https://learn.chatgpt.com/docs/extend/mcp) and [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference). Both moved off `developers.openai.com`, which answers them with a permanent redirect.
 
 ## Claude Code
 
@@ -208,7 +212,7 @@ The equivalent CLI command, run from the firmware repository root, is:
 claude mcp add --transport stdio --scope user agentic-hil -- "/absolute/path/to/persistent/agentic-hil" mcp-stdio
 ```
 
-`agentic-hil mcp-config --output .mcp.json` writes this host family's machine-local `mcpServers` discovery format with the verified absolute executable. It does not include `AGENTIC_HIL_CONFIG` and does not generate VS Code, Codex, or OpenCode configuration. Keep this machine-specific project file uncommitted; prefer `setup --agent claude` for the secure user-scoped registration and add an operator-set override only when needed.
+`agentic-hil mcp-config --output .mcp.json` writes this host family's machine-local `mcpServers` discovery format with the verified absolute executable: the `command` and `args` above, and no `type`, because Claude Code reads an entry without one as a stdio server and only a `url` entry has to declare its transport. The user-level entry `agent-install` writes does state `"type": "stdio"`, because an operator reads that file. Neither includes `AGENTIC_HIL_CONFIG`, and neither generates VS Code, Codex, or OpenCode configuration. Keep this machine-specific project file uncommitted; prefer `setup --agent claude` for the secure user-scoped registration and add an operator-set override only when needed.
 
 Source: [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
 
