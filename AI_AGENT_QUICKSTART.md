@@ -109,7 +109,7 @@ The external config binds `workspace_root` and is written at `version: 3`: readi
 
 Bootstrap uses fixed read-only setup commands, not MCP or `probe_target`. No profile means the skeleton, which grants everything but the two flashing is interlocked against.
 
-**`mcp_config_conflict` or `skill_conflict` is the finished answer.** Something under this name is already there and Agentic HIL did not write it. Do not hand-edit the config, delete the entry, or rerun with `--force`: `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, stop.
+**`mcp_config_conflict` or `skill_conflict` is the finished answer.** Something under this name is already there and Agentic HIL did not write it. Do not hand-edit the config, delete the entry, or rerun with `--force`: `--force` does not apply to a foreign entry, and replacing one hands the hardware gate to a program the operator did not choose. Report the conflict, name the file, and on an MCP conflict name the `existing_command` the refusal read out of it so the operator can tell whose entry it is, then stop.
 
 Write a project `.mcp.json` only if the operator asks (`agentic-hil mcp-config --output .mcp.json`). Unprompted it is a second registration inside the repository, naming the program that answers as the hardware gate in a file anyone with write access can change.
 

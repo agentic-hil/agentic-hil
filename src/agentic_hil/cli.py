@@ -113,6 +113,10 @@ AGENTIC_HIL_REGISTRATION_END = "<!-- Agentic HIL skill registration end -->"
 # obstacle to clear. Ten runs rewrote the operator's entry by hand and reran
 # setup, and reported success. Say whose the entry is and that the refusal is
 # the answer — and name no action that could be mistaken for a way through.
+# What the entry runs is reported beside the file, in `existing_command`, so an
+# operator can recognise their own decision without reading their agent config
+# by hand. That is the report's half of the work; this sentence keeps the
+# refusal a refusal, and nothing about the entry's command belongs in it.
 CONFLICT_NEXT_STEP = (
     "That entry belongs to the operator, and --force does not apply to a foreign entry. Editing the "
     "file yourself or removing the entry is not the resolution either: it hands the hardware gate to "
@@ -2874,6 +2878,30 @@ def _parse_toml(text: str) -> tuple[dict | None, str | None]:
     return loaded if isinstance(loaded, dict) else None, None
 
 
+def _existing_command_field(entry: object) -> JsonObject:
+    """What the entry already in the file runs, for a conflict to report.
+
+    The refusal names the file, and the file alone does not settle the question
+    the operator has to answer: whether this is the wrapper they wrote
+    themselves, an entry an older release wrote whose path has since moved, or
+    something they have never seen. The configured command settles it, and it is
+    their own data read back to them, so the refusal carries it instead of
+    sending them to parse their agent config by hand. It changes nothing about
+    the refusal: the entry belongs to the operator whatever it runs, and naming
+    it is reporting, not a step towards editing it.
+
+    Only the two shapes an agent config keeps a command in, a string and the
+    list opencode stores, and the list exactly as stored. Any other shape is
+    left out rather than quoted back: a TOML table admits values (a date, a
+    nested table) that would not survive being written into a JSON result, and a
+    value this code cannot recognise is not one it can name as the command.
+    """
+    configured = entry.get("command") if isinstance(entry, dict) else None
+    if isinstance(configured, str) or (isinstance(configured, list) and all(isinstance(item, str) for item in configured)):
+        return {"existing_command": configured}
+    return {}
+
+
 def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     path = _agent_mcp_config_path("codex")
     block = "\n".join(
@@ -2899,7 +2927,7 @@ def _register_codex_mcp(command: str, force: bool) -> JsonObject:
     entry = servers.get("agentic-hil") if isinstance(servers, dict) else None
     desired_entry = {"command": command, "args": ["mcp-stdio"], "enabled": True}
     if not has_managed and entry is not None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "An unmanaged Codex agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "codex", "format": "codex-toml", "path": str(path), **_existing_command_field(entry), "summary": "An unmanaged Codex agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
     if has_managed and not isinstance(entry, dict):
         return {"ok": False, "error_type": "config_invalid", "agent": "codex", "format": "codex-toml", "path": str(path), "summary": "The Agentic HIL managed markers do not contain an agentic-hil MCP table; left untouched."}
     if has_managed and entry == desired_entry:
@@ -2997,7 +3025,7 @@ def _register_opencode_mcp(command: str, force: bool) -> JsonObject:
     existing_entry = servers.get("agentic-hil")
     kind = _opencode_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
     if "agentic-hil" in servers and kind is None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "An unmanaged opencode agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "opencode", "format": "opencode-json", "path": str(path), **_existing_command_field(existing_entry), "summary": "An unmanaged opencode agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
     if kind == "current":
         return {"ok": True, "skipped": True, "agent": "opencode", "format": "opencode-json", "path": str(path), "summary": "opencode MCP entry already registered."}
     data.setdefault("$schema", "https://opencode.ai/config.json")
@@ -3018,7 +3046,7 @@ def _register_claude_mcp(command: str, force: bool) -> JsonObject:
     existing_entry = servers.get("agentic-hil")
     kind = _claude_mcp_entry_kind(existing_entry, desired_entry) if "agentic-hil" in servers else None
     if "agentic-hil" in servers and kind is None:
-        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "An unmanaged Claude agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
+        return {"ok": False, "error_type": "mcp_config_conflict", "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), **_existing_command_field(existing_entry), "summary": "An unmanaged Claude agentic-hil MCP entry already exists; left untouched.", "next_step": CONFLICT_NEXT_STEP}
     if kind == "current":
         return {"ok": True, "skipped": True, "agent": "claude-code", "format": "claude-user", "method": "file", "path": str(path), "summary": "Claude MCP entry already registered."}
     servers["agentic-hil"] = desired_entry

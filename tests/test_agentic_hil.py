@@ -2591,6 +2591,91 @@ def test_a_foreign_mcp_entry_refusal_says_the_refusal_is_the_answer(
     assert "ask the operator to change" not in step.lower()
 
 
+@pytest.mark.parametrize(
+    ("agent", "relative_path", "existing", "expected_command"),
+    [
+        (
+            "codex",
+            Path(".codex/config.toml"),
+            '[mcp_servers.agentic-hil]\ncommand = "/operator/wrapper.sh"\nargs = []\n',
+            "/operator/wrapper.sh",
+        ),
+        (
+            "claude-code",
+            Path(".claude.json"),
+            '{"mcpServers": {"agentic-hil": {"type": "stdio", "command": "/operator/wrapper.sh", "args": []}}}',
+            "/operator/wrapper.sh",
+        ),
+        (
+            "opencode",
+            Path(".config/opencode/opencode.json"),
+            '{"mcp": {"agentic-hil": {"type": "local", "command": ["/operator/wrapper.sh", "--profile", "bench"], "enabled": true}}}',
+            ["/operator/wrapper.sh", "--profile", "bench"],
+        ),
+    ],
+)
+def test_a_foreign_mcp_entry_refusal_names_the_command_it_found(
+    agent: str,
+    relative_path: Path,
+    existing: str,
+    expected_command: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The file alone does not say whose entry this is; the command does.
+
+    An operator reading only the path cannot tell their own deliberate wrapper
+    from an entry an older release wrote whose launcher has since moved.
+    Answering that took a hand-written JSON read of their own agent config, so
+    the refusal carries the configured command, in the shape the format stores
+    it: a string for Codex and Claude, opencode's list as it stands.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    path = home / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(existing, encoding="utf-8")
+
+    result = register_agent_mcp(agent, force=True)
+
+    assert result["error_type"] == "mcp_config_conflict"
+    assert result["existing_command"] == expected_command
+    assert path.read_text(encoding="utf-8") == existing
+    # Naming the command must stay reporting. The sentence that measured out the
+    # rewrites says the conflict is the answer, and it says nothing about the
+    # entry's command, which is what an agent would read as a thing to act on.
+    step = result["next_step"]
+    assert "This conflict is the answer to the request" in step
+    assert "/operator/wrapper.sh" not in step
+
+
+def test_a_foreign_mcp_entry_refusal_omits_a_command_it_cannot_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A TOML value that is not a command is left out, not guessed at.
+
+    TOML admits dates, tables and numbers where a command should be, and none of
+    them survives being written into the JSON this result is printed as. The
+    refusal stands either way, because it never depended on reading the entry.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    _trusted_test_mcp_command(monkeypatch)
+    path = home / ".codex" / "config.toml"
+    path.parent.mkdir(parents=True)
+    existing = "[mcp_servers.agentic-hil]\ncommand = 1979-05-27T07:32:00Z\n"
+    path.write_text(existing, encoding="utf-8")
+
+    result = register_agent_mcp("codex", force=True)
+
+    assert result["error_type"] == "mcp_config_conflict"
+    assert "existing_command" not in result
+    assert json.dumps(result)
+    assert path.read_text(encoding="utf-8") == existing
+
+
 def test_register_agent_mcp_codex_rejects_invalid_toml_without_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
