@@ -7,7 +7,7 @@ import struct
 import tempfile
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import suppress
 from pathlib import Path
 
@@ -90,6 +90,83 @@ def sweep_stale_sandbox_roots(now: float | None = None) -> list[Path]:
                 removed.append(candidate)
     return removed
 
+
+class SandboxEscaped(AssertionError):
+    """A test resolved a user-level path back onto the operator's own profile."""
+
+
+def user_level_paths() -> tuple[Path, ...]:
+    """Where this process would put user-level files if it wrote one right now.
+
+    `Path.home()` is where all three agent integrations live: `~/.claude.json`
+    and `~/.claude/skills`, `~/.codex`, `~/.config/opencode`. `tool_owned_user_roots`
+    names every tree Agentic HIL creates for itself, the authoritative
+    configurations, the state root and `~/.agentic-hil`, both where the
+    environment points now and where a profile with the variable unset falls
+    back to. Each of them is read out of the variables `isolated_config_environment`
+    redirects, and neither call opens or creates anything, which is what makes
+    asking cheap enough to do around every test.
+    """
+    from agentic_hil.config import absolute_without_symlinks, tool_owned_user_roots
+
+    return (absolute_without_symlinks(Path.home()), *tool_owned_user_roots())
+
+
+# The same question answered here, at import time, before the first fixture has
+# redirected anything: these are the operator's own directories, and no test may
+# resolve back onto them. Compared case-insensitively because that is how Windows
+# compares paths, and a test reaches these variables by writing strings into them.
+REAL_USER_PATHS = frozenset(os.path.normcase(str(path)) for path in user_level_paths())
+
+
+def assert_still_sandboxed(when: str) -> None:
+    """Fail while the damage is still one CLI call away, naming who did it.
+
+    The suite's whole safety story is that `isolated_config_environment` moves
+    every user-level path into the sandbox, and until #270 any test could revert
+    that with one line: `monkeypatch.undo()` in a test body reverted the redirect
+    along with everything else recorded on the test's own instance. The three CLI
+    calls that followed ran against the developer's real profile, and the
+    `uninstall` among them removed all three installed agent skills and their MCP
+    registrations. Nothing in the run looked wrong, which is why this has to be
+    asked here rather than inferred later from what a profile is missing.
+
+    The comparison is equality with the paths captured before the first redirect,
+    not a prefix test against the sandbox: a test is free to point HOME at
+    `tmp_path`, or through `pytester` at pytest's own basetemp, and those are
+    isolated too. Only landing back on the real thing is the failure. On Windows
+    a prefix test would also refuse the entire suite, because the per-user Temp
+    root that holds the sandbox is itself inside the real profile.
+    """
+    escaped = [path for path in user_level_paths() if os.path.normcase(str(path)) in REAL_USER_PATHS]
+    if not escaped:
+        return
+    raise SandboxEscaped(
+        f"User-level paths point at the operator's own profile {when}: "
+        + ", ".join(str(path) for path in escaped)
+        + ". Something reverted the redirect `isolated_config_environment` installs, so an `agentic-hil` call from here"
+        + " writes to, or uninstalls from, the real profile instead of the sandbox."
+    )
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
+    """Check the sandbox on both sides of every test body.
+
+    Before it runs, because a fixture can lose the redirect as easily as a test
+    can, and the test about to run against the real profile is the one worth
+    naming. After it has run, because that is where a test body's own doing shows
+    up. In a `finally`, because a test that broke the isolation and then failed
+    for its own reason is exactly the case where the breach is the news.
+    """
+    assert_still_sandboxed(f"before {item.nodeid} ran")
+    try:
+        result = yield
+    finally:
+        assert_still_sandboxed(f"after {item.nodeid} ran")
+    return result
+
+
 ROOT = Path(__file__).resolve().parents[1]
 FAKE_OPENOCD = ROOT / "tests" / "fixtures" / "fake_openocd.py"
 FAKE_OPENOCD_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_openocd_no_target.py"
@@ -113,7 +190,6 @@ FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
 @pytest.fixture(autouse=True)
 def isolated_config_environment(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
 ) -> Path:
     # Owner-only, and outside the repository whatever `--basetemp` says: see
@@ -126,16 +202,26 @@ def isolated_config_environment(
     state_root = test_sandbox / "state"
     temp_root = test_sandbox / "tmp"
     request.addfinalizer(lambda: shutil.rmtree(test_sandbox, ignore_errors=True))
+    # Deliberately not the `monkeypatch` fixture. That instance is the test's
+    # own, and `monkeypatch.undo()` in a test body reverts everything recorded on
+    # it, this redirect included; one test did exactly that, and the CLI calls
+    # that followed installed into and then uninstalled from the developer's real
+    # profile (#270). An instance the fixture owns is out of reach of anything a
+    # test does to its own, and the finalizer registered for it runs after the
+    # test's monkeypatch has already rolled its own changes back onto these
+    # values, so the environment still unwinds in the order it was built.
+    isolation = pytest.MonkeyPatch()
+    request.addfinalizer(isolation.undo)
     home_root.mkdir(parents=True)
     temp_root.mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home_root))
-    monkeypatch.setenv("USERPROFILE", str(home_root))
-    monkeypatch.setenv("APPDATA", str(config_root))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
-    monkeypatch.setenv("XDG_CACHE_HOME", str(home_root / ".cache"))
-    monkeypatch.setenv("XDG_DATA_HOME", str(home_root / ".local" / "share"))
-    monkeypatch.setenv("LOCALAPPDATA", str(state_root))
-    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    isolation.setenv("HOME", str(home_root))
+    isolation.setenv("USERPROFILE", str(home_root))
+    isolation.setenv("APPDATA", str(config_root))
+    isolation.setenv("XDG_CONFIG_HOME", str(config_root))
+    isolation.setenv("XDG_CACHE_HOME", str(home_root / ".cache"))
+    isolation.setenv("XDG_DATA_HOME", str(home_root / ".local" / "share"))
+    isolation.setenv("LOCALAPPDATA", str(state_root))
+    isolation.setenv("XDG_STATE_HOME", str(state_root))
     # Temporary storage is redirected for the same reason HOME is. `tempfile`
     # answers out of TMPDIR/TEMP/TMP, and the one directory it otherwise names
     # is shared by every suite on the machine: two runs that reached
@@ -146,9 +232,9 @@ def isolated_config_environment(
     # answer, so the module attribute moves too; the variables alone would reach
     # child processes and not this one.
     for variable in ("TMPDIR", "TEMP", "TMP"):
-        monkeypatch.setenv(variable, str(temp_root))
-    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
-    monkeypatch.delenv("AGENTIC_HIL_CONFIG", raising=False)
+        isolation.setenv(variable, str(temp_root))
+    isolation.setattr(tempfile, "tempdir", str(temp_root))
+    isolation.delenv("AGENTIC_HIL_CONFIG", raising=False)
     return config_root
 
 

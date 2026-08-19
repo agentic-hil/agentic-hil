@@ -31,7 +31,7 @@ CI runs stays a separate decision from what a developer types.
 Nothing has to be marked to make this safe. Every test already gets its own
 HOME, config, state and temporary storage, and its device-lock root, its CAN
 broker endpoint and its run records all follow that HOME, so two workers cannot
-meet in a configuration, a lock, a socket or a scratch file. Three things a new
+meet in a configuration, a lock, a socket or a scratch file. Four things a new
 test has to keep true for that to stay so:
 
 - Assert about your own entries, never about a listing of a shared directory.
@@ -44,6 +44,12 @@ test has to keep true for that to stay so:
   `ReservedTcpPort` in `backends/gdbdebug.py` exists to stop.
 - Reap what you started by its own handle. A detached run is ended through the
   record its own test wrote, never by sweeping a directory of records.
+- Leave the redirect where the fixture put it. `isolated_config_environment`
+  installs it on a `MonkeyPatch` of its own, so `monkeypatch.undo()` in a test
+  body cannot revert it any more, and a guard wrapped around every test body
+  fails that test by name the moment `Path.home()`, a configuration root or a
+  state root resolves back onto the operator's real profile. A test that wants a
+  home of its own points HOME at `tmp_path`; nothing points it at the machine's.
 
 No test currently needs a machine to itself. A test that genuinely does gets
 `@pytest.mark.xdist_group("<why>")` — but that marker only pins a group to one
