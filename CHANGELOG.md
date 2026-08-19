@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- **The package declares `Framework :: Pytest`.** It has shipped a `pytest11` entry point since the plugin existed, and the classifier is how PyPI's sidebar and every catalogue that filters by framework can tell; the automatic plugin list on docs.pytest.org keys on the `pytest-*` name pattern this package deliberately does not follow, so the classifier is the one machine-readable statement of the fact available to it.
+
 ### Changed
 
 - **A rename dropped a stalled round's work out of the guard that stops a clean exit over it.** Outstanding work is tracked by pathname, which is what keeps it from being lost the round its porcelain status changes, and a rename is the one change a name cannot survive: `git status --porcelain -z` reports the destination and carries the source in a field of its own, so a round that renamed a file an earlier round had left uncommitted removed the only name the guard knew it by. Commit something unrelated in the same round and `left_behind` is empty because `HEAD` moved, so nothing added the new name back either, and a clean verdict on a range that holds only the unrelated commit ended the run at exit 0 with the work still sitting there, never reviewed. The status is now read for where a rename moved a path as well as for which paths are dirty, and an outstanding name is carried to its destination before the tree is asked whether it is still there. It is applied every round, so a path renamed twice arrives, and a copy is followed the same way, which costs nothing because the source is still in the tree under its own name. (#300)
