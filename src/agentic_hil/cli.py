@@ -74,6 +74,7 @@ from agentic_hil.configwrite import (
 from agentic_hil.coordination import CoordinationError, HardwareCoordinator, nothing_standing_result
 from agentic_hil.devices import config_devices
 from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, write_rendered
+from agentic_hil.junit import detached_junit_refusal, write_refusal_junit_xml
 from agentic_hil.knowledge import (
     CONFIG_GRANT_COMMAND,
     CONFIG_REOPEN_COMMAND,
@@ -371,6 +372,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run the plan in its own process and return at once with a run handle and the report path, instead of holding this terminal until the report exists",
     )
+    reactor_parser.add_argument(
+        "--junit-xml",
+        default=None,
+        metavar="PATH",
+        help="also write this run as a JUnit XML report at PATH, for a CI job that reads test reports; parent directories are created, and the file is written on the refusing and failing paths too. The JSON result, the report files and the exit code are what they are without it. Not available with --detach, which returns before the run has a report",
+    )
     # The handle a detached worker was started under. Not an operator's
     # argument: the start command mints the handle, registers nothing itself and
     # hands it to the worker it spawned, so a value supplied by hand here would
@@ -469,8 +476,10 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return run_com_stdio(config, args.port, max_read_bytes=args.max_read_bytes, read_wait_timeout_s=args.read_wait_timeout_s, eof_idle_timeout_s=args.eof_idle_timeout_s)
     if args.command == "test-reactor":
         if args.detach:
+            if args.junit_xml is not None:
+                return detached_junit_refusal(args.junit_xml)
             return start_detached_test_reactor(args.test_config, wait_s=args.wait_s)
-        return run_test_reactor(args.test_config, wait_s=args.wait_s, run_handle=args.run_handle)
+        return run_test_reactor(args.test_config, wait_s=args.wait_s, run_handle=args.run_handle, junit_xml=args.junit_xml)
     if args.command == "test-reactor-status":
         return run_status(load_cli_authoritative_config(None), args.run)
     if args.command == "test-reactor-stop":
@@ -2475,15 +2484,27 @@ def start_detached_test_reactor(test_config_path: str | None = None, *, wait_s: 
     return start_plan_detached(load_authoritative_config(Path.cwd()), test_config_path, wait_s=wait_s)
 
 
-def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0, run_handle: str | None = None) -> JsonObject:
+def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0, run_handle: str | None = None, junit_xml: str | None = None) -> JsonObject:
     """Run a plan to its end and answer with the report, for this working directory.
 
     The command's whole contribution is which configuration the run is bound to:
     an operator at a shell means the project they are standing in, and the MCP
     tools mean the one their server was started on. What a run then is lives in
     `reactorrun.py`, where both frontends read it from.
+
+    The one thing owned here rather than there is the refusal that comes before
+    a configuration exists. A bench with no config, or one bound to another
+    workspace, is answered by this command as a document and by a CI job as a
+    red run, so `--junit-xml` leaves the same artifact for it that it leaves for
+    a plan refused at preflight. Below this line the run has a configuration and
+    `run_plan` writes its own.
     """
-    return run_plan(load_authoritative_config(Path.cwd()), test_config_path, wait_s=wait_s, run_handle=run_handle)
+    try:
+        config = load_authoritative_config(Path.cwd())
+    except ConfigError as error:
+        write_refusal_junit_xml(junit_xml, {"tool": "test_reactor", **error.to_dict()})
+        raise
+    return run_plan(config, test_config_path, wait_s=wait_s, run_handle=run_handle, junit_xml=junit_xml)
 
 
 def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, drives_hardware: bool = True) -> list[str]:

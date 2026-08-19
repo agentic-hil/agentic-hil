@@ -16,7 +16,9 @@ two copies were kept in step.
 """
 from __future__ import annotations
 
+from agentic_hil.config import ConfigError
 from agentic_hil.coordination import CoordinationError
+from agentic_hil.junit import result_with_junit_xml, write_refusal_junit_xml
 from agentic_hil.report import write_report
 from agentic_hil.runlifecycle import RunRegistration, new_run_handle, start_detached_run
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestConfig, TestReactor, load_test_config, plan_devices
@@ -35,25 +37,57 @@ def start_plan_detached(config: AgenticHILConfig, test_config_path: str | None =
     return start_detached_run(config, test_config_path or DEFAULT_TEST_CONFIG_PATH, wait_s=wait_s)
 
 
-def run_plan(config: AgenticHILConfig, test_config_path: str | None = None, *, wait_s: float = 0.0, run_handle: str | None = None) -> JsonObject:
+def run_plan(
+    config: AgenticHILConfig,
+    test_config_path: str | None = None,
+    *,
+    wait_s: float = 0.0,
+    run_handle: str | None = None,
+    junit_xml: str | None = None,
+) -> JsonObject:
     """Run a plan to its end and answer with the report.
 
     Registered under a run handle either way. A detached worker is handed the
     handle its start command printed; a synchronous run mints its own, so a
     plan running in one terminal can still be asked to stop from another
-    instead of being killed, which is the dead-owner route."""
-    test_config = load_test_config(test_config_path, config.work_dir)
-    registration = RunRegistration.take(
-        config,
-        run_handle or new_run_handle(),
-        name=test_config.name,
-        test_config_path=test_config.path,
-        detached=run_handle is not None,
-    )
+    instead of being killed, which is the dead-owner route.
+
+    `junit_xml` asks for a second document beside the report, for a CI job that
+    reads test reports rather than this project's JSON. It changes nothing about
+    the run: the same plan, the same locks, the same report, the same answer.
+    Written wherever the command answers at all, refusals included, and the
+    refusals are why it is written from here rather than from the caller: the
+    plan that would name the skipped cases is loaded here, and a run refused
+    before its first step is exactly the run whose artifact a CI job needs.
+
+    One path deliberately leaves without one, and it is the path that prints no
+    JSON either: an interrupted run raises past this to the operator's terminal,
+    and its record is the report `run_registered_plan` committed before it
+    re-raised."""
+    test_config: TestConfig | None = None
+    try:
+        test_config = load_test_config(test_config_path, config.work_dir)
+        registration = RunRegistration.take(
+            config,
+            run_handle or new_run_handle(),
+            name=test_config.name,
+            test_config_path=test_config.path,
+            detached=run_handle is not None,
+        )
+    except ConfigError as error:
+        # A plan that does not load, or a handle another process already runs, is
+        # as red to a CI job as a plan that failed on the board, and it is the
+        # case where no report file is written at all either. The steps go in
+        # when the plan did load, so the document still says what the run would
+        # have done.
+        write_refusal_junit_xml(junit_xml, {"tool": "test_reactor", **error.to_dict()}, plan_steps=() if test_config is None else test_config.steps)
+        raise
     with registration:
         result = run_registered_plan(config, test_config, wait_s=wait_s, registration=registration)
         registration.finish(result)
-    return result
+    if junit_xml is None:
+        return result
+    return result_with_junit_xml(result, junit_xml, plan_steps=test_config.steps)
 
 
 def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wait_s: float, registration: RunRegistration) -> JsonObject:

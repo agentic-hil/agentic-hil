@@ -12,7 +12,11 @@ import json
 from pathlib import Path
 from xml.etree import ElementTree
 
-from agentic_hil.junit import junit_xml_document, write_junit_xml
+import pytest
+from conftest import write_authoritative_config
+
+from agentic_hil.cli import entrypoint
+from agentic_hil.junit import JUNIT_DETACHED_ERROR, JUNIT_WRITE_ERROR, junit_xml_document, write_junit_xml
 
 # Aliased: pytest collects module-level names beginning with `Test`, and the
 # plan step dataclass is not a test class.
@@ -294,3 +298,177 @@ def test_control_characters_a_backend_emitted_cannot_break_the_document(tmp_path
 
     failure = ElementTree.parse(target).getroot().find("testsuite/testcase[@name='2.dut_uart.uart_read']/failure")
     assert failure.get("message") == "Comparator missed the window."
+
+
+def write_plan(workspace: Path) -> Path:
+    path = workspace / ".agentic-hil" / "testconfig.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "version: 2\nsteps:\n"
+        "  - {debugger: dut, action: flash, image_path: build/app.elf}\n"
+        "  - {debugger: dut, action: reset}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_cli_writes_the_file_and_leaves_the_json_and_the_exit_code_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    write_authoritative_config(tmp_path, monkeypatch)
+    plan_path = write_plan(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    ran = {
+        "ok": True,
+        "tool": "test_reactor",
+        "name": "testconfig",
+        "cleanup_ok": True,
+        "steps": [
+            {"index": 1, "route": "dut", "action": "flash", "result": {"ok": True, "started_at": "2026-08-19T10:00:01.000Z", "elapsed_ms": 900}},
+            {"index": 2, "route": "dut", "action": "reset", "result": {"ok": True, "started_at": "2026-08-19T10:00:02.000Z", "elapsed_ms": 90}},
+        ],
+    }
+    monkeypatch.setattr("agentic_hil.reactorrun.run_registered_plan", lambda *_args, **_kwargs: dict(ran))
+    target = tmp_path / "artifacts" / "junit.xml"
+
+    exit_code = entrypoint(["test-reactor", "--test-config", str(plan_path), "--junit-xml", str(target), "--json"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert result["ok"] is True
+    assert result["steps"] == ran["steps"]
+    assert result["junit_xml"] == str(target)
+    suite = ElementTree.parse(target).getroot().find("testsuite")
+    assert (suite.get("tests"), suite.get("failures"), suite.get("skipped")) == ("2", "0", "0")
+    assert [case.get("name") for case in suite.findall("testcase")] == ["1.dut.flash", "2.dut.reset"]
+
+
+def test_cli_writes_the_file_for_a_run_that_was_refused_before_a_plan_loaded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The artifact matters most when the run is red, and a plan file that is not
+    # there is as red to a CI job as a plan that failed on the board.
+    write_authoritative_config(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "artifacts" / "junit.xml"
+
+    exit_code = entrypoint(["test-reactor", "--test-config", "plans/absent.yaml", "--junit-xml", str(target), "--json"])
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+    error = ElementTree.parse(target).getroot().find("testsuite/testcase[@name='preflight']/error")
+    assert error is not None
+    assert error.get("type") == "test_config_not_found"
+
+
+def test_cli_writes_the_file_for_a_bench_that_has_no_configuration_at_all(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The refusal that lands before a configuration exists is the one refusal the
+    # run itself never sees, and a CI job needs an artifact for it too.
+    monkeypatch.setenv("APPDATA", str(tmp_path / "empty-user-config"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-user-config"))
+    monkeypatch.delenv("AGENTIC_HIL_CONFIG", raising=False)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    target = tmp_path / "artifacts" / "junit.xml"
+
+    exit_code = entrypoint(["test-reactor", "--junit-xml", str(target), "--json"])
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is not True
+    suite = ElementTree.parse(target).getroot().find("testsuite")
+    assert (suite.get("tests"), suite.get("errors")) == ("1", "1")
+    assert suite.find("testcase[@name='preflight']/error") is not None
+
+
+def test_a_refusal_is_still_the_answer_when_its_artifact_cannot_be_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The operator has to read the refusal, so a second failure raised out of the
+    # artifact write must not replace it with a story about a file path.
+    write_authoritative_config(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("agentic_hil.junit.write_junit_xml", _refusing_write)
+
+    exit_code = entrypoint(["test-reactor", "--test-config", "plans/absent.yaml", "--junit-xml", str(tmp_path / "junit.xml"), "--json"])
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out)["error_type"] == "test_config_not_found"
+
+
+def test_detach_refuses_the_flag_by_name_and_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    write_authoritative_config(tmp_path, monkeypatch)
+    plan_path = write_plan(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    started: list[object] = []
+    monkeypatch.setattr("agentic_hil.cli.start_plan_detached", lambda *args, **kwargs: started.append((args, kwargs)) or {"ok": True})
+    target = tmp_path / "junit.xml"
+
+    exit_code = entrypoint(["test-reactor", "--detach", "--test-config", str(plan_path), "--junit-xml", str(target), "--json"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["error_type"] == JUNIT_DETACHED_ERROR
+    assert result["side_effect_committed"] is False
+    assert "test-reactor-status" in result["summary"]
+    # Refused before the worker exists, so nothing was started and no half
+    # document was left for a CI job to believe.
+    assert started == []
+    assert not target.exists()
+
+
+def test_detach_without_the_flag_is_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    write_authoritative_config(tmp_path, monkeypatch)
+    plan_path = write_plan(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("agentic_hil.cli.start_plan_detached", lambda *_args, **_kwargs: {"ok": True, "run": "run-1234"})
+
+    exit_code = entrypoint(["test-reactor", "--detach", "--test-config", str(plan_path), "--json"])
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["run"] == "run-1234"
+
+
+def test_a_file_that_cannot_be_written_is_named_rather_than_swallowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    write_authoritative_config(tmp_path, monkeypatch)
+    plan_path = write_plan(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("agentic_hil.reactorrun.run_registered_plan", lambda *_args, **_kwargs: {"ok": True, "tool": "test_reactor", "name": "testconfig", "cleanup_ok": True, "steps": []})
+    monkeypatch.setattr("agentic_hil.junit.write_junit_xml", _refusing_write)
+
+    exit_code = entrypoint(["test-reactor", "--test-config", str(plan_path), "--junit-xml", str(tmp_path / "junit.xml"), "--json"])
+
+    result = json.loads(capsys.readouterr().out)
+    # The run happened and its own report stands; the missing artifact is what
+    # pulls the verdict down, because an operator who asked for one and got none
+    # did not get the command they typed.
+    assert exit_code == 1
+    assert result["ok"] is False
+    assert result["error_type"] == JUNIT_WRITE_ERROR
+    assert result["junit_xml_error"]["exception_type"] == "OSError"
+
+
+def _refusing_write(*_args, **_kwargs) -> str:
+    raise OSError("read-only file system")
