@@ -2216,6 +2216,51 @@ def test_a_failed_project_half_leaves_the_user_wide_installation_intact(
     assert skill_path.is_file()
 
 
+def test_a_failed_claude_project_half_rolls_back_the_external_project_record_it_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback that claims the project half went back must include the record it wrote.
+
+    For a project `AGENTIC_HIL_CONFIG` binds outside the projects directory, the
+    restriction step writes `external-projects.json` first — the one file on disk
+    that says the project exists. If a late failure rolls the project half back
+    while that record stays, the run reports its changes reversed and leaves a
+    stale entry standing, which a later refresh reads as a configuration gone
+    missing. The record is in the project half's mutation set, so it goes back
+    with the config and the settings file (#246 the other way round).
+    """
+    from agentic_hil import cli as cli_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+    override = Path.home() / "operator-policy" / "config.yaml"
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(override))
+    record = project_config_directory().parent / "external-projects.json"
+    assert not record.exists()
+    real_restrict = cli_module.restrict_agent_write_access
+
+    def write_then_fail(*args: object, **kwargs: object) -> dict:
+        written = real_restrict(*args, **kwargs)
+        assert written["ok"] is True
+        # The record the real step just wrote is what the rollback must not leave.
+        assert record.exists()
+        return {"ok": False, "error_type": "injected_failure", "summary": "late restriction failure"}
+
+    monkeypatch.setattr("agentic_hil.cli.restrict_agent_write_access", write_then_fail)
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is False
+    assert result["rollback"]["ok"] is True
+    # The record went back with the rest of the project half's own writes...
+    assert not record.exists()
+    # ...as did the config the half wrote at the bound location.
+    assert not override.exists()
+
+
 def test_a_failed_user_half_leaves_an_existing_project_config_intact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3771,6 +3816,45 @@ def test_uninstall_takes_back_the_rule_for_a_project_the_override_bound(
     assert result["ok"] is True, result
     assert _deny_rules(settings) == ["Bash(curl *)"]
     assert [item["what"] for item in result["removed"]] == ["write refusal", "write refusal", "project record"]
+    assert not _external_project_record().exists()
+
+
+def test_uninstall_still_names_an_externally_bound_configuration_and_its_state_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record is taken back, but what it named is still left standing and named.
+
+    A project `AGENTIC_HIL_CONFIG` bound outside the projects directory, and a
+    `state_root` it points to on a volume that is not this tool's own, are trees
+    the uninstall deliberately keeps. The walk over the projects directory never
+    comes across either, and the record that did is removed with the rules it
+    explained — so unless `kept` reads that record before it goes, both trees drop
+    out of the accounting the contract promises. They are read first, and named.
+    """
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    external_state = tmp_path / "off-volume-state"
+    (external_state / "coordination" / "records").mkdir(parents=True)
+    bound = tmp_path / "benches" / "alpha" / "config.yaml"
+    bound.parent.mkdir(parents=True)
+    bound.write_text(f"state_root: {external_state.as_posix()!r}\n", encoding="utf-8")
+    settings = _claude_settings(home, ["Bash(curl *)"])
+    assert restrict_agent_write_access("claude-code", bound, external_state)["ok"] is True
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    # The operator's own rule stays; only this tool's went, record and all.
+    assert _deny_rules(settings) == ["Bash(curl *)"]
+    kept = _uninstall_kept(result)
+    # Both the external configuration and its off-volume state root are named...
+    assert str(bound) in kept
+    assert str(external_state) in kept
+    # ...and both are still on disk, which is the whole of what "kept" promises.
+    assert bound.is_file()
+    assert (external_state / "coordination" / "records").is_dir()
+    # The record that named them was taken back with the rules it explained.
     assert not _external_project_record().exists()
 
 

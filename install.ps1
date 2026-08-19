@@ -133,6 +133,18 @@ function Enable-SystemCerts {
     Write-Say "certificates: uv reads this machine's own certificate store"
 }
 
+function Clear-SystemCerts {
+    # --no-system-certs promises never to reach for this machine's own store, and
+    # keeps it only by clearing an inherited override as well as by not setting
+    # one. TROUBLESHOOTING.md recommends exporting UV_SYSTEM_CERTS so future
+    # upgrades keep working behind a proxy, so an operator who then passes
+    # --no-system-certs would still have uv reading the machine store from it.
+    if ($env:UV_SYSTEM_CERTS) {
+        Remove-Item Env:\UV_SYSTEM_CERTS
+        Write-Say "certificates: --no-system-certs; cleared the inherited UV_SYSTEM_CERTS so uv does not read this machine's own store"
+    }
+}
+
 function Install-WithUv {
     # uv's output is captured rather than streamed, because the text of a
     # failure is what decides whether there is a second attempt to make.
@@ -152,6 +164,7 @@ function Install-WithUv {
 }
 
 if ($SystemCertsMode -eq 'always') { Enable-SystemCerts }
+elseif ($SystemCertsMode -eq 'never') { Clear-SystemCerts }
 
 $UvInstallFailure = if ($SystemCertsMode -eq 'never') {
     'uv could not install agentic-hil, and a certificate failure would not have been retried against this machine own store because --no-system-certs was given; TROUBLESHOOTING.md section 1 has the rest'

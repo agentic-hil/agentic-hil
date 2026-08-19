@@ -2552,6 +2552,12 @@ def main(argv: list[str] | None = None) -> int:
             left_behind = (
                 "" if new_commits or options.dry_run else newly_uncommitted(inherited, uncommitted(repo, paperwork))
             )
+            # The round's own work, still uncommitted in the tree because the retry
+            # was declined. The review below runs on a commit-only range -- and in
+            # the default separate checkout these files do not exist at all -- so a
+            # clean verdict this round never inspected them. The guard after the
+            # review refuses to call the run clean while this holds a path.
+            kept_uncommitted = ""
             if left_behind and options.stall_retry:
                 try:
                     recover_stalled_round(setup, record, number, task, branch, previous_review, paperwork, inherited)
@@ -2564,6 +2570,7 @@ def main(argv: list[str] | None = None) -> int:
             elif left_behind:
                 report_stall(record, number, left_behind)
                 print("not handing it back: --no-stall-retry. The work stays exactly where it is.")
+                kept_uncommitted = left_behind
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
@@ -2585,6 +2592,21 @@ def main(argv: list[str] | None = None) -> int:
 
             verdict, review_path = reviewed
             if verdict.is_clean:
+                if kept_uncommitted:
+                    # A clean verdict cannot terminate the run while this round's
+                    # own work is sitting uncommitted and unreviewed: the review
+                    # measured committed history, so calling that clean would exit
+                    # 0 over changes nobody looked at. Stop as stalled instead, and
+                    # leave the work exactly where the round left it.
+                    print(
+                        f"\nround {number}: the review came back clean, but this round left "
+                        f"{len(kept_uncommitted.splitlines())} path(s) uncommitted that the review never saw; "
+                        "stopping as stalled rather than calling the run clean. Commit the work, or drop "
+                        "--continue-on-no-commit.",
+                        file=sys.stderr,
+                    )
+                    exit_code = EXIT_STALLED
+                    break
                 print(f"\nreview came back clean after {number} round(s).")
                 exit_code = EXIT_CLEAN
                 break

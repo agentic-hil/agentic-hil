@@ -877,12 +877,23 @@ def _project_mutation_paths(agent: SkillAgent | None, config_path: Path) -> list
     registered the MCP server in. Snapshots are taken when this half starts,
     after the user-wide half has finished, so restoring it restores the
     registration rather than removing it.
+
+    A claude-code project whose configuration `AGENTIC_HIL_CONFIG` binds outside
+    the projects directory is also written into `external-projects.json`, in the
+    same restriction step and before its deny rules — the one record on disk that
+    says the project exists. That record is here so that a rollback restores its
+    exact prior bytes, or removes one this run created; leaving it out let a
+    failed restriction step claim the project's changes were rolled back while
+    the new entry stayed behind, which a later refresh then reads as a
+    configuration that has gone missing (#246 the other way round).
     """
     paths = [config_path]
     if agent is not None:
         permission_path = _agent_permission_config_path(agent.id)
         if permission_path is not None:
             paths.append(permission_path)
+        if agent.id == "claude-code" and not _configuration_the_projects_walk_finds(config_path):
+            paths.append(_external_project_record_path())
     return _unique_paths(paths)
 
 
@@ -1126,10 +1137,16 @@ def uninstall_agent_integration(agents: list[str] | None = None) -> JsonObject:
         return {"ok": False, "error_type": "unsupported_agent", "summary": "Agentic HIL does not know one or more requested agents.", "agents": invalid, "allowed_agents": supported_skill_agents()}
 
     wanted = {resolved.id for name in requested if (resolved := resolve_skill_agent(name)) is not None}
+    # Read before the agent removal below, which takes back the record these are
+    # named in: a project bound by `AGENTIC_HIL_CONFIG` outside the projects
+    # directory, and any external `state_root` it points at, are trees this
+    # command deliberately leaves standing, and `kept` has to still account for
+    # them once the record that named them is gone.
+    external_configurations = _recorded_external_configurations()
     reports = [_uninstall_one_agent(agent) for agent in skill_agents() if not wanted or agent.id in wanted]
     removed = [item for report in reports for item in report["removed"]]
     left_alone = [item for report in reports for item in report["left_alone"]]
-    kept = _uninstall_kept_trees()
+    kept = _uninstall_kept_trees(external_configurations)
     failed = [report["agent"] for report in reports if not report["ok"]]
 
     command = upgrade.removal_command()
@@ -1590,7 +1607,7 @@ def _visible_project_configurations() -> list[tuple[Path, Path | None]]:
     return found
 
 
-def _uninstall_kept_trees() -> list[JsonObject]:
+def _uninstall_kept_trees(external_configurations: list[Path] | None) -> list[JsonObject]:
     """The trees this command names and does not remove, with the reason on each.
 
     Named rather than counted, because "state root" is an abstraction and a path
@@ -1598,8 +1615,18 @@ def _uninstall_kept_trees() -> list[JsonObject]:
     are the ones this tool creates for itself, reported only where they are
     actually there; a `state_root` a configuration points somewhere else is
     added from the configuration that names it.
+
+    `external_configurations` are the projects `AGENTIC_HIL_CONFIG` bound outside
+    the projects directory, read from the record before the agent removal took it
+    back. The walk over the projects directory never comes across them, so each
+    one still on disk is named here, with the external `state_root` it points at,
+    or the report would claim to account for every tree left standing while
+    missing exactly the ones nothing else on disk can find (#246). `None` is a
+    record that could not be read, and costs the same nothing here as everywhere
+    else: those trees go unnamed rather than the command stopping.
     """
     configurations = _visible_project_configurations()
+    external = external_configurations or []
     kept: list[JsonObject] = [
         {
             "what": "project configurations",
@@ -1608,8 +1635,18 @@ def _uninstall_kept_trees() -> list[JsonObject]:
             "reason": _KEPT_CONFIGURATION,
         }
     ]
+    kept.extend(
+        {"what": "externally bound project configuration", "path": str(config_path), "reason": _KEPT_CONFIGURATION}
+        for config_path in external
+        if _path_entry_exists(config_path)
+    )
     trees: dict[str, Path] = {}
-    for path in [*tool_owned_user_roots(), *(state_root for _config, state_root in configurations if state_root is not None)]:
+    external_state_roots = [state for state in (_configured_state_root(path) for path in external) if state is not None]
+    for path in [
+        *tool_owned_user_roots(),
+        *(state_root for _config, state_root in configurations if state_root is not None),
+        *external_state_roots,
+    ]:
         if _path_entry_exists(path):
             trees.setdefault(os.path.normcase(str(path)), path)
     kept.extend({"what": "tree Agentic HIL created for itself", "path": str(path), "reason": _KEPT_TOOL_TREE} for path in trees.values())

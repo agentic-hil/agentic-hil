@@ -1266,3 +1266,49 @@ def test_a_real_digest_still_has_to_equal_the_expected_one() -> None:
     assert verifier.package_digest_matches(digest, digest) is True
     assert verifier.package_digest_matches(digest, "f" * 64) is False
     assert verifier.package_digest_matches(None, digest) is False
+
+
+def _fake_cli_that_renders_prose_unless_json(path: Path) -> None:
+    """A stand-in CLI that behaves like the real one: prose for a person, JSON on --json.
+
+    The real `doctor` renders a human report unless the caller says it parses
+    the output. The probe reads the output, so it must ask for the document; a
+    fake that prints prose either way is the shape that fails an otherwise valid
+    install, and a fake that prints JSON either way could never catch it.
+    """
+    path.write_text(
+        "import json, sys\n"
+        "args = sys.argv[1:]\n"
+        "if '--json' in args:\n"
+        "    sys.stdout.write(json.dumps({'ok': True, 'hardware_state': 'ready'}))\n"
+        "else:\n"
+        "    sys.stdout.write('Doctor: configuration is valid and the debugger is present.\\n')\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_trusted_doctor_probe_asks_for_the_json_document(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A successful trusted doctor, run as a real subprocess, must be read as a document.
+
+    Every non-protocol CLI command renders prose unless `--json` is given, and
+    the probe calls `json.loads` on doctor's stdout. Without the flag a green
+    doctor prints a report that does not parse, `add_probe` catches the
+    `JSONDecodeError`, and a sound install fails a check it should have passed.
+    """
+    fake = tmp_path / "fake_cli.py"
+    _fake_cli_that_renders_prose_unless_json(fake)
+    monkeypatch.setattr(verifier, "trusted_command", lambda arguments: [sys.executable, str(fake), *arguments])
+    # run_trusted works out of the eval workspace, which does not exist off the
+    # container; the fake CLI does not read it, so point it at one that is here.
+    monkeypatch.setattr(verifier, "WORKSPACE", tmp_path)
+
+    ok, detail = verifier.trusted_doctor_succeeds(tmp_path)
+    assert ok, detail
+
+    # And the reason the flag is required: the same doctor without it renders
+    # prose that json.loads cannot read, which is exactly what the probe hit.
+    prose = verifier.run_trusted(["doctor"], config_home=tmp_path)
+    assert prose.returncode == 0
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(prose.stdout)

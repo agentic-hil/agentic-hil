@@ -185,8 +185,46 @@ use_system_certs() {
     fi
 }
 
+# Whether a PIP_CERT already in the environment names this machine's own store
+# rather than a bundle the operator chose for themselves. The list is the one
+# system_cert_bundle reaches for, so an inherited PIP_CERT that equals any of
+# those paths is the same reach --no-system-certs forbids.
+is_system_cert_bundle() {
+    for candidate in \
+        /etc/ssl/certs/ca-certificates.crt \
+        /etc/pki/tls/certs/ca-bundle.crt \
+        /etc/ssl/ca-bundle.pem \
+        /etc/ssl/cert.pem; do
+        if [ "$1" = "$candidate" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# --no-system-certs promises never to reach for this machine's own store, and it
+# can only keep that promise by clearing an inherited override as well as by not
+# setting one. TROUBLESHOOTING.md recommends exporting UV_SYSTEM_CERTS so future
+# upgrades keep working behind a proxy, so an operator who then passes
+# --no-system-certs would still have uv reading the machine store from that
+# variable. A PIP_CERT the operator aimed at a bundle of their own is their
+# choice and stays; one that already points at this machine's system bundle is
+# the same reach the flag refuses, and goes with UV_SYSTEM_CERTS.
+clear_system_certs() {
+    if [ -n "${UV_SYSTEM_CERTS:-}" ]; then
+        unset UV_SYSTEM_CERTS
+        say "certificates: --no-system-certs; cleared the inherited UV_SYSTEM_CERTS so uv does not read this machine's own store"
+    fi
+    if [ -n "${PIP_CERT:-}" ] && is_system_cert_bundle "${PIP_CERT}"; then
+        unset PIP_CERT
+        say "certificates: --no-system-certs; cleared the inherited system-bundle PIP_CERT so pip does not read this machine's own store"
+    fi
+}
+
 if [ "$SYSTEM_CERTS" = "always" ]; then
     use_system_certs
+elif [ "$SYSTEM_CERTS" = "never" ]; then
+    clear_system_certs
 fi
 
 # The leading run of digits of one dot-separated field, so a development version

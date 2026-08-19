@@ -1457,7 +1457,9 @@ def test_no_stall_retry_leaves_it_to_the_no_commit_rule_whether_the_run_goes_on(
     So the two options compose rather than each having their own idea of when a
     run ends: `--continue-on-no-commit` carries the round to review the same way
     it carries a declined one, and the work stays in the tree for the next round
-    to pick up.
+    to pick up. What it must not do is end the run clean: the review runs on a
+    commit-only range that never saw the stalled work, so a clean verdict is not
+    a verdict on it, and the run stops as stalled rather than claiming otherwise.
     """
     repository = _repository(tmp_path)
 
@@ -1465,10 +1467,43 @@ def test_no_stall_retry_leaves_it_to_the_no_commit_rule_whether_the_run_goes_on(
         repository, _stalling_agent(tmp_path, then=_COMMITS), monkeypatch, "--no-stall-retry", "--continue-on-no-commit"
     )
 
-    assert exit_code == agent_review_loop.EXIT_CLEAN  # the canned review ran on the round and came back clean
+    # The canned review comes back clean, but the round's own work never reached
+    # it, so the run is stalled, not clean -- and the work is still in the tree.
+    assert exit_code == agent_review_loop.EXIT_STALLED
     assert (repository / "fix.py").read_text(encoding="utf-8") == FIX
     record = _round_records(repository)[0]
     assert (record["stalled"], record["retried"]) == (True, False)
+
+
+def test_a_stalled_file_cannot_produce_a_clean_run_under_the_default_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The default checkout is where the false-clean is worst: the file is not even there.
+
+    `--review-checkout clone` (the default) reviews a fresh checkout of the
+    committed head, so a stalled round's uncommitted work does not exist in the
+    tree the reviewer reads at all. A clean verdict on that checkout says nothing
+    about the work, and `--no-stall-retry --continue-on-no-commit` must not let it
+    end the run at exit 0 with `fix.py` still dirty and never looked at.
+    """
+    repository = _repository(tmp_path)
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(
+        agent_review_loop, "claude_command", lambda _options: [sys.executable, str(_stalling_agent(tmp_path, then=_COMMITS))]
+    )
+    monkeypatch.setattr(agent_review_loop, "perform_review", _clean_verdict)
+    # No --review-checkout: the run takes the default clone, which is the whole point.
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "1", "--heartbeat", "0"]
+        + ["--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert (repository / "fix.py").read_text(encoding="utf-8") == FIX
+    assert _in(repository, "status", "--porcelain").strip() == "?? fix.py"
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
 
 
 def test_the_second_attempt_is_told_what_is_in_the_tree_and_keeps_the_first_ones_transcript(

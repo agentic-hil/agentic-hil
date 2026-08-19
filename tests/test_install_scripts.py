@@ -1320,6 +1320,129 @@ def test_the_retry_is_refused_when_it_was_told_to_be(tmp_path: Path) -> None:
     assert "--no-system-certs" in transcript, transcript
 
 
+def _recording_uv_stub(seen: Path) -> str:
+    """A uv that always succeeds and records the two cert variables it inherited.
+
+    Real uv reads only UV_SYSTEM_CERTS, but a shell stub can read any variable in
+    its environment, so it records PIP_CERT too: --no-system-certs clears both
+    before the manager runs, and this is where that clearing is observed.
+    """
+    return (
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'  echo "${{UV_SYSTEM_CERTS:-unset}} ${{PIP_CERT:-unset}}" > "{seen}"\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "99.0.0" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+def _no_system_certs_run(tmp_path: Path, pip_cert: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run install.sh with --no-system-certs and the two cert variables already set.
+
+    The environment starts the way a host does that took TROUBLESHOOTING.md's
+    advice and exported UV_SYSTEM_CERTS for future upgrades. Returns the process
+    and the file the stub uv wrote the variables it saw into.
+    """
+    shell = _posix_shell()
+    home = tmp_path / "home"
+    project = home / "project"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, uv_bin, tools):
+        directory.mkdir(parents=True)
+    seen = tmp_path / "what-uv-inherited"
+    _stub_executable(tools / "uv", _recording_uv_stub(seen))
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "UV_TOOL_BIN_DIR": str(uv_bin),
+        "UV_SYSTEM_CERTS": "1",
+        "PIP_CERT": pip_cert,
+    }
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-system-certs", "--no-can", "--no-agent-install"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    return result, seen
+
+
+def test_no_system_certs_clears_an_inherited_machine_store_override(tmp_path: Path) -> None:
+    """The flag has to override the environment, not merely decline to set it.
+
+    A host that exported UV_SYSTEM_CERTS for future upgrades, and a PIP_CERT that
+    already points at this machine's own bundle, would otherwise have uv and pip
+    reading that store even as the operator passes --no-system-certs. The stub uv
+    records what it inherited; both must be gone.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, seen = _no_system_certs_run(tmp_path, pip_cert="/etc/ssl/cert.pem")
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert seen.read_text(encoding="utf-8").split() == ["unset", "unset"], transcript
+    assert "cleared the inherited UV_SYSTEM_CERTS" in transcript, transcript
+    assert "cleared the inherited system-bundle PIP_CERT" in transcript, transcript
+
+
+def test_no_system_certs_keeps_a_pip_cert_the_operator_chose_for_themselves(tmp_path: Path) -> None:
+    """"Never reach for this machine's store" is not "throw away my own bundle."
+
+    A PIP_CERT that names a file of the operator's, rather than this machine's
+    system bundle, is their deliberate choice and not the reach the flag refuses.
+    The inherited UV_SYSTEM_CERTS still goes, because that one does point uv at
+    the machine store.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    own_bundle = tmp_path / "my-proxy-ca.pem"
+    own_bundle.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+
+    result, seen = _no_system_certs_run(tmp_path, pip_cert=str(own_bundle))
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert seen.read_text(encoding="utf-8").split() == ["unset", str(own_bundle)], transcript
+    assert "cleared the inherited system-bundle PIP_CERT" not in transcript, transcript
+
+
+def test_both_scripts_clear_an_inherited_machine_store_override_when_refused() -> None:
+    """Both installers, not just the one this platform can run end to end.
+
+    The PowerShell flow is not exercised as a subprocess here, so its half of the
+    contract is pinned structurally: --no-system-certs clears the inherited
+    UV_SYSTEM_CERTS rather than only declining to set it.
+    """
+    shell = _code_only(_shell_source())
+    assert "unset UV_SYSTEM_CERTS" in shell
+    # And the clearing is what "never" reaches, not the "always" path.
+    assert re.search(r'SYSTEM_CERTS"?\s*=\s*"never"[^\n]*\n\s*clear_system_certs', shell), shell
+
+    powershell = _code_only(_powershell_source())
+    assert r"Remove-Item Env:\UV_SYSTEM_CERTS" in powershell
+    assert re.search(r"SystemCertsMode -eq 'never'[^\n]*Clear-SystemCerts", powershell), powershell
+
+
 # The container run, end to end: a machine with nothing on it, the real package
 # from the index, a stub `claude` on PATH so agent detection has something to
 # find, and then the four questions that decide whether the line did its job.

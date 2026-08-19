@@ -250,20 +250,34 @@ def package_digest_matches(installed_digest: str | None, expected_digest: str | 
 def run_trusted(
     arguments: list[str],
     *,
-    cwd: Path = WORKSPACE,
+    cwd: Path | None = None,
     config: Path | None = None,
     config_home: Path | None = None,
     timeout: float = 30.0,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         trusted_command(arguments),
-        cwd=cwd,
+        cwd=cwd or WORKSPACE,
         env=trusted_environment(config, config_home=config_home),
         text=True,
         capture_output=True,
         timeout=timeout,
         check=False,
     )
+
+
+def trusted_doctor_succeeds(config_home: Path) -> tuple[bool, str]:
+    """Run doctor through the trusted runtime and read its verdict as a document.
+
+    Every non-protocol CLI command renders prose for a person unless a caller
+    states that it parses the output, so this asks for the machine document with
+    `--json`. Without it a green doctor prints a report `json.loads` cannot read,
+    and this probe would fail an install that is in fact sound -- the check the
+    CLI migration missed.
+    """
+    result = run_trusted(["doctor", "--json"], config_home=config_home)
+    ok = result.returncode == 0 and overall_success(json.loads(result.stdout))
+    return ok, result.stderr.strip() or result.stdout.strip()
 
 
 def installed_distribution() -> dict[str, Any]:
@@ -1810,11 +1824,7 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
             )
             add_probe(
                 "doctor succeeds through trusted verifier runtime",
-                lambda: (
-                    (result := run_trusted(["doctor"], config_home=probe_configuration_home())).returncode == 0
-                    and overall_success(json.loads(result.stdout)),
-                    result.stderr.strip() or result.stdout.strip(),
-                ),
+                lambda: trusted_doctor_succeeds(probe_configuration_home()),
             )
         if trusted_package_ready and registered_ok:
 
