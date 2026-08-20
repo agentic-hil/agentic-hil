@@ -9,7 +9,7 @@
   <img alt="The Agentic HIL loop: build, flash, stimulate, observe, then diagnose and fix, closing back onto build. Flash and stimulate write to the real board on your bench; observe reads back from it. Your agent runs the loop unattended; you review the pull request." src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop.svg">
 </picture>
 
-Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, reports, and logs, all without giving an agent arbitrary host or debugger access. Each project has exactly one authoritative configuration stored outside the repository, out of reach of the agent's own file tools.
+Agentic Hardware-in-the-Loop (Agentic HIL) gives supported coding agents policy-gated MCP tools, and CI suites a pytest plugin, to probe, flash, reset, and exchange UART and CAN traffic with configured embedded targets, including STM32, without exposing a raw debugger shell. Setup ships for Claude Code, Codex, and OpenCode. Each project has exactly one authoritative configuration stored outside the repository, out of reach of the agent's own file tools.
 
 ## Why
 
