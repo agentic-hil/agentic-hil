@@ -173,11 +173,22 @@ def test_the_machine_trusts_the_proxy_through_its_own_store() -> None:
     assert "/usr/local/share/ca-certificates/" in dockerfile
 
 
-def test_the_bench_routes_every_request_through_the_proxy() -> None:
-    dockerfile = _code_only(_dockerfile())
+def test_the_bench_routes_every_request_through_the_proxy_it_starts() -> None:
+    """Every program is pointed at the address the entrypoint listens on.
 
+    The proxy variables are written out literally, so `docker inspect` shows an
+    address rather than an expansion, and the listen address is declared once as
+    `TLS_PROXY_HOST` and `TLS_PROXY_PORT` for the entrypoint to start mitmdump
+    on. Two spellings of one address is exactly the pair that drifts, so they are
+    held to each other here rather than trusted to stay in step.
+    """
+    dockerfile = _code_only(_dockerfile())
+    host = re.search(r"TLS_PROXY_HOST=(\S+)", dockerfile)
+    port = re.search(r"TLS_PROXY_PORT=(\S+)", dockerfile)
+
+    assert host is not None and port is not None, dockerfile
     for variable in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-        assert f"{variable}=http://127.0.0.1:8080" in dockerfile, variable
+        assert f"{variable}=http://{host.group(1)}:{port.group(1)}" in dockerfile, variable
 
 
 def test_the_image_never_hands_uv_the_system_store_by_itself() -> None:
