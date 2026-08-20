@@ -8,12 +8,15 @@
 
 set -eu
 
-# The release this script installs, and the version an installation already
-# here has to reach to be left alone. Deliberately not a capability floor: the
-# line that installs Agentic HIL is the same line people re-run to get current,
-# and step 4 registers the skill out of whatever copy step 1 decided to keep, so
-# a floor left a returning user on an old package and an old skill at once. A
-# development tree reports X.Y.Z.devN, which compares as X.Y.Z and stays put.
+# The release this script installs, and the number step 1 compares an
+# installation already here against. It decides what the transcript calls the
+# run, not whether the run happens: this line is the emergency anchor people
+# re-run when `agentic-hil upgrade` itself is what broke, so an existing
+# installation always reaches step 2's manager invocation, which is idempotent
+# and answers for a copy that is already current in one quick resolve.
+# Deliberately not a capability floor either: step 4 registers the skill out of
+# whatever copy step 1 left in place, so a floor left a returning user on an old
+# package and an old skill at once.
 RELEASE="0.17.0"
 
 AGENT=""
@@ -292,6 +295,21 @@ version_exactly() {
     return 0
 }
 
+# A development tree: an editable checkout of this repository, which reports
+# X.Y.Z.devN. It is the one installation already here that this script keeps
+# instead of sending through the manager, whatever number it carries, because
+# step 2 would replace the operator's own working copy with a release from PyPI
+# (#291). The marker is a suffix and not a number, so it is read as one: the
+# comparisons above stop at the digits of each field by design, which is what
+# lets a development version compare as its X.Y.Z, and is also why neither of
+# them can see this.
+version_is_development() {
+    case "$1" in
+        *.dev | *.dev[0-9]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 python_is_new_enough() {
     "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
 }
@@ -321,8 +339,9 @@ package_spec() {
 # A pin has to match exactly: the documented --version contract is an exact
 # release, so a newer copy left in the manager's bin is not the release this run
 # wrote. An unpinned run named no version at all, so there is nothing here to
-# compare it against; the release floor decides one thing only, in step 1, and what
-# proves a copy at step 3 is where it sits (see installed_executable_dir).
+# compare it against; the release decides one thing only, in step 1, where it is
+# what that step calls the run, and what proves a copy at step 3 is where it sits
+# (see installed_executable_dir).
 version_matches_request() {
     if [ -n "$PINNED" ]; then
         version_exactly "$1" "$PINNED"
@@ -498,9 +517,9 @@ manager_bin_dir() {
 }
 
 # The exact agentic-hil the machine half calls. It stays the bare name only when
-# step 1 found a new-enough copy already here and installed nothing; once this
-# run installs a copy, it becomes that copy's own path, so an older agentic-hil
-# earlier on PATH cannot answer for the install that just happened.
+# step 1 kept a development installation and this run installed nothing; once
+# this run installs a copy, it becomes that copy's own path, so an older
+# agentic-hil earlier on PATH cannot answer for the install that just happened.
 AGENTIC_HIL_CMD="agentic-hil"
 
 installed_executable_dir() {
@@ -514,8 +533,9 @@ installed_executable_dir() {
     # protection and cost the release window. Between the merge of a release commit
     # and the PyPI publish the index still serves the release below, so the script
     # demanded a version nobody could install yet and refused a wholly correct fresh
-    # install as possibly stale (#310). The floor keeps its one real job, in step 1,
-    # where it decides whether a copy already here is kept or upgraded.
+    # install as possibly stale (#310). The release keeps its one real job, in step
+    # 1, where it decides whether a copy already here is called upgraded or
+    # refreshed.
     #
     # A pin is the one case where a version still has to be checked here. There the
     # operator named a release, step 2 either installed exactly that or failed
@@ -539,8 +559,8 @@ installed_executable_dir() {
 
 report_path() {
     if [ "$NEEDS_PACKAGE" -eq 0 ]; then
-        # Nothing was installed: the copy step 1 probed and accepted on this PATH
-        # is the one the machine half uses, and it already resolves here.
+        # Nothing was installed: the development copy step 1 kept on this PATH is
+        # the one the machine half uses, and it already resolves here.
         step 3 "PATH: agentic-hil ${installed:-} is already here and was kept, nothing to add"
         return 0
     fi
@@ -599,7 +619,14 @@ running_pid() {
 
 DISCOVERED_PYTHON=""
 
-# Step 1: is a new enough agentic-hil already here?
+# Step 1: what is already here, and what does this run call itself.
+#
+# An installation found here goes through step 2 either way. This line is the
+# rescue path for an installation that is broken, or whose own `agentic-hil
+# upgrade` is what broke, and answering "nothing to install" to the person who
+# just watched their upgrade fail left the anchor with nothing to anchor. The
+# comparison against the release chooses the word, upgrading or refreshing, and
+# a development tree is the one copy that is kept.
 NEEDS_PACKAGE=1
 if ! have agentic-hil; then
     step 1 "probe: no agentic-hil on this PATH, installing it user-local"
@@ -607,16 +634,18 @@ elif ! installed=$(agentic-hil --version 2>/dev/null); then
     step 1 "probe: an agentic-hil on this PATH does not answer, installing it again"
 elif [ -n "$PINNED" ]; then
     step 1 "probe: agentic-hil $installed is here, and --version $PINNED was asked for, so the package is installed again"
-elif version_at_least "$installed" "$RELEASE"; then
-    step 1 "probe: agentic-hil $installed is here and not older than $RELEASE, skipping the package install"
+elif version_is_development "$installed"; then
+    step 1 "probe: agentic-hil $installed is a development version, so it is kept: installing over it would replace an editable checkout with a release from PyPI"
     NEEDS_PACKAGE=0
+elif version_at_least "$installed" "$RELEASE"; then
+    step 1 "probe: agentic-hil $installed is here and not older than $RELEASE, refreshing this current installation"
 else
     step 1 "probe: agentic-hil $installed is older than $RELEASE, upgrading it"
 fi
 
 # Step 2: install the package, user-local, never as root.
 if [ "$NEEDS_PACKAGE" -eq 0 ]; then
-    step 2 "package: nothing to install"
+    step 2 "package: nothing to install, the development installation stays as it is"
 elif have uv; then
     step 2 "package: uv is here, installing $(package_spec) user-local with uv tool install"
     install_with_uv
