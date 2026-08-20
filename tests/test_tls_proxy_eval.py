@@ -29,6 +29,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 EVAL_DIRECTORY = REPOSITORY_ROOT / "evals" / "tls_proxy"
@@ -158,6 +159,21 @@ def test_the_uv_bootstrap_is_pinned_and_checked_before_it_runs() -> None:
     assert re.search(r"astral\.sh/uv/\$\{UV_INSTALLER_VERSION\}/install\.sh", dockerfile), dockerfile
     assert "sha256sum -c -" in dockerfile, dockerfile
     assert re.search(r"ARG UV_INSTALLER_SHA256=[0-9a-f]{64}\b", dockerfile), dockerfile
+
+
+def test_dependabot_keeps_this_evals_base_image_digest_fresh() -> None:
+    """The Dockerfile says a bot keeps its pin fresh; this is what makes that true.
+
+    Dependabot's docker ecosystem reads the Dockerfile in the directory it is
+    configured with and nothing below it, so the entry that covers the install
+    eval's container says nothing about this one. A digest that never moves is a
+    stale image with a security history rather than a safe one, and this eval is
+    a bench a reader is invited to build and run themselves.
+    """
+    configuration = yaml.safe_load((REPOSITORY_ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
+    directories = {entry.get("directory") for entry in configuration["updates"] if entry.get("package-ecosystem") == "docker"}
+
+    assert "/evals/tls_proxy/container" in directories, sorted(str(directory) for directory in directories)
 
 
 def test_the_machine_trusts_the_proxy_through_its_own_store() -> None:
