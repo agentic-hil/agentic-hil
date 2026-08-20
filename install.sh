@@ -625,7 +625,7 @@ uv_recorded_requirements() {
         if (state == 1) interior = interior "\n"
     }
     # The receipt is read whole before anything is printed: the requirements array
-    # must have opened AND closed (state 2 — a missing anchor leaves 0, a truncated
+    # must have opened AND closed (state 2, a missing anchor leaves 0, a truncated
     # array 1), no tool option may be recorded, and every requirement must replay.
     END {
         if (state != 2) exit 1
@@ -652,7 +652,7 @@ uv_with_flags() {
 # The requirement a uv-managed refresh reinstalls from: this run's extras merged
 # with the ones uv already recorded (passed as $1, whitespace-separated and
 # possibly empty), spelled agentic-hil[...] with this run's pin if there is one.
-# Merging closes both gaps at once — the recorded pyocd an earlier install left
+# Merging closes both gaps at once, the recorded pyocd an earlier install left
 # survives (a bare `tool install agentic-hil[can]` would drop it), and the `can` a
 # --can run wants is added even when the recorded requirement was bare (a bare
 # `tool upgrade` would never add it).

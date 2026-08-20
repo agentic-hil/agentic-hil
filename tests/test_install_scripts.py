@@ -1405,7 +1405,7 @@ def _uv_refresh_with_stub(release: str, uv_log: Path, pycan_marker: Path, marker
     `tool install` models real uv's receipt for a tool that carries `--with`
     requirements: it finds the reconstructed `agentic-hil[...]` spec and every
     `--with` value it was handed, and rewrites the receipt to the multiline shape
-    uv writes — the root requirement first, then one object per replayed `--with`.
+    uv writes, the root requirement first, then one object per replayed `--with`.
     That receipt is what proves both the recorded root extra and the recorded
     `--with` survived the refresh instead of being dropped."""
     return (
@@ -1579,7 +1579,7 @@ def test_refreshing_a_uv_tool_keeps_the_extras_it_was_installed_with(tmp_path: P
 def test_refreshing_a_bare_uv_tool_adds_the_can_extra_this_run_asks_for(tmp_path: Path) -> None:
     """The other half of the merge: a requested extra that was missing is added.
 
-    A bench installed the tool bare — `agentic-hil`, no extras — and re-ran the
+    A bench installed the tool bare, `agentic-hil`, no extras, and re-ran the
     canonical line, which enables `[can]` by default. A `uv tool upgrade` would
     reinstall from the bare recorded requirement and never add the extra, so the
     documented --can option could not enable CAN on an existing uv installation and
@@ -1614,7 +1614,7 @@ def test_refreshing_a_uv_tool_keeps_a_recorded_with_requirement_and_extra(tmp_pa
 
     uv writes a multiline requirement list the moment the tool carries a `--with`
     dependency, and the previous reader only saw the first object on the
-    `requirements = [` line — so a real `agentic-hil[pyocd] --with requests==2.32.5`
+    `requirements = [` line, so a real `agentic-hil[pyocd] --with requests==2.32.5`
     parsed to no extras, and the refresh reinstalled from a bare `agentic-hil[can]`
     that dropped both the recorded pyOCD extra and the recorded requests `--with`.
     The refresh now reads the whole recorded set across lines: it reinstalls from

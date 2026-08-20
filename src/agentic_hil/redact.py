@@ -49,7 +49,7 @@ _STREAM_KEYS = frozenset({"stdout", "stderr"})
 # `_mask_url_userinfo`, a deterministic single pass rather than a lone regex,
 # because a captured stream can carry 10k+ scheme-valid bytes on one line with no
 # `://` and a `scheme://…` regex retries such a run as a scheme from every
-# position, each attempt scanning the whole tail — quadratic, and able to stall
+# position, each attempt scanning the whole tail, quadratic, and able to stall
 # result delivery. The scanner instead locates each `://` once and works outward.
 
 # The characters a URI scheme is built from (RFC 3986:
@@ -74,8 +74,8 @@ def _url_password_span(text: str, sep: int) -> tuple[int, int] | None:
     `://` sits at *sep*, or ``None`` when that `://` is not a credentialed URL.
 
     The scheme is the maximal run of scheme-valid characters ending at the `://`,
-    taken to start at that run's first letter, so a leading `.`, `-` or `+` — part
-    of the run but unable to begin a scheme — is punctuation before the URL and
+    taken to start at that run's first letter, so a leading `.`, `-` or `+`, part
+    of the run but unable to begin a scheme, is punctuation before the URL and
     does not hide it. The userinfo is matched forward from just past the `://`."""
     run_start = sep
     while run_start > 0 and text[run_start - 1] in _URL_SCHEME_CHARS:
@@ -136,7 +136,7 @@ _ASSIGNMENT_NAME = (
 # ordinary data inside a shell word. Applying the union of both to every
 # assignment therefore stopped a mask short of the real value end and leaked the
 # tail, so the two are split into their own arms, told apart by the character
-# before the name — a `?` or `&` marks a query parameter, nothing else does.
+# before the name, a `?` or `&` marks a query parameter, nothing else does.
 
 # A query parameter (`?token=…`, `&api_key=…`): the value runs to whitespace,
 # another `&`, a `#` fragment, or a quote, and through the `)`, `;` and `,` that
@@ -150,7 +150,7 @@ _SENSITIVE_ASSIGNMENT_QUERY = re.compile(
 # A shell / environment / flag assignment: the value is a shell word, so it ends
 # only at unescaped whitespace or one of `;|&<>()`, and is built from any run of
 # escaped characters, single- and double-quoted segments, and ordinary characters
-# — `#` and `,` among them, both data mid-word. Reading the whole word is what
+#, `#` and `,` among them, both data mid-word. Reading the whole word is what
 # keeps an escaped space (`alpha\ beta`), an embedded `#` (`alpha#beta`) and
 # concatenated quoted segments (`alpha"beta gamma"delta`) from leaking their tail
 # past a mask that stopped at the first such character. The trailing arm is a value

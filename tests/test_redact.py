@@ -274,8 +274,8 @@ def test_a_long_scheme_like_run_without_a_url_is_scanned_in_linear_time() -> Non
     a long line of scheme-valid characters that never reaches `://` must not be
     retried as a scheme from every position.
 
-    A `scheme://…` regex was quadratic on exactly this input — a captured stream
-    can carry 10k+ such bytes on one line, enough to stall result delivery — which
+    A `scheme://…` regex was quadratic on exactly this input, a captured stream
+    can carry 10k+ such bytes on one line, enough to stall result delivery, which
     the deterministic single pass avoids by locating each `://` once. A 1 MB run
     with no `://` finishes well under this bound and comes through byte for byte,
     so a regression that reintroduced the quadratic scan would fail the same
