@@ -182,6 +182,7 @@ FAKE_STLINK_PARTIAL_CONFIRMATION = ROOT / "tests" / "fixtures" / "fake_stlink_pa
 FAKE_STLINK_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_stlink_no_target.py"
 FAKE_STLINK_NO_PROBE = ROOT / "tests" / "fixtures" / "fake_stlink_no_probe.py"
 FAKE_STLINK_ERASE_REFUSED = ROOT / "tests" / "fixtures" / "fake_stlink_erase_refused.py"
+FAKE_STLINK_ERASE_MID_FLASH = ROOT / "tests" / "fixtures" / "fake_stlink_erase_mid_flash.py"
 FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
 FAKE_PYOCD_UNKNOWN_TARGET = ROOT / "tests" / "fixtures" / "fake_pyocd_unknown_target.py"
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"

@@ -150,6 +150,51 @@ STLINK_EMPTY_MARKERS = ["no st-link detected", "no stlink detected", "0 st-link 
 # seen a programmer print does not belong here; adding one on a guess would
 # claim an erase refusal for a transcript that never refused an erase.
 STLINK_ERASE_REFUSAL_MARKERS = ["failed to erase memory"]
+# The lines STM32CubeProgrammer prints once it has begun changing what is in
+# flash, and therefore the lines that decide the quarantine (#328). Each one is
+# printed after the operation it names has started, which is the whole property
+# that makes it evidence:
+#
+# * `Download in Progress` opens the write phase for a segment, and the erase for
+#   that segment is behind it.
+# * `File download complete` and `Download verified successfully` close it.
+# * `Mass erase successfully achieved` is an erase that finished.
+# * A progress bar belongs to whichever phase is running, so one anywhere in the
+#   transcript says a phase ran rather than being announced.
+#
+# `Erasing memory corresponding to segment 0:` and `Erasing internal memory
+# sectors [0 5]` are deliberately not in this set: the programmer prints both
+# before it asks the device for anything, so they name what it intends to erase
+# rather than what it erased. That is why a transcript can end at the refusal
+# with nothing in flash having moved.
+STLINK_FLASH_CHANGE_MARKERS = [
+    "download in progress",
+    "file download complete",
+    "download verified successfully",
+    "mass erase successfully achieved",
+    "[=",
+]
+# The two readings #328 allows, and the third that is neither. The first is the
+# only one that relaxes the quarantine; the other two keep it, because a
+# transcript that says work was under way and a transcript that says nothing
+# usable are both answers of "this bench does not know what is in flash".
+ERASE_REFUSED_BEFORE_FLASH_CHANGED = "erase_refused_before_flash_changed"
+FLASH_CHANGE_UNDERWAY = "flash_change_underway"
+ERASE_ABORT_POINT_UNREADABLE = "abort_point_unreadable"
+# The markers a flash failure carries when the programmer's own transcript proves
+# nothing in flash moved. Deliberately not `NOT_CONTACTED`: the probe was opened
+# and the part was identified, so `target_contacted` is true and saying otherwise
+# would be a second false claim in place of the one being fixed. What is claimed
+# is narrower and is exactly what the transcript supports: no write was
+# committed, the board holds what it held, and the retry this bench measured as
+# reliable is safe.
+FLASH_UNCHANGED: JsonObject = {
+    "target_contacted": True,
+    "side_effect_committed": False,
+    "side_effect_status": "not_started",
+    "hardware_state": "unchanged",
+    "retry_safe": True,
+}
 
 
 class STLinkBackend:
@@ -760,8 +805,73 @@ def erase_refusal_evidence(completed: CompletedCommand) -> JsonObject:
     human rendering prints them as literal blocks rather than as one flattened
     row. Nothing is summarised away into a prose field: the whole captured
     output travels, exactly as the log file holds it.
+
+    `erase_abort_point` is the reading of that same transcript the quarantine
+    turns on, and the markers that go with it are added only for the reading
+    that earns them.
     """
-    return {"programmer_output": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}}
+    abort_point = erase_abort_point(f"{completed.stdout}{completed.stderr}")
+    evidence: JsonObject = {
+        "programmer_output": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr},
+        "erase_abort_point": abort_point,
+    }
+    if abort_point["reading"] == ERASE_REFUSED_BEFORE_FLASH_CHANGED:
+        evidence.update(FLASH_UNCHANGED)
+    return evidence
+
+
+def erase_abort_point(output: str) -> JsonObject:
+    """How far a refused erase got, read off the programmer's transcript.
+
+    `debugger_result_unconfirmed` is the right answer to a flash whose landing
+    nobody can account for, and it was the answer to every failed flash, which
+    is a wider claim than the evidence supports. Its cost is not theoretical: on
+    the bench behind #328 the lease it left on `cleanup_required` later refused a
+    `debug_dump_symbol_ihex` with `resource_busy`, the run had to be stopped and
+    reopened to reach coverage data, and ending a run under `auto_recover:
+    reset_halt` resets the target, so the RAM-resident measurements went with it.
+    All of that for a programmer that had refused before it wrote anything.
+
+    Whether a failed erase leaves flash determinate depends on where it failed,
+    so the decision comes from the transcript and never from the exit code. Three
+    readings, and only the first relaxes anything:
+
+    * ``erase_refused_before_flash_changed`` -- the erase refusal is in the
+      transcript and no line in it says any erase or write phase had started.
+      The programmer announced what it meant to erase and was refused, so the
+      board holds what it held.
+    * ``flash_change_underway`` -- a line says a phase had started before the
+      failure hit. Partially erased or partially written flash is precisely what
+      the quarantine exists for, and this keeps it unchanged.
+    * ``abort_point_unreadable`` -- the transcript will not answer the question.
+      The quarantine stays, and the result says so rather than trading safety
+      for convenience.
+
+    Every reading names the line it read, so an operator can disagree with
+    evidence rather than with a feeling. The unreadable one names the last line
+    the programmer printed, because "this is as far as the transcript goes and
+    it does not say" is the evidence in that case.
+    """
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    change = next((line for line in reversed(lines) if contains_any(line.lower(), STLINK_FLASH_CHANGE_MARKERS)), None)
+    if change is not None:
+        return {
+            "reading": FLASH_CHANGE_UNDERWAY,
+            "evidence_line": change,
+            "evidence_rule": "STM32CubeProgrammer prints this line only after the phase it names has started, so flash was being changed when the failure hit and what it holds now is unknown.",
+        }
+    refusal = next((line for line in reversed(lines) if contains_any(line.lower(), STLINK_ERASE_REFUSAL_MARKERS)), None)
+    if refusal is None:
+        return {
+            "reading": ERASE_ABORT_POINT_UNREADABLE,
+            "evidence_line": lines[-1] if lines else "",
+            "evidence_rule": "The transcript carries no line placing the failure before or after the first flash operation, so where it stopped is not established and the quarantine stands.",
+        }
+    return {
+        "reading": ERASE_REFUSED_BEFORE_FLASH_CHANGED,
+        "evidence_line": refusal,
+        "evidence_rule": "The erase was refused and no line reports an erase or a download having started, so nothing in flash was changed and the board holds the image it held before this call.",
+    }
 
 
 def gdb_symbol_query_args(gdb_executable: str, elf_path: str, symbol: str) -> list[str]:

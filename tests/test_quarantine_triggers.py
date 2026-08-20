@@ -30,11 +30,14 @@ from conftest import (
     FAKE_OPENOCD_MISSING_CFG,
     FAKE_OPENOCD_NO_TARGET,
     FAKE_OPENOCD_UNCONFIRMED,
+    FAKE_STLINK_ERASE_MID_FLASH,
+    FAKE_STLINK_ERASE_REFUSED,
     FAKE_STLINK_NO_PROBE,
     FAKE_STLINK_UNCONFIRMED,
     write_config,
 )
 
+from agentic_hil.backends.stlink import erase_abort_point
 from agentic_hil.config import load_config
 from agentic_hil.coordination import HardwareCoordinator, debugger_effect_resources
 from agentic_hil.knowledge import (
@@ -323,6 +326,118 @@ def test_a_reset_the_openocd_fake_aborts_after_init_is_still_an_incident(tmp_pat
         assert service.coordinator.blocked is False
     finally:
         service.close()
+
+
+def flash_through_stlink(workspace: Path, executable: Path):
+    firmware = workspace / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True, exist_ok=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = config_for(workspace, debugger_type="stlink", debugger_executable=executable, probe_id="STLINK123")
+    service = AgenticHILToolService(config)
+    try:
+        return service.call("flash_firmware", {"image_path": "build/firmware.elf"}), service, config
+    except BaseException:
+        service.close()
+        raise
+
+
+def test_a_programmer_that_refused_the_erase_leaves_the_board_where_it_was(tmp_path: Path) -> None:
+    """The bench report behind #328, end to end.
+
+    STM32CubeProgrammer refused the erase before it wrote anything, and the
+    quarantine that followed cost more than the failure did: the lease it left on
+    `cleanup_required` refused a later `debug_dump_symbol_ihex` with
+    `resource_busy`, the run had to be stopped and reopened, and ending a run
+    resets the target, so RAM-resident measurements went with it.
+    """
+    result, service, config = flash_through_stlink(tmp_path, FAKE_STLINK_ERASE_REFUSED)
+    try:
+        assert result["error_type"] == "flash_erase_failed"
+        # The probe was opened and the part was identified, so the claim is about
+        # the flash content and not about contact.
+        assert result["target_contacted"] is True
+        assert result["side_effect_committed"] is False
+        assert result["side_effect_status"] == "not_started"
+        assert result["hardware_state"] == "unchanged"
+        assert result["retry_safe"] is True
+        assert result["lease_state"] == "released"
+        assert_refused_without_quarantine(result, config)
+        assert service.coordinator.blocked is False
+        assert service.coordinator.leases == {}
+        # And the bench stays in service: the retry this failure's own remediation
+        # names is answerable, rather than meeting `resource_quarantined`.
+        assert service.call("flash_firmware", {"image_path": "build/firmware.elf"})["error_type"] == "flash_erase_failed"
+    finally:
+        service.close()
+    assert_no_quarantine_record(config)
+
+
+def test_the_refusal_names_the_line_it_read_the_board_state_off(tmp_path: Path) -> None:
+    """An operator has to be able to disagree with evidence rather than a feeling."""
+    result, service, _ = flash_through_stlink(tmp_path, FAKE_STLINK_ERASE_REFUSED)
+    try:
+        abort_point = result["erase_abort_point"]
+
+        assert abort_point["reading"] == "erase_refused_before_flash_changed"
+        assert abort_point["evidence_line"] == "Error: failed to erase memory"
+        assert "no line reports an erase or a download having started" in abort_point["evidence_rule"]
+    finally:
+        service.close()
+
+
+def test_a_failure_with_a_segment_already_written_keeps_the_quarantine(tmp_path: Path) -> None:
+    """The other reading of the same refusal line, and the whole reason the
+    decision is taken from the transcript rather than from the exit code.
+
+    Segment 0 was erased and downloaded, segment 1's erase was refused, and flash
+    now holds neither the old image nor the new one. That is exactly what
+    `debugger_result_unconfirmed` is for, and nothing here may talk it away.
+    """
+    result, service, _ = flash_through_stlink(tmp_path, FAKE_STLINK_ERASE_MID_FLASH)
+    try:
+        # Asserted before the new fields on purpose: these four are what this
+        # branch must not change, and they hold on the shipped code too.
+        assert result["side_effect_status"] == "unknown"
+        assert result["retry_safe"] is False
+        assert result.get("hardware_state") != "unchanged"
+        assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+
+        abort_point = result["erase_abort_point"]
+        assert result["error_type"] == "flash_erase_failed"
+        assert abort_point["reading"] == "flash_change_underway"
+        assert abort_point["evidence_line"] == "File download complete"
+    finally:
+        service.close()
+
+
+def test_a_transcript_that_cannot_place_the_failure_keeps_the_quarantine() -> None:
+    """When in doubt the quarantine stays, and the result says which it is.
+
+    Reached when the refusal line the classification was taken from cannot be
+    found line by line: the reading is neither of the two the transcript is
+    supposed to support, so nothing is relaxed and the last line the programmer
+    printed travels as the evidence that it does not answer the question.
+    """
+    coarse = erase_abort_point("ST-LINK SN  : STLINK123\nDevice name : STM32F446\nError: operation failed\n")
+
+    assert coarse["reading"] == "abort_point_unreadable"
+    assert coarse["evidence_line"] == "Error: operation failed"
+
+
+def test_a_progress_bar_between_the_announcement_and_the_refusal_is_work_underway() -> None:
+    """The announcement lines are not evidence and the bar is.
+
+    `Erasing internal memory sectors [0 5]` is printed before the device is asked
+    for anything, which is what lets the refused case be read as untouched flash.
+    A progress bar belongs to a phase that is running, so a transcript carrying
+    one is the other reading even though no download line ever appeared.
+    """
+    announced_only = erase_abort_point("Erasing memory corresponding to segment 0:\nErasing internal memory sectors [0 5]\nError: failed to erase memory\n")
+    started = erase_abort_point("Erasing internal memory sectors [0 5]\n[=========                     ] 18%\nError: failed to erase memory\n")
+
+    assert announced_only["reading"] == "erase_refused_before_flash_changed"
+    assert started["reading"] == "flash_change_underway"
+    assert started["evidence_line"] == "[=========                     ] 18%"
 
 
 # ---------------------------------------------------------------------------
