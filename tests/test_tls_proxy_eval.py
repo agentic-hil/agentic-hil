@@ -224,20 +224,23 @@ def test_the_failing_proof_runs_with_the_variable_removed() -> None:
     assert re.search(r"env -u UV_SYSTEM_CERTS agentic-hil upgrade --json", entrypoint), entrypoint
 
 
-def test_only_the_seed_reaches_for_the_system_store() -> None:
-    """One assignment, on one command, and it is the one that provisions.
+def test_only_provisioning_reaches_for_the_system_store() -> None:
+    """The variable is a prefix on the two installs that provision, never an export.
 
-    A prefix on a single command, never an export: an export would outlive the
-    seed and hand proof 1 the very thing it is measuring the absence of. The
-    lines that merely print the seed command back to the reader are not command
-    prefixes and are not counted.
+    Two commands set it, and both are a `uv tool install` that builds a bench for
+    a later proof to measure: the seed for proof 1, and proof 2's own by-name
+    install of the environment this checkout is overlaid onto. Neither is an
+    export, which would outlive the command and hand proof 1 the very thing it is
+    measuring the absence of. The lines that merely print those commands back to
+    the reader are not command prefixes and are not counted.
     """
     code = _code_only(_entrypoint())
     prefixes = [line.strip() for line in code.splitlines() if re.match(r"\s*(if )?UV_SYSTEM_CERTS=1 ", line)]
 
     assert "export UV_SYSTEM_CERTS" not in code, code
-    assert len(prefixes) == 1, prefixes
-    assert prefixes[0].startswith("if UV_SYSTEM_CERTS=1 uv tool install"), prefixes
+    assert len(prefixes) == 2, prefixes
+    for prefix in prefixes:
+        assert re.match(r"(if )?UV_SYSTEM_CERTS=1 uv tool install", prefix), prefixes
 
 
 def test_the_eval_asserts_the_certificate_error_by_its_own_words() -> None:
@@ -248,12 +251,59 @@ def test_the_eval_asserts_the_certificate_error_by_its_own_words() -> None:
     assert "upgrade_failed" in entrypoint, entrypoint
 
 
-def test_the_eval_runs_the_released_installer_rather_than_this_checkout() -> None:
-    """Proof 2 measures the anchor operators actually get, not the working tree."""
+def test_the_installer_proof_runs_the_released_anchor() -> None:
+    """Proof 3 measures the anchor operators actually get, off the releases page.
+
+    Proof 2 runs this checkout's own upgrade; proof 3 is the separate,
+    released-artifact scenario, and it fetches and runs the one-line installer
+    exactly as an operator would rather than anything from the working tree.
+    """
     entrypoint = _code_only(_entrypoint())
 
     assert "https://github.com/agentic-hil/agentic-hil/releases/latest" in entrypoint
     assert "curl -LsSf \"$INSTALLER_URL\" | sh" in entrypoint
+
+
+def test_proof_two_runs_this_checkouts_upgrade_and_asserts_the_retry() -> None:
+    """The live candidate proof: this checkout's own upgrade, healing on the bench.
+
+    It provisions by name and unpinned, so the upgrade reaches the index and
+    trust-fails the way proof 1 did, then overlays this checkout's package onto
+    that install so the code under review is what runs. The assertions are on the
+    retry the module records: the first attempt carries the trust failure, the
+    retry adds `UV_SYSTEM_CERTS=1`, and the result says that second attempt is the
+    one that got through. Reading those fields is what makes this a live check of
+    the real CLI, uv, the child environment and the system store together, rather
+    than the stub in `test_upgrade_certificates.py`.
+    """
+    entrypoint = _code_only(_entrypoint())
+
+    # Provisioned by name and unpinned, then overlaid with the copied source.
+    assert "uv tool install --force agentic-hil" in entrypoint, entrypoint
+    assert "CANDIDATE_SRC=/opt/tls-proxy/candidate/agentic_hil" in entrypoint, entrypoint
+    assert 'cp -R "$CANDIDATE_SRC/." "$candidate_target/"' in entrypoint, entrypoint
+
+    # The retry, read straight off the report the candidate upgrade produced.
+    assert "install.certificate_retry.first_attempt.stderr" in entrypoint, entrypoint
+    assert "install.certificate_retry.variable" in entrypoint, entrypoint
+    assert "install.certificate_retry.value" in entrypoint, entrypoint
+    assert 'report_field "$CANDIDATE_REPORT" certificates' in entrypoint, entrypoint
+    # The first attempt is asserted to carry both halves of the same signature.
+    assert "'invalid peer certificate' 'UnknownIssuer'" in entrypoint, entrypoint
+
+
+def test_the_container_carries_this_checkouts_package_for_the_candidate_proof() -> None:
+    """Proof 2 can only run this checkout if the image is built with it inside.
+
+    The Dockerfile copies the package under review into the image, and the
+    `.dockerignore` that otherwise sends only `evals/` to the build context has to
+    let that source through, or the build fails before there is anything to run.
+    """
+    dockerfile = _code_only(_dockerfile())
+    dockerignore = (REPOSITORY_ROOT / ".dockerignore").read_text(encoding="utf-8")
+
+    assert "COPY src/agentic_hil /opt/tls-proxy/candidate/agentic_hil" in dockerfile, dockerfile
+    assert "!src/agentic_hil/**" in dockerignore, dockerignore
 
 
 def test_neither_file_turns_certificate_verification_off() -> None:
@@ -269,23 +319,24 @@ def test_every_proof_prints_a_verdict_line() -> None:
 
     assert "printf 'PASS: %s\\n'" in entrypoint, entrypoint
     assert "printf 'FAIL: %s\\n'" in entrypoint, entrypoint
-    for label in ('"seed, ', '"proof 1, ', '"proof 2, '):
+    for label in ('"seed, ', '"proof 1, ', '"proof 2, ', '"proof 3, '):
         assert label in entrypoint, label
 
 
-def test_the_readme_records_the_retry_landed_and_the_container_proof_waits_on_a_release() -> None:
-    """#326 landed the upgrade retry; the container gains its proof once a release seeds it.
+def test_the_readme_records_the_retry_landed_and_the_container_now_proves_it() -> None:
+    """#326 landed the upgrade retry, and the container exercises it live in proof 2.
 
     The retry the installer already made is now in `agentic-hil upgrade` too, so
     the README must not still promise it as work `agentic-hil upgrade` "does not
-    know yet". What stays genuinely pending is a release carrying the retry for
-    this bench to seed, after which the eval gains its third proof; the README
-    names #326 and points at the unit test that pins the retry in the meantime.
+    know yet", nor claim the container "does not exercise it yet". The README
+    names #326, keeps the pointer to the unit test that pins the retry without
+    Docker, and describes the live proof that runs this checkout on the bench.
     """
     readme = README.read_text(encoding="utf-8")
 
     assert "#326" in readme, readme
     assert "does not know it yet" not in readme, readme
+    assert "does not exercise it yet" not in readme, readme
     assert "test_upgrade_certificates.py" in readme, readme
 
 
@@ -316,11 +367,11 @@ def test_the_entrypoint_parses_in_a_posix_shell() -> None:
     assert result.returncode == 0, f"{result.stdout}{result.stderr}"
 
 
-def test_the_container_reproduces_both_halves_of_the_bench() -> None:
+def test_the_container_reproduces_every_proof_of_the_bench() -> None:
     """The eval itself: build the bench, run it, read its verdicts.
 
     Nothing here re-implements the assertions; the container makes them and says
-    so line by line, and this asserts that it said all three and that the
+    so line by line, and this asserts that it said all of them and that the
     certificate error the bench reported is in the transcript verbatim. The
     container is removed by `--rm` whether it passed or failed.
     """
@@ -352,4 +403,5 @@ def test_the_container_reproduces_both_halves_of_the_bench() -> None:
     assert "PASS: seed," in transcript, transcript
     assert "PASS: proof 1," in transcript, transcript
     assert "PASS: proof 2," in transcript, transcript
+    assert "PASS: proof 3," in transcript, transcript
     assert "invalid peer certificate: UnknownIssuer" in transcript, transcript

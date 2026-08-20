@@ -2,5 +2,11 @@
 !evals/
 !evals/**
 evals/install/artifacts/
+# The TLS-proxy eval overlays this package onto a released install, so its
+# container build needs the source under review in the context. Nothing else
+# from src/ is sent, and the bytecode rules below still strip caches from it.
+!src/
+!src/agentic_hil/
+!src/agentic_hil/**
 **/__pycache__/
 **/*.py[cod]

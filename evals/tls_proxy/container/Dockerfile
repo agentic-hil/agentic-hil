@@ -42,6 +42,13 @@ RUN useradd --create-home --user-group --shell /bin/bash bench \
 COPY evals/tls_proxy/container/entrypoint.sh /opt/tls-proxy/entrypoint.sh
 RUN chmod 0755 /opt/tls-proxy/entrypoint.sh
 
+# The package under review. Proof 2 installs a released agentic-hil by name --
+# so `uv tool upgrade` fetches the index and meets the proxy the way proof 1
+# does -- and then overlays this source over it, so the upgrade it runs is the
+# code in this checkout rather than any release. Only the package is copied, not
+# the whole tree: the entrypoint places it into the tool environment it builds.
+COPY src/agentic_hil /opt/tls-proxy/candidate/agentic_hil
+
 USER bench
 WORKDIR /home/bench
 

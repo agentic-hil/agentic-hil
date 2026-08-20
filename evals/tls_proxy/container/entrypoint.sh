@@ -4,8 +4,13 @@
 # Seed:    install agentic-hil 0.16.0 through the proxy with UV_SYSTEM_CERTS=1.
 #          This provisions the bench and proves the system-store path works.
 # Proof 1: `agentic-hil upgrade --json` without that variable fails, and the
-#          report says so with uv's own certificate error inside it.
-# Proof 2: the released one-line installer meets the same failure, recognises
+#          report says so with uv's own certificate error inside it. This is the
+#          released 0.16.0, from before the retry, so it fails and stays failed.
+# Proof 2: the upgrade in *this checkout* is placed into a real uv tool
+#          environment and run on the same proxy. Its first attempt meets the
+#          same failure, and its own retry against this machine's store gets past
+#          it -- the code under review, exercised live rather than through a stub.
+# Proof 3: the released one-line installer meets the same failure, recognises
 #          it, switches to this machine's own store and finishes the install.
 #
 # Every step's decisive output is printed whole. A line that is filtered out is
@@ -13,8 +18,9 @@
 # error is the entire point of this container.
 #
 # The first assertion that fails ends the run non-zero. Later proofs depend on
-# earlier ones (proof 1 needs the seeded 0.16.0, proof 2 replaces it), so there
-# is nothing to learn from continuing past a failure.
+# earlier ones (proof 1 needs the seeded 0.16.0, proof 2 reprovisions it
+# unpinned, proof 3 replaces it), so there is nothing to learn from continuing
+# past a failure.
 
 set -u
 
@@ -31,6 +37,13 @@ SEED_LOG=/tmp/seed.log
 UPGRADE_REPORT=/tmp/upgrade.json
 UPGRADE_ERRORS=/tmp/upgrade.err
 INSTALLER_LOG=/tmp/installer.log
+
+# The package under review, copied into the image at build time so proof 2 can
+# run this checkout's own upgrade on the bench rather than a released artifact.
+CANDIDATE_SRC=/opt/tls-proxy/candidate/agentic_hil
+CANDIDATE_SEED_LOG=/tmp/candidate-seed.log
+CANDIDATE_REPORT=/tmp/candidate-upgrade.json
+CANDIDATE_ERRORS=/tmp/candidate-upgrade.err
 
 PROXY_PID=""
 
@@ -195,7 +208,96 @@ decisive=$(grep -F -- 'invalid peer certificate' /tmp/manager.err | head -n 1 | 
 pass "proof 1, agentic-hil upgrade fails against uv's own bundled roots" \
     "$decisive"
 
-heading "Proof 2: the released one-line installer, on the same bench, unchanged"
+heading "Proof 2: the upgrade under review heals itself against this machine's own store"
+# Proof 1 is the released 0.16.0, which has no retry and cannot grow one. This
+# proof is the code in this checkout, run on the same bench, so the retry meets
+# real uv, a real child environment and this machine's real trust store rather
+# than the stub tests/test_upgrade_certificates.py holds.
+#
+# It is provisioned by name and unpinned, on purpose. `uv tool upgrade
+# agentic-hil` then fetches the index and meets the very trust failure proof 1
+# just recorded -- the one mechanism this bench is known to reproduce. A path
+# install would rebuild agentic-hil from disk and might never reach the index,
+# and the pinned 0.16.0 seed would send the retry past the failure only to be
+# told there was nothing to move.
+printf 'command: UV_SYSTEM_CERTS=1 uv tool install --force agentic-hil\n'
+if UV_SYSTEM_CERTS=1 uv tool install --force agentic-hil >"$CANDIDATE_SEED_LOG" 2>&1; then
+    verbatim "uv output" "$CANDIDATE_SEED_LOG"
+else
+    verbatim "uv output" "$CANDIDATE_SEED_LOG"
+    fail "proof 2, the candidate environment could not be provisioned through the proxy" \
+        "with no installed tool to overlay there is nothing for this checkout's upgrade to run out of"
+fi
+
+# The tool's own interpreter names where the installed package sits. It is asked
+# for through `uv tool dir` rather than read off a console-script shebang, which
+# uv rewrites into a /bin/sh trampoline once the path is long enough. This
+# checkout is overlaid onto that package -- every module overwritten, any
+# release-only data left in place -- and the stale bytecode dropped, because uv
+# installs hash-pinned .pyc files an mtime would never invalidate and the old
+# code would otherwise keep running.
+tool_python="$(uv tool dir)/agentic-hil/bin/python"
+if [ ! -x "$tool_python" ]; then
+    fail "proof 2, the tool interpreter is not where uv tool dir says it is" \
+        "looked for $tool_python, and without it this checkout's code cannot be placed on the bench"
+fi
+candidate_target=$("$tool_python" -c 'import agentic_hil, os; print(os.path.dirname(agentic_hil.__file__))' 2>/dev/null)
+if [ -z "$candidate_target" ] || [ ! -d "$candidate_target" ]; then
+    fail "proof 2, the installed package directory could not be located" \
+        "the overlay had no target, so this checkout's code was never placed on the bench"
+fi
+cp -R "$CANDIDATE_SRC/." "$candidate_target/"
+"$tool_python" -c 'import pathlib, shutil, sys
+for cache in pathlib.Path(sys.argv[1]).rglob("__pycache__"):
+    shutil.rmtree(cache, ignore_errors=True)' "$candidate_target"
+overlaid=$("$tool_python" -c 'import agentic_hil; print(agentic_hil.__version__)' 2>/dev/null)
+printf 'overlay: the installed agentic_hil now reports %s, the version in this checkout\n' "$overlaid"
+
+printf 'command: agentic-hil upgrade --json, with UV_SYSTEM_CERTS unset\n'
+env -u UV_SYSTEM_CERTS agentic-hil upgrade --json >"$CANDIDATE_REPORT" 2>"$CANDIDATE_ERRORS"
+candidate_status=$?
+verbatim "upgrade report" "$CANDIDATE_REPORT"
+if [ -s "$CANDIDATE_ERRORS" ]; then
+    verbatim "upgrade stderr" "$CANDIDATE_ERRORS"
+fi
+printf 'exit status: %s\n' "$candidate_status"
+
+# The retry keeps the attempt that named the proxy under
+# install.certificate_retry.first_attempt rather than dropping it. Its presence
+# at all is proof this checkout's code ran: 0.16.0 has no such field. Both halves
+# of the signature have to be in it, the same two proof 1 asserted.
+report_field "$CANDIDATE_REPORT" install.certificate_retry.first_attempt.stderr >/tmp/candidate-first.err
+verbatim "first attempt stderr, as the retry recorded it" /tmp/candidate-first.err
+for marker in 'invalid peer certificate' 'UnknownIssuer'; do
+    if ! contains /tmp/candidate-first.err "$marker"; then
+        fail "proof 2, the first attempt's recorded stderr does not carry '$marker'" \
+            "the upgrade under review did not begin from the trust failure this bench produces"
+    fi
+done
+
+retry_variable=$(report_field "$CANDIDATE_REPORT" install.certificate_retry.variable)
+retry_value=$(report_field "$CANDIDATE_REPORT" install.certificate_retry.value)
+if [ "$retry_variable" != "UV_SYSTEM_CERTS" ] || [ "$retry_value" != "1" ]; then
+    fail "proof 2, the retry did not reach for this machine's own store" \
+        "expected UV_SYSTEM_CERTS=1 in the retry, the report carries '$retry_variable=$retry_value'"
+fi
+
+candidate_ok=$(report_field "$CANDIDATE_REPORT" ok)
+if [ "$candidate_ok" != "true" ]; then
+    fail "proof 2, the upgrade under review did not succeed against this machine's own store" \
+        "the report carries ok '$candidate_ok', so the retry never got past the trust failure"
+fi
+
+candidate_note=$(report_field "$CANDIDATE_REPORT" certificates)
+if ! printf '%s\n' "$candidate_note" | grep -q -F -- 'succeeded'; then
+    fail "proof 2, the result does not say the retry is the attempt that succeeded" \
+        "certificates carries: $candidate_note"
+fi
+
+pass "proof 2, the upgrade under review met the trust failure and healed itself against this machine's own store" \
+    "$candidate_note"
+
+heading "Proof 3: the released one-line installer, on the same bench, unchanged"
 printf 'command: curl -LsSf %s | sh\n' "$INSTALLER_URL"
 curl -LsSf "$INSTALLER_URL" | sh >"$INSTALLER_LOG" 2>&1
 installer_status=$?
@@ -203,16 +305,16 @@ verbatim "installer output" "$INSTALLER_LOG"
 printf 'exit status: %s\n' "$installer_status"
 
 if [ "$installer_status" -ne 0 ]; then
-    fail "proof 2, the released installer exited $installer_status" \
+    fail "proof 3, the released installer exited $installer_status" \
         "the anchor did not repair this bench"
 fi
 if ! contains "$INSTALLER_LOG" 'invalid peer certificate'; then
-    fail "proof 2, the installer never met the trust failure" \
+    fail "proof 3, the installer never met the trust failure" \
         "without the failure there is nothing for it to detect, so this run proves nothing"
 fi
 switch="retrying once against this machine's own store"
 if ! contains "$INSTALLER_LOG" "$switch"; then
-    fail "proof 2, the installer did not say it was switching to this machine's own store" \
+    fail "proof 3, the installer did not say it was switching to this machine's own store" \
         "expected a line containing: $switch"
 fi
 
@@ -221,21 +323,23 @@ released_version=${released_tag##*/}
 released_version=${released_version#v}
 installed=$(agentic-hil --version 2>/dev/null)
 if [ -z "$released_version" ] || [ "$installed" != "$released_version" ]; then
-    fail "proof 2, the bench does not run the released version" \
+    fail "proof 3, the bench does not run the released version" \
         "agentic-hil --version answered '$installed', the latest release is '$released_version'"
 fi
 if [ "$installed" = "$SEED_VERSION" ]; then
-    fail "proof 2, the installation never moved off the seeded version" \
+    fail "proof 3, the installation never moved off the seeded version" \
         "agentic-hil --version still answers $SEED_VERSION"
 fi
 
 detection=$(grep -F -- "$switch" "$INSTALLER_LOG" | head -n 1)
-pass "proof 2, the released installer detected the trust failure and finished against this machine's own store" \
+pass "proof 3, the released installer detected the trust failure and finished against this machine's own store" \
     "$detection"
 printf '      agentic-hil --version: %s (the latest release)\n' "$installed"
 
 heading "Result"
-printf 'Both halves reproduced on one bench: the upgrade path fails on a TLS-inspecting\n'
-printf 'proxy, and the released one-line installer is the way through it today.\n'
+printf 'Reproduced on one bench: the released 0.16.0 upgrade fails on a TLS-inspecting\n'
+printf 'proxy, the upgrade in this checkout retries against the machine own store and\n'
+printf 'gets through, and the released one-line installer does the same for an operator\n'
+printf 'still on a version from before that retry.\n'
 stop_proxy
 exit 0

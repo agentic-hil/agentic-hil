@@ -1,7 +1,9 @@
 # TLS-proxy bench evaluation
 
 One Docker image that **is** the bench: a Linux machine behind a TLS-inspecting
-proxy, where `agentic-hil upgrade` fails and the one-line installer gets through.
+proxy, where the released 0.16.0 `agentic-hil upgrade` fails, the upgrade in this
+checkout retries against the machine's own store and gets through, and the
+one-line installer does the same for an operator still on the older release.
 
 ## The bench
 
@@ -41,7 +43,7 @@ The image builds that bench from nothing:
 - `uv`, installed before any of that, the way the bench already had it, from the
   installer version and hash `install.sh` itself pins.
 
-Then the entrypoint runs three steps in order and stops at the first one that
+Then the entrypoint runs four steps in order and stops at the first one that
 fails:
 
 1. **Seed.** `UV_SYSTEM_CERTS=1 uv tool install agentic-hil==0.16.0`. This
@@ -52,12 +54,28 @@ fails:
    `upgrade_failed` and that the manager stderr it recorded contains both
    `invalid peer certificate` and `UnknownIssuer`, and prints the whole report
    and the whole error. Nothing is filtered: the certificate error is the point.
-3. **Proof 2, the anchor repairs it.** The released one-line installer, fetched
+   This is the released 0.16.0, from before the retry, so it fails and stays
+   failed.
+3. **Proof 2, the upgrade under review heals itself.** A tool environment is
+   provisioned by name and unpinned (`UV_SYSTEM_CERTS=1 uv tool install --force
+   agentic-hil`) so that `uv tool upgrade` reaches the index and meets the same
+   failure, and this checkout's package is overlaid onto it so the code that runs
+   is the one under review. Then `agentic-hil upgrade --json` runs with
+   `UV_SYSTEM_CERTS` removed from the environment, and the run reads the retry off
+   the report: the first attempt carries the trust failure, the retry adds
+   `UV_SYSTEM_CERTS=1`, and the result says that second attempt is the one that
+   got through. This is the live check of the real CLI, uv, the child environment
+   and the machine's own store together — the fix in `src/agentic_hil/upgrade.py`,
+   not a stub. Because this checkout is newer than any release, the upgrade the
+   retry completes is an already-current one; what it proves is that the retry
+   reached the index with verification on and the command reported success.
+4. **Proof 3, the anchor repairs it.** The released one-line installer, fetched
    and run exactly as an operator would type it:
    `curl -LsSf https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh | sh`.
    The run asserts that the installer met the same certificate failure, said it
    was switching to this machine's own store, exited zero, and left the current
-   release installed and answering `--version`.
+   release installed and answering `--version`. It is the way through for an
+   operator still on a version from before the retry landed.
 
 Each step prints a `PASS:` or `FAIL:` line with the decisive evidence line under
 it. The first failure ends the run non-zero.
@@ -98,14 +116,18 @@ the chain is checked against.
 
 #326 taught `agentic-hil upgrade` the same move the installer already makes:
 recognise a trust failure and retry once against the machine's own store,
-verification still on. That retry is pinned by
-`tests/test_upgrade_certificates.py`, which stubs the manager and runs
-everywhere without Docker. This container does not exercise it yet, and the
-reason is structural: it installs only *released* artifacts — the seed and the
-one-line installer both come off the index and the releases page — and the fix
-is newer than the release the bench seeds, so proof 1 reproduces the failure
-that release still has. When a release carrying the retry is what this bench
-seeds, the eval gains a third proof, run after proof 1 and before proof 2: the
-upgrade heals itself, so the operator on a proxied bench never has to reach for
-the installer at all. Until then proof 1 is expected to fail, and it failing is
-the reason the file exists.
+verification still on. That retry is pinned two ways. `tests/test_upgrade_certificates.py`
+stubs the manager and runs everywhere without Docker; proof 2 here runs the real
+thing on the bench, overlaying this checkout onto a real uv tool environment so
+the retry meets real uv, a real child environment and the machine's own trust
+store. The overlay is what lets an opt-in repository eval exercise the code under
+review without waiting for a release to carry it: proof 2 does not install a
+released artifact, it installs one by name only to reach the index the way proof
+1 does, then replaces the code with this working tree's.
+
+What is still keyed to a release is proof 1's seed. It is 0.16.0 on purpose — a
+version from before the retry, so proof 1 reproduces the failure an operator on
+that release still meets, and proof 3 shows the installer is their way through.
+When the retry ships in a release old enough to seed a bench that then has a
+newer one to move to, proof 2 can drop the overlay and seed that release
+directly, and proof 1 can move its seed forward or retire.
