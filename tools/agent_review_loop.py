@@ -1392,6 +1392,68 @@ def relocated_stall(
     return by_inode | by_content
 
 
+def committed_blobs(repo: Path, base: str, head: str) -> set[str]:
+    """The post-image blob ids the range `base..head` added or changed.
+
+    What a review of that range actually read, named the way git names a blob and
+    the way `blob_id` names the work tree -- sha1 over `blob <length>\\0` and the
+    bytes, no filters -- so a stalled object's content can be compared against it.
+    A stall whose bytes are among these reached a commit the review saw and is no
+    longer outstanding, however its name moved on the way there; a stall whose
+    bytes are not is one the round did not commit, and if its name has also left
+    the tree the work is sitting somewhere no review read.
+
+    Renames are turned off so every changed path carries its own post-image rather
+    than a similarity score, and a deletion's all-zero id -- which no content
+    hashes to -- is dropped. An empty range, or a git that will not answer, is no
+    proof of anything committed and is the empty set.
+    """
+    if base == head:
+        return set()
+    result = subprocess.run(
+        ["git", "-C", str(repo), "diff-tree", "-r", "--no-renames", "--no-abbrev", base, head],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        return set()
+    blobs: set[str] = set()
+    for line in result.stdout.splitlines():
+        meta, _, _path = line.partition("\t")
+        fields = meta.lstrip(":").split()
+        if len(fields) >= 4 and set(fields[3]) != {"0"}:
+            blobs.add(fields[3])
+    return blobs
+
+
+def changed_inherited_dirty(
+    repo: Path, present: set[str], inherited_dirty: set[str], inherited_blobs: dict[str, str]
+) -> set[str]:
+    """Inherited-dirty paths still dirty whose content this round rewrote.
+
+    The conservative destination a stall's own identity can no longer name. An
+    atomic save -- write a temporary file, rename it over the target -- lands the
+    outstanding object under an inherited-dirty name with a fresh inode and fresh
+    bytes, so neither identity `relocated_stall` matches on follows it there; all
+    that is left to go on is that a move onto inherited dirt rewrites its
+    destination. A path the run inherited dirty and still holds dirty whose content
+    is no longer what it began with is such a rewrite, whatever put it there, and
+    is where a stall that cannot be proven reviewed or removed might have landed.
+
+    `inherited_blobs` is the content of every inherited-dirty path as the round
+    found it; a path missing from it was empty or unreadable then. A path is
+    changed when its content now differs from that -- one that gained content it
+    had none of, or lost the content it had, among them -- and unchanged when the
+    two agree, which is the operator's own file this round never touched and does
+    not stop the run.
+    """
+    still = present & inherited_dirty
+    now = blob_ids(repo, still)
+    return {path for path in still if now.get(path) != inherited_blobs.get(path)}
+
+
 def listed(entries: str, limit: int) -> str:
     """`entries` as at most `limit` lines, with a count standing in for the rest."""
     lines = entries.splitlines()
@@ -2771,10 +2833,14 @@ def main(argv: list[str] | None = None) -> int:
             # subtraction below cannot see it. A pure move does not change the
             # bytes, and no move on one filesystem changes the inode even when the
             # round then edits the file in place; between them they still name the
-            # object the tree has not committed. See `relocated_stall`. Both are
-            # asked only while something is outstanding to recognise: otherwise
-            # there is nothing to compare against, and a dirty tree can be a large
-            # read.
+            # object the tree has not committed. See `relocated_stall`. An atomic
+            # save -- write a temp file and rename it over the destination --
+            # changes both, so a move onto inherited dirt made that way is named by
+            # neither; the reconciliation falls back to the content the round did
+            # commit and the inherited dirt it rewrote. See `changed_inherited_dirty`.
+            # All are asked only while something is outstanding to recognise:
+            # otherwise there is nothing to compare against, and a dirty tree can
+            # be a large read.
             inherited_blobs = {} if options.dry_run or not outstanding_paths else blob_ids(repo, inherited_dirty)
             stalled_blobs = {inherited_blobs[path] for path in outstanding_paths if path in inherited_blobs}
             stalled_objects = (
@@ -2850,7 +2916,8 @@ def main(argv: list[str] | None = None) -> int:
                 # finished the work left a clean tree, so `present_dirty` holds
                 # nothing new to carry; one that moved the work away left it dirty
                 # under its new name, and carrying keeps it from slipping the guard.
-                carry_new = bool(kept_uncommitted) or bool(followed - survived)
+                vanished = followed - survived
+                carry_new = bool(kept_uncommitted) or bool(vanished)
                 outstanding_paths = survived
                 if carry_new:
                     outstanding_paths |= present_dirty - inherited_dirty
@@ -2864,6 +2931,26 @@ def main(argv: list[str] | None = None) -> int:
                     outstanding_paths |= relocated_stall(
                         repo, present_dirty, stalled_blobs, inherited_blobs, stalled_objects
                     )
+                    # Both of those identities are the object's own, and an atomic
+                    # save replaces both: write the edited bytes to a temporary
+                    # file and rename it over the destination, and the inherited
+                    # dirty name the stall moved onto has the temp file's inode and
+                    # the temp file's bytes, so neither names it. When a followed
+                    # name vanished with no porcelain rename to account for it and
+                    # the stalled content reached no commit the review read, the
+                    # work cannot be proven reviewed or removed; keep the
+                    # inherited-dirty paths this round rewrote, since a move onto
+                    # inherited dirt always rewrites its destination and a false
+                    # stall is the safe error where a false clean exits 0 over work
+                    # no review saw. See `changed_inherited_dirty`. Asked only when
+                    # a name vanished and there is content to have committed, so an
+                    # operator's own edit stops nothing while the stall is accounted
+                    # for. The narrower identities above still carry every move they
+                    # can name, so this retains only what they could not.
+                    if vanished and stalled_blobs and not (stalled_blobs & committed_blobs(repo, last_head, head)):
+                        outstanding_paths |= changed_inherited_dirty(
+                            repo, present_dirty, inherited_dirty, inherited_blobs
+                        )
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
