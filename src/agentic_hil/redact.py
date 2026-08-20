@@ -45,8 +45,13 @@ _STREAM_KEYS = frozenset({"stdout", "stderr"})
 # `scheme://user:secret@host`: the user survives, because it names the account
 # the manager was configured with and is not the credential, and the span
 # between that colon and the `@` is masked. A URL with no password (no colon
-# inside the userinfo, or an empty one) matches nothing.
-_URL_USERINFO_PATTERN = re.compile(r"(?P<keep>[A-Za-z][A-Za-z0-9+.\-]*://[^\s:/?#@]+:)[^\s/?#@]+(?=@)")
+# inside the userinfo, or an empty one) matches nothing. The leading lookbehind
+# forbids the scheme from starting in the middle of a run of scheme-valid
+# characters: without it, a long run with no `://` (a captured stream can carry
+# 10k+ such bytes on one line) is retried as a scheme from every position, each
+# scanning the whole tail, which is quadratic and can stall result delivery. A
+# real scheme always starts at a boundary, so this changes no match.
+_URL_USERINFO_PATTERN = re.compile(r"(?P<keep>(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]*://[^\s:/?#@]+:)[^\s/?#@]+(?=@)")
 
 # `Authorization: Bearer <token>` and `Authorization: Basic <blob>`, including
 # the quoted spellings that appear when a manager echoes a header dict or a curl
@@ -92,17 +97,21 @@ _SENSITIVE_ASSIGNMENT_QUERY = re.compile(
 # concatenated quoted segments (`alpha"beta gamma"delta`) from leaking their tail
 # past a mask that stopped at the first such character. The trailing arm is a value
 # whose quote never closes, which the shell reads as the rest of its line, so the
-# mask follows it there rather than eating the lines that follow. A value that is
-# exactly one quoted segment keeps its quotes around the marker so the line still
-# reads as an assignment (`PASSWORD="[redacted]"`), an unterminated one keeps its
-# opening quote (`PASSWORD='[redacted]`), and everything else is masked bare; a
-# second pass is a no-op because `[redacted]` is itself such a value.
+# mask follows it there rather than eating the lines that follow. Inside that
+# unterminated double quote a backslash-newline is a line continuation, not the
+# value's end, so the arm consumes such continuations (repeated ones too) and the
+# mask crosses them to the real logical-line end rather than leaking the bytes
+# after the break. A value that is exactly one quoted segment keeps its quotes
+# around the marker so the line still reads as an assignment (`PASSWORD="[redacted]"`),
+# an unterminated one keeps its opening quote (`PASSWORD='[redacted]`), and
+# everything else is masked bare; a second pass is a no-op because `[redacted]` is
+# itself such a value.
 _SENSITIVE_ASSIGNMENT_SHELL = re.compile(
     r"(?P<keep>" + _ASSIGNMENT_NAME + r")"
     r"(?=[^\s;|&<>()])"
     r"(?P<value>"
     r"(?:\\[\s\S]|'[^']*'|\"(?:\\[\s\S]|[^\"\\])*\"|[^\s;|&<>()\"'\\])*"
-    r"(?P<unterm>'[^'\r\n]*|\"(?:\\[^\r\n]|[^\"\\\r\n])*)?"
+    r"(?P<unterm>'[^'\r\n]*|\"(?:\\\r?\n|\\[^\r\n]|[^\"\\\r\n])*)?"
     r")",
     re.IGNORECASE,
 )

@@ -19,6 +19,8 @@ to carry, so the content pass runs under stream keys only.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from agentic_hil.cli import emit_result
@@ -203,6 +205,49 @@ def test_a_quoted_assignment_masks_across_an_escaped_line_continuation() -> None
 
     assert "beta" not in out
     assert out == 'token="[redacted]" trailing=kept\n'
+
+
+def test_an_unterminated_quoted_assignment_masks_across_a_line_continuation() -> None:
+    """A backslash-newline inside an *unterminated* double quote is a line
+    continuation, not the value's end, so the mask crosses it to the logical
+    line's end rather than leaking the bytes on the next physical line.
+
+    `token="alpha\\<newline>beta gamma` never closes its quote, and the shell reads
+    the backslash-newline as joining the two physical lines into one value; a mask
+    that stopped its unterminated arm at the backslash-newline emitted `beta gamma`
+    in clear text. Repeated continuations are consumed the same way, and a second
+    pass over the masked line changes nothing."""
+    line = 'token="alpha\\\nbeta gamma\nnext line kept\n'
+    repeated = 'token="a\\\n\\\nb c\nnext line kept\n'
+
+    out = redact_sensitive({"stderr": line})["stderr"]
+    repeated_out = redact_sensitive({"stderr": repeated})["stderr"]
+
+    assert "beta gamma" not in out
+    assert out == 'token="[redacted]\nnext line kept\n'
+    assert redact_sensitive({"stderr": out})["stderr"] == out
+    assert "b c" not in repeated_out
+    assert repeated_out == 'token="[redacted]\nnext line kept\n'
+    assert redact_sensitive({"stderr": repeated_out})["stderr"] == repeated_out
+
+
+def test_a_long_unterminated_value_is_masked_in_linear_time() -> None:
+    """The content pass runs over captured output before both CLI and MCP
+    serialization, so it must stay linear: one long line cannot be allowed to stall
+    result delivery.
+
+    A quadratic pass took over a second on 50k characters in this checkout and did
+    not finish a 1 MB unterminated value at all; the linear pass does 1 MB in well
+    under this bound. The exact output is asserted alongside the time so a
+    regression that traded correctness for speed would fail the same test."""
+    line = 'PASSWORD="' + "a" * 1_000_000
+
+    start = time.perf_counter()
+    out = redact_sensitive({"stderr": line})["stderr"]
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 5.0, f"redaction of a 1 MB unterminated value took {elapsed:.2f}s"
+    assert out == 'PASSWORD="[redacted]'
 
 
 def test_an_unquoted_value_runs_through_the_punctuation_that_is_valid_inside_it() -> None:

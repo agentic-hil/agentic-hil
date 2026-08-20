@@ -475,10 +475,14 @@ uv_manages_tool() {
 }
 
 # The requirement set uv recorded for the tool it owns, printed only when uv keeps
-# a receipt this can read AND every recorded requirement is one this can rebuild; a
-# non-zero return says either there was no receipt or a requirement carried a shape
-# this must not reconstruct (a marker, a url, a git/path source), so the caller
-# keeps to the upgrade that preserves the recorded set verbatim instead.
+# a receipt this can read in full AND the whole recorded install can be replayed
+# faithfully; a non-zero return says the reconstruction would change what uv
+# recorded, so the caller keeps to the upgrade that preserves it verbatim instead.
+# That covers a missing or unreadable receipt, a receipt whose requirements array
+# never opened or never closed, a recorded tool option (an explicit `[tool.options]`
+# index the reconstruction would drop), a root carrying a pin or a git/path/url
+# source rather than a plain name and extras, and any `--with` requirement that
+# does not rebuild to a bare `name[extras]specifier`.
 #
 # uv writes `agentic-hil[can,pyocd] --with requests==2.32.5` into a receipt beside
 # the tool environment as a TOML array of requirement objects, inline for a lone
@@ -526,6 +530,21 @@ uv_recorded_requirements() {
         }
         return 1
     }
+    function root_ok(obj,   tmp, k) {
+        # The root requirement is rebuilt from its extras plus the pin this run
+        # names, so only name and extras replay faithfully. A recorded specifier
+        # (a pin), a directory/url/git source or a marker would be dropped by the
+        # reconstruction, so refuse the whole receipt and let the caller keep to
+        # the upgrade that preserves whatever uv recorded.
+        tmp = obj
+        while (match(tmp, /[A-Za-z][A-Za-z_-]*[ ]*=/)) {
+            k = substr(tmp, RSTART, RLENGTH)
+            sub(/[ ]*=$/, "", k)
+            if (k != "name" && k != "extras") return 0
+            tmp = substr(tmp, RSTART + RLENGTH)
+        }
+        return 1
+    }
     function pep508(obj,   nm, out, ex, item, spec) {
         if (!match(obj, /name = "[^"]*"/)) return ""
         nm = substr(obj, RSTART, RLENGTH); gsub(/name = "|"/, "", nm)
@@ -544,8 +563,12 @@ uv_recorded_requirements() {
         }
         return out
     }
-    function process(txt,   rest, obj, nm, withs, root_seen, p) {
-        withs = ""; root_seen = 0; root_extras = ""
+    function process(txt,   rest, obj, nm, root_seen, p) {
+        # Fills the globals out_extras/out_withs and returns 1 on a receipt this
+        # can replay in full, 0 on one it cannot; the caller prints only after a
+        # 1, so a rejected receipt reaches the preserving upgrade instead of a
+        # reconstruction from a partial read.
+        out_withs = ""; root_seen = 0; out_extras = ""
         rest = txt
         while (match(rest, /\{[^{}]*\}/)) {
             obj = substr(rest, RSTART, RLENGTH)
@@ -553,23 +576,39 @@ uv_recorded_requirements() {
             nm = ""
             if (match(obj, /name = "[^"]*"/)) { nm = substr(obj, RSTART, RLENGTH); gsub(/name = "|"/, "", nm) }
             if (nm == "agentic-hil" && !root_seen) {
+                if (!root_ok(obj)) return 0
                 root_seen = 1
-                root_extras = extras_of(obj)
+                out_extras = extras_of(obj)
             } else {
-                if (!object_ok(obj)) exit 1
+                if (!object_ok(obj)) return 0
                 p = pep508(obj)
-                if (p == "" || index(p, " ") > 0) exit 1
-                withs = withs p "\n"
+                if (p == "" || index(p, " ") > 0) return 0
+                out_withs = out_withs p "\n"
             }
         }
-        if (!root_seen) exit 1
-        print root_extras
-        printf "%s", withs
-        exit 0
+        if (!root_seen) return 0
+        return 1
     }
-    BEGIN { state = 0 }
+    BEGIN { state = 0; options = 0; in_options = 0 }
     {
-        s = $0
+        line = $0
+        # A recorded tool option (an explicit index, a python pin) cannot be
+        # replayed by the reconstruction, which passes none, so a receipt that
+        # records any is refused and the caller keeps to the preserving upgrade.
+        # uv writes these under a `[tool.options]` table (or sub-table / array of
+        # tables) only when there are some, so a bare header with no key before the
+        # next section is treated as no options.
+        if (line ~ /^[ \t]*\[\[?tool\.options/) {
+            if (line ~ /^[ \t]*\[tool\.options\][ \t]*$/) { in_options = 1 }
+            else { options = 1; in_options = 0 }
+            next
+        }
+        if (in_options) {
+            if (line ~ /^[ \t]*\[/) { in_options = 0 }
+            else if (line ~ /[^ \t]/ && line !~ /^[ \t]*#/) { options = 1 }
+        }
+        if (state == 2) next
+        s = line
         if (state == 0) {
             p = index(s, "requirements = [")
             if (p == 0) next
@@ -583,10 +622,19 @@ uv_recorded_requirements() {
             else if (c == "[") { depth++; interior = interior c }
             else interior = interior c
         }
-        if (state == 2) process(interior)
-        else interior = interior "\n"
+        if (state == 1) interior = interior "\n"
     }
-    END { if (state == 1) process(interior) }
+    # The receipt is read whole before anything is printed: the requirements array
+    # must have opened AND closed (state 2 — a missing anchor leaves 0, a truncated
+    # array 1), no tool option may be recorded, and every requirement must replay.
+    END {
+        if (state != 2) exit 1
+        if (options) exit 1
+        if (!process(interior)) exit 1
+        print out_extras
+        printf "%s", out_withs
+        exit 0
+    }
     ' "$uv_receipt"
 }
 

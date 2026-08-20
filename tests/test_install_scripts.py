@@ -1687,6 +1687,131 @@ def test_both_scripts_merge_the_recorded_extras_into_a_uv_refresh() -> None:
     assert "Get-RefreshSpec" in powershell, powershell
 
 
+def test_refreshing_a_uv_tool_with_a_recorded_source_falls_back_to_the_upgrade(tmp_path: Path) -> None:
+    """A root recorded with a local `directory` source (a url or git source the
+    same) cannot be rebuilt as `agentic-hil[...]` without switching the tool to the
+    public index, so the refresh reconstruction is refused and the preserving
+    `uv tool upgrade --reinstall` runs instead.
+
+    Before this fix the parser validated only the non-root requirements and read a
+    root's extras while ignoring its source, so a path/url/git installation was
+    silently reinstalled from PyPI. The stub's upgrade is a no-op, so the tool is
+    left as it was: the `damaged` marker is what proves the reconstruction install
+    did not run in its place.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(
+        tmp_path,
+        "[tool]\n"
+        'requirements = [{ name = "agentic-hil", directory = "/opt/agentic-hil-src" }]\n',
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "tool upgrade --reinstall agentic-hil" in invocations, invocations
+    assert "tool install --upgrade --reinstall agentic-hil[" not in invocations, invocations
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "damaged", transcript
+
+
+def test_refreshing_a_uv_tool_with_a_recorded_index_option_falls_back_to_the_upgrade(tmp_path: Path) -> None:
+    """A recorded `[tool.options]` index cannot be replayed by a reconstruction
+    that passes no options, so a refresh that reinstalled from `agentic-hil[...]`
+    would switch a private-index installation to the public index. The refresh now
+    refuses the reconstruction and keeps to the `uv tool upgrade --reinstall` that
+    preserves whatever uv recorded, options and all.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(
+        tmp_path,
+        "[tool]\n"
+        'requirements = [{ name = "agentic-hil", extras = ["can"] }]\n'
+        "\n"
+        "[tool.options]\n"
+        'index = ["https://buildbot:tok3n@packages.example.internal/simple/"]\n',
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "tool upgrade --reinstall agentic-hil" in invocations, invocations
+    assert "tool install --upgrade --reinstall agentic-hil[" not in invocations, invocations
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "damaged", transcript
+
+
+def test_refreshing_a_uv_tool_with_an_empty_receipt_falls_back_to_the_upgrade(tmp_path: Path) -> None:
+    """An empty receipt has no `requirements = [` anchor, so the reader must return
+    failure rather than accept it as `no extras` and reinstall a bare `agentic-hil`
+    that drops whatever the tool actually carried. The refresh falls back to the
+    preserving upgrade.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(tmp_path, "")
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "tool upgrade --reinstall agentic-hil" in invocations, invocations
+    assert "tool install --upgrade --reinstall agentic-hil" not in invocations, invocations
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "damaged", transcript
+
+
+def test_refreshing_a_uv_tool_with_a_truncated_receipt_falls_back_to_the_upgrade(tmp_path: Path) -> None:
+    """A receipt whose requirements array never closes is a partial read, so the
+    reader must return failure rather than reconstruct from the objects it did see.
+    Before this fix the awk `END` block ran `process` on the unclosed array; now a
+    never-closed array falls back to the preserving upgrade.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(
+        tmp_path,
+        "requirements = [\n"
+        '    { name = "agentic-hil", extras = ["can", "pyocd"] }\n',
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "tool upgrade --reinstall agentic-hil" in invocations, invocations
+    assert "tool install --upgrade --reinstall agentic-hil[" not in invocations, invocations
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "damaged", transcript
+
+
+def test_both_scripts_refuse_a_receipt_they_cannot_replay_in_full() -> None:
+    """The preserving-fallback contract, pinned on both scripts.
+
+    A reconstruction that would change what uv recorded must be refused so the
+    caller keeps to the upgrade that preserves it. The PowerShell side has no
+    interpreter in every checkout, so this static check is its regression guard: it
+    validates the root requirement, refuses a recorded `[tool.options]`, and reaches
+    the fallback on an empty or unreadable receipt rather than terminating or
+    reconstructing from a partial read. The shell side is exercised end to end
+    above; the same guards are asserted here for symmetry.
+    """
+    shell = _code_only(_shell_source())
+    powershell = _code_only(_powershell_source())
+
+    # The root requirement is validated too, not just the non-root ones.
+    assert "root_ok" in shell, shell
+    assert re.search(r"if \(\$k -ne 'name' -and \$k -ne 'extras'\) \{ return \$null \}", powershell), powershell
+    # A recorded tool option refuses the reconstruction (the dot is escaped in
+    # both scripts' matchers, so the literal in the code is `tool\.options`).
+    assert "tool\\.options" in shell, shell
+    assert "tool\\.options" in powershell, powershell
+    # An unreadable receipt is caught rather than terminating the run, and an empty
+    # one is refused before it is indexed as a string.
+    assert re.search(r"try \{\s*\$text = Get-Content -LiteralPath \$receipt -Raw\s*\} catch \{\s*return \$null", powershell), powershell
+    assert "[string]::IsNullOrEmpty($text)" in powershell, powershell
+
+
 def test_refreshing_a_pip_installation_forces_the_reinstall(tmp_path: Path) -> None:
     """The pip half of the same repair, run end to end through a POSIX shell.
 

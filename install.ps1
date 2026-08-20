@@ -185,10 +185,13 @@ function Test-UvManagesTool {
 
 function Get-UvRecordedRequirements {
     # The requirement set uv recorded for the tool it owns, as
-    # @{ Extras = <string[]>; Withs = <string[]> }, or $null when uv keeps no
-    # receipt this can read OR records a requirement this must not rebuild (a
-    # marker, a url, a git/path source), so the caller keeps to the upgrade that
-    # preserves the recorded set verbatim instead. uv writes
+    # @{ Extras = <string[]>; Withs = <string[]> }, or $null when the
+    # reconstruction would change what uv recorded so the caller keeps to the
+    # upgrade that preserves it verbatim instead. That covers a missing, unreadable
+    # or empty receipt, a requirements array that never opened or never closed, a
+    # recorded tool option (an explicit `[tool.options]` index), a root carrying a
+    # pin or a git/path/url source rather than a plain name and extras, and any
+    # `--with` this must not rebuild (a marker, a url, a git/path source). uv writes
     # `agentic-hil[can,pyocd] --with requests==2.32.5` into a receipt beside the
     # tool environment as a TOML array of requirement objects, inline for a lone
     # root requirement and one-per-line the moment a `--with` is added. Extras is
@@ -201,7 +204,31 @@ function Get-UvRecordedRequirements {
     if ($probe.ExitCode -ne 0) { return $null }
     $receipt = Join-Path (Join-Path $probe.Output.Trim() 'agentic-hil') 'uv-receipt.toml'
     if (-not (Test-Path -LiteralPath $receipt)) { return $null }
-    $text = Get-Content -LiteralPath $receipt -Raw
+    # $ErrorActionPreference is 'Stop' for the whole script, so an unreadable
+    # receipt would terminate the repair; catch it and fall back to the preserving
+    # upgrade instead. An empty receipt reads back as $null, which has no IndexOf.
+    try {
+        $text = Get-Content -LiteralPath $receipt -Raw
+    } catch {
+        return $null
+    }
+    if ([string]::IsNullOrEmpty($text)) { return $null }
+
+    # A recorded tool option (an explicit index, a python pin) cannot be replayed
+    # by the reconstruction, which passes none, so a receipt that records any is
+    # refused and the caller keeps to the preserving upgrade. uv writes these under
+    # a `[tool.options]` table (or sub-table / array of tables) only when there are
+    # some, so a bare header with no key before the next section is no options.
+    $inOptions = $false
+    foreach ($line in ($text -split "`n")) {
+        if ($line -match '^\s*\[\[?tool\.options') {
+            if ($line -match '^\s*\[tool\.options\]\s*$') { $inOptions = $true }
+            else { return $null }
+        } elseif ($inOptions) {
+            if ($line -match '^\s*\[') { $inOptions = $false }
+            elseif ($line -match '\S' -and $line -notmatch '^\s*#') { return $null }
+        }
+    }
 
     # Isolate the requirements array by bracket depth, from `requirements = [` to
     # its matching `]`, so the nested `extras = [...]` arrays and the trailing
@@ -227,6 +254,14 @@ function Get-UvRecordedRequirements {
         $nameMatch = [regex]::Match($obj, 'name = "([^"]*)"')
         $name = if ($nameMatch.Success) { $nameMatch.Groups[1].Value } else { '' }
         if ($name -eq 'agentic-hil' -and -not $rootSeen) {
+            # The root is rebuilt from its extras plus this run pin, so only name
+            # and extras replay faithfully; a recorded specifier (a pin), a
+            # directory/url/git source or a marker would be dropped, so refuse the
+            # whole receipt.
+            foreach ($key in [regex]::Matches($obj, '([A-Za-z][A-Za-z_-]*)[ ]*=')) {
+                $k = $key.Groups[1].Value
+                if ($k -ne 'name' -and $k -ne 'extras') { return $null }
+            }
             $rootSeen = $true
             $extrasMatch = [regex]::Match($obj, 'extras = \[([^\]]*)\]')
             if ($extrasMatch.Success) {
