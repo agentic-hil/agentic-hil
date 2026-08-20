@@ -415,6 +415,29 @@ def test_a_refusal_renders_captured_output_however_deep_the_document_nests_it() 
     assert "066EFF3" in out
 
 
+def test_a_refusal_whose_diagnosis_is_a_list_of_objects_renders_the_entries() -> None:
+    """The other half of the shape, and the catalogue already points at it.
+
+    `installation_in_use` names each holding process in `held_by` and
+    `device_busy` says "Read `holder`" in its own remediation, so the advice this
+    same rendering prints was sending people to fields it did not print.
+    """
+    document = {
+        "ok": False,
+        "error_type": "installation_in_use",
+        "summary": "The installation is in use and nothing was removed.",
+        "held_by": [
+            {"pid": 4412, "image": "C:/Users/op/AppData/Local/Programs/claude/claude.exe"},
+            {"pid": 7781, "image": "C:/Users/op/.local/bin/agentic-hil.exe"},
+        ],
+    }
+    out = _rendered(document, "upgrade")
+    assert "\n  held_by\n" in out
+    assert "4412" in out and "7781" in out
+    assert "claude.exe" in out and "agentic-hil.exe" in out
+    assert "{" not in out and "[" not in out
+
+
 def test_captured_output_that_is_enormous_says_how_much_it_cut_and_keeps_both_ends() -> None:
     """A truncation nobody can see is the same defect one level down.
 
