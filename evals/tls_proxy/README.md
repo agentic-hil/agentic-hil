@@ -77,7 +77,7 @@ Under pytest the same build and run live in
 which skips unless Docker is present **and** `AGENTIC_HIL_TLS_PROXY_EVAL=1` is
 set. It is not part of default CI, for the same reason it is opt-in here: it
 costs network and minutes. Set `AGENTIC_HIL_TLS_PROXY_EVAL_IMAGE` to build and
-run under a different tag. The rest of that file reads these two committed files
+run under a different tag. The rest of that file reads the committed files here
 and runs everywhere.
 
 ## Trust boundary
@@ -86,10 +86,10 @@ The CA is generated inside the image, is trusted by that one container, and its
 key never leaves it. The base image is pinned by digest and the uv bootstrap is
 pinned by version and checked against its hash before it runs, so nothing the
 image installs is a moving download piped into a shell. Nothing here relaxes
-certificate verification: there is no
-`--insecure`, no `--trusted-host`, no `SSL_CERT_FILE`, and a test asserts there
-never will be. Both attempts a run makes verify the chain; the only thing that
-changes between them is which store the chain is checked against.
+certificate verification: there is no `--insecure`, no `--trusted-host`, no
+`SSL_CERT_FILE`, and a test asserts there never will be. Both attempts a run
+makes verify the chain; the only thing that changes between them is which store
+the chain is checked against.
 
 ## What comes next
 

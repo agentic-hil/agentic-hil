@@ -6,7 +6,7 @@ store, `HTTPS_PROXY` exported, uv installed. On such a bench `agentic-hil
 upgrade` fails with `invalid peer certificate: UnknownIssuer` while curl and apt
 keep working, because uv validates against roots compiled into its own binary.
 
-Two kinds of test live here. The static ones read the two committed files and
+Two kinds of test live here. The static ones read the committed files and
 hold the properties that make the reproduction worth anything: the base image is
 pinned, the machine trusts the proxy through the system store rather than
 through a switch, the proof runs without the variable the seed needs, and
