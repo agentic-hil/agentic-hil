@@ -67,46 +67,50 @@ _ASSIGNMENT_NAME = (
     r"(?:token|secret|password|passwd|api[_\-]?key|auth[_\-]?key)\s*=\s*"
 )
 
-# A quoted value has to be masked through its *matching* closing quote, not up to
-# the first delimiter inside it: `PASSWORD='correct horse battery staple'` and
-# `PASSWORD="alpha,beta"` carry the credential across the space and the comma that
-# a bare-token value would stop at, and a value quoted across a newline
-# (`PASSWORD="alpha<newline>beta"`) carries it across that too; stopping at any of
-# them emitted the tail in clear text. So a quote after `=` switches passes, in
-# two arms. The first consumes the value through the matching closing quote
-# wherever it is, line boundaries included: an escaped quote (`\"`) does not close
-# it and an escaped anything (`\<newline>`, a line continuation) is consumed
-# whole, so the credential is masked to the quote that really ends it. The second
-# arm is the fallback for a value that never closes, which the shell reads as the
-# rest of its line, so the mask ends there rather than eating the lines that
-# follow. Either way the quote characters survive so the line still reads as an
-# assignment, and re-masking `[redacted]` between the quotes yields `[redacted]`
-# again, so a second pass is a no-op.
-_SENSITIVE_ASSIGNMENT_QUOTED = re.compile(
-    r"(?P<keep>" + _ASSIGNMENT_NAME + r"(?P<quote>[\"']))"
-    r"(?:"
-    r"(?:\\[\s\S]|(?!(?P=quote))[^\\])*?(?P<close>(?P=quote))"
-    r"|"
-    r"(?:\\.|(?!(?P=quote))[^\\\r\n])*"
+# A value's terminators depend on the context it sits in, and a query string and a
+# shell command line do not share them: `)` and `;` are ordinary data inside a
+# query value but end a shell word, and `#` ends a query (its fragment) but is
+# ordinary data inside a shell word. Applying the union of both to every
+# assignment therefore stopped a mask short of the real value end and leaked the
+# tail, so the two are split into their own arms, told apart by the character
+# before the name — a `?` or `&` marks a query parameter, nothing else does.
+
+# A query parameter (`?token=…`, `&api_key=…`): the value runs to whitespace,
+# another `&`, a `#` fragment, or a quote, and through the `)`, `;` and `,` that
+# are ordinary inside a query value, so `?access_token=alpha)beta&next=1` masks
+# `alpha)beta` rather than leaking `)beta`.
+_SENSITIVE_ASSIGNMENT_QUERY = re.compile(
+    r"(?P<keep>(?<=[?&])" + _ASSIGNMENT_NAME + r")[^\s\"'&#]+",
+    re.IGNORECASE,
+)
+
+# A shell / environment / flag assignment: the value is a shell word, so it ends
+# only at unescaped whitespace or one of `;|&<>()`, and is built from any run of
+# escaped characters, single- and double-quoted segments, and ordinary characters
+# — `#` and `,` among them, both data mid-word. Reading the whole word is what
+# keeps an escaped space (`alpha\ beta`), an embedded `#` (`alpha#beta`) and
+# concatenated quoted segments (`alpha"beta gamma"delta`) from leaking their tail
+# past a mask that stopped at the first such character. The trailing arm is a value
+# whose quote never closes, which the shell reads as the rest of its line, so the
+# mask follows it there rather than eating the lines that follow. A value that is
+# exactly one quoted segment keeps its quotes around the marker so the line still
+# reads as an assignment (`PASSWORD="[redacted]"`), an unterminated one keeps its
+# opening quote (`PASSWORD='[redacted]`), and everything else is masked bare; a
+# second pass is a no-op because `[redacted]` is itself such a value.
+_SENSITIVE_ASSIGNMENT_SHELL = re.compile(
+    r"(?P<keep>" + _ASSIGNMENT_NAME + r")"
+    r"(?=[^\s;|&<>()])"
+    r"(?P<value>"
+    r"(?:\\[\s\S]|'[^']*'|\"(?:\\[\s\S]|[^\"\\])*\"|[^\s;|&<>()\"'\\])*"
+    r"(?P<unterm>'[^'\r\n]*|\"(?:\\[^\r\n]|[^\"\\\r\n])*)?"
     r")",
     re.IGNORECASE,
 )
 
-# An unquoted value is a shell token, a query parameter or a command flag, so it
-# ends only at what actually ends a value in those contexts — whitespace, a query
-# `&`, a fragment `#`, a shell `;` or a closing `)` — and runs through the commas
-# and brackets that are ordinary inside a value (`PASSWORD=alpha,beta` is one
-# value, not `alpha` and a leaked `,beta`, and `PASSWORD=abc[def` is one value,
-# not `abc` and a leaked `[def`). Keeping the rest of the line byte-identical is
-# the point, so nothing else is treated as a boundary. A second pass is still a
-# no-op: the `[redacted]` the first pass wrote is itself such a value and
-# re-masks to `[redacted]`, so brackets do not need to be boundaries to reach
-# idempotence. The value cannot begin with a quote — that is the quoted pass's job
-# above — because the character class excludes both quotes.
-_SENSITIVE_ASSIGNMENT_UNQUOTED = re.compile(
-    r"(?P<keep>" + _ASSIGNMENT_NAME + r")[^\s\"'&#;)]+",
-    re.IGNORECASE,
-)
+# Exactly one quoted segment and nothing else: whether a masked shell value keeps
+# its surrounding quotes turns on this, so an escaped quote inside (`"a\"b"`) still
+# counts as one segment.
+_SINGLE_QUOTED_SEGMENT = re.compile(r"'[^']*'|\"(?:\\[\s\S]|[^\"\\])*\"")
 
 
 def _mask_keep(match: re.Match[str]) -> str:
@@ -114,20 +118,29 @@ def _mask_keep(match: re.Match[str]) -> str:
     return match.group("keep") + _REDACTION_MARKER
 
 
-def _mask_quoted(match: re.Match[str]) -> str:
-    """Keep the prefix and its opening quote, mask the value, restore the closing
-    quote when the value actually reached one."""
-    return match.group("keep") + _REDACTION_MARKER + (match.group("close") or "")
+def _mask_shell(match: re.Match[str]) -> str:
+    """Keep the assignment prefix and mask the value, keeping the quotes a wholly
+    quoted value carries and the opening quote an unterminated one carries so the
+    masked line still reads as an assignment."""
+    keep = match.group("keep")
+    value = match.group("value")
+    if value.startswith(("'", '"')):
+        if _SINGLE_QUOTED_SEGMENT.fullmatch(value):
+            return keep + value[0] + _REDACTION_MARKER + value[0]
+        if match.group("unterm"):
+            return keep + value[0] + _REDACTION_MARKER
+    return keep + _REDACTION_MARKER
 
 
-# Each pass is paired with how its match is rebuilt: the closing quote a quoted
-# assignment consumed is put back, every other pass just keeps its prefix. The
-# quoted pass runs before the unquoted one so a quoted value is taken whole.
+# Each pass is paired with how its match is rebuilt. The query pass runs before the
+# shell pass so a query value is masked with the query's own terminators; the shell
+# pass then finds nothing left to do on it (the `[redacted]` it wrote is itself a
+# valid shell value that re-masks to `[redacted]`).
 _CONTENT_PATTERNS = (
     (_URL_USERINFO_PATTERN, _mask_keep),
     (_AUTH_HEADER_PATTERN, _mask_keep),
-    (_SENSITIVE_ASSIGNMENT_QUOTED, _mask_quoted),
-    (_SENSITIVE_ASSIGNMENT_UNQUOTED, _mask_keep),
+    (_SENSITIVE_ASSIGNMENT_QUERY, _mask_keep),
+    (_SENSITIVE_ASSIGNMENT_SHELL, _mask_shell),
 )
 
 

@@ -183,33 +183,86 @@ function Test-UvManagesTool {
     return $false
 }
 
-function Get-UvRecordedExtras {
-    # The extras uv recorded for the tool it owns, as a string[], or $null when uv
-    # keeps no receipt this can read. uv writes `agentic-hil[can,pyocd]` into a
-    # receipt beside the tool environment as `extras = ["can", "pyocd"]`, and
-    # reading it back is what lets a refresh add the extra THIS run asks for
-    # without dropping one an earlier install or a hand edit recorded. Only the
-    # first requirement object is read, which is the agentic-hil requirement uv
-    # records first. The comma before the return keeps an empty result an empty
-    # array rather than letting PowerShell collapse it to $null, so "no extras
-    # recorded" stays distinct from "no receipt to read".
+function Get-UvRecordedRequirements {
+    # The requirement set uv recorded for the tool it owns, as
+    # @{ Extras = <string[]>; Withs = <string[]> }, or $null when uv keeps no
+    # receipt this can read OR records a requirement this must not rebuild (a
+    # marker, a url, a git/path source), so the caller keeps to the upgrade that
+    # preserves the recorded set verbatim instead. uv writes
+    # `agentic-hil[can,pyocd] --with requests==2.32.5` into a receipt beside the
+    # tool environment as a TOML array of requirement objects, inline for a lone
+    # root requirement and one-per-line the moment a `--with` is added. Extras is
+    # the agentic-hil root's extras; Withs is every other recorded requirement
+    # rebuilt as a `--with` PEP 508 string (`name[extras]specifier`). Reading the
+    # whole set back is what lets a refresh add the extra THIS run asks for while
+    # keeping both a root extra an earlier install recorded and a `--with` it
+    # recorded; a bare `tool install agentic-hil[...]` drops the latter.
     $probe = Invoke-Captured -File 'uv' -Arguments @('tool', 'dir')
     if ($probe.ExitCode -ne 0) { return $null }
     $receipt = Join-Path (Join-Path $probe.Output.Trim() 'agentic-hil') 'uv-receipt.toml'
     if (-not (Test-Path -LiteralPath $receipt)) { return $null }
     $text = Get-Content -LiteralPath $receipt -Raw
-    $extras = New-Object System.Collections.Generic.List[string]
-    $requirements = [regex]::Match($text, 'requirements = \[(.*)')
-    if ($requirements.Success) {
-        $firstObject = ($requirements.Groups[1].Value -split '\}', 2)[0]
-        $extrasMatch = [regex]::Match($firstObject, 'extras = \[([^\]]*)\]')
-        if ($extrasMatch.Success) {
-            foreach ($quoted in [regex]::Matches($extrasMatch.Groups[1].Value, '"([^"]*)"')) {
-                $extras.Add($quoted.Groups[1].Value)
-            }
-        }
+
+    # Isolate the requirements array by bracket depth, from `requirements = [` to
+    # its matching `]`, so the nested `extras = [...]` arrays and the trailing
+    # `entrypoints = [...]` block do not confuse where the requirement list ends.
+    $anchor = 'requirements = ['
+    $start = $text.IndexOf($anchor)
+    if ($start -lt 0) { return $null }
+    $depth = 1
+    $interior = New-Object System.Text.StringBuilder
+    for ($i = $start + $anchor.Length; $i -lt $text.Length -and $depth -gt 0; $i++) {
+        $ch = $text[$i]
+        if ($ch -eq '[') { $depth++; [void]$interior.Append($ch) }
+        elseif ($ch -eq ']') { $depth--; if ($depth -gt 0) { [void]$interior.Append($ch) } }
+        else { [void]$interior.Append($ch) }
     }
-    return ,$extras.ToArray()
+    if ($depth -ne 0) { return $null }
+
+    $extras = New-Object System.Collections.Generic.List[string]
+    $withs = New-Object System.Collections.Generic.List[string]
+    $rootSeen = $false
+    foreach ($object in [regex]::Matches($interior.ToString(), '\{[^{}]*\}')) {
+        $obj = $object.Value
+        $nameMatch = [regex]::Match($obj, 'name = "([^"]*)"')
+        $name = if ($nameMatch.Success) { $nameMatch.Groups[1].Value } else { '' }
+        if ($name -eq 'agentic-hil' -and -not $rootSeen) {
+            $rootSeen = $true
+            $extrasMatch = [regex]::Match($obj, 'extras = \[([^\]]*)\]')
+            if ($extrasMatch.Success) {
+                foreach ($quoted in [regex]::Matches($extrasMatch.Groups[1].Value, '"([^"]*)"')) {
+                    $extras.Add($quoted.Groups[1].Value)
+                }
+            }
+            continue
+        }
+        # A non-root requirement is replayed as --with, so it must rebuild to a bare
+        # PEP 508 string: only name/extras/specifier, and no whitespace in the
+        # result. Anything else (a marker, a url) refuses the whole receipt.
+        foreach ($key in [regex]::Matches($obj, '([A-Za-z][A-Za-z_-]*)[ ]*=')) {
+            $k = $key.Groups[1].Value
+            if ($k -ne 'name' -and $k -ne 'extras' -and $k -ne 'specifier') { return $null }
+        }
+        if (-not $nameMatch.Success) { return $null }
+        $req = $name
+        $extrasMatch = [regex]::Match($obj, 'extras = \[([^\]]*)\]')
+        if ($extrasMatch.Success) {
+            $items = New-Object System.Collections.Generic.List[string]
+            foreach ($quoted in [regex]::Matches($extrasMatch.Groups[1].Value, '"([^"]*)"')) {
+                $items.Add($quoted.Groups[1].Value)
+            }
+            if ($items.Count -gt 0) { $req += '[' + ([string]::Join(',', $items)) + ']' }
+        }
+        $specMatch = [regex]::Match($obj, 'specifier = "([^"]*)"')
+        if ($specMatch.Success) { $req += $specMatch.Groups[1].Value }
+        if ($req -match '\s') { return $null }
+        $withs.Add($req)
+    }
+    if (-not $rootSeen) { return $null }
+    # Hashtable member assignment preserves an array as-is (no unrolling and no
+    # array-wrap comma), so an empty or single Extras/Withs stays the array
+    # Get-RefreshSpec and the --with loop iterate over.
+    return @{ Extras = $extras.ToArray(); Withs = $withs.ToArray() }
 }
 
 function Get-RefreshSpec {
@@ -238,11 +291,16 @@ function Install-WithUv {
             # bare recorded requirement never had is added (a `tool upgrade` would
             # never add it). --reinstall replaces the files even when the recorded
             # version is already current, which is the repair the anchor exists
-            # for. When uv keeps no readable receipt, fall back to the upgrade that
-            # preserves whatever it did record.
-            $recorded = Get-UvRecordedExtras
+            # for. A recorded `--with` requirement is replayed as its own --with so
+            # the reinstall keeps it too; a bare `tool install agentic-hil[...]`
+            # would drop it. When uv keeps no readable receipt, or records a
+            # requirement this cannot rebuild without changing it, fall back to the
+            # upgrade that preserves whatever it did record.
+            $recorded = Get-UvRecordedRequirements
             if ($null -ne $recorded) {
-                Invoke-Uv -Arguments @('tool', 'install', '--upgrade', '--reinstall', (Get-RefreshSpec -Recorded $recorded))
+                $uvArgs = @('tool', 'install', '--upgrade', '--reinstall', (Get-RefreshSpec -Recorded $recorded.Extras))
+                foreach ($recordedWith in $recorded.Withs) { $uvArgs += @('--with', $recordedWith) }
+                Invoke-Uv -Arguments $uvArgs
             } else {
                 Invoke-Uv -Arguments @('tool', 'upgrade', '--reinstall', 'agentic-hil')
             }

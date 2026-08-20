@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -1398,7 +1399,83 @@ def _uv_refresh_stub(release: str, uv_log: Path, pycan_marker: Path, marker: Pat
     )
 
 
-def _run_uv_refresh(tmp_path: Path, recorded_receipt: str) -> tuple[subprocess.CompletedProcess[str], str, Path, Path, Path]:
+def _uv_refresh_with_stub(release: str, uv_log: Path, pycan_marker: Path, marker: Path) -> str:
+    """A uv stub for the multiline `--with` refresh path. Like ``_uv_refresh_stub``
+    it answers the probes and repairs the console script under --reinstall, but its
+    `tool install` models real uv's receipt for a tool that carries `--with`
+    requirements: it finds the reconstructed `agentic-hil[...]` spec and every
+    `--with` value it was handed, and rewrites the receipt to the multiline shape
+    uv writes — the root requirement first, then one object per replayed `--with`.
+    That receipt is what proves both the recorded root extra and the recorded
+    `--with` survived the refresh instead of being dropped."""
+    return (
+        f'echo "$*" >> "{uv_log}"\n'
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  if [ "$3" = "--bin" ]; then echo "$UV_TOOL_BIN_DIR"; else echo "$UV_TOOL_ROOT"; fi\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "list" ]; then\n'
+        f'  echo "agentic-hil v{release}"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  case "$*" in\n'
+        "    *--reinstall*) : ;;\n"
+        "    *) exit 0 ;;\n"
+        "  esac\n"
+        # Separate the reconstructed root spec from the replayed --with values.
+        '  spec=""; withs=""; prev=""\n'
+        '  for a in "$@"; do\n'
+        '    if [ "$prev" = "--with" ]; then withs="$withs $a"; fi\n'
+        '    case "$a" in agentic-hil*) spec="$a" ;; esac\n'
+        '    prev="$a"\n'
+        "  done\n"
+        '  extras=$(printf \'%s\' "$spec" | sed -n \'s/[^[]*\\[\\([^]]*\\)\\].*/\\1/p\' | tr \',\' \' \')\n'
+        '  quoted=""\n'
+        '  for e in $extras; do\n'
+        '    if [ -z "$quoted" ]; then quoted="\\"$e\\""; else quoted="$quoted, \\"$e\\""; fi\n'
+        "  done\n"
+        '  {\n'
+        '    echo "requirements = ["\n'
+        '    if [ -n "$quoted" ]; then\n'
+        '      echo "    { name = \\"agentic-hil\\", extras = [$quoted] },"\n'
+        '    else\n'
+        '      echo "    { name = \\"agentic-hil\\" },"\n'
+        '    fi\n'
+        '    for w in $withs; do\n'
+        '      case "$w" in\n'
+        '        *==*) echo "    { name = \\"${w%%==*}\\", specifier = \\"==${w#*==}\\" }," ;;\n'
+        '        *) echo "    { name = \\"$w\\" }," ;;\n'
+        '      esac\n'
+        "    done\n"
+        '    echo "]"\n'
+        '  } > "$UV_TOOL_ROOT/agentic-hil/uv-receipt.toml"\n'
+        '  case " $extras " in\n'
+        f'    *" can "*) echo installed > "{pycan_marker}" ;;\n'
+        "  esac\n"
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        f'  --version) echo "{release}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "upgrade" ]; then\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+def _run_uv_refresh(
+    tmp_path: Path,
+    recorded_receipt: str,
+    stub: Callable[[str, Path, Path, Path], str] = _uv_refresh_stub,
+) -> tuple[subprocess.CompletedProcess[str], str, Path, Path, Path]:
     """Drive `install.sh` end to end against a uv-managed tool whose receipt records
     ``recorded_receipt``. Returns the process, the uv invocation log, and the three
     files the assertions read: the rewritten receipt, the python-can marker, and the
@@ -1435,7 +1512,7 @@ def _run_uv_refresh(tmp_path: Path, recorded_receipt: str) -> tuple[subprocess.C
         "exit 0\n",
     )
     _stub_executable(tools / "claude", "exit 0\n")
-    _stub_executable(tools / "uv", _uv_refresh_stub(release, uv_log, pycan_marker, marker))
+    _stub_executable(tools / "uv", stub(release, uv_log, pycan_marker, marker))
 
     result = subprocess.run(
         [shell, str(SHELL_SCRIPT)],
@@ -1532,15 +1609,62 @@ def test_refreshing_a_bare_uv_tool_adds_the_can_extra_this_run_asks_for(tmp_path
     assert pycan_marker.is_file(), transcript
 
 
+def test_refreshing_a_uv_tool_keeps_a_recorded_with_requirement_and_extra(tmp_path: Path) -> None:
+    """The regression a multiline receipt caused: a recorded `--with` was dropped.
+
+    uv writes a multiline requirement list the moment the tool carries a `--with`
+    dependency, and the previous reader only saw the first object on the
+    `requirements = [` line — so a real `agentic-hil[pyocd] --with requests==2.32.5`
+    parsed to no extras, and the refresh reinstalled from a bare `agentic-hil[can]`
+    that dropped both the recorded pyOCD extra and the recorded requests `--with`.
+    The refresh now reads the whole recorded set across lines: it reinstalls from
+    `agentic-hil[can,pyocd]` and replays `--with requests==2.32.5`, so the recorded
+    extra, the requested extra, and the recorded `--with` all survive.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(
+        tmp_path,
+        'requirements = [\n'
+        '    { name = "agentic-hil", extras = ["pyocd"] },\n'
+        '    { name = "requests", specifier = "==2.32.5" },\n'
+        ']\n'
+        'entrypoints = [\n'
+        '    { name = "agentic-hil", install-path = "/x", from = "agentic-hil" },\n'
+        ']\n',
+        stub=_uv_refresh_with_stub,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    # The reinstall merged the recorded pyocd with this run's can AND replayed the
+    # recorded --with, rather than dropping either the way the bare-spec reinstall
+    # did, and rather than falling back to the `tool upgrade` that cannot add can.
+    assert "tool install --upgrade --reinstall agentic-hil[can,pyocd] --with requests==2.32.5" in invocations, invocations
+    assert "tool upgrade" not in invocations, invocations
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+    # The receipt the reinstall recorded still names both extras and the --with.
+    recorded = receipt.read_text(encoding="utf-8")
+    assert '"pyocd"' in recorded, recorded
+    assert '"can"' in recorded, recorded
+    assert '"requests"' in recorded, recorded
+    assert "==2.32.5" in recorded, recorded
+    assert pycan_marker.is_file(), transcript
+
+
 def test_both_scripts_merge_the_recorded_extras_into_a_uv_refresh() -> None:
     """The merge-on-refresh contract, pinned on both scripts.
 
     A uv-managed refresh must reinstall from the extras uv recorded merged with
-    this run's, so it neither drops a recorded extra nor ignores a requested one.
-    The PowerShell side has no interpreter in every checkout, so this static check
-    is its regression guard: it reads uv's receipt, builds the merged spec, and
-    hands it to `tool install --reinstall` rather than reinstalling the bare name
-    through `tool upgrade` when the receipt is there.
+    this run's, so it neither drops a recorded extra nor ignores a requested one,
+    and it must replay every recorded `--with` requirement so a multiline receipt
+    does not lose it. The PowerShell side has no interpreter in every checkout, so
+    this static check is its regression guard: it reads uv's receipt, builds the
+    merged spec plus the recorded `--with` arguments, and hands them to
+    `tool install --reinstall` rather than reinstalling the bare name through
+    `tool upgrade` when the receipt is there.
     """
     shell = _code_only(_shell_source())
     powershell = _code_only(_powershell_source())
@@ -1548,9 +1672,15 @@ def test_both_scripts_merge_the_recorded_extras_into_a_uv_refresh() -> None:
     # Both read the requirement uv recorded, from the receipt beside the tool env.
     assert "uv-receipt.toml" in shell, shell
     assert "uv-receipt.toml" in powershell, powershell
-    # Both build the merged requirement and reinstall from it under --reinstall.
-    assert re.search(r'tool install --upgrade --reinstall "\$\(refresh_spec ', shell), shell
+    # Both build the merged requirement and reinstall from it under --reinstall,
+    # with the recorded --with requirements replayed after it.
+    assert re.search(r'tool install --upgrade --reinstall "\$\(refresh_spec .*\$with_flags', shell), shell
     assert re.search(r"'tool', 'install', '--upgrade', '--reinstall', \(Get-RefreshSpec", powershell), powershell
+    assert re.search(r"foreach \(\$recordedWith in \$recorded\.Withs\).*'--with', \$recordedWith", powershell), powershell
+    # Both read the whole recorded requirement set, not just the first object, so a
+    # multiline receipt's --with requirements are seen.
+    assert "uv_recorded_requirements" in shell, shell
+    assert "Get-UvRecordedRequirements" in powershell, powershell
     # And the pre-fix bare-name upgrade is only the fallback for an unreadable
     # receipt, not the path a present receipt takes.
     assert "refresh_spec" in shell, shell

@@ -228,6 +228,69 @@ def test_an_unquoted_value_runs_through_the_punctuation_that_is_valid_inside_it(
     assert redact_sensitive({"stdout": bracket_out})["stdout"] == bracket_out
 
 
+def test_a_shell_assignment_runs_through_a_hash_and_an_escaped_space() -> None:
+    """A `#` is a comment only at the start of a word, so mid-value it is data, and
+    a backslash-space is one escaped character that keeps the word going.
+
+    `PASSWORD=alpha#beta` is one shell value, not `alpha` and a leaked `#beta`, and
+    `PASSWORD=alpha\\ beta` is one value `alpha beta`, not `alpha` and a leaked
+    ` beta`; a mask that took `#` or the escaped space for a boundary emitted the
+    tail in clear text. Both end at the unescaped space that really ends the
+    word."""
+    hashed = "  env: PASSWORD=alpha#beta rest\n"
+    escaped = "  env: PASSWORD=alpha\\ beta rest\n"
+
+    hashed_out = redact_sensitive({"stdout": hashed})["stdout"]
+    escaped_out = redact_sensitive({"stdout": escaped})["stdout"]
+
+    assert "beta" not in hashed_out
+    assert hashed_out == "  env: PASSWORD=[redacted] rest\n"
+    assert "beta" not in escaped_out
+    assert escaped_out == "  env: PASSWORD=[redacted] rest\n"
+    assert redact_sensitive({"stdout": hashed_out})["stdout"] == hashed_out
+    assert redact_sensitive({"stdout": escaped_out})["stdout"] == escaped_out
+
+
+def test_a_shell_assignment_masks_concatenated_quoted_segments() -> None:
+    """A shell word is any run of quoted and unquoted segments stuck together, so a
+    quote that ends does not end the value if the word keeps going.
+
+    `PASSWORD=alpha"beta gamma"delta` and `PASSWORD="alpha"beta` are each one value
+    to the space that ends the word; a mask that stopped at the first closing quote
+    left the concatenated remainder in clear text. The whole word is masked, and
+    the surrounding quotes are dropped because the value is not a lone quoted
+    string."""
+    trailing = 'PASSWORD=alpha"beta gamma"delta rest\n'
+    leading = 'PASSWORD="alpha"beta rest\n'
+
+    trailing_out = redact_sensitive({"stdout": trailing})["stdout"]
+    leading_out = redact_sensitive({"stderr": leading})["stderr"]
+
+    assert "beta gamma" not in trailing_out
+    assert "delta" not in trailing_out
+    assert trailing_out == "PASSWORD=[redacted] rest\n"
+    assert "beta" not in leading_out
+    assert leading_out == "PASSWORD=[redacted] rest\n"
+    assert redact_sensitive({"stdout": trailing_out})["stdout"] == trailing_out
+
+
+def test_a_query_value_runs_through_the_shell_delimiters_that_are_data_in_it() -> None:
+    """`)` and `;` end a shell word but are ordinary inside a query value, so a
+    query parameter runs through them to the `&` that ends it.
+
+    `?access_token=alpha)beta&next=1` masks `alpha)beta`, not `alpha` and a leaked
+    `)beta`; the `&` and the following parameter are what the operator needs, so
+    the mask ends there."""
+    query = "  GET https://h/p?access_token=alpha)beta;more&next=1\n"
+
+    out = redact_sensitive({"stdout": query})["stdout"]
+
+    assert "alpha)beta;more" not in out
+    assert ")beta" not in out
+    assert out == "  GET https://h/p?access_token=[redacted]&next=1\n"
+    assert redact_sensitive({"stdout": out})["stdout"] == out
+
+
 def test_a_second_pass_over_a_masked_quoted_assignment_changes_nothing() -> None:
     """Redacting `'[redacted]'` again yields `'[redacted]'`, so the quoted pass is
     idempotent the same way the unquoted one is."""

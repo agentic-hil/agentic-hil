@@ -474,23 +474,131 @@ uv_manages_tool() {
     uv tool list 2>/dev/null | grep -q '^agentic-hil[[:space:]]'
 }
 
-# The extras uv recorded for the tool it owns, one per line, printed only when uv
-# keeps a receipt this can read; a non-zero return says there was none to read.
-# uv writes `agentic-hil[can,pyocd]` into a receipt beside the tool environment as
-# `extras = ["can", "pyocd"]`, and reading it back is what lets a refresh add the
-# extra THIS run asks for without dropping one an earlier install or a hand edit
-# recorded. Only the first requirement object is read, which is the agentic-hil
-# requirement uv records first, so a `--with` a hand edit added stays out of it.
-uv_recorded_extras() {
+# The requirement set uv recorded for the tool it owns, printed only when uv keeps
+# a receipt this can read AND every recorded requirement is one this can rebuild; a
+# non-zero return says either there was no receipt or a requirement carried a shape
+# this must not reconstruct (a marker, a url, a git/path source), so the caller
+# keeps to the upgrade that preserves the recorded set verbatim instead.
+#
+# uv writes `agentic-hil[can,pyocd] --with requests==2.32.5` into a receipt beside
+# the tool environment as a TOML array of requirement objects, inline for a lone
+# root requirement and one-per-line the moment a `--with` is added:
+#
+#     requirements = [
+#         { name = "agentic-hil", extras = ["can", "pyocd"] },
+#         { name = "requests", specifier = "==2.32.5" },
+#     ]
+#
+# The output is the agentic-hil root's extras on the first line (space-separated,
+# possibly empty) and every other recorded requirement on a following line, rebuilt
+# as a `--with` PEP 508 string (`name[extras]specifier`). Reading the whole set
+# back is what lets a refresh add the extra THIS run asks for while keeping both a
+# root extra an earlier install recorded and a `--with` requirement it recorded;
+# reinstalling from the root alone drops the latter, which the previous reader did
+# whenever the receipt went multiline. The parse spans lines and tracks bracket
+# depth so the nested `extras = [...]` and the trailing `entrypoints = [...]` block
+# do not confuse where the requirement list ends.
+uv_recorded_requirements() {
     uv_tool_root=$(uv tool dir 2>/dev/null) || return 1
     uv_receipt="${uv_tool_root%/}/agentic-hil/uv-receipt.toml"
     [ -r "$uv_receipt" ] || return 1
-    sed -n 's/.*requirements = \[//p' "$uv_receipt" \
-        | sed 's/}.*//' \
-        | grep -o 'extras = \[[^][]*\]' \
-        | grep -o '"[^"]*"' \
-        | tr -d '"'
-    return 0
+    awk '
+    function extras_of(obj,   ex, out) {
+        out = ""
+        if (match(obj, /extras = \[[^]]*\]/)) {
+            ex = substr(obj, RSTART, RLENGTH)
+            while (match(ex, /"[^"]*"/)) {
+                out = out (out == "" ? "" : " ") substr(ex, RSTART + 1, RLENGTH - 2)
+                ex = substr(ex, RSTART + RLENGTH)
+            }
+        }
+        return out
+    }
+    function object_ok(obj,   tmp, k) {
+        # Only name/extras/specifier can be rebuilt as a bare PEP 508 string; a
+        # marker, url or git/path field cannot, so refuse the whole receipt.
+        tmp = obj
+        while (match(tmp, /[A-Za-z][A-Za-z_-]*[ ]*=/)) {
+            k = substr(tmp, RSTART, RLENGTH)
+            sub(/[ ]*=$/, "", k)
+            if (k != "name" && k != "extras" && k != "specifier") return 0
+            tmp = substr(tmp, RSTART + RLENGTH)
+        }
+        return 1
+    }
+    function pep508(obj,   nm, out, ex, item, spec) {
+        if (!match(obj, /name = "[^"]*"/)) return ""
+        nm = substr(obj, RSTART, RLENGTH); gsub(/name = "|"/, "", nm)
+        out = nm
+        if (match(obj, /extras = \[[^]]*\]/)) {
+            ex = substr(obj, RSTART, RLENGTH); item = ""
+            while (match(ex, /"[^"]*"/)) {
+                item = item (item == "" ? "" : ",") substr(ex, RSTART + 1, RLENGTH - 2)
+                ex = substr(ex, RSTART + RLENGTH)
+            }
+            if (item != "") out = out "[" item "]"
+        }
+        if (match(obj, /specifier = "[^"]*"/)) {
+            spec = substr(obj, RSTART, RLENGTH); gsub(/specifier = "|"/, "", spec)
+            out = out spec
+        }
+        return out
+    }
+    function process(txt,   rest, obj, nm, withs, root_seen, p) {
+        withs = ""; root_seen = 0; root_extras = ""
+        rest = txt
+        while (match(rest, /\{[^{}]*\}/)) {
+            obj = substr(rest, RSTART, RLENGTH)
+            rest = substr(rest, RSTART + RLENGTH)
+            nm = ""
+            if (match(obj, /name = "[^"]*"/)) { nm = substr(obj, RSTART, RLENGTH); gsub(/name = "|"/, "", nm) }
+            if (nm == "agentic-hil" && !root_seen) {
+                root_seen = 1
+                root_extras = extras_of(obj)
+            } else {
+                if (!object_ok(obj)) exit 1
+                p = pep508(obj)
+                if (p == "" || index(p, " ") > 0) exit 1
+                withs = withs p "\n"
+            }
+        }
+        if (!root_seen) exit 1
+        print root_extras
+        printf "%s", withs
+        exit 0
+    }
+    BEGIN { state = 0 }
+    {
+        s = $0
+        if (state == 0) {
+            p = index(s, "requirements = [")
+            if (p == 0) next
+            s = substr(s, p + 16)
+            state = 1; depth = 1
+        }
+        n = length(s)
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c == "]") { depth--; if (depth == 0) { state = 2; break }; interior = interior c }
+            else if (c == "[") { depth++; interior = interior c }
+            else interior = interior c
+        }
+        if (state == 2) process(interior)
+        else interior = interior "\n"
+    }
+    END { if (state == 1) process(interior) }
+    ' "$uv_receipt"
+}
+
+# The `--with` arguments a uv-managed refresh replays, built from the recorded
+# requirement set ($1, the multi-line value uv_recorded_requirements printed): its
+# second line onward, each turned into `--with <req>`. The reconstructed
+# requirements are bare PEP 508 strings with no spaces, so the caller can rely on
+# word-splitting to pass them as separate arguments.
+uv_with_flags() {
+    printf '%s\n' "$1" | sed -n '2,$p' | while IFS= read -r recorded_with; do
+        [ -n "$recorded_with" ] && printf -- '--with %s ' "$recorded_with"
+    done
 }
 
 # The requirement a uv-managed refresh reinstalls from: this run's extras merged
@@ -531,11 +639,20 @@ install_with_uv() {
                 # and a `--can` a bare recorded requirement never had is added (a
                 # `tool upgrade` would never add it). --reinstall replaces the
                 # files even when the recorded version is already current, which is
-                # the repair the anchor exists for. When uv keeps no readable
-                # receipt, fall back to the upgrade that preserves whatever it did
-                # record rather than reinstalling from extras this could not read.
-                if recorded_extras=$(uv_recorded_extras); then
-                    run_uv tool install --upgrade --reinstall "$(refresh_spec "$recorded_extras")"
+                # the repair the anchor exists for. A recorded `--with` requirement
+                # is replayed as its own --with so the reinstall keeps it too; a bare
+                # `tool install agentic-hil[...]` would drop it. When uv keeps no
+                # readable receipt, or records a requirement this cannot rebuild
+                # without changing it, fall back to the upgrade that preserves
+                # whatever it did record rather than reinstalling from a set this
+                # could not read back in full.
+                if recorded=$(uv_recorded_requirements); then
+                    recorded_extras=$(printf '%s\n' "$recorded" | sed -n '1p')
+                    with_flags=$(uv_with_flags "$recorded")
+                    # Word-splitting on with_flags is intended: each replayed
+                    # requirement is a space-free PEP 508 string.
+                    # shellcheck disable=SC2086
+                    run_uv tool install --upgrade --reinstall "$(refresh_spec "$recorded_extras")" $with_flags
                 else
                     run_uv tool upgrade --reinstall agentic-hil
                 fi
