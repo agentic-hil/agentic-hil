@@ -121,6 +121,18 @@ STLINK_RESET_MODES: dict[str, dict[str, list[str]]] = {
     "run": {"args": ["-rst"], "success_text": ["MCU Reset", "reset is performed"]},
     "halt": {"args": ["-halt"], "success_text": ["Core halted"]},
 }
+# `debuggers.<name>.connect_mode` in the spelling STM32CubeProgrammer's own
+# `--connect` usage prints: "[mode=<mode>] : Connection mode. Value in
+# {UR/HOTPLUG/NORMAL/POWERDOWN/HWRSTPULSE}". Taken from the CLI's usage text
+# rather than assumed, because `UR` is the one value here that could not be
+# guessed from the word it abbreviates, and the same text is where its
+# consequence is written down too: "Reset mode with UR connection mode is HWrst",
+# so a bench that selects it needs the probe's reset line wired to NRST.
+#
+# Only the two modes the configuration can ask for are here. NORMAL is not one of
+# them: it stays what `reset_target` and the memory reads connect with, chosen by
+# the operation rather than by the file.
+STLINK_CONNECT_MODES: dict[str, str] = {"hotplug": "HOTPLUG", "under_reset": "UR"}
 # What the offline symbol query prints, and what is read back out of it. Named
 # markers rather than GDB's own `$1 = ...` value history: a command that failed
 # prints an error and no marker at all, so a missing answer can never be
@@ -284,7 +296,7 @@ class STLinkBackend:
                 return {"ok": False, "tool": "flash_firmware", "backend": self.backend_name, "error_type": "invalid_argument", "summary": "Flashing .bin artifacts with ST-Link requires debuggers.<name>.flash_address.", "artifact": {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}}
             write_args.append(self.config.debugger.flash_address)
         reset_args = ["-rst"] if reset_after_flash else []
-        result = self._run_stlink("flash_firmware", [*self._connection_args("HOTPLUG"), *write_args, "-v", *reset_args])
+        result = self._run_stlink("flash_firmware", [*self._connection_args(self._flash_connect_mode()), *write_args, "-v", *reset_args])
         result["artifact"] = {"source": artifact.get("source", "path"), "path": artifact.get("path"), "sha256": artifact.get("sha256")}
         result["verify"] = True
         result["reset_after_flash"] = reset_after_flash
@@ -560,11 +572,29 @@ class STLinkBackend:
             return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "success_confirmed": True, "operation_result": {"confirmed": True, "matched_success_text": confirmation["matched"]}, "summary": "STM32CubeProgrammer CLI command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
         return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path, completed), audit_error)
 
-    def _connection_args(self, mode: Literal["HOTPLUG", "NORMAL"]) -> list[str]:
+    def _connection_args(self, mode: Literal["HOTPLUG", "NORMAL", "UR"]) -> list[str]:
         args = ["-c", f"port={self.config.debugger.interface}", f"mode={mode}"]
         if self.config.debugger.probe_id is not None:
             args.append(f"sn={self.config.debugger.probe_id}")
         return args
+
+    def _flash_connect_mode(self) -> Literal["HOTPLUG", "UR"]:
+        """The connect mode the flash command uses, from the configuration.
+
+        The one call that reads `connect_mode`, and it reads it because it is the
+        one whose failure the setting exists for: a core executing from flash can
+        defeat the erase a hot-plug connect leaves it running through, and holding
+        the target in reset for the connect is the documented remedy. Halting
+        first is not one on this interface: the CLI reboots the target on every
+        invocation, so a halt from a previous call has not survived into this one.
+
+        `probe_target` deliberately keeps connecting hot plug whatever this says.
+        It is the least intrusive call this backend makes and has to stay that
+        way, and it erases nothing, so it has no failure to fix. `reset_target`
+        and the memory reads keep their own NORMAL connect for the same kind of
+        reason: what they do to the target is decided by the operation.
+        """
+        return STLINK_CONNECT_MODES[self.config.debugger.connect_mode]  # type: ignore[return-value]
 
     # STM32CubeProgrammer's own report that the transport never existed, for any
     # tool, plus — for the reads, whose command drives nothing of its own — its
