@@ -14,7 +14,7 @@ set -eu
 # and step 4 registers the skill out of whatever copy step 1 decided to keep, so
 # a floor left a returning user on an old package and an old skill at once. A
 # development tree reports X.Y.Z.devN, which compares as X.Y.Z and stays put.
-RELEASE="0.16.0"
+RELEASE="0.17.0"
 
 AGENT=""
 WITH_AGENT_INSTALL=1
