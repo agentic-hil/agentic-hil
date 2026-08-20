@@ -1952,6 +1952,65 @@ def test_editing_the_operators_own_dirty_file_is_not_read_as_the_stall_arriving(
     assert (repository / "renamed.py").read_text(encoding="utf-8") == _OPERATOR_DIRT + _ROUND_TWO_EDIT
 
 
+_CRLF_STALL = b"def fixed():\r\n    return 'a CRLF stall, normalised to LF on the way into git'\r\n"
+_WRITES_A_CRLF_STALL_WITHOUT_COMMITTING = (
+    f"pathlib.Path('fix.py').write_bytes({_CRLF_STALL!r})\n"
+    "sys.stdout.write('wrote an untracked CRLF fix.py, then never came back to commit it\\n')\n"
+)
+_COMMITS_THE_CRLF_STALL_UNDER_ITS_OWN_NAME_AND_EDITS_THE_OPERATORS_FILE = (
+    # core.autocrlf normalises the CRLF work-tree file to LF on the way into git, so
+    # the blob the commit stores is not a raw hash of the bytes on disk. The stall is
+    # committed under its own name -- reviewed and gone -- and the operator's dirty
+    # file is edited beside it, the same shape a moved stall leaves.
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: commit the CRLF stall, normalised to LF'], check=True)\n"
+    f"pathlib.Path('renamed.py').write_text({_OPERATOR_DIRT + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    "sys.stdout.write('committed the CRLF stall under its own name and edited the operator file\\n')\n"
+)
+
+
+def test_a_crlf_stall_committed_under_a_clean_filter_is_recognised_as_reviewed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stall committed through a filter must be named the way git names its commit.
+
+    The mirror case, but `core.autocrlf=true` rewrites the CRLF work-tree file to LF
+    on the way into git, so the blob the commit stores is not a raw hash of the bytes
+    on disk. Round 1 stalls with untracked CRLF `fix.py`; round 2 commits it under its
+    own name and edits the operator's dirty `renamed.py` beside it. Hashing the
+    work-tree bytes raw named the stall by a CRLF id the normalised-LF commit never
+    carried, so the proof that the stall reached a reviewed commit failed on content,
+    the operator's edited file was retained, and a clean review was reported stalled.
+    Naming the work tree the way `git add` would -- filters applied, the object format
+    the repository uses -- matches the stall to its own commit, and the run ends clean.
+    """
+    repository = _repository(tmp_path)
+    _in(repository, "config", "core.autocrlf", "true")
+    # The operator's own uncommitted work, edited beside the committed stall.
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_crlf_then_finishes_beside_the_dirt",
+        _WRITES_A_CRLF_STALL_WITHOUT_COMMITTING,
+        _COMMITS_THE_CRLF_STALL_UNDER_ITS_OWN_NAME_AND_EDITS_THE_OPERATORS_FILE,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_CLEAN
+    # The stall is committed, normalised to LF, and reviewed; the operator's file is
+    # left exactly as the round left it, uncommitted and blocking nothing.
+    assert _in(repository, "show", "HEAD:fix.py") == _CRLF_STALL.replace(b"\r\n", b"\n").decode()
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == _OPERATOR_DIRT + _ROUND_TWO_EDIT
+
+
 _MOVES_THE_STALLED_FILE_ONTO_INHERITED_DIRT_AND_EDITS_IT = (
     # The move-onto-inherited-dirt case, but the round edits the file after it
     # lands. `replace` carries the stalled fix.py's inode onto renamed.py, and the
@@ -2353,6 +2412,73 @@ def test_a_zero_byte_stall_atomic_saved_onto_inherited_dirt_does_not_slip_a_clea
     assert "the review never saw" in f"{captured.out}{captured.err}"
 
 
+_HARD_LINKS_THE_STALL_TO_AN_ALIAS_AND_ATOMIC_SAVES_THE_STALL_ONTO_INHERITED_DIRT = (
+    # A hard link carries the stall's inode onto a second name while the stall is
+    # still alive, so alias.py and fix.py are the one object under two names.
+    "pathlib.Path('alias.py').hardlink_to('fix.py')\n"
+    # The stall then moves onto the operator's dirty renamed.py and an atomic save
+    # replaces both its identities there: the edited work goes to a temp file renamed
+    # over renamed.py, so renamed.py takes a fresh inode and the edited bytes while
+    # alias.py keeps the stall's original inode and original bytes.
+    "pathlib.Path('fix.py').replace('renamed.py')\n"
+    f"pathlib.Path('atomic.tmp').write_text({FIX + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    "pathlib.Path('atomic.tmp').replace('renamed.py')\n"
+    # Only the alias is committed. The stall's inode and its bytes both reach a commit
+    # -- but under alias.py, not the name the stall was followed to -- so a range-wide
+    # check for either would read the object as reviewed and gone.
+    "subprocess.run(['git', 'add', 'alias.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: commit the hard-linked alias'], check=True)\n"
+    "sys.stdout.write('hard-linked the stall to alias.py, atomic-saved the edit onto the dirt, committed the alias\\n')\n"
+)
+
+
+def test_committing_a_hard_linked_alias_does_not_clear_the_stall_atomic_saved_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An alias sharing the stall's inode must not prove the object itself was committed.
+
+    An inode is not one file's alone: a hard link puts it under a second name. Round 1
+    stalls with untracked `fix.py`; round 2 hard-links it to `alias.py`, moves `fix.py`
+    onto the operator's dirty `renamed.py`, atomic-saves edited bytes over it, and
+    commits only `alias.py`. The alias carries the stall's original inode *and* its
+    original bytes into the commit, so a proof that asked whether the stall's identity
+    reached the range *anywhere* read it as reviewed, dropped `renamed.py`, and exited 0
+    over the edited work no review saw. Asking instead whether the identity is what the
+    range committed at the very name the stall was followed to keeps the alias from
+    vouching -- `fix.py` reached no commit, `alias.py` is another name -- so the object
+    stays outstanding and the run stops as stalled with the work still in the tree.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the pathname round 2 will move onto.
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_commits_a_hard_linked_alias",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _HARD_LINKS_THE_STALL_TO_AN_ALIAS_AND_ATOMIC_SAVES_THE_STALL_ONTO_INHERITED_DIRT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_commits_a_hard_linked_alias") == 2
+    # The committed alias carries the stalled bytes; the stalled object was not committed
+    # at the name it was followed to, and the edited work is nowhere in history.
+    assert _in(repository, "show", "HEAD:alias.py") == FIX
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    # The stalled work, plus the round-2 edit, is untracked and outside every range.
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX + _ROUND_TWO_EDIT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
 def test_content_identity_is_only_asked_of_a_path_that_has_content(tmp_path: Path) -> None:
     """A directory, a path that is gone and an empty file identify nothing.
 
@@ -2362,6 +2488,7 @@ def test_content_identity_is_only_asked_of_a_path_that_has_content(tmp_path: Pat
     is identical to every other empty file's, so matching on it would report the
     stall as having arrived anywhere a round happened to truncate a file.
     """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     (tmp_path / "here.py").write_bytes(b"same bytes\n")
     (tmp_path / "elsewhere.py").write_bytes(b"same bytes\n")
     (tmp_path / "other.py").write_bytes(b"different bytes\n")
@@ -2373,9 +2500,45 @@ def test_content_identity_is_only_asked_of_a_path_that_has_content(tmp_path: Pat
 
     assert set(found) == {"here.py", "elsewhere.py", "other.py"}
     assert found["here.py"] == found["elsewhere.py"] != found["other.py"]
-    # Git's own object id for the bytes on disk, so git agrees about them.
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    assert _in(tmp_path, "hash-object", "--no-filters", "here.py").strip() == found["here.py"]
+    # Git's own object id for the content on disk, the identity `git add` would store.
+    assert _in(tmp_path, "hash-object", "here.py").strip() == found["here.py"]
+
+
+def test_blob_ids_use_the_repositorys_object_format_and_clean_filters(tmp_path: Path) -> None:
+    """The work-tree id is git's own, so a stall committed through a filter still matches.
+
+    `committed_blobs` reads the object ids git stored; `blob_ids` must name the work
+    tree the same way, or a stall committed under its own name never matches its own
+    commit. A raw hash of the bytes on disk does not: a `core.autocrlf` clean filter
+    rewrites CRLF to LF on the way into git, and an `extensions.objectFormat=sha256`
+    repository names objects in 64 hex digits, not sha1's 40. Both namespaces are here
+    at once, and hashing through git -- the path's attributes applied, the repository's
+    format used -- matches the work-tree file to the very post-image its commit stores.
+    """
+    subprocess.run(["git", "init", "-q", "--object-format=sha256", str(tmp_path)], check=True)
+    for name, value in (
+        ("user.name", "A Developer"),
+        ("user.email", "dev@example.invalid"),
+        ("commit.gpgsign", "false"),
+        ("core.autocrlf", "true"),
+    ):
+        subprocess.run(["git", "-C", str(tmp_path), "config", name, value], check=True)
+    (tmp_path / "README.md").write_text("start\n", encoding="utf-8")
+    _in(tmp_path, "add", "README.md")
+    _in(tmp_path, "commit", "-q", "-m", "initial")
+    base = _in(tmp_path, "rev-parse", "HEAD").strip()
+    (tmp_path / "crlf.py").write_bytes(b"line one\r\nline two\r\n")
+
+    found = agent_review_loop.blob_ids(tmp_path, {"crlf.py"})
+
+    # Sha256's 64 hex digits, not sha1's 40, and git's own id for the filtered content.
+    assert len(found["crlf.py"]) == 64
+    assert found["crlf.py"] == _in(tmp_path, "hash-object", "crlf.py").strip()
+    # Exactly the post-image the commit stores, so a committed stall matches its own range.
+    _in(tmp_path, "add", "crlf.py")
+    _in(tmp_path, "commit", "-q", "-m", "commit the crlf stall")
+    head = _in(tmp_path, "rev-parse", "HEAD").strip()
+    assert agent_review_loop.committed_blobs(tmp_path, base, head) == {"crlf.py": found["crlf.py"]}
 
 
 def test_filesystem_identity_tells_apart_files_that_content_cannot(tmp_path: Path) -> None:
@@ -2405,14 +2568,15 @@ def test_filesystem_identity_tells_apart_files_that_content_cannot(tmp_path: Pat
 
 
 def test_committed_blobs_are_the_range_post_images_a_review_would_read(tmp_path: Path) -> None:
-    """The bytes a range committed, named the way `blob_id` names the work tree.
+    """The bytes a range committed at each path, named the way `blob_id` names the work tree.
 
     The proof a stall reached a commit no identity has to carry: the content a
-    review of the range actually read. Each path a range added or changed is
-    named by its post-image blob, git's own object id and `blob_id`'s too, so a
-    stalled object's bytes can be looked for among them. An empty range committed
-    nothing, and a deletion carries an all-zero post-image and no content, so it
-    is left out rather than counted as something reviewed.
+    review of the range actually read, kept by the path it landed at so a stall's
+    bytes can be looked for at the very name it was followed to. Each path a range
+    added or changed is named by its post-image blob, git's own object id and
+    `blob_id`'s too. An empty range committed nothing, and a deletion carries an
+    all-zero post-image and no content, so it is left out rather than counted as
+    something reviewed.
     """
     repository = _repository(tmp_path)
     base = _in(repository, "rev-parse", "HEAD").strip()
@@ -2424,31 +2588,31 @@ def test_committed_blobs_are_the_range_post_images_a_review_would_read(tmp_path:
 
     found = agent_review_loop.committed_blobs(repository, base, head)
 
-    # Exactly the two post-images the range introduced, as `blob_id` names them.
+    # Exactly the two post-images the range introduced, keyed by path, as `blob_id` names them.
     assert found == {
-        agent_review_loop.blob_id(repository / "added.py"),
-        agent_review_loop.blob_id(repository / "README.md"),
+        "added.py": agent_review_loop.blob_id(repository, "added.py"),
+        "README.md": agent_review_loop.blob_id(repository, "README.md"),
     }
     # An empty range added nothing, whatever the tree holds.
-    assert agent_review_loop.committed_blobs(repository, head, head) == set()
+    assert agent_review_loop.committed_blobs(repository, head, head) == {}
     # A range that only deletes carries no post-image content, so it is empty.
     (repository / "added.py").unlink()
     _in(repository, "add", "-A")
     _in(repository, "commit", "-q", "-m", "remove the added file")
     gone = _in(repository, "rev-parse", "HEAD").strip()
-    assert agent_review_loop.committed_blobs(repository, head, gone) == set()
+    assert agent_review_loop.committed_blobs(repository, head, gone) == {}
 
 
 def test_committed_objects_are_the_filesystem_identities_at_the_paths_a_range_committed(tmp_path: Path) -> None:
-    """The inodes now under the range's paths, the proof a copy of the bytes cannot fake.
+    """The inode now under each of the range's paths, the proof a copy of the bytes cannot fake.
 
     `git commit` never touches the work tree, so a file committed under a name keeps
     the inode it had before, and the identity at the committed name afterwards is the
     identity the reconciliation captured before the round. Each path a range added or
-    changed is read for the object now under it, so a stalled object's inode can be
-    looked for among them and told apart from a mere copy of its bytes committed
-    elsewhere. An empty range committed nothing, and a path the range only deleted
-    has no work-tree file left to identify, so it drops.
+    changed is read for the object now under it and kept by that path, so a stalled
+    object's inode can be looked for at the very name it was followed to and told apart
+    from a mere copy of its bytes committed elsewhere. An empty range committed nothing,
+    and a path the range only deleted has no work-tree file left to identify, so it drops.
     """
     repository = _repository(tmp_path)
     base = _in(repository, "rev-parse", "HEAD").strip()
@@ -2460,24 +2624,24 @@ def test_committed_objects_are_the_filesystem_identities_at_the_paths_a_range_co
 
     found = agent_review_loop.committed_objects(repository, base, head)
 
-    # Exactly the identities of the two work-tree files the range committed.
+    # Exactly the identities of the two work-tree files the range committed, keyed by path.
     assert found == {
-        agent_review_loop.object_id(repository / "added.py"),
-        agent_review_loop.object_id(repository / "README.md"),
+        "added.py": agent_review_loop.object_id(repository / "added.py"),
+        "README.md": agent_review_loop.object_id(repository / "README.md"),
     }
     # A copy of the committed bytes at another path is a different object, so the
     # range's identities are not the bytes' -- the tell `committed_blobs` cannot give.
     (repository / "copy.py").write_text("brand new content\n", encoding="utf-8")
-    assert agent_review_loop.object_id(repository / "copy.py") not in found
+    assert agent_review_loop.object_id(repository / "copy.py") not in found.values()
     (repository / "copy.py").unlink()
     # An empty range committed nothing.
-    assert agent_review_loop.committed_objects(repository, head, head) == set()
+    assert agent_review_loop.committed_objects(repository, head, head) == {}
     # A range that only deletes leaves no work-tree file to identify.
     (repository / "added.py").unlink()
     _in(repository, "add", "-A")
     _in(repository, "commit", "-q", "-m", "remove the added file")
     gone = _in(repository, "rev-parse", "HEAD").strip()
-    assert agent_review_loop.committed_objects(repository, head, gone) == set()
+    assert agent_review_loop.committed_objects(repository, head, gone) == {}
 
 
 def test_changed_inherited_dirty_keeps_what_the_round_rewrote_and_leaves_what_it_did_not(tmp_path: Path) -> None:
@@ -2490,6 +2654,7 @@ def test_changed_inherited_dirty_keeps_what_the_round_rewrote_and_leaves_what_it
     operator's own file the round never touched reads the same and is left out, as
     is a path no longer present at all.
     """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     (tmp_path / "rewritten.py").write_bytes(b"what the round left behind\n")
     (tmp_path / "untouched.py").write_bytes(b"the operator's own work, as the round found it\n")
     (tmp_path / "filled.py").write_bytes(b"content it had none of before\n")
@@ -2498,14 +2663,12 @@ def test_changed_inherited_dirty_keeps_what_the_round_rewrote_and_leaves_what_it
     # captured `inherited_blobs`: the rewritten path had other bytes, the cleared
     # path had content it has since lost. The filled path was empty then and so
     # carried no content identity, which is why it is absent below.
-    started_rewritten = tmp_path / "started_rewritten"
-    started_rewritten.write_bytes(b"what the round started with\n")
-    started_cleared = tmp_path / "started_cleared"
-    started_cleared.write_bytes(b"content the round cleared out\n")
+    (tmp_path / "started_rewritten").write_bytes(b"what the round started with\n")
+    (tmp_path / "started_cleared").write_bytes(b"content the round cleared out\n")
     inherited_blobs = {
-        "rewritten.py": agent_review_loop.blob_id(started_rewritten),
-        "untouched.py": agent_review_loop.blob_id(tmp_path / "untouched.py"),
-        "cleared.py": agent_review_loop.blob_id(started_cleared),
+        "rewritten.py": agent_review_loop.blob_id(tmp_path, "started_rewritten"),
+        "untouched.py": agent_review_loop.blob_id(tmp_path, "untouched.py"),
+        "cleared.py": agent_review_loop.blob_id(tmp_path, "started_cleared"),
     }
     inherited_dirty = {"rewritten.py", "untouched.py", "filled.py", "cleared.py", "gone.py"}
     present = {"rewritten.py", "untouched.py", "filled.py", "cleared.py"}

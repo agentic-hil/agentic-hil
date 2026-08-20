@@ -61,7 +61,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
-import hashlib
 import json
 import os
 import re
@@ -1275,14 +1274,19 @@ def dirty_records(repo: Path, paperwork: tuple[Path, ...] = ()) -> tuple[set[str
     return _porcelain_z_records(result.stdout)
 
 
-def blob_id(path: Path) -> str | None:
-    """`path`'s current content as git would name it, or None when it names nothing.
+def blob_id(repo: Path, relative: str) -> str | None:
+    """`relative`'s current content as git would name it, or None when it names nothing.
 
-    Git's own object id: sha1 over `blob <length>\\0` and the bytes on disk, which
-    is the identity git itself uses to say two pathnames hold the same object. No
-    filters are applied, because both sides of every comparison here are bytes in
-    the same work tree. Read in chunks so a large dirty file is not pulled into
-    memory whole.
+    Git's own object id for the file on disk, computed the way `git add` would: the
+    repository's object format -- sha1, or the sha256 an `extensions.objectFormat`
+    repository asks for -- over the content a clean filter would store, `core.autocrlf`
+    and any `.gitattributes` conversion among them. That is the identity
+    `committed_blobs` reads out of the range's post-images, so a work-tree file and the
+    commit it reached are named alike. A raw hash of the bytes on disk is not: wherever
+    a filter rewrites content on the way into git, or the repository names objects in
+    sha256, the two live in different namespaces and never match, which read a stall
+    committed under its own name as still outstanding. See `blob_ids`, which hashes a
+    whole set in one pass, and does the reading.
 
     A directory (an untracked one is reported as a path in its own right), a path
     that is gone, and one that will not open have no content to identify. Neither
@@ -1290,26 +1294,68 @@ def blob_id(path: Path) -> str | None:
     matching on it would say the stalled work had arrived at any path a round
     happened to truncate. All four are None rather than a shared placeholder.
     """
+    return blob_ids(repo, {relative}).get(relative)
+
+
+def has_content(path: Path) -> bool:
+    """Whether `path` is a regular file with bytes in it, the only kind git is asked to name.
+
+    A directory, a path that is gone or will not `stat`, and an empty file are all
+    excluded before git is asked: the first two hold no content to identify, and every
+    empty file's content is every other's, so a blob id is asked only of what a match
+    on it can tell apart. See `blob_id`.
+    """
     try:
-        if not path.is_file():
-            return None
-        size = path.stat().st_size
-        if not size:
-            return None
-        digest = hashlib.sha1(usedforsecurity=False)
-        digest.update(b"blob %d\0" % size)
-        with path.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
+        return path.is_file() and path.stat().st_size > 0
     except OSError:
-        return None
-    return digest.hexdigest()
+        return False
 
 
 def blob_ids(repo: Path, paths: set[str]) -> dict[str, str]:
-    """The content identity of each of `paths`, the ones that have none left out."""
-    asked = ((path, blob_id(repo / path)) for path in paths)
-    return {path: blob for path, blob in asked if blob is not None}
+    """The content identity of each of `paths`, the ones that have none left out.
+
+    Git's own object ids, from `git hash-object` over the whole set in one pass so a
+    large dirty tree costs one child rather than one per path, and with the object
+    format and clean filters the repository itself would apply -- the identity
+    `committed_blobs` compares against, not a raw hash of the bytes. Paths with no
+    content to name are dropped before git is asked; a path that races the hash away
+    and fails the batch is retried on its own, so one casualty does not take the rest
+    of the set with it.
+    """
+    named = sorted(path for path in paths if has_content(repo / path))
+    hashed = _hash_object(repo, named)
+    if hashed is not None:
+        return dict(zip(named, hashed, strict=True))
+    resolved: dict[str, str] = {}
+    for path in named:
+        one = _hash_object(repo, [path])
+        if one:
+            resolved[path] = one[0]
+    return resolved
+
+
+def _hash_object(repo: Path, names: list[str]) -> list[str] | None:
+    """`git hash-object` for `names`, one id per name in order, or None when it would not answer.
+
+    None is the batch git refused -- a path that vanished under it among the reasons --
+    told apart from an empty set, which is simply no ids to return. The id count is
+    checked against the names because a partial answer cannot be lined back up with the
+    paths that asked for it, and a mismatch is refused rather than misattributed.
+    """
+    if not names:
+        return []
+    result = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "--stdin-paths"],
+        input="".join(f"{name}\n" for name in names),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        return None
+    ids = result.stdout.splitlines()
+    return ids if len(ids) == len(names) else None
 
 
 def object_id(path: Path) -> tuple[int, int] | None:
@@ -1392,24 +1438,25 @@ def relocated_stall(
     return by_inode | by_content
 
 
-def committed_blobs(repo: Path, base: str, head: str) -> set[str]:
-    """The post-image blob ids the range `base..head` added or changed.
+def committed_blobs(repo: Path, base: str, head: str) -> dict[str, str]:
+    """The post-image blob id the range `base..head` left at each path it added or changed.
 
-    What a review of that range actually read, named the way git names a blob and
-    the way `blob_id` names the work tree -- sha1 over `blob <length>\\0` and the
-    bytes, no filters -- so a stalled object's content can be compared against it.
-    A stall whose bytes are among these reached a commit the review saw and is no
-    longer outstanding, however its name moved on the way there; a stall whose
-    bytes are not is one the round did not commit, and if its name has also left
-    the tree the work is sitting somewhere no review read.
+    What a review of that range actually read, named the way git names a blob and the
+    way `blob_id` names the work tree -- the repository's object format over the content
+    a clean filter would store -- and kept by the path so a stall's bytes can be looked
+    for at the very name it was followed to, not merely somewhere in the range. A stall
+    whose bytes are the post-image at that name reached a commit the review saw; a copy
+    of its bytes committed under some other name did not put the object there, and
+    reading a stall as committed because its bytes turned up anywhere let a hard-linked
+    alias vouch for work no review read.
 
     Renames are turned off so every changed path carries its own post-image rather
     than a similarity score, and a deletion's all-zero id -- which no content
     hashes to -- is dropped. An empty range, or a git that will not answer, is no
-    proof of anything committed and is the empty set.
+    proof of anything committed and is the empty mapping.
     """
     if base == head:
-        return set()
+        return {}
     result = subprocess.run(
         ["git", "-C", str(repo), "diff-tree", "-r", "--no-renames", "--no-abbrev", base, head],
         capture_output=True,
@@ -1418,42 +1465,42 @@ def committed_blobs(repo: Path, base: str, head: str) -> set[str]:
         errors="replace",
     )
     if result.returncode != 0:
-        return set()
-    blobs: set[str] = set()
+        return {}
+    blobs: dict[str, str] = {}
     for line in result.stdout.splitlines():
-        meta, _, _path = line.partition("\t")
+        meta, _, path = line.partition("\t")
         fields = meta.lstrip(":").split()
-        if len(fields) >= 4 and set(fields[3]) != {"0"}:
-            blobs.add(fields[3])
+        if path and len(fields) >= 4 and set(fields[3]) != {"0"}:
+            blobs[path] = fields[3]
     return blobs
 
 
-def committed_objects(repo: Path, base: str, head: str) -> set[tuple[int, int]]:
-    """The filesystem identities now sitting at the paths the range `base..head` committed.
+def committed_objects(repo: Path, base: str, head: str) -> dict[str, tuple[int, int]]:
+    """The filesystem identity now sitting at each path the range `base..head` committed.
 
     The proof a stalled object reached a commit that its bytes alone cannot give,
-    and the reason `committed_blobs` is not asked to give it by itself. `git commit`
-    never touches the work tree, so a file committed under a name still carries the
-    inode it had when the round began; the identity captured before the round is the
-    identity of the work-tree file at the committed name afterwards. A stall whose
-    inode is among these was read by a review under some committed name, however its
-    own name moved to get there.
+    kept by the path so a stall can be asked whether it was committed *where it was
+    followed to* rather than merely somewhere in the range. `git commit` never touches
+    the work tree, so a file committed under a name still carries the inode it had when
+    the round began; the identity captured before the round is the identity of the
+    work-tree file at the committed name afterwards. A stall whose inode is the one now
+    at the name it moved to was read by a review under that name.
 
-    Content alone cannot say as much. A copy of the stall's bytes committed at
-    another path, while the stall itself was atomic-saved somewhere no review read,
-    puts those bytes in `committed_blobs` without the object ever reaching a commit;
-    an inode a later file reused after the stall freed it carries the bytes of an
-    unrelated commit rather than the stall's. Each is half a proof, so the caller
-    counts an object reviewed only when both its inode and its content reached the
-    range -- a copy fails the inode half, a reuse fails the content half.
+    Reading it by inode rather than by content is what tells a commit of the object
+    apart from a commit of a copy of its bytes: a hard link, or a rewritten duplicate,
+    can put the stall's bytes at a committed path while the object itself was atomic-
+    saved somewhere no review read, and its inode is not there to be found. Asking at
+    the followed name rather than across the range is what an alias cannot fake -- the
+    inode it carries lands on some *other* committed name, not the one the stall was
+    followed to. See `committed_blobs` for the content half, asked at the same name.
 
     Renames are turned off so every changed path carries its own name, and a path
     the range only deleted has no work-tree file left to identify and drops out on
     the `object_id` that finds none. An empty range committed nothing, and a git
-    that will not answer is no proof, so both are the empty set.
+    that will not answer is no proof, so both are the empty mapping.
     """
     if base == head:
-        return set()
+        return {}
     result = subprocess.run(
         ["git", "-C", str(repo), "diff-tree", "-r", "--no-renames", "--name-only", "--no-commit-id", base, head],
         capture_output=True,
@@ -1462,14 +1509,14 @@ def committed_objects(repo: Path, base: str, head: str) -> set[tuple[int, int]]:
         errors="replace",
     )
     if result.returncode != 0:
-        return set()
-    objects: set[tuple[int, int]] = set()
+        return {}
+    objects: dict[str, tuple[int, int]] = {}
     for path in result.stdout.splitlines():
         if not path:
             continue
         obj = object_id(repo / path)
         if obj is not None:
-            objects.add(obj)
+            objects[path] = obj
     return objects
 
 
@@ -2988,32 +3035,38 @@ def main(argv: list[str] | None = None) -> int:
                     # it can be proven reviewed: a `git commit` leaves the work tree
                     # be, so an object committed under some name still sits there with
                     # the inode and the bytes it began with, and only an object whose
-                    # inode *and* content both reached this round's commits was read
-                    # by the review. The two are asked together on purpose -- an inode
-                    # a later file reused answers for an unrelated commit's bytes, a
-                    # copy of the stall's bytes committed elsewhere answers under
-                    # another inode -- and per object rather than for the range at
-                    # large, since a range-wide check let any one committed object
-                    # clear the rest. An object that clears neither half might have
-                    # been atomic-saved onto inherited dirt, so keep the paths this
+                    # inode *and* content are what the round committed *at the name it
+                    # was followed to* was read by the review. Asking at that name, not
+                    # across the range at large, is what a hard link cannot fake -- it
+                    # carries the stall's inode onto some other committed name (the
+                    # alias) while the object itself is atomic-saved onto inherited
+                    # dirt, so the followed name holds neither its inode nor its bytes
+                    # and the fallback below is not suppressed. The inode and content
+                    # are still asked together, an inode a later file reused answering
+                    # for an unrelated commit's bytes and a copy of the bytes committed
+                    # elsewhere answering under another inode, and per object rather
+                    # than for the range, since a range-wide check let any one committed
+                    # object clear the rest. An object that clears neither half might
+                    # have been atomic-saved onto inherited dirt, so keep the paths this
                     # round rewrote there, a false stall the operator clears by
                     # committing being the safe error where a false clean exits 0 over
                     # work no review saw. A contentless object -- an empty file the
-                    # byte identity had to drop -- is proven by its inode alone, the
-                    # conservative reading that keeps it in rather than out. See
-                    # `committed_objects` and `changed_inherited_dirty`; the narrower
+                    # byte identity had to drop -- is proven by its inode alone at that
+                    # name, the conservative reading that keeps it in rather than out.
+                    # See `committed_objects` and `changed_inherited_dirty`; the narrower
                     # identities above still carry every move they can name, so this
                     # retains only what they could not.
                     if vanished:
-                        committed_ids = committed_objects(repo, last_head, head)
+                        committed_at = committed_objects(repo, last_head, head)
                         committed_content = committed_blobs(repo, last_head, head)
                         unreviewed = any(
                             dest not in present_dirty
                             and not (
-                                outstanding_ids.get(path) in committed_ids
+                                outstanding_ids.get(path) is not None
+                                and committed_at.get(dest) == outstanding_ids.get(path)
                                 and (
                                     inherited_blobs.get(path) is None
-                                    or inherited_blobs.get(path) in committed_content
+                                    or committed_content.get(dest) == inherited_blobs.get(path)
                                 )
                             )
                             for path, dest in followed_of.items()
