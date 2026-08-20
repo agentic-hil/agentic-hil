@@ -5,7 +5,7 @@ the declared plan in ../testconfig.yaml:
 
     agentic-hil test-reactor --test-config testconfig.yaml
 
-which says the same five steps in one command and validates every device name,
+which says the same four steps in one command and validates every device name,
 permission and session order before the first hardware action. This file is for
 suites that already run pytest and want the hardware check reported through the
 same runner as everything else, so it drives the same tools by hand — the read

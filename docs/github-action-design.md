@@ -31,9 +31,10 @@ jobs:
 ```
 
 The action installs the pinned Agentic HIL version, checks the bench with
-`agentic-hil doctor`, runs `agentic-hil test-reactor --test-config <plan>`,
-and turns the resulting JSON report into a job summary, a JUnit XML file, a
-JSON run summary, and a copy of the run's event logs.
+`agentic-hil doctor`, runs `agentic-hil test-reactor --test-config <plan>
+--junit-xml <path>`, and turns the resulting JSON report into a job summary, a
+JSON run summary, and a copy of the run's event logs. The JUnit XML file is the
+command's own, not the action's: the action passes the path.
 
 It deliberately does not: choose a plan, write or select a configuration, grant
 a permission, install a debugger toolchain, or clear a quarantine.
@@ -216,6 +217,10 @@ unavailable, not which key.
 
 ### The JUnit mapping
 
+The mapping is implemented, and it is the CLI's: `agentic-hil test-reactor
+--junit-xml <path>` writes it, so the action passes a path and maps nothing. See
+[testing.md](testing.md#a-junit-report-for-ci) for the flag itself.
+
 JUnit has no vocabulary for "the plan was refused before anything ran", so the
 mapping states it explicitly rather than approximating:
 
@@ -240,6 +245,23 @@ mapping states it explicitly rather than approximating:
   one, and omitted otherwise. The run report carries no universal per-step
   duration, and inventing one would put a number in a test report that nothing
   measured.
+
+Three things the implementation settled that the mapping above left open. A run
+refused before it reached a plan at all, by a missing configuration or one bound
+to another workspace, writes the same `preflight` case with the refusal as its
+`<error>` and no step cases, because there was no plan to name them from. A run
+that was stopped on request keeps the steps it ran as passes and marks the rest
+`<skipped>` with the stop as the reason, because a stop is not a failure here and
+nothing is invented to make it look like one. And the suite's `timestamp` and
+`time` are read off the step results the run recorded, so a document written
+minutes after a run still says when the run happened.
+
+One run leaves no document, and it is the run that prints no JSON either: an
+interrupted one, the cancelled job and the dead runner of the table above. Its
+record is the report the reactor commits before the interrupt goes on out of the
+process, which the action already reads from `reports.directory` for exactly
+this case. Everything the command answers at all, refusals included, writes the
+file.
 
 ## Failure modes
 
@@ -279,13 +301,16 @@ a self-hosted runner would need the USB devices, the serial nodes and the CAN
 interfaces passed through, and Docker container actions are Linux-only, while
 the benches this serves run on all three platforms.
 
-It runs `agentic-hil test-reactor --test-config <plan> [--wait-s N]` in
-`working-directory` and reads the single JSON object the command writes to
-standard output. That is the report, and the CLI's exit status is already the
-composite success predicate: a run is successful only when `ok` is true and
-nothing else in the result contradicts it, so the action does not re-derive
-success from `ok` alone. It also reads the persisted report from
-`reports.directory` when the process was interrupted and printed nothing.
+It runs `agentic-hil test-reactor --test-config <plan> --junit-xml <path>
+[--wait-s N]` in `working-directory` and reads the single JSON object the
+command writes to standard output. That is the report, and the CLI's exit
+status is already the composite success predicate: a run is successful only
+when `ok` is true and nothing else in the result contradicts it, so the action
+does not re-derive success from `ok` alone. It also reads the persisted report
+from `reports.directory` when the process was interrupted and printed nothing.
+The JUnit file is written by the same command, on the refusing and failing
+paths as well as the passing one, so the upload step has something to take
+whatever the run did.
 
 Concurrency is the workflow's to declare. The bench lock is machine-wide and
 independent of the repository, so a second job on the same runner is refused
@@ -294,7 +319,22 @@ with `device_busy` naming the holder rather than corrupting anything; a
 
 ## Decisions the implementation must make
 
-These are genuinely open, and each changes the action's shape:
+Two of these have since been decided, and both went the way that keeps the
+action small. **Whether JUnit belongs in the CLI**: it does.
+`agentic-hil test-reactor --junit-xml <path>` writes the mapping above, so the
+action passes a path and holds no copy of it, the same file reaches anyone
+running the reactor by hand, and the mapping is under this project's own tests
+instead of inside a workflow file. The case against, that a CI file format has
+no place in a tool whose output is otherwise one JSON object, is answered by the
+flag being opt-in: without it the command writes nothing new, and with it the
+JSON result, the report files and the exit code are unchanged. And
+**skipped-step reconstruction**, which the first decision settled with it: the
+document is written from inside the run that already loaded the plan and is
+handed the loaded steps, so the action never reads a plan file, there is no
+second reader of the plan schema outside the package, and the report did not
+have to grow a step count that no other reader wanted.
+
+The rest are genuinely open, and each changes the action's shape:
 
 - **Install or require.** Whether the action installs the pinned version into a
   throwaway environment under the runner's temp directory on every run, or
@@ -310,18 +350,6 @@ These are genuinely open, and each changes the action's shape:
   action inside ours and makes the version we pin everyone's problem; emitting
   paths means every consumer writes the same three lines and some of them forget
   `if: always()`.
-- **Whether JUnit belongs in the CLI.** The mapping above is a pure function of
-  the run report. It could live in the action, or `test-reactor` could grow a
-  `--junit-xml` output and the action would only pass a path. The second gives
-  the same file to the pytest plugin's users and to anyone running the reactor
-  by hand, and puts the mapping under the project's own tests; the first keeps a
-  CI file format out of a tool whose output is otherwise one JSON object.
-- **Skipped-step reconstruction.** The report lists executed steps only. To emit
-  `<skipped>` cases for the steps after a failure, the action must read the plan
-  file itself and count. That is a second reader of the plan schema living
-  outside the package, and it will drift the first time the schema gains a step
-  kind, unless the report grows a total step count, which is a small change to
-  the reactor and removes the need entirely.
 - **Whether `doctor` should run at all by default.** It spawns the debugger
   toolchain and takes seconds, and the reactor's own preflight already refuses
   everything `doctor` would refuse about the configuration. What `doctor` adds

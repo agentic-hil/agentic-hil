@@ -119,7 +119,7 @@ ends the run exactly as a failed top-level step does.
 Nothing in that list identifies a machine. A plan is a document about firmware
 and about the shape of a test, and it is reviewable as such:
 [`examples/nucleo-f446re_demo/testconfig.yaml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/nucleo-f446re_demo/testconfig.yaml)
-is five steps of flash, open, reset, and assert on a banner, and it names no COM
+is four steps of flash, open, reset, and assert on a banner, and it names no COM
 port, no baudrate and no probe serial anywhere. The expanded form of every
 action is
 [`examples/testconfig.example.yaml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/testconfig.example.yaml).

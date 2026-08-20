@@ -101,3 +101,47 @@ def test_legacy_pytest_config_option_cannot_redirect_authority(
     result = pytester.runpytest(*PLUGIN_ARGS, "--rootdir", str(pytester.path), "--agentic-hil-config", str(legacy))
 
     assert "cannot change policy authority" in result.stdout.str()
+
+
+def test_the_legacy_selector_refusal_names_the_deprecation_and_the_way_out(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loudest behaviour this plugin has was documented nowhere and said least.
+
+    A suite that passes a path is not quietly ignored, it fails the session, and
+    the message said only "remove the legacy option" without saying that the
+    option is deprecated, that failing is the behaviour rather than an accident,
+    or which of the two supported ways of selecting a configuration to use
+    instead. `docs/configuration.md` was the single page in the tree that
+    mentioned these options at all, and it promised the opposite outcome.
+
+    Behaviour is unchanged, deliberately: a repository-controlled flag that
+    redirected policy authority would decide what this bench may be told to do,
+    and a silent fallback would run the suite under a policy nobody chose."""
+    write_authoritative_config(pytester.path, monkeypatch)
+    legacy = pytester.path / ".agentic-hil" / "config.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text("workspace_root: ignored\n", encoding="utf-8")
+    pytester.makepyfile(SERVICE_TEST)
+
+    result = pytester.runpytest(*PLUGIN_ARGS, "--rootdir", str(pytester.path), "--agentic-hil-config", str(legacy))
+    output = result.stdout.str()
+
+    assert result.parseoutcomes().get("passed", 0) == 0
+    # Named: what the option is now.
+    assert "--agentic-hil-config" in output
+    assert "agentic_hil_config" in output
+    assert "are deprecated" in output
+    # Named: that this is the behaviour, not a fallback that failed.
+    assert "fails the session rather than falling back" in output
+    # Named: both ways out, the one that needs no option at all first.
+    assert "Drop the option" in output
+    assert "AGENTIC_HIL_CONFIG" in output
+
+
+def test_the_deprecated_selector_says_in_help_what_it_does(pytester: pytest.Pytester) -> None:
+    """`--help` is where a CI author meets this option before CI does."""
+    output = pytester.runpytest(*PLUGIN_ARGS, "--help").stdout.str()
+
+    assert "Deprecated" in output
+    assert "fails the session" in output

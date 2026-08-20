@@ -2456,6 +2456,79 @@ def test_register_agent_mcp_claude_writes_user_json(tmp_path: Path, monkeypatch:
     assert not (tmp_path / ".mcp.json").exists()
 
 
+HOST_GUIDE = Path(__file__).resolve().parents[1] / "docs" / "mcp-hosts.md"
+HOST_GUIDE_COMMAND = "/absolute/path/to/persistent/agentic-hil"
+HOST_GUIDE_CWD = "/absolute/path/to/firmware-project"
+
+
+def _host_guide_block(section: str, language: str) -> str:
+    """The first fenced `language` block under `section` of docs/mcp-hosts.md."""
+    body = HOST_GUIDE.read_text(encoding="utf-8").split(f"\n## {section}\n", 1)[1].split("\n## ", 1)[0]
+    return body.split(f"```{language}\n", 1)[1].split("```", 1)[0]
+
+
+def test_the_host_guide_prints_the_registrations_agent_install_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The page is what an operator hand-writes a registration from, and for
+    three of its hosts `agent-install` writes that registration itself. A key
+    added on one side and not the other sends the operator to a shape this
+    project no longer produces, so each block is compared against the file the
+    command just wrote rather than kept in step by hand.
+
+    The one documented difference is `cwd`: the generated registrations bake in
+    no working directory, and the hand-written blocks name the firmware project
+    root, which is why the page prints them at all.
+    """
+    from agentic_hil import cli as cli_module
+
+    _isolated_workspace(tmp_path, monkeypatch)
+    home = _isolated_home(tmp_path, monkeypatch)
+    command = _trusted_test_mcp_command(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda name: None)
+    for agent in ("claude-code", "codex", "opencode"):
+        assert register_agent_mcp(agent)["ok"] is True, agent
+
+    written = json.loads((home / ".claude.json").read_text(encoding="utf-8"))["mcpServers"]["agentic-hil"]
+    documented = json.loads(_host_guide_block("Claude Code", "json"))["mcpServers"]["agentic-hil"]
+    assert documented == {**written, "command": HOST_GUIDE_COMMAND}
+
+    written = json.loads((home / ".config" / "opencode" / "opencode.json").read_text(encoding="utf-8"))["mcp"]["agentic-hil"]
+    documented = json.loads(_host_guide_block("OpenCode", "json"))["mcp"]["agentic-hil"]
+    assert documented.pop("cwd") == HOST_GUIDE_CWD
+    assert documented == {**written, "command": [HOST_GUIDE_COMMAND, "mcp-stdio"]}
+
+    codex = (home / ".codex" / "config.toml").read_text(encoding="utf-8")
+    managed = codex.split(cli_module.AGENTIC_HIL_MCP_START, 1)[1].split(cli_module.AGENTIC_HIL_MCP_END, 1)[0]
+    written_lines = sorted(line.replace(json.dumps(command), json.dumps(HOST_GUIDE_COMMAND)) for line in managed.strip().splitlines())
+    documented_lines = sorted(line for line in _host_guide_block("OpenAI Codex", "toml").strip().splitlines() if not line.startswith("cwd ="))
+    assert documented_lines == written_lines
+
+
+def test_the_host_guide_describes_the_project_file_mcp_config_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`mcp-config` writes a fourth shape, which the page describes in prose
+    rather than printing: the Claude Code block above it, without the `type`.
+    A `type` added to one and not the other makes that sentence wrong.
+
+    The launcher is stubbed the way every neighbouring test that reaches a
+    registration stubs it, and for the same reason. `mcp_config_text` resolves a
+    trusted persistent executable and fails closed when there is none, so on a
+    machine with neither a uv tool nor a pipx installation this asked the
+    question and got a refusal instead of the document the page is held to.
+    """
+    from agentic_hil import cli as cli_module
+
+    command = _trusted_test_mcp_command(monkeypatch)
+
+    generated = json.loads(cli_module.mcp_config_text())["mcpServers"]["agentic-hil"]
+    documented = json.loads(_host_guide_block("Claude Code", "json"))["mcpServers"]["agentic-hil"]
+
+    # The whole entry, not a subset of its keys: the page's block with the
+    # placeholder resolved and the one field the prose claims is missing taken
+    # out. A key gained on either side fails here.
+    assert generated == {**{key: value for key, value in documented.items() if key != "type"}, "command": command}
+    assert "type" in documented and "type" not in generated
+    assert "and no `type`" in HOST_GUIDE.read_text(encoding="utf-8")
+
+
 def test_schema_exports_bundled_config_schema(tmp_path: Path) -> None:
     schema_path = tmp_path / "config.schema.json"
     result = schema(str(schema_path))

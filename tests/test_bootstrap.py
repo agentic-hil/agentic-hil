@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import inspect
+import os
+import re
 from pathlib import Path
 
 import pytest
@@ -12,6 +15,8 @@ from agentic_hil.backends.common import CompletedCommand, cube_clt_programmer_pa
 from agentic_hil.backends.stlink import stlink_target_info
 from agentic_hil.bench import BenchMutex
 from agentic_hil.bootstrap import (
+    DEFAULT_PROJECT_PROFILE,
+    PROFILE_KEYS_READ,
     PROJECT_PROFILE,
     apply_discovery_to_template,
     correlate_com_port,
@@ -32,6 +37,8 @@ from agentic_hil.knowledge import remediation_fields
 from agentic_hil.report import read_last_report
 from agentic_hil.tools import AgenticHILToolService, project_config_create
 from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, fold_hardware_id
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_stlink_target_info_extracts_one_identity() -> None:
@@ -259,6 +266,71 @@ def test_discovery_applies_project_requirements() -> None:
     }
     assert configured["com_ports"]["dut_uart"]["device"] == "COM3"
     assert configured["com_ports"]["dut_uart"]["permissions"] == {"allow_write": False}
+
+
+def _shipped_profiles() -> list[Path]:
+    """Every `agentic-hil.config.example.yaml` this repository ships.
+
+    Walked rather than listed by name, so a profile added to a second example
+    directory is held to the same rule on the day it lands. Dot directories are
+    pruned: a developer's virtualenv lives in one and is not something this
+    repository ships."""
+    found: list[Path] = []
+    for directory, subdirectories, files in os.walk(REPOSITORY_ROOT):
+        subdirectories[:] = [name for name in subdirectories if not name.startswith(".")]
+        if PROJECT_PROFILE in files:
+            found.append(Path(directory) / PROJECT_PROFILE)
+    return sorted(found)
+
+
+def test_the_constant_names_the_keys_a_profile_is_actually_read_for() -> None:
+    """`PROFILE_KEYS_READ` is worth something only while it matches the reads.
+
+    The guard below holds every shipped profile to this list, so a list that had
+    drifted from `apply_discovery_to_template` would hold them to the wrong one:
+    a key the function stopped reading would stay welcome in a file this project
+    ships, and a key it started reading would be turned away there. The constant
+    is therefore compared against the profile lookups in the function itself
+    rather than maintained beside them."""
+    # The lookbehind keeps `target_profile.get("name")` out: that is a read of a
+    # subkey the profile already handed over, not of the profile itself.
+    read = set(re.findall(r'(?<!\w)profile\.get\("(\w+)"', inspect.getsource(apply_discovery_to_template)))
+
+    assert read == set(PROFILE_KEYS_READ), sorted(read.symmetric_difference(PROFILE_KEYS_READ))
+
+
+@pytest.mark.parametrize("profile_path", _shipped_profiles(), ids=lambda path: path.parent.name)
+def test_a_shipped_profile_names_nothing_that_would_be_read_past(profile_path: Path) -> None:
+    """A key this project ships in a profile has to be one the profile decides.
+
+    The demo profile opened with `workspace_root` and `state_root`, each carrying
+    a plausible absolute path and neither of them an input.
+    `apply_discovery_to_template` reads four keys, and both roots are written
+    over afterwards by the caller that generates the configuration. Editing
+    either placeholder therefore had no effect, produced no warning, and left no
+    line in the result of `init` saying the value had been read and discarded,
+    which is the one answer this project does not give: a `baudrate` the same
+    file names wrongly is refused against `com_ports.<name>.baudrate`. The two
+    keys are gone, and this keeps the invitation from coming back under any
+    name."""
+    loaded = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+
+    assert isinstance(loaded, dict)
+    assert set(loaded) <= set(PROFILE_KEYS_READ), sorted(set(loaded) - set(PROFILE_KEYS_READ))
+
+
+def test_the_guard_over_shipped_profiles_has_a_profile_to_guard() -> None:
+    """A walk that finds nothing parametrizes to nothing and proves nothing."""
+    assert _shipped_profiles()
+
+
+def test_the_profile_that_fills_in_for_a_missing_one_is_held_to_the_same_rule() -> None:
+    """Nobody edits `DEFAULT_PROJECT_PROFILE`, and it is still a profile.
+
+    It is what both generation paths use when the workspace ships none, so a key
+    added to it that nothing reads would be the same silence one file further
+    in, with no operator able to see it at all."""
+    assert set(DEFAULT_PROJECT_PROFILE) <= set(PROFILE_KEYS_READ)
 
 
 @pytest.mark.parametrize("baudrate", ["fast", None, [], True], ids=repr)
