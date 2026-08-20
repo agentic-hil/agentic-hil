@@ -2205,6 +2205,131 @@ def test_an_atomic_save_over_inherited_dirt_after_a_move_does_not_slip_a_clean_r
     assert "the review never saw" in f"{captured.out}{captured.err}"
 
 
+# A newline is a byte a POSIX filename may hold; the destination is named with one so
+# the transport that hashes it is exercised on a name a newline-delimited channel splits.
+_NEWLINE_DEST = "rename\nd.py"
+_MOVES_THE_STALL_ONTO_A_NEWLINE_NAMED_INHERITED_DIRT_ATOMICALLY = (
+    f"dst = {_NEWLINE_DEST!r}\n"
+    # Move the stall onto the operator's dirty destination whose name holds a newline,
+    # then atomic-save the edited bytes over it: the edit goes to a temp file renamed
+    # over dst, so dst takes a fresh inode and fresh bytes and neither identity
+    # relocated_stall matches on follows the work there. Only the conservative backstop,
+    # which asks whether an inherited-dirty path's content was rewritten, is left.
+    "pathlib.Path('fix.py').replace(dst)\n"
+    f"pathlib.Path('atomic.tmp').write_text({FIX + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    "pathlib.Path('atomic.tmp').replace(dst)\n"
+    # Only an unrelated file is committed.
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    "sys.stdout.write('atomic-saved the edited stall onto the newline-named inherited dirt, committed other.py\\n')\n"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a newline in a filename is a POSIX-only name")
+def test_an_atomic_save_over_a_newline_named_inherited_dirt_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A newline in the destination name must not make its rewrite compare as unchanged.
+
+    The atomic-save-over-inherited-dirt case, but the operator's dirty destination is
+    named with a newline in it -- a valid POSIX filename. Round 2 moves round 1's
+    untracked `fix.py` onto it and atomic-saves edited bytes over it, so only the
+    conservative backstop -- which asks whether an inherited-dirty path's content was
+    rewritten -- is left to catch it. That backstop hashes the destination through
+    `git hash-object`; a newline-delimited transport would split the name in two and
+    hash nothing under it, so the path compared as unchanged against itself -- absent on
+    both sides -- and the run exited 0 over the edited stall no review read. Passed
+    positionally, the name is hashed whole, its content differs from the operator's own,
+    and the run keeps it outstanding and stops as stalled.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the newline-named path round 2 moves onto.
+    (repository / _NEWLINE_DEST).write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_atomic_saves_over_a_newline_name",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _MOVES_THE_STALL_ONTO_A_NEWLINE_NAMED_INHERITED_DIRT_ATOMICALLY,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_atomic_saves_over_a_newline_name") == 2
+    # The committed file is the unrelated round 2 one, not the stalled work.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["other.py"]
+    # The edited stall sits under the newline-named path, uncommitted and unreviewed.
+    assert (repository / _NEWLINE_DEST).read_text(encoding="utf-8") == FIX + _ROUND_TWO_EDIT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_MOVES_THE_STALL_BENEATH_AN_INHERITED_UNTRACKED_DIRECTORY = (
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    # Move the untracked stall beneath a directory the run inherited untracked. The
+    # default status mode reports that whole directory as one `?? operator-work/`
+    # record and never descends, so the moved file's own name never appears among the
+    # dirty paths; only listing every untracked file gives it a name to carry.
+    "pathlib.Path('fix.py').rename('operator-work/fix.py')\n"
+    "sys.stdout.write('committed only other.py and moved the stall beneath the inherited untracked dir\\n')\n"
+)
+
+
+def test_moving_a_stall_beneath_an_inherited_untracked_directory_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stall hidden inside a collapsed untracked directory still must not exit clean.
+
+    Round 1 stalls with an untracked `fix.py`; its review requests changes, so the run
+    goes on. Round 2 commits only an unrelated `other.py`, then moves `fix.py` beneath
+    `operator-work/`, a directory the run inherited untracked. Under the default
+    untracked mode git reports that directory as one `?? operator-work/` record and
+    never descends, so the moved file has no name of its own in either the inherited or
+    the present dirty paths: the directory record collides with itself and is subtracted
+    out, holds no blob or inode the stall matches, and the run exited 0 over work no
+    review read. Listing every untracked file gives `operator-work/fix.py` a name the
+    round's new dirt carries, so the run keeps it outstanding and stops as stalled.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own untracked directory, inherited before the run starts.
+    (repository / "operator-work").mkdir()
+    (repository / "operator-work" / "wip.txt").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_hides_under_an_untracked_dir",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _MOVES_THE_STALL_BENEATH_AN_INHERITED_UNTRACKED_DIRECTORY,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_hides_under_an_untracked_dir") == 2
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["other.py"]
+    # The moved work is untracked, uncommitted, and outside every reviewed range.
+    assert "operator-work/fix.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert (repository / "operator-work" / "fix.py").read_text(encoding="utf-8") == FIX
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
 _STALLED_A = "def a():\n    return 'stalled a, written and never committed'\n"
 _STALLED_B = "def b():\n    return 'stalled b, written and never committed'\n"
 _WRITES_TWO_UNTRACKED_FILES_WITHOUT_COMMITTING = (
@@ -2569,6 +2694,79 @@ def test_content_identity_is_only_asked_of_a_path_that_has_content(tmp_path: Pat
     assert found["here.py"] == found["elsewhere.py"] != found["other.py"]
     # Git's own object id for the content on disk, the identity `git add` would store.
     assert _in(tmp_path, "hash-object", "here.py").strip() == found["here.py"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a newline in a filename is a POSIX-only name")
+def test_content_identity_survives_a_newline_in_the_pathname(tmp_path: Path) -> None:
+    """A newline is a byte a POSIX name may hold, and it must not split the path in two.
+
+    `blob_ids` hashes a whole set through one `git hash-object`, and a newline-delimited
+    transport would read a name that itself contains a newline as two paths -- hashing
+    the wrong bytes, or none, under a name the reconciliation then compares as unchanged.
+    Passed positionally, the name is carried through whole, so it gets an id at all, that
+    id is git's own for its content, and it differs from an unrelated file's.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    newline = "rename\nd.py"
+    (tmp_path / newline).write_bytes(b"the stalled work, under a name with a newline in it\n")
+    (tmp_path / "plain.py").write_bytes(b"an unrelated file\n")
+
+    found = agent_review_loop.blob_ids(tmp_path, {newline, "plain.py"})
+
+    # The name is hashed whole, not split, so both paths get an id and the two differ.
+    assert set(found) == {newline, "plain.py"}
+    assert found[newline] != found["plain.py"]
+    # Git's own object id for the content under that exact name.
+    assert _in(tmp_path, "hash-object", "--", newline).strip() == found[newline]
+
+
+def test_argv_batches_split_by_byte_budget_and_never_drop_a_name() -> None:
+    """A positional argv has a length the platform enforces, so the names are batched.
+
+    The batching keeps each run's order, splits when the next name would push a run past
+    the budget, and puts a single name too large for the budget in a run of its own
+    rather than dropping or splitting it -- so concatenating the runs is exactly the
+    names asked, in order.
+    """
+    names = ["aa", "bb", "cc", "dd"]
+    # A budget of three bytes takes one two-byte name (cost 3) per run.
+    batches = agent_review_loop._argv_batches(names, budget=3)
+    assert batches == [["aa"], ["bb"], ["cc"], ["dd"]]
+    # A wider budget packs several names into a run until the next would overflow it.
+    assert agent_review_loop._argv_batches(names, budget=7) == [["aa", "bb"], ["cc", "dd"]]
+    # A name past the budget is its own run, not dropped or split.
+    assert agent_review_loop._argv_batches(["abcdefgh"], budget=3) == [["abcdefgh"]]
+    # The concatenation of the runs is always the names, in order.
+    assert [name for batch in agent_review_loop._argv_batches(names, budget=3) for name in batch] == names
+    assert agent_review_loop._argv_batches([]) == []
+
+
+def test_hash_object_lines_ids_up_across_several_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Split into runs, the ids still come back one per name and in the order asked.
+
+    The transport is chunked so a large dirty tree does not overflow the argv, and the
+    join across the runs must not scramble the answer. With the batching forced to one
+    name per run, several `git hash-object` calls answer the set, and every name still
+    gets its own id in order.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    names = []
+    for index in range(5):
+        name = f"f{index}.py"
+        (tmp_path / name).write_bytes(f"contents of {name}\n".encode())
+        names.append(name)
+    # One name per run, so the ordering across the joins is what is under test.
+    monkeypatch.setattr(
+        agent_review_loop, "_argv_batches", lambda values, budget=0: [[value] for value in values]
+    )
+
+    ids = agent_review_loop._hash_object(tmp_path, names)
+
+    assert ids is not None
+    # Each id is git's own for the matching name, in order -- the join did not scramble.
+    assert ids == [_in(tmp_path, "hash-object", "--", name).strip() for name in names]
 
 
 def test_blob_ids_use_the_repositorys_object_format_and_clean_filters(tmp_path: Path) -> None:

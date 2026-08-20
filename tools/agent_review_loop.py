@@ -1257,13 +1257,23 @@ def dirty_records(repo: Path, paperwork: tuple[Path, ...] = ()) -> tuple[set[str
     Where a move lands the work on a name that was already dirty, the name is the
     thing that collides and `relocated_stall` reads the content instead.
 
+    `--untracked-files=all` is what makes an untracked file its own record. The
+    default mode reports a whole untracked directory as one `?? directory/` line and
+    never descends, so a stall moved beneath a directory the run inherited untracked
+    has no name of its own in either snapshot: the directory collides with itself,
+    holds no blob or inode the stall would match, and the work sits under a name no
+    review read while the loop calls the run clean. Listing every untracked file
+    gives the moved path a name the reconciliation below can carry. Ignored files are
+    still left out -- that would take `--ignored`, which this does not pass -- so the
+    loop's own paperwork under a gitignored path stays invisible as before.
+
     Takes the same pathspecs as `uncommitted`, so the loop's own review documents
     and transcripts are not read as the implementer's work. A git that will not
     answer is an empty set, matching `uncommitted`: nothing is then carried, and
     no tree is touched on the strength of a question that could not be asked.
     """
     result = subprocess.run(
-        ["git", "-C", str(repo), "status", "--porcelain", "-z", *excluding(repo, paperwork)],
+        ["git", "-C", str(repo), "status", "--porcelain", "-z", "--untracked-files=all", *excluding(repo, paperwork)],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1335,27 +1345,67 @@ def blob_ids(repo: Path, paths: set[str]) -> dict[str, str]:
     return resolved
 
 
+def _argv_batches(names: list[str], budget: int = 8000) -> list[list[str]]:
+    """`names` split into runs whose bytes fit an argv the platform will spawn.
+
+    `git hash-object` takes its paths positionally so a newline in a name is carried
+    through rather than read as a delimiter, but a command line has a length the
+    platform enforces -- `E2BIG` on POSIX, a hard character cap on Windows -- where
+    `--stdin-paths` had none. A conservative byte budget keeps each run well under the
+    smallest such limit, so a large dirty tree costs a handful of children rather than
+    raising. A single name past the budget is still a run of its own: a name cannot be
+    split, and the run that holds it is refused or answered whole by git, not here.
+    """
+    batches: list[list[str]] = []
+    current: list[str] = []
+    used = 0
+    for name in names:
+        cost = len(name.encode()) + 1
+        if current and used + cost > budget:
+            batches.append(current)
+            current, used = [], 0
+        current.append(name)
+        used += cost
+    if current:
+        batches.append(current)
+    return batches
+
+
 def _hash_object(repo: Path, names: list[str]) -> list[str] | None:
     """`git hash-object` for `names`, one id per name in order, or None when it would not answer.
+
+    The names are passed positionally, after `--`, not down `--stdin-paths`. That
+    transport delimits paths by newline, and a newline is a byte a POSIX filename may
+    hold, so a name that carried one was split into several: the batch then hashed the
+    wrong content under the wrong names, or returned a count that no longer lined up
+    and left the name unhashed. A rewritten inherited-dirty path named that way
+    compared as unchanged against itself and exited a run clean over work no review
+    read. A positional argv carries every byte of the name through untouched, and git
+    still reads the path's `.gitattributes` filters and the repository's object format
+    from it, so the id is the one `git add` would store.
 
     None is the batch git refused -- a path that vanished under it among the reasons --
     told apart from an empty set, which is simply no ids to return. The id count is
     checked against the names because a partial answer cannot be lined back up with the
-    paths that asked for it, and a mismatch is refused rather than misattributed.
+    paths that asked for it, and a mismatch is refused rather than misattributed. The
+    call is split into runs whose argv stays within the length a platform will spawn --
+    the limit `--stdin-paths` was reached for and this transport meets again -- each run
+    keeping its order so the ids still line up with the names across the joins.
     """
     if not names:
         return []
-    result = subprocess.run(
-        ["git", "-C", str(repo), "hash-object", "--stdin-paths"],
-        input="".join(f"{name}\n" for name in names),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        return None
-    ids = result.stdout.splitlines()
+    ids: list[str] = []
+    for batch in _argv_batches(names):
+        result = subprocess.run(
+            ["git", "-C", str(repo), "hash-object", "--", *batch],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            return None
+        ids.extend(result.stdout.splitlines())
     return ids if len(ids) == len(names) else None
 
 
