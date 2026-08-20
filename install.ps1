@@ -148,22 +148,64 @@ function Clear-SystemCerts {
     }
 }
 
-function Install-WithUv {
-    # uv's output is captured rather than streamed, because the text of a
-    # failure is what decides whether there is a second attempt to make.
-    $result = Invoke-Captured -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
+function Invoke-Uv {
+    # One uv command, run with the certificate-retry branch around it. uv's
+    # output is captured rather than streamed, because the text of a failure is
+    # what decides whether there is a second attempt to make, and the refresh,
+    # fresh and pin paths hand their own argument list to this one retry.
+    param([string[]]$Arguments)
+    $result = Invoke-Captured -File 'uv' -Arguments $Arguments
     Write-Host $result.Output.TrimEnd()
     if ($result.ExitCode -eq 0) { return }
     if ($script:SystemCertsMode -eq 'auto' -and (Test-TrustFailure $result.Output)) {
         Write-Say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
         Enable-SystemCerts
         $script:SystemCertsMode = 'always'
-        $retry = Invoke-Captured -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
+        $retry = Invoke-Captured -File 'uv' -Arguments $Arguments
         Write-Host $retry.Output.TrimEnd()
         if ($retry.ExitCode -eq 0) { return }
         throw "uv could not install agentic-hil against this machine's own certificate store either; the proxy's own CA is missing from that store, and installing it there is the fix; TROUBLESHOOTING.md section 1 has the rest"
     }
     throw $UvInstallFailure
+}
+
+function Test-UvManagesTool {
+    # Whether uv already owns this tool. A tool uv installed is one `uv tool
+    # upgrade` can rebuild from the requirement uv itself recorded, extras and pin
+    # included; a copy pip put on PATH is not one. The probe keeps a refresh on
+    # the command that preserves what the tool was installed with, and falls back
+    # to a plain install only when there is no uv tool for uv to upgrade.
+    $list = Invoke-Captured -File 'uv' -Arguments @('tool', 'list')
+    if ($list.ExitCode -ne 0) { return $false }
+    foreach ($line in ($list.Output -split "`n")) {
+        if ($line -match '^agentic-hil\s') { return $true }
+    }
+    return $false
+}
+
+function Install-WithUv {
+    if ($script:InstallMode -eq 'refresh') {
+        if (Test-UvManagesTool) {
+            # `uv tool upgrade` reinstalls from the requirement uv recorded, and
+            # that requirement already names the extras this tool carries, so a
+            # refresh keeps `agentic-hil[can,pyocd]` as `[can,pyocd]` rather than
+            # rewriting it to this run's `[can]`. --reinstall is what replaces the
+            # files even when the recorded version is already current, which is
+            # the whole of the repair the anchor is here for.
+            Invoke-Uv -Arguments @('tool', 'upgrade', '--reinstall', 'agentic-hil')
+            return
+        }
+        Invoke-Uv -Arguments @('tool', 'install', '--upgrade', '--reinstall', (Get-PackageSpec))
+        return
+    }
+    if ($script:InstallMode -eq 'pin') {
+        # A named release sets the requirement outright, so it goes through
+        # install; --reinstall forces the replacement even when the installed
+        # version already equals the pin.
+        Invoke-Uv -Arguments @('tool', 'install', '--upgrade', '--reinstall', (Get-PackageSpec))
+        return
+    }
+    Invoke-Uv -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
 }
 
 if ($SystemCertsMode -eq 'always') { Enable-SystemCerts }
@@ -420,19 +462,29 @@ function Get-ProcessNameForAgent {
 # comparison against the release chooses the word, upgrading or refreshing, and
 # a development tree is the one copy that is kept.
 $needsPackage = $true
+# InstallMode says what step 2 asks the manager to do, not whether it runs.
+# `fresh` is a first install with nothing to reinstall; `refresh` is a copy
+# already here that this run replaces in place, which neither uv nor pip does for
+# an already-current version unless told to; `pin` is `refresh` with the
+# operator's own release named, which sets the requirement outright.
+$InstallMode = 'fresh'
 if (Test-Executable 'agentic-hil') {
     $probe = Invoke-Captured -File 'agentic-hil' -Arguments @('--version')
     $installed = $probe.Output.Trim()
     if ($probe.ExitCode -ne 0) {
+        $InstallMode = 'refresh'
         Write-Step 1 'probe: an agentic-hil on this PATH does not answer, installing it again'
     } elseif ($Version) {
+        $InstallMode = 'pin'
         Write-Step 1 "probe: agentic-hil $installed is here, and --version $Version was asked for, so the package is installed again"
     } elseif (Test-VersionIsDevelopment -Found $installed) {
         Write-Step 1 "probe: agentic-hil $installed is a development version, so it is kept: installing over it would replace an editable checkout with a release from PyPI"
         $needsPackage = $false
     } elseif (Test-VersionAtLeast -Found $installed -Floor $Release) {
+        $InstallMode = 'refresh'
         Write-Step 1 "probe: agentic-hil $installed is here and not older than $Release, refreshing this current installation"
     } else {
+        $InstallMode = 'refresh'
         Write-Step 1 "probe: agentic-hil $installed is older than $Release, upgrading it"
     }
 } else {
@@ -454,9 +506,16 @@ if (-not $needsPackage) {
     $pythonCommand = Find-Python
     if ($pythonCommand) {
         Write-Step 2 "package: installing $(Get-PackageSpec) user-local with $pythonCommand -m pip install --user"
-        $pip = Invoke-Captured -File $pythonCommand -Arguments @(
-            '-m', 'pip', 'install', '--user', '--upgrade', (Get-PackageSpec)
-        )
+        # pip leaves a package whose installed version already satisfies the
+        # request untouched under --upgrade, so a refresh or a pin adds
+        # --force-reinstall to make it replace the files; a first install has
+        # nothing to reinstall. pip keeps no requirement of its own, so the extras
+        # a refresh preserves are the ones already on disk, which --force-reinstall
+        # does not remove.
+        $pipArguments = @('-m', 'pip', 'install', '--user', '--upgrade')
+        if ($InstallMode -eq 'refresh' -or $InstallMode -eq 'pin') { $pipArguments += '--force-reinstall' }
+        $pipArguments += (Get-PackageSpec)
+        $pip = Invoke-Captured -File $pythonCommand -Arguments $pipArguments
         Write-Host $pip.Output.TrimEnd()
         if ($pip.ExitCode -ne 0) {
             # PEP 668: the distribution owns this interpreter. The answer is an

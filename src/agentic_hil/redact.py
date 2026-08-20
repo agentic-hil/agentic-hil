@@ -61,16 +61,59 @@ _AUTH_HEADER_PATTERN = re.compile(r"(?P<keep>\bauthorization[\"']?\s*:\s*[\"']?(
 # what a credential is called; a hyphen joins the separator role an underscore
 # has in a key, because that is how the same names are spelled on a command line
 # and in a query string. Only `=` assigns: a colon is how prose introduces a
-# clause, and `token: expired` is a diagnosis rather than a credential. The value
-# ends at whatever ends a value in a URL, a shell line or a sentence, which is
-# what keeps the rest of the line byte-identical; a bracket is excluded so a
-# second pass over an already-masked stream is a no-op.
-_SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
-    r"(?P<keep>(?<![A-Za-z0-9_])(?:[A-Za-z0-9]+[_\-])*(?:token|secret|password|passwd|api[_\-]?key|auth[_\-]?key)\s*=\s*[\"']?)[^\s\"'\[\]&#;,)]+",
+# clause, and `token: expired` is a diagnosis rather than a credential.
+_ASSIGNMENT_NAME = (
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z0-9]+[_\-])*"
+    r"(?:token|secret|password|passwd|api[_\-]?key|auth[_\-]?key)\s*=\s*"
+)
+
+# A quoted value has to be masked through its *matching* closing quote, not up to
+# the first delimiter inside it: `PASSWORD='correct horse battery staple'` and
+# `PASSWORD="alpha,beta"` carry the credential across the space and the comma that
+# a bare-token value would stop at, and stopping there emitted the tail in clear
+# text. So a quote after `=` switches passes: the value is everything up to the
+# same quote — an escaped quote (`\"`) does not close it, and a value that never
+# closes ends at the line — and the quote characters themselves survive so the
+# line still reads as an assignment. Re-masking `[redacted]` between the quotes
+# yields `[redacted]` again, so a second pass is a no-op.
+_SENSITIVE_ASSIGNMENT_QUOTED = re.compile(
+    r"(?P<keep>" + _ASSIGNMENT_NAME + r"(?P<quote>[\"']))"
+    r"(?:\\.|(?!(?P=quote))[^\\\r\n])*"
+    r"(?P<close>(?P=quote))?",
     re.IGNORECASE,
 )
 
-_CONTENT_PATTERNS = (_URL_USERINFO_PATTERN, _AUTH_HEADER_PATTERN, _SENSITIVE_ASSIGNMENT_PATTERN)
+# An unquoted value is a shell token, a query parameter or a command flag, so it
+# ends at whatever ends a value in those contexts, which is what keeps the rest of
+# the line byte-identical; a bracket is excluded so a second pass over an
+# already-masked stream is a no-op. The value cannot begin with a quote — that is
+# the quoted pass's job above — because the character class excludes both quotes.
+_SENSITIVE_ASSIGNMENT_UNQUOTED = re.compile(
+    r"(?P<keep>" + _ASSIGNMENT_NAME + r")[^\s\"'\[\]&#;,)]+",
+    re.IGNORECASE,
+)
+
+
+def _mask_keep(match: re.Match[str]) -> str:
+    """Keep the labelling prefix, replace the value with the marker."""
+    return match.group("keep") + _REDACTION_MARKER
+
+
+def _mask_quoted(match: re.Match[str]) -> str:
+    """Keep the prefix and its opening quote, mask the value, restore the closing
+    quote when the value actually reached one."""
+    return match.group("keep") + _REDACTION_MARKER + (match.group("close") or "")
+
+
+# Each pass is paired with how its match is rebuilt: the closing quote a quoted
+# assignment consumed is put back, every other pass just keeps its prefix. The
+# quoted pass runs before the unquoted one so a quoted value is taken whole.
+_CONTENT_PATTERNS = (
+    (_URL_USERINFO_PATTERN, _mask_keep),
+    (_AUTH_HEADER_PATTERN, _mask_keep),
+    (_SENSITIVE_ASSIGNMENT_QUOTED, _mask_quoted),
+    (_SENSITIVE_ASSIGNMENT_UNQUOTED, _mask_keep),
+)
 
 
 def redact_stream_text(text: str) -> str:
@@ -79,8 +122,8 @@ def redact_stream_text(text: str) -> str:
     Everything outside a masked span is returned byte for byte, because the
     stream is the tool's own account of what went wrong.
     """
-    for pattern in _CONTENT_PATTERNS:
-        text = pattern.sub(lambda match: match.group("keep") + _REDACTION_MARKER, text)
+    for pattern, replace in _CONTENT_PATTERNS:
+        text = pattern.sub(replace, text)
     return text
 
 

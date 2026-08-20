@@ -134,6 +134,60 @@ def test_a_token_or_password_assignment_in_a_stream_masks_only_the_value() -> No
     assert stream == MANAGER_COMMAND_ECHO.replace(QUERY_SECRET, MARKER).replace(ASSIGNMENT_SECRET, MARKER).replace(FLAG_SECRET, MARKER)
 
 
+def test_a_quoted_assignment_masks_through_the_closing_quote_not_the_first_space() -> None:
+    """A quoted value carries the credential across the space or comma inside it.
+
+    `PASSWORD='correct horse battery staple'` is one password, not a first word
+    and a leaked remainder, and `PASSWORD="alpha,beta gamma"` is one too. A mask
+    that ended at the first delimiter emitted the tail in clear text; the quote
+    ends the value, and the quote characters themselves come through so the line
+    still reads as an assignment."""
+    spaced = "  running: PIP_INDEX_PASSWORD='correct horse battery staple' uv tool upgrade\n"
+    comma = "  env: DB_PASSWORD=\"alpha,beta gamma\" other=kept\n"
+
+    spaced_out = redact_sensitive({"stdout": spaced})["stdout"]
+    comma_out = redact_sensitive({"stdout": comma})["stdout"]
+
+    assert "correct" not in spaced_out
+    assert "horse battery staple" not in spaced_out
+    assert spaced_out == "  running: PIP_INDEX_PASSWORD='[redacted]' uv tool upgrade\n"
+    assert "alpha" not in comma_out
+    assert "beta gamma" not in comma_out
+    assert comma_out == '  env: DB_PASSWORD="[redacted]" other=kept\n'
+
+
+def test_a_quoted_assignment_masks_across_an_escaped_quote() -> None:
+    """An escaped quote inside the value does not end it, so the credential after
+    it is masked too rather than leaking past a `\\"`."""
+    line = 'token="a\\"b c d" trailing=kept\n'
+
+    out = redact_sensitive({"stderr": line})["stderr"]
+
+    assert "b c d" not in out
+    assert out == 'token="[redacted]" trailing=kept\n'
+
+
+def test_a_quoted_assignment_that_never_closes_masks_to_the_line_end() -> None:
+    """An unterminated quote is the shell reading the rest of the line as the
+    value, so the mask follows it there rather than stopping at the first space
+    and leaking the rest."""
+    line = "  PASSWORD='alpha beta gamma\n  next line kept\n"
+
+    out = redact_sensitive({"stdout": line})["stdout"]
+
+    assert "alpha beta gamma" not in out
+    assert out == "  PASSWORD='[redacted]\n  next line kept\n"
+
+
+def test_a_second_pass_over_a_masked_quoted_assignment_changes_nothing() -> None:
+    """Redacting `'[redacted]'` again yields `'[redacted]'`, so the quoted pass is
+    idempotent the same way the unquoted one is."""
+    once = redact_sensitive({"stdout": "PASSWORD='correct horse' TOKEN=\"a b\"\n"})
+
+    assert redact_sensitive(once) == once
+    assert once["stdout"] == 'PASSWORD=\'[redacted]\' TOKEN="[redacted]"\n'
+
+
 def test_a_stream_with_no_secrets_comes_through_byte_identical() -> None:
     """The common case, and the one a content pass gets wrong.
 

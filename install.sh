@@ -12,11 +12,11 @@ set -eu
 # installation already here against. It decides what the transcript calls the
 # run, not whether the run happens: this line is the emergency anchor people
 # re-run when `agentic-hil upgrade` itself is what broke, so an existing
-# installation always reaches step 2's manager invocation, which is idempotent
-# and answers for a copy that is already current in one quick resolve.
-# Deliberately not a capability floor either: step 4 registers the skill out of
-# whatever copy step 1 left in place, so a floor left a returning user on an old
-# package and an old skill at once.
+# installation always reaches step 2's manager invocation, which reinstalls it in
+# place rather than resolving it as already-current and leaving a broken copy
+# untouched. Deliberately not a capability floor either: step 4 registers the
+# skill out of whatever copy step 1 left in place, so a floor left a returning
+# user on an old package and an old skill at once.
 RELEASE="0.17.0"
 
 AGENT=""
@@ -435,10 +435,14 @@ user_bin_on_path() {
     export PATH
 }
 
-# uv's output is captured rather than streamed, because the text of a failure is
-# what decides whether there is a second attempt to make.
-install_with_uv() {
-    if uv_output=$(uv tool install --upgrade "$(package_spec)" 2>&1); then
+# One uv command, run with the certificate-retry branches around it, because the
+# text of a failure is what decides whether there is a second attempt to make.
+# The command's own words are this function's positional parameters, so the
+# refresh path (`tool upgrade --reinstall`) and the fresh and pin paths (`tool
+# install ...`) share one retry. uv's output is captured rather than streamed for
+# the same reason: the retry reads it.
+run_uv() {
+    if uv_output=$(uv "$@" 2>&1); then
         printf '%s\n' "$uv_output"
         return 0
     fi
@@ -447,7 +451,7 @@ install_with_uv() {
         say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
         use_system_certs
         SYSTEM_CERTS="always"
-        if uv_output=$(uv tool install --upgrade "$(package_spec)" 2>&1); then
+        if uv_output=$(uv "$@" 2>&1); then
             printf '%s\n' "$uv_output"
             return 0
         fi
@@ -460,9 +464,58 @@ install_with_uv() {
     fail "package: uv could not install $(package_spec); TROUBLESHOOTING.md section 1 has the fallbacks"
 }
 
+# Whether uv already owns this tool. A tool uv installed is one `uv tool upgrade`
+# can rebuild from the requirement uv itself recorded, extras and pin included; a
+# copy pip put on PATH is not one, and asking uv to upgrade it would only fail.
+# The probe keeps a refresh on the command that preserves what the tool was
+# installed with, and falls back to a plain install only when there is no uv tool
+# for uv to upgrade.
+uv_manages_tool() {
+    uv tool list 2>/dev/null | grep -q '^agentic-hil[[:space:]]'
+}
+
+install_with_uv() {
+    case "$INSTALL_MODE" in
+        refresh)
+            if uv_manages_tool; then
+                # `uv tool upgrade` reinstalls from the requirement uv recorded,
+                # and that requirement already names the extras this tool carries,
+                # so a refresh cannot drop a capability the way `tool install` with
+                # only this run's extras would; `agentic-hil[can,pyocd]` stays
+                # `[can,pyocd]` rather than being rewritten to this run's `[can]`.
+                # --reinstall is what makes it replace the files even when the
+                # recorded version is already current, which is the whole of the
+                # repair the anchor is here for.
+                run_uv tool upgrade --reinstall agentic-hil
+                return 0
+            fi
+            run_uv tool install --upgrade --reinstall "$(package_spec)"
+            ;;
+        pin)
+            # A named release sets the requirement outright, so it goes through
+            # install; --reinstall still forces the replacement even when the
+            # installed version already equals the pin.
+            run_uv tool install --upgrade --reinstall "$(package_spec)"
+            ;;
+        *)
+            run_uv tool install --upgrade "$(package_spec)"
+            ;;
+    esac
+}
+
 install_with_pip() {
     python_bin="$1"
-    if pip_output=$("$python_bin" -m pip install --user --upgrade "$(package_spec)" 2>&1); then
+    # pip leaves a package whose installed version already satisfies the request
+    # untouched under --upgrade, so a refresh or a pin adds --force-reinstall to
+    # make it replace the files; a first install has nothing to reinstall. pip has
+    # no recorded requirement of its own, so the extras a refresh keeps are the
+    # ones already on disk, which --force-reinstall does not remove.
+    pip_reinstall=""
+    case "$INSTALL_MODE" in
+        refresh | pin) pip_reinstall="--force-reinstall" ;;
+    esac
+    # shellcheck disable=SC2086 # pip_reinstall is one optional flag, split on purpose
+    if pip_output=$("$python_bin" -m pip install --user --upgrade $pip_reinstall "$(package_spec)" 2>&1); then
         printf '%s\n' "$pip_output"
         return 0
     fi
@@ -472,7 +525,8 @@ install_with_pip() {
         SYSTEM_CERTS="always"
         if [ -n "${PIP_CERT:-}" ]; then
             say "certificates: retrying pip once against this machine's own store, with verification still on"
-            if pip_output=$("$python_bin" -m pip install --user --upgrade "$(package_spec)" 2>&1); then
+            # shellcheck disable=SC2086 # pip_reinstall is one optional flag, split on purpose
+            if pip_output=$("$python_bin" -m pip install --user --upgrade $pip_reinstall "$(package_spec)" 2>&1); then
                 printf '%s\n' "$pip_output"
                 return 0
             fi
@@ -524,10 +578,10 @@ AGENTIC_HIL_CMD="agentic-hil"
 
 installed_executable_dir() {
     # The manager's own destination directory, and only that. Step 2 installed into
-    # exactly this directory, with --upgrade, so a copy that answers --version here
-    # is the copy the manager just wrote and the newest the index served. The
-    # placement is the proof: an older or unrelated agentic-hil elsewhere on PATH
-    # cannot get into the directory the manager names.
+    # exactly this directory, so a copy that answers --version here is the copy the
+    # manager just wrote and the newest requirement it resolved. The placement is
+    # the proof: an older or unrelated agentic-hil elsewhere on PATH cannot get
+    # into the directory the manager names.
     #
     # Requiring the release floor on top of that placement added no stale-copy
     # protection and cost the release window. Between the merge of a release commit
@@ -627,19 +681,32 @@ DISCOVERED_PYTHON=""
 # just watched their upgrade fail left the anchor with nothing to anchor. The
 # comparison against the release chooses the word, upgrading or refreshing, and
 # a development tree is the one copy that is kept.
+# INSTALL_MODE says what step 2 is asking the manager to do, which is not the
+# same question as whether it runs. `fresh` is a first install, and its --upgrade
+# has nothing to reinstall. `refresh` is a copy already here that this run
+# replaces in place: whatever it reports, the manager is told to reinstall it,
+# because neither uv nor pip touches a package whose installed version already
+# satisfies the request unless it is told to, and a current-but-broken copy is
+# exactly the one the anchor exists to repair. `pin` is `refresh` with the
+# operator's own release named, which sets the requirement outright.
 NEEDS_PACKAGE=1
+INSTALL_MODE="fresh"
 if ! have agentic-hil; then
     step 1 "probe: no agentic-hil on this PATH, installing it user-local"
 elif ! installed=$(agentic-hil --version 2>/dev/null); then
+    INSTALL_MODE="refresh"
     step 1 "probe: an agentic-hil on this PATH does not answer, installing it again"
 elif [ -n "$PINNED" ]; then
+    INSTALL_MODE="pin"
     step 1 "probe: agentic-hil $installed is here, and --version $PINNED was asked for, so the package is installed again"
 elif version_is_development "$installed"; then
     step 1 "probe: agentic-hil $installed is a development version, so it is kept: installing over it would replace an editable checkout with a release from PyPI"
     NEEDS_PACKAGE=0
 elif version_at_least "$installed" "$RELEASE"; then
+    INSTALL_MODE="refresh"
     step 1 "probe: agentic-hil $installed is here and not older than $RELEASE, refreshing this current installation"
 else
+    INSTALL_MODE="refresh"
     step 1 "probe: agentic-hil $installed is older than $RELEASE, upgrading it"
 fi
 
