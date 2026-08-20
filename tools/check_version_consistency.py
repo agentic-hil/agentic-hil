@@ -93,12 +93,13 @@ EXPECTED_VERSION_FIELD = re.compile(r"""["']expected_version["']\s*:\s*["']([^"'
 # `actions/checkout@v4` and every other third-party pin carries somebody
 # else's version and must stay invisible to this gate.
 TAG_PIN = re.compile(r"""([^\s"'`@]+)@v(\d+\.\d+\.\d+)(?![\w.])""")
-# The release each one-line installer installs, and the version an installation
-# already on the machine has to reach to be left alone. Both are a single
-# constant at the top of their script, and both have to follow the release: an
-# installer holding a number below it answers "nothing to install" to the very
-# person re-running the line to get current, and then registers the skill out of
-# the copy it kept.
+# The release each one-line installer names, a single constant at the top of its
+# script. It is what step 1 compares an installation already on the machine
+# against, and what the transcript then calls the run: a constant left behind the
+# release tells a returning user that the copy being refreshed is current when it
+# is a release old. Step 2 reaches the package manager either way now (#315), so
+# this no longer decides whether anything is installed, and it still has to
+# follow the release for the transcript to be true.
 INSTALL_SH_RELEASE = re.compile(r'^RELEASE="(\d+\.\d+\.\d+)"$', re.MULTILINE)
 INSTALL_PS1_RELEASE = re.compile(r"^\$Release = '(\d+\.\d+\.\d+)'$", re.MULTILINE)
 # The MCP registry schema server.json names declares `maxLength: 100` on

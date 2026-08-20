@@ -120,6 +120,29 @@ DOCTOR = {
     "debugger": {"ok": False, "tool": "debugger_info", "summary": "OpenOCD was not found on this host."},
 }
 
+# The transcript from issue #314, field for field: `uv tool upgrade` came back
+# non-zero, `_failed_upgrade` put `_process_result`'s three fields on the refusal
+# under `install`, and the operator was shown every fact about the failure except
+# the manager's own words for why it happened.
+UPGRADE_FAILED = {
+    "ok": False,
+    "tool": "agentic_hil_upgrade",
+    "manager": "uv",
+    "command": ["/home/op/.local/bin/uv", "tool", "upgrade", "agentic-hil"],
+    "python": "/home/op/.local/share/uv/tools/agentic-hil/bin/python3",
+    "previous_version": "0.16.0",
+    "install": {
+        "returncode": 2,
+        "stderr": "error: Failed to install agentic-hil\n  Caused by: Failed to fetch `https://pypi.org/simple/agentic-hil/`\n  Caused by: Request failed after 3 retries",
+    },
+    "error_type": "upgrade_failed",
+    "summary": "Agentic HIL package manager reported an upgrade failure. This installation still runs 0.16.0 and was not replaced.",
+    "installation_intact": True,
+    "version": "0.16.0",
+    "restart_required": False,
+    "verification": {"returncode": 0, "stdout": "0.16.0"},
+}
+
 GENERIC = {
     "ok": True,
     "tool": "hardware_lease_status",
@@ -227,6 +250,19 @@ def test_a_refusal_asked_for_as_a_document_is_still_the_document_it_was(monkeypa
     assert document["remediation"] == remediation_fields("config_file_not_found", "workspace_root")["remediation"]
 
 
+def test_a_refusals_nested_diagnostics_reach_the_document_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rendering gained a body; the contract did not move.
+
+    `install.stderr` is what the human half was missing and what every machine
+    caller has always parsed, so the flagged half is pinned here byte for byte,
+    newlines and all, against a change to the other half.
+    """
+    code, out = _run(monkeypatch, ["upgrade", "--json"], UPGRADE_FAILED, tty=False)
+    assert code == 1
+    assert out == json.dumps(UPGRADE_FAILED, indent=2) + "\n"
+    assert json.loads(out)["install"] == UPGRADE_FAILED["install"]
+
+
 def test_the_decision_is_declared_and_never_sniffed(monkeypatch: pytest.MonkeyPatch) -> None:
     """`isatty` is not consulted, so a stream that cannot answer is not a case.
 
@@ -317,6 +353,134 @@ def test_a_refusal_the_catalogue_does_not_cover_invents_no_advice() -> None:
     assert out.startswith("Refused: no_such_error_anybody_wrote")
     assert "What to do" not in out
     assert "Something went wrong." in out
+
+
+def test_a_refusal_shows_the_failing_tools_own_words_and_not_only_the_facts_around_them() -> None:
+    """Issue #314: the one field that says why was the one field that was dropped.
+
+    Everything else in this document rendered. The operator was told that uv
+    failed, which command ran, which interpreter answered and that the old
+    version was still there, and had to run the command again with `--json` to
+    read the error their own machine had already produced.
+    """
+    out = _rendered(UPGRADE_FAILED, "upgrade")
+    assert out.startswith("Refused: upgrade_failed")
+    # The facts that already rendered still render, in the same section.
+    for fact in ("manager", "uv", "previous_version", "0.16.0", "installation_intact"):
+        assert fact in out, fact
+    # And the diagnosis is under the key that carries it, with the returncode
+    # beside it rather than somewhere else.
+    assert "\n  install\n" in out
+    assert "\n    returncode  2\n" in out
+    assert "\n    stderr\n" in out
+    # Captured output is literal: the manager's lines arrive as the manager
+    # wrote them, indented and neither reflowed nor merged into one strip. This
+    # is width-independent by construction, which the wrapped prose is not.
+    assert "\n      error: Failed to install agentic-hil\n" in out
+    assert "\n        Caused by: Failed to fetch `https://pypi.org/simple/agentic-hil/`\n" in out
+    assert "\n        Caused by: Request failed after 3 retries\n" in out
+    # The second `_process_result` on the same refusal is rendered by the same
+    # rule, so the fix is about the shape rather than about one field name.
+    assert "\n  verification\n" in out
+    assert "\n      0.16.0\n" in out
+    # It is still a report, not a dump.
+    assert "{" not in out and '"stderr"' not in out
+
+
+def test_a_refusal_renders_captured_output_however_deep_the_document_nests_it() -> None:
+    document = {
+        "ok": False,
+        "error_type": "flash_failed",
+        "summary": "The flash did not complete.",
+        "backend": {
+            "adapter": "openocd",
+            "attempt": {
+                "returncode": 1,
+                "stderr": "Error: init mode failed (unable to connect to the target)\nin procedure 'program'",
+                "probe": {"serial_number": "066EFF3"},
+            },
+        },
+    }
+    out = _rendered(document, "flash")
+    # Each level under its parent, one indent further in, all the way down.
+    assert "\n  backend\n" in out
+    assert "\n    adapter  openocd\n" in out
+    assert "\n    attempt\n" in out
+    assert "\n      returncode  1\n" in out
+    assert "\n      stderr\n" in out
+    assert "\n        Error: init mode failed (unable to connect to the target)\n" in out
+    assert "\n        in procedure 'program'\n" in out
+    # The object below the captured stream is not lost behind it.
+    assert "\n      probe\n" in out
+    assert "066EFF3" in out
+
+
+def test_a_refusal_whose_diagnosis_is_a_list_of_objects_renders_the_entries() -> None:
+    """The other half of the shape, and the catalogue already points at it.
+
+    `installation_in_use` names each holding process in `held_by` and
+    `device_busy` says "Read `holder`" in its own remediation, so the advice this
+    same rendering prints was sending people to fields it did not print.
+    """
+    document = {
+        "ok": False,
+        "error_type": "installation_in_use",
+        "summary": "The installation is in use and nothing was removed.",
+        "held_by": [
+            {"pid": 4412, "image": "C:/Users/op/AppData/Local/Programs/claude/claude.exe"},
+            {"pid": 7781, "image": "C:/Users/op/.local/bin/agentic-hil.exe"},
+        ],
+    }
+    out = _rendered(document, "upgrade")
+    assert "\n  held_by\n" in out
+    assert "4412" in out and "7781" in out
+    assert "claude.exe" in out and "agentic-hil.exe" in out
+    assert "{" not in out and "[" not in out
+
+
+def test_captured_output_that_is_enormous_says_how_much_it_cut_and_keeps_both_ends() -> None:
+    """A truncation nobody can see is the same defect one level down.
+
+    The line that names the cause of a failed run sits at either end of the
+    capture depending on what ran, so the cut is taken out of the middle, and it
+    is stated: a report that silently kept the first screenful would have been
+    the same kind of quiet as the one this replaced.
+    """
+    document = {
+        "ok": False,
+        "error_type": "upgrade_failed",
+        "summary": "It failed.",
+        "install": {"returncode": 1, "stdout": "\n".join(f"line {number}" for number in range(1, 121)), "stderr": "y" * 900},
+    }
+    out = _rendered(document, "upgrade")
+    assert "\n      line 1\n" in out
+    assert "\n      line 120\n" in out
+    assert "\n      line 60\n" not in out
+    assert "[... 85 lines not shown ...]" in out
+    # A single line nothing would ever read to the end of is cut the same way,
+    # and counted in the unit it was cut by.
+    assert "[... 400 characters not shown ...]" in out
+    assert "y" * 500 in out
+
+
+def test_a_secret_named_value_inside_a_refusals_nested_object_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rendering redacts through the same function the document path does.
+
+    It is handed the redacted document, so this holds at every depth rather than
+    at the top level only, and surfacing nested diagnostics could not open a
+    path the machine document does not already have.
+    """
+    document = {
+        "ok": False,
+        "error_type": "upgrade_failed",
+        "summary": "The manager failed.",
+        "install": {"returncode": 1, "stderr": "error: 401 Unauthorized", "index": {"url": "https://pypi.example/simple", "api_token": "hunter2"}},
+    }
+    _, out = _run(monkeypatch, ["upgrade"], document, tty=True)
+    assert "hunter2" not in out
+    assert "[redacted]" in out
+    # And the diagnosis that had to be surfaced for this to matter is there.
+    assert "error: 401 Unauthorized" in out
 
 
 def test_doctor_renders_its_findings_section_by_section() -> None:

@@ -20,12 +20,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# The release this script installs, and the version an installation already
-# here has to reach to be left alone. Deliberately not a capability floor: the
-# line that installs Agentic HIL is the same line people re-run to get current,
-# and step 4 registers the skill out of whatever copy step 1 decided to keep, so
-# a floor left a returning user on an old package and an old skill at once. A
-# development tree reports X.Y.Z.devN, which compares as X.Y.Z and stays put.
+# The release this script installs, and the number step 1 compares an
+# installation already here against. It decides what the transcript calls the
+# run, not whether the run happens: this line is the emergency anchor people
+# re-run when `agentic-hil upgrade` itself is what broke, so an existing
+# installation always reaches step 2's manager invocation, which is idempotent
+# and answers for a copy that is already current in one quick resolve.
+# Deliberately not a capability floor either: step 4 registers the skill out of
+# whatever copy step 1 left in place, so a floor left a returning user on an old
+# package and an old skill at once.
 $Release = '0.17.0'
 $StepTotal = 5
 
@@ -145,22 +148,210 @@ function Clear-SystemCerts {
     }
 }
 
-function Install-WithUv {
-    # uv's output is captured rather than streamed, because the text of a
-    # failure is what decides whether there is a second attempt to make.
-    $result = Invoke-Captured -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
+function Invoke-Uv {
+    # One uv command, run with the certificate-retry branch around it. uv's
+    # output is captured rather than streamed, because the text of a failure is
+    # what decides whether there is a second attempt to make, and the refresh,
+    # fresh and pin paths hand their own argument list to this one retry.
+    param([string[]]$Arguments)
+    $result = Invoke-Captured -File 'uv' -Arguments $Arguments
     Write-Host $result.Output.TrimEnd()
     if ($result.ExitCode -eq 0) { return }
     if ($script:SystemCertsMode -eq 'auto' -and (Test-TrustFailure $result.Output)) {
         Write-Say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
         Enable-SystemCerts
         $script:SystemCertsMode = 'always'
-        $retry = Invoke-Captured -File 'uv' -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
+        $retry = Invoke-Captured -File 'uv' -Arguments $Arguments
         Write-Host $retry.Output.TrimEnd()
         if ($retry.ExitCode -eq 0) { return }
         throw "uv could not install agentic-hil against this machine's own certificate store either; the proxy's own CA is missing from that store, and installing it there is the fix; TROUBLESHOOTING.md section 1 has the rest"
     }
     throw $UvInstallFailure
+}
+
+function Test-UvManagesTool {
+    # Whether uv already owns this tool. A tool uv installed is one `uv tool
+    # upgrade` can rebuild from the requirement uv itself recorded, extras and pin
+    # included; a copy pip put on PATH is not one. The probe keeps a refresh on
+    # the command that preserves what the tool was installed with, and falls back
+    # to a plain install only when there is no uv tool for uv to upgrade.
+    $list = Invoke-Captured -File 'uv' -Arguments @('tool', 'list')
+    if ($list.ExitCode -ne 0) { return $false }
+    foreach ($line in ($list.Output -split "`n")) {
+        if ($line -match '^agentic-hil\s') { return $true }
+    }
+    return $false
+}
+
+function Get-UvRecordedRequirements {
+    # The requirement set uv recorded for the tool it owns, as
+    # @{ Extras = <string[]>; Withs = <string[]> }, or $null when the
+    # reconstruction would change what uv recorded so the caller keeps to the
+    # upgrade that preserves it verbatim instead. That covers a missing, unreadable
+    # or empty receipt, a requirements array that never opened or never closed, a
+    # recorded tool option (an explicit `[tool.options]` index), a root carrying a
+    # pin or a git/path/url source rather than a plain name and extras, and any
+    # `--with` this must not rebuild (a marker, a url, a git/path source). uv writes
+    # `agentic-hil[can,pyocd] --with requests==2.32.5` into a receipt beside the
+    # tool environment as a TOML array of requirement objects, inline for a lone
+    # root requirement and one-per-line the moment a `--with` is added. Extras is
+    # the agentic-hil root's extras; Withs is every other recorded requirement
+    # rebuilt as a `--with` PEP 508 string (`name[extras]specifier`). Reading the
+    # whole set back is what lets a refresh add the extra THIS run asks for while
+    # keeping both a root extra an earlier install recorded and a `--with` it
+    # recorded; a bare `tool install agentic-hil[...]` drops the latter.
+    $probe = Invoke-Captured -File 'uv' -Arguments @('tool', 'dir')
+    if ($probe.ExitCode -ne 0) { return $null }
+    $receipt = Join-Path (Join-Path $probe.Output.Trim() 'agentic-hil') 'uv-receipt.toml'
+    if (-not (Test-Path -LiteralPath $receipt)) { return $null }
+    # $ErrorActionPreference is 'Stop' for the whole script, so an unreadable
+    # receipt would terminate the repair; catch it and fall back to the preserving
+    # upgrade instead. An empty receipt reads back as $null, which has no IndexOf.
+    try {
+        $text = Get-Content -LiteralPath $receipt -Raw
+    } catch {
+        return $null
+    }
+    if ([string]::IsNullOrEmpty($text)) { return $null }
+
+    # A recorded tool option (an explicit index, a python pin) cannot be replayed
+    # by the reconstruction, which passes none, so a receipt that records any is
+    # refused and the caller keeps to the preserving upgrade. uv writes these under
+    # a `[tool.options]` table (or sub-table / array of tables) only when there are
+    # some, so a bare header with no key before the next section is no options.
+    $inOptions = $false
+    foreach ($line in ($text -split "`n")) {
+        if ($line -match '^\s*\[\[?tool\.options') {
+            if ($line -match '^\s*\[tool\.options\]\s*$') { $inOptions = $true }
+            else { return $null }
+        } elseif ($inOptions) {
+            if ($line -match '^\s*\[') { $inOptions = $false }
+            elseif ($line -match '\S' -and $line -notmatch '^\s*#') { return $null }
+        }
+    }
+
+    # Isolate the requirements array by bracket depth, from `requirements = [` to
+    # its matching `]`, so the nested `extras = [...]` arrays and the trailing
+    # `entrypoints = [...]` block do not confuse where the requirement list ends.
+    $anchor = 'requirements = ['
+    $start = $text.IndexOf($anchor)
+    if ($start -lt 0) { return $null }
+    $depth = 1
+    $interior = New-Object System.Text.StringBuilder
+    for ($i = $start + $anchor.Length; $i -lt $text.Length -and $depth -gt 0; $i++) {
+        $ch = $text[$i]
+        if ($ch -eq '[') { $depth++; [void]$interior.Append($ch) }
+        elseif ($ch -eq ']') { $depth--; if ($depth -gt 0) { [void]$interior.Append($ch) } }
+        else { [void]$interior.Append($ch) }
+    }
+    if ($depth -ne 0) { return $null }
+
+    $extras = New-Object System.Collections.Generic.List[string]
+    $withs = New-Object System.Collections.Generic.List[string]
+    $rootSeen = $false
+    foreach ($object in [regex]::Matches($interior.ToString(), '\{[^{}]*\}')) {
+        $obj = $object.Value
+        $nameMatch = [regex]::Match($obj, 'name = "([^"]*)"')
+        $name = if ($nameMatch.Success) { $nameMatch.Groups[1].Value } else { '' }
+        if ($name -eq 'agentic-hil' -and -not $rootSeen) {
+            # The root is rebuilt from its extras plus this run pin, so only name
+            # and extras replay faithfully; a recorded specifier (a pin), a
+            # directory/url/git source or a marker would be dropped, so refuse the
+            # whole receipt.
+            foreach ($key in [regex]::Matches($obj, '([A-Za-z][A-Za-z_-]*)[ ]*=')) {
+                $k = $key.Groups[1].Value
+                if ($k -ne 'name' -and $k -ne 'extras') { return $null }
+            }
+            $rootSeen = $true
+            $extrasMatch = [regex]::Match($obj, 'extras = \[([^\]]*)\]')
+            if ($extrasMatch.Success) {
+                foreach ($quoted in [regex]::Matches($extrasMatch.Groups[1].Value, '"([^"]*)"')) {
+                    $extras.Add($quoted.Groups[1].Value)
+                }
+            }
+            continue
+        }
+        # A non-root requirement is replayed as --with, so it must rebuild to a bare
+        # PEP 508 string: only name/extras/specifier, and no whitespace in the
+        # result. Anything else (a marker, a url) refuses the whole receipt.
+        foreach ($key in [regex]::Matches($obj, '([A-Za-z][A-Za-z_-]*)[ ]*=')) {
+            $k = $key.Groups[1].Value
+            if ($k -ne 'name' -and $k -ne 'extras' -and $k -ne 'specifier') { return $null }
+        }
+        if (-not $nameMatch.Success) { return $null }
+        $req = $name
+        $extrasMatch = [regex]::Match($obj, 'extras = \[([^\]]*)\]')
+        if ($extrasMatch.Success) {
+            $items = New-Object System.Collections.Generic.List[string]
+            foreach ($quoted in [regex]::Matches($extrasMatch.Groups[1].Value, '"([^"]*)"')) {
+                $items.Add($quoted.Groups[1].Value)
+            }
+            if ($items.Count -gt 0) { $req += '[' + ([string]::Join(',', $items)) + ']' }
+        }
+        $specMatch = [regex]::Match($obj, 'specifier = "([^"]*)"')
+        if ($specMatch.Success) { $req += $specMatch.Groups[1].Value }
+        if ($req -match '\s') { return $null }
+        $withs.Add($req)
+    }
+    if (-not $rootSeen) { return $null }
+    # Hashtable member assignment preserves an array as-is (no unrolling and no
+    # array-wrap comma), so an empty or single Extras/Withs stays the array
+    # Get-RefreshSpec and the --with loop iterate over.
+    return @{ Extras = $extras.ToArray(); Withs = $withs.ToArray() }
+}
+
+function Get-RefreshSpec {
+    # This run's extras merged with the ones uv already recorded, spelled
+    # agentic-hil[...] with this run's pin if there is one. Merging adds the [can]
+    # a --can run wants even to a bare recorded requirement, and keeps a recorded
+    # extra (a hand-added pyocd) a bare `tool install agentic-hil[can]` would drop.
+    param([string[]]$Recorded)
+    $extras = New-Object System.Collections.Generic.List[string]
+    if ($WithCan) { $extras.Add('can') }
+    foreach ($extra in $Recorded) {
+        if (-not $extras.Contains($extra)) { $extras.Add($extra) }
+    }
+    $spec = 'agentic-hil'
+    if ($extras.Count -gt 0) { $spec = "agentic-hil[$([string]::Join(',', $extras))]" }
+    if ($Version) { $spec = "$spec==$Version" }
+    return $spec
+}
+
+function Install-WithUv {
+    if ($script:InstallMode -eq 'refresh') {
+        if (Test-UvManagesTool) {
+            # uv owns this tool. Reinstall from the requirement uv recorded merged
+            # with this run's extras: the recorded `[can,pyocd]` survives (a
+            # `tool install agentic-hil[can]` would drop pyocd) and a `--can` a
+            # bare recorded requirement never had is added (a `tool upgrade` would
+            # never add it). --reinstall replaces the files even when the recorded
+            # version is already current, which is the repair the anchor exists
+            # for. A recorded `--with` requirement is replayed as its own --with so
+            # the reinstall keeps it too; a bare `tool install agentic-hil[...]`
+            # would drop it. When uv keeps no readable receipt, or records a
+            # requirement this cannot rebuild without changing it, fall back to the
+            # upgrade that preserves whatever it did record.
+            $recorded = Get-UvRecordedRequirements
+            if ($null -ne $recorded) {
+                $uvArgs = @('tool', 'install', '--upgrade', '--reinstall', (Get-RefreshSpec -Recorded $recorded.Extras))
+                foreach ($recordedWith in $recorded.Withs) { $uvArgs += @('--with', $recordedWith) }
+                Invoke-Uv -Arguments $uvArgs
+            } else {
+                Invoke-Uv -Arguments @('tool', 'upgrade', '--reinstall', 'agentic-hil')
+            }
+            return
+        }
+        Invoke-Uv -Arguments @('tool', 'install', '--upgrade', '--reinstall', (Get-PackageSpec))
+        return
+    }
+    if ($script:InstallMode -eq 'pin') {
+        # A named release sets the requirement outright, so it goes through
+        # install; --reinstall forces the replacement even when the installed
+        # version already equals the pin.
+        Invoke-Uv -Arguments @('tool', 'install', '--upgrade', '--reinstall', (Get-PackageSpec))
+        return
+    }
+    Invoke-Uv -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
 }
 
 if ($SystemCertsMode -eq 'always') { Enable-SystemCerts }
@@ -259,14 +450,28 @@ function Test-VersionExactly {
     return $true
 }
 
+function Test-VersionIsDevelopment {
+    param([string]$Found)
+    # A development tree: an editable checkout of this repository, which reports
+    # X.Y.Z.devN. It is the one installation already here that this script keeps
+    # instead of sending through the manager, whatever number it carries, because
+    # step 2 would replace the operator's own working copy with a release from
+    # PyPI (#291). The marker is a suffix and not a number, so it is read as one:
+    # the comparisons above match three numeric fields by design, which is what
+    # lets a development version compare as its X.Y.Z, and is also why neither of
+    # them can see this.
+    return ($Found -match '\.dev(\d|$)')
+}
+
 function Test-VersionMatchesRequest {
     param([string]$Found)
     # Does a freshly installed copy's reported version answer what this run asked
     # for. A pin has to match exactly: the documented --version contract is an exact
     # release, so a newer copy left in the manager's bin is not the release this run
     # wrote. An unpinned run named no version at all, so there is nothing here to
-    # compare it against; the release floor decides one thing only, in step 1, and
-    # what proves a copy at step 3 is where it sits.
+    # compare it against; the release decides one thing only, in step 1, where it
+    # is what that step calls the run, and what proves a copy at step 3 is where it
+    # sits.
     if ($Version) { return (Test-VersionExactly -Found $Found -Wanted $Version) }
     return $true
 }
@@ -394,19 +599,38 @@ function Get-ProcessNameForAgent {
     return $AgentId
 }
 
-# Step 1: is a new enough agentic-hil already here?
+# Step 1: what is already here, and what does this run call itself.
+#
+# An installation found here goes through step 2 either way. This line is the
+# rescue path for an installation that is broken, or whose own `agentic-hil
+# upgrade` is what broke, and answering "nothing to install" to the person who
+# just watched their upgrade fail left the anchor with nothing to anchor. The
+# comparison against the release chooses the word, upgrading or refreshing, and
+# a development tree is the one copy that is kept.
 $needsPackage = $true
+# InstallMode says what step 2 asks the manager to do, not whether it runs.
+# `fresh` is a first install with nothing to reinstall; `refresh` is a copy
+# already here that this run replaces in place, which neither uv nor pip does for
+# an already-current version unless told to; `pin` is `refresh` with the
+# operator's own release named, which sets the requirement outright.
+$InstallMode = 'fresh'
 if (Test-Executable 'agentic-hil') {
     $probe = Invoke-Captured -File 'agentic-hil' -Arguments @('--version')
     $installed = $probe.Output.Trim()
     if ($probe.ExitCode -ne 0) {
+        $InstallMode = 'refresh'
         Write-Step 1 'probe: an agentic-hil on this PATH does not answer, installing it again'
     } elseif ($Version) {
+        $InstallMode = 'pin'
         Write-Step 1 "probe: agentic-hil $installed is here, and --version $Version was asked for, so the package is installed again"
-    } elseif (Test-VersionAtLeast -Found $installed -Floor $Release) {
-        Write-Step 1 "probe: agentic-hil $installed is here and not older than $Release, skipping the package install"
+    } elseif (Test-VersionIsDevelopment -Found $installed) {
+        Write-Step 1 "probe: agentic-hil $installed is a development version, so it is kept: installing over it would replace an editable checkout with a release from PyPI"
         $needsPackage = $false
+    } elseif (Test-VersionAtLeast -Found $installed -Floor $Release) {
+        $InstallMode = 'refresh'
+        Write-Step 1 "probe: agentic-hil $installed is here and not older than $Release, refreshing this current installation"
     } else {
+        $InstallMode = 'refresh'
         Write-Step 1 "probe: agentic-hil $installed is older than $Release, upgrading it"
     }
 } else {
@@ -419,7 +643,7 @@ $pythonCommand = ''
 # actually put the executable rather than guess.
 $packageManager = ''
 if (-not $needsPackage) {
-    Write-Step 2 'package: nothing to install'
+    Write-Step 2 'package: nothing to install, the development installation stays as it is'
 } elseif (Test-Executable 'uv') {
     Write-Step 2 "package: uv is here, installing $(Get-PackageSpec) user-local with uv tool install"
     Install-WithUv
@@ -428,9 +652,16 @@ if (-not $needsPackage) {
     $pythonCommand = Find-Python
     if ($pythonCommand) {
         Write-Step 2 "package: installing $(Get-PackageSpec) user-local with $pythonCommand -m pip install --user"
-        $pip = Invoke-Captured -File $pythonCommand -Arguments @(
-            '-m', 'pip', 'install', '--user', '--upgrade', (Get-PackageSpec)
-        )
+        # pip leaves a package whose installed version already satisfies the
+        # request untouched under --upgrade, so a refresh or a pin adds
+        # --force-reinstall to make it replace the files; a first install has
+        # nothing to reinstall. pip keeps no requirement of its own, so the extras
+        # a refresh preserves are the ones already on disk, which --force-reinstall
+        # does not remove.
+        $pipArguments = @('-m', 'pip', 'install', '--user', '--upgrade')
+        if ($InstallMode -eq 'refresh' -or $InstallMode -eq 'pin') { $pipArguments += '--force-reinstall' }
+        $pipArguments += (Get-PackageSpec)
+        $pip = Invoke-Captured -File $pythonCommand -Arguments $pipArguments
         Write-Host $pip.Output.TrimEnd()
         if ($pip.ExitCode -ne 0) {
             # PEP 668: the distribution owns this interpreter. The answer is an
@@ -459,15 +690,15 @@ if (-not $needsPackage) {
 }
 
 # The exact agentic-hil the machine half calls. It stays the bare name only when
-# step 1 found a new-enough copy already here and installed nothing; once this
-# run installs a copy, it becomes that copy's own path, so an older agentic-hil
-# earlier on PATH cannot answer for the install that just happened.
+# step 1 kept a development installation and this run installed nothing; once
+# this run installs a copy, it becomes that copy's own path, so an older
+# agentic-hil earlier on PATH cannot answer for the install that just happened.
 $AgenticHilCmd = 'agentic-hil'
 
 # Step 3: say where it landed, and edit nobody's profile script.
 if (-not $needsPackage) {
-    # Nothing was installed: the copy step 1 probed and accepted on this PATH is
-    # the one the machine half uses, and it already resolves here.
+    # Nothing was installed: the development copy step 1 kept on this PATH is the
+    # one the machine half uses, and it already resolves here.
     Write-Step 3 "PATH: agentic-hil $installed is already here and was kept, nothing to add"
 } else {
     # The manager's own destination directory, and only that. Step 2 installed into
@@ -480,8 +711,9 @@ if (-not $needsPackage) {
     # protection and cost the release window. Between the merge of a release commit
     # and the PyPI publish the index still serves the release below, so the script
     # demanded a version nobody could install yet and refused a wholly correct fresh
-    # install as possibly stale (#310). The floor keeps its one real job, in step 1,
-    # where it decides whether a copy already here is kept or upgraded.
+    # install as possibly stale (#310). The release keeps its one real job, in step
+    # 1, where it decides whether a copy already here is called upgraded or
+    # refreshed.
     #
     # A pin is the one case where a version still has to be checked here. There the
     # operator named a release, step 2 either installed exactly that or failed

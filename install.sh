@@ -8,12 +8,15 @@
 
 set -eu
 
-# The release this script installs, and the version an installation already
-# here has to reach to be left alone. Deliberately not a capability floor: the
-# line that installs Agentic HIL is the same line people re-run to get current,
-# and step 4 registers the skill out of whatever copy step 1 decided to keep, so
-# a floor left a returning user on an old package and an old skill at once. A
-# development tree reports X.Y.Z.devN, which compares as X.Y.Z and stays put.
+# The release this script installs, and the number step 1 compares an
+# installation already here against. It decides what the transcript calls the
+# run, not whether the run happens: this line is the emergency anchor people
+# re-run when `agentic-hil upgrade` itself is what broke, so an existing
+# installation always reaches step 2's manager invocation, which reinstalls it in
+# place rather than resolving it as already-current and leaving a broken copy
+# untouched. Deliberately not a capability floor either: step 4 registers the
+# skill out of whatever copy step 1 left in place, so a floor left a returning
+# user on an old package and an old skill at once.
 RELEASE="0.17.0"
 
 AGENT=""
@@ -292,6 +295,21 @@ version_exactly() {
     return 0
 }
 
+# A development tree: an editable checkout of this repository, which reports
+# X.Y.Z.devN. It is the one installation already here that this script keeps
+# instead of sending through the manager, whatever number it carries, because
+# step 2 would replace the operator's own working copy with a release from PyPI
+# (#291). The marker is a suffix and not a number, so it is read as one: the
+# comparisons above stop at the digits of each field by design, which is what
+# lets a development version compare as its X.Y.Z, and is also why neither of
+# them can see this.
+version_is_development() {
+    case "$1" in
+        *.dev | *.dev[0-9]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 python_is_new_enough() {
     "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
 }
@@ -321,8 +339,9 @@ package_spec() {
 # A pin has to match exactly: the documented --version contract is an exact
 # release, so a newer copy left in the manager's bin is not the release this run
 # wrote. An unpinned run named no version at all, so there is nothing here to
-# compare it against; the release floor decides one thing only, in step 1, and what
-# proves a copy at step 3 is where it sits (see installed_executable_dir).
+# compare it against; the release decides one thing only, in step 1, where it is
+# what that step calls the run, and what proves a copy at step 3 is where it sits
+# (see installed_executable_dir).
 version_matches_request() {
     if [ -n "$PINNED" ]; then
         version_exactly "$1" "$PINNED"
@@ -416,10 +435,14 @@ user_bin_on_path() {
     export PATH
 }
 
-# uv's output is captured rather than streamed, because the text of a failure is
-# what decides whether there is a second attempt to make.
-install_with_uv() {
-    if uv_output=$(uv tool install --upgrade "$(package_spec)" 2>&1); then
+# One uv command, run with the certificate-retry branches around it, because the
+# text of a failure is what decides whether there is a second attempt to make.
+# The command's own words are this function's positional parameters, so the
+# refresh path (`tool upgrade --reinstall`) and the fresh and pin paths (`tool
+# install ...`) share one retry. uv's output is captured rather than streamed for
+# the same reason: the retry reads it.
+run_uv() {
+    if uv_output=$(uv "$@" 2>&1); then
         printf '%s\n' "$uv_output"
         return 0
     fi
@@ -428,7 +451,7 @@ install_with_uv() {
         say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
         use_system_certs
         SYSTEM_CERTS="always"
-        if uv_output=$(uv tool install --upgrade "$(package_spec)" 2>&1); then
+        if uv_output=$(uv "$@" 2>&1); then
             printf '%s\n' "$uv_output"
             return 0
         fi
@@ -441,9 +464,275 @@ install_with_uv() {
     fail "package: uv could not install $(package_spec); TROUBLESHOOTING.md section 1 has the fallbacks"
 }
 
+# Whether uv already owns this tool. A tool uv installed is one `uv tool upgrade`
+# can rebuild from the requirement uv itself recorded, extras and pin included; a
+# copy pip put on PATH is not one, and asking uv to upgrade it would only fail.
+# The probe keeps a refresh on the command that preserves what the tool was
+# installed with, and falls back to a plain install only when there is no uv tool
+# for uv to upgrade.
+uv_manages_tool() {
+    uv tool list 2>/dev/null | grep -q '^agentic-hil[[:space:]]'
+}
+
+# The requirement set uv recorded for the tool it owns, printed only when uv keeps
+# a receipt this can read in full AND the whole recorded install can be replayed
+# faithfully; a non-zero return says the reconstruction would change what uv
+# recorded, so the caller keeps to the upgrade that preserves it verbatim instead.
+# That covers a missing or unreadable receipt, a receipt whose requirements array
+# never opened or never closed, a recorded tool option (an explicit `[tool.options]`
+# index the reconstruction would drop), a root carrying a pin or a git/path/url
+# source rather than a plain name and extras, and any `--with` requirement that
+# does not rebuild to a bare `name[extras]specifier`.
+#
+# uv writes `agentic-hil[can,pyocd] --with requests==2.32.5` into a receipt beside
+# the tool environment as a TOML array of requirement objects, inline for a lone
+# root requirement and one-per-line the moment a `--with` is added:
+#
+#     requirements = [
+#         { name = "agentic-hil", extras = ["can", "pyocd"] },
+#         { name = "requests", specifier = "==2.32.5" },
+#     ]
+#
+# The output is the agentic-hil root's extras on the first line (space-separated,
+# possibly empty) and every other recorded requirement on a following line, rebuilt
+# as a `--with` PEP 508 string (`name[extras]specifier`). Reading the whole set
+# back is what lets a refresh add the extra THIS run asks for while keeping both a
+# root extra an earlier install recorded and a `--with` requirement it recorded;
+# reinstalling from the root alone drops the latter, which the previous reader did
+# whenever the receipt went multiline. The parse spans lines and tracks bracket
+# depth so the nested `extras = [...]` and the trailing `entrypoints = [...]` block
+# do not confuse where the requirement list ends.
+uv_recorded_requirements() {
+    uv_tool_root=$(uv tool dir 2>/dev/null) || return 1
+    uv_receipt="${uv_tool_root%/}/agentic-hil/uv-receipt.toml"
+    [ -r "$uv_receipt" ] || return 1
+    awk '
+    function extras_of(obj,   ex, out) {
+        out = ""
+        if (match(obj, /extras = \[[^]]*\]/)) {
+            ex = substr(obj, RSTART, RLENGTH)
+            while (match(ex, /"[^"]*"/)) {
+                out = out (out == "" ? "" : " ") substr(ex, RSTART + 1, RLENGTH - 2)
+                ex = substr(ex, RSTART + RLENGTH)
+            }
+        }
+        return out
+    }
+    function object_ok(obj,   tmp, k) {
+        # Only name/extras/specifier can be rebuilt as a bare PEP 508 string; a
+        # marker, url or git/path field cannot, so refuse the whole receipt.
+        tmp = obj
+        while (match(tmp, /[A-Za-z][A-Za-z_-]*[ ]*=/)) {
+            k = substr(tmp, RSTART, RLENGTH)
+            sub(/[ ]*=$/, "", k)
+            if (k != "name" && k != "extras" && k != "specifier") return 0
+            tmp = substr(tmp, RSTART + RLENGTH)
+        }
+        return 1
+    }
+    function root_ok(obj,   tmp, k) {
+        # The root requirement is rebuilt from its extras plus the pin this run
+        # names, so only name and extras replay faithfully. A recorded specifier
+        # (a pin), a directory/url/git source or a marker would be dropped by the
+        # reconstruction, so refuse the whole receipt and let the caller keep to
+        # the upgrade that preserves whatever uv recorded.
+        tmp = obj
+        while (match(tmp, /[A-Za-z][A-Za-z_-]*[ ]*=/)) {
+            k = substr(tmp, RSTART, RLENGTH)
+            sub(/[ ]*=$/, "", k)
+            if (k != "name" && k != "extras") return 0
+            tmp = substr(tmp, RSTART + RLENGTH)
+        }
+        return 1
+    }
+    function pep508(obj,   nm, out, ex, item, spec) {
+        if (!match(obj, /name = "[^"]*"/)) return ""
+        nm = substr(obj, RSTART, RLENGTH); gsub(/name = "|"/, "", nm)
+        out = nm
+        if (match(obj, /extras = \[[^]]*\]/)) {
+            ex = substr(obj, RSTART, RLENGTH); item = ""
+            while (match(ex, /"[^"]*"/)) {
+                item = item (item == "" ? "" : ",") substr(ex, RSTART + 1, RLENGTH - 2)
+                ex = substr(ex, RSTART + RLENGTH)
+            }
+            if (item != "") out = out "[" item "]"
+        }
+        if (match(obj, /specifier = "[^"]*"/)) {
+            spec = substr(obj, RSTART, RLENGTH); gsub(/specifier = "|"/, "", spec)
+            out = out spec
+        }
+        return out
+    }
+    function process(txt,   rest, obj, nm, root_seen, p) {
+        # Fills the globals out_extras/out_withs and returns 1 on a receipt this
+        # can replay in full, 0 on one it cannot; the caller prints only after a
+        # 1, so a rejected receipt reaches the preserving upgrade instead of a
+        # reconstruction from a partial read.
+        out_withs = ""; root_seen = 0; out_extras = ""
+        rest = txt
+        while (match(rest, /\{[^{}]*\}/)) {
+            obj = substr(rest, RSTART, RLENGTH)
+            rest = substr(rest, RSTART + RLENGTH)
+            nm = ""
+            if (match(obj, /name = "[^"]*"/)) { nm = substr(obj, RSTART, RLENGTH); gsub(/name = "|"/, "", nm) }
+            if (nm == "agentic-hil" && !root_seen) {
+                if (!root_ok(obj)) return 0
+                root_seen = 1
+                out_extras = extras_of(obj)
+            } else {
+                if (!object_ok(obj)) return 0
+                p = pep508(obj)
+                if (p == "" || index(p, " ") > 0) return 0
+                out_withs = out_withs p "\n"
+            }
+        }
+        if (!root_seen) return 0
+        return 1
+    }
+    BEGIN { state = 0; options = 0; in_options = 0 }
+    {
+        line = $0
+        # A recorded tool option (an explicit index, a python pin) cannot be
+        # replayed by the reconstruction, which passes none, so a receipt that
+        # records any is refused and the caller keeps to the preserving upgrade.
+        # uv writes these under a `[tool.options]` table (or sub-table / array of
+        # tables) only when there are some, so a bare header with no key before the
+        # next section is treated as no options.
+        if (line ~ /^[ \t]*\[\[?tool\.options/) {
+            if (line ~ /^[ \t]*\[tool\.options\][ \t]*$/) { in_options = 1 }
+            else { options = 1; in_options = 0 }
+            next
+        }
+        if (in_options) {
+            if (line ~ /^[ \t]*\[/) { in_options = 0 }
+            else if (line ~ /[^ \t]/ && line !~ /^[ \t]*#/) { options = 1 }
+        }
+        if (state == 2) next
+        s = line
+        if (state == 0) {
+            p = index(s, "requirements = [")
+            if (p == 0) next
+            s = substr(s, p + 16)
+            state = 1; depth = 1
+        }
+        n = length(s)
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c == "]") { depth--; if (depth == 0) { state = 2; break }; interior = interior c }
+            else if (c == "[") { depth++; interior = interior c }
+            else interior = interior c
+        }
+        if (state == 1) interior = interior "\n"
+    }
+    # The receipt is read whole before anything is printed: the requirements array
+    # must have opened AND closed (state 2, a missing anchor leaves 0, a truncated
+    # array 1), no tool option may be recorded, and every requirement must replay.
+    END {
+        if (state != 2) exit 1
+        if (options) exit 1
+        if (!process(interior)) exit 1
+        print out_extras
+        printf "%s", out_withs
+        exit 0
+    }
+    ' "$uv_receipt"
+}
+
+# The `--with` arguments a uv-managed refresh replays, built from the recorded
+# requirement set ($1, the multi-line value uv_recorded_requirements printed): its
+# second line onward, each turned into `--with <req>`. The reconstructed
+# requirements are bare PEP 508 strings with no spaces, so the caller can rely on
+# word-splitting to pass them as separate arguments.
+uv_with_flags() {
+    printf '%s\n' "$1" | sed -n '2,$p' | while IFS= read -r recorded_with; do
+        [ -n "$recorded_with" ] && printf -- '--with %s ' "$recorded_with"
+    done
+}
+
+# The requirement a uv-managed refresh reinstalls from: this run's extras merged
+# with the ones uv already recorded (passed as $1, whitespace-separated and
+# possibly empty), spelled agentic-hil[...] with this run's pin if there is one.
+# Merging closes both gaps at once, the recorded pyocd an earlier install left
+# survives (a bare `tool install agentic-hil[can]` would drop it), and the `can` a
+# --can run wants is added even when the recorded requirement was bare (a bare
+# `tool upgrade` would never add it).
+refresh_spec() {
+    refresh_extras=""
+    if [ "$WITH_CAN" -eq 1 ]; then
+        refresh_extras="can"
+    fi
+    for recorded_extra in $1; do
+        case " $refresh_extras " in
+            *" $recorded_extra "*) ;;
+            *) refresh_extras="${refresh_extras:+$refresh_extras }$recorded_extra" ;;
+        esac
+    done
+    refresh_result="agentic-hil"
+    if [ -n "$refresh_extras" ]; then
+        refresh_result="agentic-hil[$(printf '%s' "$refresh_extras" | tr ' ' ',')]"
+    fi
+    if [ -n "$PINNED" ]; then
+        refresh_result="${refresh_result}==${PINNED}"
+    fi
+    printf '%s' "$refresh_result"
+}
+
+install_with_uv() {
+    case "$INSTALL_MODE" in
+        refresh)
+            if uv_manages_tool; then
+                # uv owns this tool. Reinstall from the requirement uv recorded
+                # merged with this run's extras: the recorded `[can,pyocd]`
+                # survives (a `tool install agentic-hil[can]` would drop pyocd)
+                # and a `--can` a bare recorded requirement never had is added (a
+                # `tool upgrade` would never add it). --reinstall replaces the
+                # files even when the recorded version is already current, which is
+                # the repair the anchor exists for. A recorded `--with` requirement
+                # is replayed as its own --with so the reinstall keeps it too; a bare
+                # `tool install agentic-hil[...]` would drop it. When uv keeps no
+                # readable receipt, or records a requirement this cannot rebuild
+                # without changing it, fall back to the upgrade that preserves
+                # whatever it did record rather than reinstalling from a set this
+                # could not read back in full.
+                if recorded=$(uv_recorded_requirements); then
+                    recorded_extras=$(printf '%s\n' "$recorded" | sed -n '1p')
+                    with_flags=$(uv_with_flags "$recorded")
+                    # Word-splitting on with_flags is intended: each replayed
+                    # requirement is a space-free PEP 508 string.
+                    # shellcheck disable=SC2086
+                    run_uv tool install --upgrade --reinstall "$(refresh_spec "$recorded_extras")" $with_flags
+                else
+                    run_uv tool upgrade --reinstall agentic-hil
+                fi
+                return 0
+            fi
+            run_uv tool install --upgrade --reinstall "$(package_spec)"
+            ;;
+        pin)
+            # A named release sets the requirement outright, so it goes through
+            # install; --reinstall still forces the replacement even when the
+            # installed version already equals the pin.
+            run_uv tool install --upgrade --reinstall "$(package_spec)"
+            ;;
+        *)
+            run_uv tool install --upgrade "$(package_spec)"
+            ;;
+    esac
+}
+
 install_with_pip() {
     python_bin="$1"
-    if pip_output=$("$python_bin" -m pip install --user --upgrade "$(package_spec)" 2>&1); then
+    # pip leaves a package whose installed version already satisfies the request
+    # untouched under --upgrade, so a refresh or a pin adds --force-reinstall to
+    # make it replace the files; a first install has nothing to reinstall. pip has
+    # no recorded requirement of its own, so the extras a refresh keeps are the
+    # ones already on disk, which --force-reinstall does not remove.
+    pip_reinstall=""
+    case "$INSTALL_MODE" in
+        refresh | pin) pip_reinstall="--force-reinstall" ;;
+    esac
+    # shellcheck disable=SC2086 # pip_reinstall is one optional flag, split on purpose
+    if pip_output=$("$python_bin" -m pip install --user --upgrade $pip_reinstall "$(package_spec)" 2>&1); then
         printf '%s\n' "$pip_output"
         return 0
     fi
@@ -453,7 +742,8 @@ install_with_pip() {
         SYSTEM_CERTS="always"
         if [ -n "${PIP_CERT:-}" ]; then
             say "certificates: retrying pip once against this machine's own store, with verification still on"
-            if pip_output=$("$python_bin" -m pip install --user --upgrade "$(package_spec)" 2>&1); then
+            # shellcheck disable=SC2086 # pip_reinstall is one optional flag, split on purpose
+            if pip_output=$("$python_bin" -m pip install --user --upgrade $pip_reinstall "$(package_spec)" 2>&1); then
                 printf '%s\n' "$pip_output"
                 return 0
             fi
@@ -498,24 +788,25 @@ manager_bin_dir() {
 }
 
 # The exact agentic-hil the machine half calls. It stays the bare name only when
-# step 1 found a new-enough copy already here and installed nothing; once this
-# run installs a copy, it becomes that copy's own path, so an older agentic-hil
-# earlier on PATH cannot answer for the install that just happened.
+# step 1 kept a development installation and this run installed nothing; once
+# this run installs a copy, it becomes that copy's own path, so an older
+# agentic-hil earlier on PATH cannot answer for the install that just happened.
 AGENTIC_HIL_CMD="agentic-hil"
 
 installed_executable_dir() {
     # The manager's own destination directory, and only that. Step 2 installed into
-    # exactly this directory, with --upgrade, so a copy that answers --version here
-    # is the copy the manager just wrote and the newest the index served. The
-    # placement is the proof: an older or unrelated agentic-hil elsewhere on PATH
-    # cannot get into the directory the manager names.
+    # exactly this directory, so a copy that answers --version here is the copy the
+    # manager just wrote and the newest requirement it resolved. The placement is
+    # the proof: an older or unrelated agentic-hil elsewhere on PATH cannot get
+    # into the directory the manager names.
     #
     # Requiring the release floor on top of that placement added no stale-copy
     # protection and cost the release window. Between the merge of a release commit
     # and the PyPI publish the index still serves the release below, so the script
     # demanded a version nobody could install yet and refused a wholly correct fresh
-    # install as possibly stale (#310). The floor keeps its one real job, in step 1,
-    # where it decides whether a copy already here is kept or upgraded.
+    # install as possibly stale (#310). The release keeps its one real job, in step
+    # 1, where it decides whether a copy already here is called upgraded or
+    # refreshed.
     #
     # A pin is the one case where a version still has to be checked here. There the
     # operator named a release, step 2 either installed exactly that or failed
@@ -539,8 +830,8 @@ installed_executable_dir() {
 
 report_path() {
     if [ "$NEEDS_PACKAGE" -eq 0 ]; then
-        # Nothing was installed: the copy step 1 probed and accepted on this PATH
-        # is the one the machine half uses, and it already resolves here.
+        # Nothing was installed: the development copy step 1 kept on this PATH is
+        # the one the machine half uses, and it already resolves here.
         step 3 "PATH: agentic-hil ${installed:-} is already here and was kept, nothing to add"
         return 0
     fi
@@ -599,24 +890,46 @@ running_pid() {
 
 DISCOVERED_PYTHON=""
 
-# Step 1: is a new enough agentic-hil already here?
+# Step 1: what is already here, and what does this run call itself.
+#
+# An installation found here goes through step 2 either way. This line is the
+# rescue path for an installation that is broken, or whose own `agentic-hil
+# upgrade` is what broke, and answering "nothing to install" to the person who
+# just watched their upgrade fail left the anchor with nothing to anchor. The
+# comparison against the release chooses the word, upgrading or refreshing, and
+# a development tree is the one copy that is kept.
+# INSTALL_MODE says what step 2 is asking the manager to do, which is not the
+# same question as whether it runs. `fresh` is a first install, and its --upgrade
+# has nothing to reinstall. `refresh` is a copy already here that this run
+# replaces in place: whatever it reports, the manager is told to reinstall it,
+# because neither uv nor pip touches a package whose installed version already
+# satisfies the request unless it is told to, and a current-but-broken copy is
+# exactly the one the anchor exists to repair. `pin` is `refresh` with the
+# operator's own release named, which sets the requirement outright.
 NEEDS_PACKAGE=1
+INSTALL_MODE="fresh"
 if ! have agentic-hil; then
     step 1 "probe: no agentic-hil on this PATH, installing it user-local"
 elif ! installed=$(agentic-hil --version 2>/dev/null); then
+    INSTALL_MODE="refresh"
     step 1 "probe: an agentic-hil on this PATH does not answer, installing it again"
 elif [ -n "$PINNED" ]; then
+    INSTALL_MODE="pin"
     step 1 "probe: agentic-hil $installed is here, and --version $PINNED was asked for, so the package is installed again"
-elif version_at_least "$installed" "$RELEASE"; then
-    step 1 "probe: agentic-hil $installed is here and not older than $RELEASE, skipping the package install"
+elif version_is_development "$installed"; then
+    step 1 "probe: agentic-hil $installed is a development version, so it is kept: installing over it would replace an editable checkout with a release from PyPI"
     NEEDS_PACKAGE=0
+elif version_at_least "$installed" "$RELEASE"; then
+    INSTALL_MODE="refresh"
+    step 1 "probe: agentic-hil $installed is here and not older than $RELEASE, refreshing this current installation"
 else
+    INSTALL_MODE="refresh"
     step 1 "probe: agentic-hil $installed is older than $RELEASE, upgrading it"
 fi
 
 # Step 2: install the package, user-local, never as root.
 if [ "$NEEDS_PACKAGE" -eq 0 ]; then
-    step 2 "package: nothing to install"
+    step 2 "package: nothing to install, the development installation stays as it is"
 elif have uv; then
     step 2 "package: uv is here, installing $(package_spec) user-local with uv tool install"
     install_with_uv
