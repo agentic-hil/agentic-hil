@@ -14,7 +14,7 @@ set -eu
 # and step 4 registers the skill out of whatever copy step 1 decided to keep, so
 # a floor left a returning user on an old package and an old skill at once. A
 # development tree reports X.Y.Z.devN, which compares as X.Y.Z and stays put.
-RELEASE="0.16.0"
+RELEASE="0.17.0"
 
 AGENT=""
 WITH_AGENT_INSTALL=1
@@ -317,17 +317,17 @@ package_spec() {
     printf '%s' "$spec"
 }
 
-# Does a freshly installed copy's reported version answer what this run asked
-# for: exactly the pin when one was given, at least the release otherwise. The pin
-# must match exactly -- a newer copy left in the manager's bin is not the pinned
-# release this run wrote, and the documented --version contract is an exact
-# release, not a floor. Without a pin the manager only ever writes the newest, so
-# any copy at or above the release is the one just installed.
+# Does a freshly installed copy's reported version answer what this run asked for.
+# A pin has to match exactly: the documented --version contract is an exact
+# release, so a newer copy left in the manager's bin is not the release this run
+# wrote. An unpinned run named no version at all, so there is nothing here to
+# compare it against; the release floor decides one thing only, in step 1, and what
+# proves a copy at step 3 is where it sits (see installed_executable_dir).
 version_matches_request() {
     if [ -n "$PINNED" ]; then
         version_exactly "$1" "$PINNED"
     else
-        version_at_least "$1" "$RELEASE"
+        return 0
     fi
 }
 
@@ -504,17 +504,32 @@ manager_bin_dir() {
 AGENTIC_HIL_CMD="agentic-hil"
 
 installed_executable_dir() {
-    # The manager's own destination directory, and only that. The copy there must
-    # answer and match what this run asked for -- exactly the pin, or at least the
-    # floor -- which is the proof it is the one the manager just wrote and not an
-    # older or unrelated one elsewhere on PATH. If the manager cannot name its
-    # destination, or the copy there does not answer at the required version, this
-    # returns failure: the machine half is refused rather than run against a
+    # The manager's own destination directory, and only that. Step 2 installed into
+    # exactly this directory, with --upgrade, so a copy that answers --version here
+    # is the copy the manager just wrote and the newest the index served. The
+    # placement is the proof: an older or unrelated agentic-hil elsewhere on PATH
+    # cannot get into the directory the manager names.
+    #
+    # Requiring the release floor on top of that placement added no stale-copy
+    # protection and cost the release window. Between the merge of a release commit
+    # and the PyPI publish the index still serves the release below, so the script
+    # demanded a version nobody could install yet and refused a wholly correct fresh
+    # install as possibly stale (#310). The floor keeps its one real job, in step 1,
+    # where it decides whether a copy already here is kept or upgraded.
+    #
+    # A pin is the one case where a version still has to be checked here. There the
+    # operator named a release, step 2 either installed exactly that or failed
+    # outright, and a copy in the manager's bin reporting anything else is a
+    # leftover rather than this run's work.
+    #
+    # If the manager cannot name its destination, or the copy there does not answer,
+    # this returns failure: the machine half is refused rather than run against a
     # guessed, possibly stale copy.
     directory=$(manager_bin_dir)
     [ -n "$directory" ] || return 1
     [ -x "$directory/agentic-hil" ] || return 1
     found_version=$("$directory/agentic-hil" --version 2>/dev/null) || return 1
+    [ -n "$found_version" ] || return 1
     if version_matches_request "$found_version"; then
         printf '%s\n' "$directory"
         return 0
