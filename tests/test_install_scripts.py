@@ -968,20 +968,43 @@ def test_both_scripts_locate_the_fresh_copy_only_in_the_managers_own_bin() -> No
 
 
 def test_both_scripts_require_an_exact_match_for_a_version_pin() -> None:
-    """A `--version` pin is proven by exact equality, not a floor comparison.
+    """A `--version` pin is proven by exact equality, and an unpinned run by nothing.
 
     The documented `--version` installs an exact release, so a copy in the manager's
-    own bin whose version merely exceeds the pin is not the one this run wrote. Both
-    scripts gate the fresh copy on an exact-equality check when a pin is present and
-    fall back to the floor otherwise; the PowerShell side cannot run end to end in
-    every checkout, so this pins that both carry such a check.
+    own bin whose version merely exceeds the pin is not the one this run wrote. An
+    unpinned run named no version, so the same check has nothing to compare against:
+    it used to fall back to the release floor there, which refused every correct
+    fresh install made during a release window (#310). The PowerShell side cannot run
+    end to end in every checkout, so this pins both halves of the rule structurally:
+    the exact check is present, and the floor is not reachable from it.
     """
     shell = _code_only(_shell_source())
     assert "version_exactly" in shell
-    assert "version_matches_request" in shell
+    shell_body = re.search(r"^version_matches_request\(\) \{\n(.*?)\n\}", shell, re.MULTILINE | re.DOTALL)
+    assert shell_body is not None, "install.sh has no version_matches_request"
+    assert "version_exactly" in shell_body.group(1)
+    assert "version_at_least" not in shell_body.group(1), "install.sh compares an unpinned copy against the floor again"
+
     powershell = _code_only(_powershell_source())
     assert "Test-VersionExactly" in powershell
-    assert "Test-VersionMatchesRequest" in powershell
+    powershell_body = re.search(r"^function Test-VersionMatchesRequest \{\n(.*?)\n\}", powershell, re.MULTILINE | re.DOTALL)
+    assert powershell_body is not None, "install.ps1 has no Test-VersionMatchesRequest"
+    assert "Test-VersionExactly" in powershell_body.group(1)
+    assert "Test-VersionAtLeast" not in powershell_body.group(1), "install.ps1 compares an unpinned copy against the floor again"
+
+
+def test_the_release_floor_still_decides_whether_an_existing_copy_is_kept() -> None:
+    """The floor lost step 3, not step 1, and step 1 is where it was ever doing work.
+
+    Step 1 asks whether the agentic-hil already on this PATH is new enough to keep,
+    and the release is the only answer to that: a 0.11.0 bench that is kept gets
+    written a 0.11.0 skill. Dropping the floor from step 3's proof (#310) must not
+    take that comparison with it, so both scripts are held to still making it.
+    """
+    shell = _code_only(_shell_source())
+    assert 'version_at_least "$installed" "$RELEASE"' in shell
+    powershell = _code_only(_powershell_source())
+    assert "Test-VersionAtLeast -Found $installed -Floor $Release" in powershell
 
 
 def test_both_scripts_install_the_same_release() -> None:
@@ -1078,6 +1101,173 @@ def test_an_installation_below_the_release_is_upgraded_rather_than_kept(tmp_path
     assert "0.11.0 is older than" in transcript, transcript
     assert marker.is_file(), transcript
     assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+
+
+def _release() -> str:
+    """The release install.sh states, read from the script rather than copied here.
+
+    The number moves with every release and these tests have to move with it. A
+    literal written into this file would keep passing while saying nothing about the
+    version the installer actually carries.
+    """
+    found = re.search(r'^RELEASE="(\d+\.\d+\.\d+)"$', _shell_source(), re.MULTILINE)
+    assert found is not None, "install.sh states no RELEASE"
+    return found.group(1)
+
+
+def _the_release_below(release: str) -> str:
+    """What the index still serves inside a release window: one release below.
+
+    One minor down where there is a minor to spend, one major otherwise. Either way
+    it is a real release number that sits below the floor, which is the only
+    property the window depends on.
+    """
+    major, minor, _patch = (int(part) for part in release.split("."))
+    if minor > 0:
+        return f"{major}.{minor - 1}.0"
+    assert major > 0, f"there is no release below {release} for a window to serve"
+    return f"{major - 1}.0.0"
+
+
+def _release_window_run(
+    tmp_path: Path,
+    *,
+    served: str,
+    pin: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """A fresh machine, an index serving one version, one install run through `sh`.
+
+    Nothing of this project is on the machine, so step 1 takes the "no agentic-hil
+    on this PATH" branch and step 2 installs. The stub uv is the index: it reports
+    its destination with `tool dir --bin` the way the real one does, and `tool
+    install` writes a console script reporting `served` into it. That directory is
+    on PATH here, the way `~/.local/bin` is on a real machine, so step 3 has the
+    ordinary shape rather than the off-PATH one.
+
+    The stub writes the one version it has whatever spec it is handed. A real index
+    that cannot serve a pin fails the install itself, at step 2; keeping the stub
+    going past that is what lets a pinned run reach step 3, where the check under
+    test is the one that answers.
+
+    Returns the finished run, the marker file the machine half writes, and the
+    directory the manager reported.
+    """
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    tools = tmp_path / "tools"
+    uv_bin = home / ".local" / "bin"
+    for directory in (project, tools, uv_bin):
+        directory.mkdir(parents=True)
+
+    marker = tmp_path / "who-ran-agent-install"
+
+    # A stub claude, so agent detection has a claude-code to register for.
+    _stub_executable(tools / "claude", "exit 0\n")
+    _stub_executable(
+        tools / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        f'  echo "{uv_bin}"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'  cat > "{uv_bin}/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        f'  --version) echo "{served}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        f'  chmod +x "{uv_bin}/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+    arguments = [shell, str(SHELL_SCRIPT), "--no-can"]
+    if pin is not None:
+        arguments += ["--version", pin]
+
+    result = subprocess.run(
+        arguments,
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={"HOME": str(home), "PATH": f"{tools}:{uv_bin}:/usr/bin:/bin"},
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    return result, marker, uv_bin
+
+
+def test_a_fresh_install_during_a_release_window_is_not_refused(tmp_path: Path) -> None:
+    """The release window, run end to end through a POSIX shell.
+
+    A release commit lands on master and the one-line installer host mirrors it
+    within the hour, but PyPI has not published yet, so the index still serves the
+    release below. Step 3 asked the fresh copy in the manager's own bin to be at
+    least `RELEASE` before it would accept it, so it refused the copy the manager had
+    just written, step 4 stopped with "the machine half was not run against a
+    possibly stale PATH copy", and a completely correct install read as a broken
+    machine to everyone who ran it during the window (#310).
+
+    The floor never protected anything here: step 2 installed with `--upgrade` into
+    the directory the manager itself names, so what answers there is this run's own
+    work whatever number it reports. The directory is the proof now, and the install
+    goes through.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    release = _release()
+    served = _the_release_below(release)
+    assert tuple(int(part) for part in served.split(".")) < tuple(int(part) for part in release.split(".")), (
+        f"the window only exists while the index serves less than {release}"
+    )
+
+    result, marker, uv_bin = _release_window_run(tmp_path, served=served)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "does not resolve here" not in transcript, transcript
+    # Step 3 resolved the manager's own copy, and named the directory it sits in.
+    assert f"agentic-hil is installed in {uv_bin}" in transcript, transcript
+    # Step 4 was reached, and reached through that copy rather than a bare name.
+    assert "agent: registering the skill and the MCP server for claude-code" in transcript, transcript
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+
+
+def test_a_pinned_run_in_a_release_window_still_gets_the_version_it_named(tmp_path: Path) -> None:
+    """The pinned mirror of the window: the exact check is untouched by the fix.
+
+    An operator who names a release has named it, and step 3 still proves that
+    exactly. Pinning the release the index serves inside the window succeeds, the
+    same as an unpinned run in the same window does. Pinning one the index cannot
+    serve fails, loudly, without the machine half running: on a real index the
+    install itself would already have failed, and even past that the copy in the
+    manager's bin is not the release this run asked for.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    served = _the_release_below(_release())
+
+    matched, matched_marker, uv_bin = _release_window_run(tmp_path / "matched", served=served, pin=served)
+    transcript = f"{matched.stdout}{matched.stderr}"
+    assert matched.returncode == 0, transcript
+    assert f"agentic-hil is installed in {uv_bin}" in transcript, transcript
+    assert matched_marker.is_file(), transcript
+    assert matched_marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+
+    unserved, unserved_marker, _ = _release_window_run(tmp_path / "unserved", served=served, pin=_release())
+    transcript = f"{unserved.stdout}{unserved.stderr}"
+    assert unserved.returncode != 0, transcript
+    assert "does not resolve here" in transcript, transcript
+    assert not unserved_marker.exists(), transcript
 
 
 def test_neither_script_offers_a_way_to_disable_certificate_verification() -> None:
