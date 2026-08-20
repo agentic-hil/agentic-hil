@@ -820,9 +820,10 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job
     reached only the leader, which is the bug this fixes -- the grandchildren
     editing the tree never saw a signal at all.
 
-    Returns only once the tree is *positively confirmed* gone. If a signal cannot
-    be delivered, or the group still has a member after the final SIGKILL and its
-    deadline, this raises CleanupUnconfirmed rather than returning: returning would
+    Returns only once the tree is *positively confirmed* gone. If the group still
+    has a member once a signal and its deadline have passed -- whether the signal
+    itself was delivered or could not be, which only decides which report is
+    raised -- this raises CleanupUnconfirmed rather than returning: returning would
     tell the caller the tree is safe to commit when a process may still be editing
     it, which is the race this exists to prevent. On Windows without a job there
     is no kernel-tracked membership to ask, so this never returns cleanly at
@@ -890,15 +891,34 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job
     # SIGTERM first for a clean stop, then SIGKILL for whatever ignored it. After
     # each, the leader is reaped -- a group whose only remaining member is an
     # unreaped zombie leader never looks empty -- and the group waited out.
+    #
+    # A signal that could not be delivered is not by itself the failure, and
+    # raising over it before asking anything else was issue #320. Darwin answers
+    # EPERM, not ESRCH, for a group the kernel still knows but whose every
+    # remaining member is a zombie: its group iterator skips zombies, and a pass
+    # that signalled nobody is reported as a permission failure under POSIX
+    # conformance rather than as an empty group. This path walks through exactly
+    # that state by design -- the leader is a zombie from the moment it dies until
+    # `_reap_leader` collects it, and a descendant the SIGTERM above killed is one
+    # until init collects it -- so a delivery error here routinely describes a tree
+    # that is already gone, and "could not signal" is then a survivor an operator
+    # goes looking for and cannot find.
+    #
+    # The question that decides the answer is the membership one, so it is asked
+    # first either way and the delivery error is reported only when the group also
+    # will not read empty. That swallows nothing: a group with a live member that
+    # is not ours to signal answers the `_group_gone` probe with the same refusal
+    # for the whole wait, and still raises below.
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        if not _signal_group(pgid, sig):
-            # A signal that could not be delivered leaves the group's members
-            # running with their state unknown; SIGKILL failing here is the worst
-            # case and must not be swallowed.
-            raise CleanupUnconfirmed(f"could not signal process group {pgid} with {_signal_name(sig)} while killing pid {process.pid}")
+        delivered = _signal_group(pgid, sig)
         _reap_leader(process, grace_s)
         if _group_gone(pgid, deadline=time.monotonic() + grace_s):
             return
+        if not delivered:
+            raise CleanupUnconfirmed(
+                f"could not signal process group {pgid} with {_signal_name(sig)} while killing pid {process.pid}, "
+                f"and the group still had a member after a {grace_s:.0f}s wait"
+            )
     raise CleanupUnconfirmed(
         f"process group {pgid} (agent pid {process.pid}) still had a member after SIGKILL and a {grace_s:.0f}s wait"
     )
@@ -916,8 +936,11 @@ def _signal_group(pgid: int, sig: int) -> bool:
 
     True when the signal was delivered or the group was already gone -- both mean
     there is nothing left this call failed to reach. False when it could not be
-    delivered (``PermissionError`` or another ``OSError``): the members are still
-    there and were not signalled, which the caller must not read as a clean kill.
+    delivered (``PermissionError`` or another ``OSError``): nothing in the group
+    was reached, which is not the same as something being left in it. On Darwin it
+    is also the answer for a group whose remaining members are all zombies, so the
+    caller settles it by asking whether the group still has a member rather than
+    by assuming one is there -- see `_terminate_tree`.
     """
     try:
         os.killpg(pgid, sig)

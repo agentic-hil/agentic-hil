@@ -2212,22 +2212,76 @@ def test_terminate_tree_reports_cleanup_unconfirmed_when_the_group_never_clears(
 def test_terminate_tree_reports_cleanup_unconfirmed_when_a_signal_cannot_be_delivered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A SIGKILL that cannot be delivered leaves the group's state unknown.
+    """A signal that cannot be delivered to a group that still has a member.
 
     `_terminate_tree` used to suppress every signalling error, so a killpg that
-    failed with EPERM was indistinguishable from one that worked. A signal that
-    did not land means the members are still there and were not stopped, which is
-    the one thing that must not be read as a clean kill."""
+    failed with EPERM was indistinguishable from one that worked. A member that
+    was never signalled is still there and still writing, which is the one thing
+    that must not be read as a clean kill. The group here really does have one --
+    the live process below, never signalled because the delivery is refused --
+    so the report names both halves: the signal that did not land, and the group
+    that did not clear. Issue #320 narrowed this to the second half; a delivery
+    error over a group that then reads empty is the tree being gone rather than
+    a survivor, and is no longer raised (see the test below)."""
     process = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
     )
     monkeypatch.setattr(agent_review_loop, "_signal_group", lambda pgid, sig: False)
     try:
-        with pytest.raises(agent_review_loop.CleanupUnconfirmed):
+        with pytest.raises(agent_review_loop.CleanupUnconfirmed) as excinfo:
             agent_review_loop._terminate_tree(process, grace_s=0.1)
     finally:
         process.kill()
         process.wait()
+
+    assert str(excinfo.value) == (
+        f"could not signal process group {process.pid} with SIGTERM while killing pid {process.pid}, "
+        "and the group still had a member after a 0s wait"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_terminate_tree_takes_an_empty_group_over_a_kill_that_could_not_be_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #320: the SIGKILL that fails because there is nobody left to kill.
+
+    Darwin answers EPERM, not ESRCH, for a group the kernel still knows but whose
+    remaining members are all zombies: its group iterator skips zombies, and a
+    pass that signalled nobody is reported as a permission failure rather than as
+    an empty group. `_terminate_tree` walks through exactly that state by design,
+    so it was raising `could not signal process group N with SIGKILL` over a tree
+    that was already gone -- a survivor an operator goes looking for and cannot
+    find, and a round refused for it.
+
+    The whole sequence the macOS leg hit is replayed here as injected answers
+    rather than as timing, so it reproduces on any POSIX host and the ending is
+    decided by the code: the SIGTERM lands, the group will not clear before its
+    deadline, the SIGKILL is refused, and by the time membership is asked again
+    the reaper has been past and the group is empty. Empty is the same positive
+    confirmation the delivered path returns on, so this returns."""
+    process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    process.wait(timeout=30)
+    attempted: list[int] = []
+
+    def killpg_as_macos_answered(pgid: int, sig: int) -> None:
+        assert pgid == process.pid
+        if sig != 0:
+            attempted.append(sig)
+            if sig == agent_review_loop.signal.SIGKILL:
+                raise PermissionError()
+            return
+        # `_group_gone` asking: unclearable until the SIGKILL has been attempted,
+        # then empty, which is the reaper collecting the last zombie member.
+        if agent_review_loop.signal.SIGKILL not in attempted:
+            raise PermissionError()
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(agent_review_loop.os, "killpg", killpg_as_macos_answered)
+
+    agent_review_loop._terminate_tree(process, grace_s=0.2)
+
+    assert attempted == [agent_review_loop.signal.SIGTERM, agent_review_loop.signal.SIGKILL]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="killpg is POSIX-only")
