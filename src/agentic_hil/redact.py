@@ -43,15 +43,73 @@ _SENSITIVE_KEY_PATTERN = re.compile(r"(?:^|_)(?:token|secret|password|passwd|api
 _STREAM_KEYS = frozenset({"stdout", "stderr"})
 
 # `scheme://user:secret@host`: the user survives, because it names the account
-# the manager was configured with and is not the credential, and the span
-# between that colon and the `@` is masked. A URL with no password (no colon
-# inside the userinfo, or an empty one) matches nothing. The leading lookbehind
-# forbids the scheme from starting in the middle of a run of scheme-valid
-# characters: without it, a long run with no `://` (a captured stream can carry
-# 10k+ such bytes on one line) is retried as a scheme from every position, each
-# scanning the whole tail, which is quadratic and can stall result delivery. A
-# real scheme always starts at a boundary, so this changes no match.
-_URL_USERINFO_PATTERN = re.compile(r"(?P<keep>(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]*://[^\s:/?#@]+:)[^\s/?#@]+(?=@)")
+# the manager was configured with and is not the credential, and the span between
+# that colon and the `@` is masked. A URL with no password (no colon inside the
+# userinfo, or an empty one) matches nothing. This shape is masked by
+# `_mask_url_userinfo`, a deterministic single pass rather than a lone regex,
+# because a captured stream can carry 10k+ scheme-valid bytes on one line with no
+# `://` and a `scheme://…` regex retries such a run as a scheme from every
+# position, each attempt scanning the whole tail — quadratic, and able to stall
+# result delivery. The scanner instead locates each `://` once and works outward.
+
+# The characters a URI scheme is built from (RFC 3986:
+# ``ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )``). The distinction the scanner
+# turns on is that a scheme must *begin* with a letter: `+`, `-` and `.` are
+# continuation-only, so one of them sitting in front of a URL is punctuation, not
+# part of the scheme, and the scheme still starts at the following letter.
+_URL_SCHEME_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-."
+)
+_URL_SCHEME_START = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+
+# The `user:secret` that follows a validated `://`, split so the account (`user:`)
+# is kept and only the password span is masked. Matched with `.match(text, pos)`
+# anchored immediately after the `://`, exactly as the old contiguous pattern
+# required; the `@` lookahead leaves a bare `://host` (no userinfo) untouched.
+_URL_USERINFO_AFTER_SEP = re.compile(r"[^\s:/?#@]+:(?P<secret>[^\s/?#@]+)(?=@)")
+
+
+def _url_password_span(text: str, sep: int) -> tuple[int, int] | None:
+    """The ``[start, end)`` of the password in a `scheme://user:secret@` whose
+    `://` sits at *sep*, or ``None`` when that `://` is not a credentialed URL.
+
+    The scheme is the maximal run of scheme-valid characters ending at the `://`,
+    taken to start at that run's first letter, so a leading `.`, `-` or `+` — part
+    of the run but unable to begin a scheme — is punctuation before the URL and
+    does not hide it. The userinfo is matched forward from just past the `://`."""
+    run_start = sep
+    while run_start > 0 and text[run_start - 1] in _URL_SCHEME_CHARS:
+        run_start -= 1
+    if not any(text[i] in _URL_SCHEME_START for i in range(run_start, sep)):
+        return None
+    match = _URL_USERINFO_AFTER_SEP.match(text, sep + 3)
+    if match is None:
+        return None
+    return match.start("secret"), match.end("secret")
+
+
+def _mask_url_userinfo(text: str) -> str:
+    """Mask the password of every `scheme://user:secret@…` in *text*, one
+    deterministic left-to-right pass. Each `://` is located and validated once, so
+    no suffix of a long scheme-like run is retried and a `://`-free line costs a
+    single linear scan. Everything outside a masked password span is copied byte
+    for byte."""
+    out: list[str] = []
+    pos = 0
+    sep = text.find("://")
+    while sep != -1:
+        span = _url_password_span(text, sep)
+        if span is None:
+            sep = text.find("://", sep + 3)
+            continue
+        start, end = span
+        out.append(text[pos:start])
+        out.append(_REDACTION_MARKER)
+        pos = end
+        sep = text.find("://", end)
+    out.append(text[pos:])
+    return "".join(out)
+
 
 # `Authorization: Bearer <token>` and `Authorization: Basic <blob>`, including
 # the quoted spellings that appear when a manager echoes a header dict or a curl
@@ -146,7 +204,6 @@ def _mask_shell(match: re.Match[str]) -> str:
 # pass then finds nothing left to do on it (the `[redacted]` it wrote is itself a
 # valid shell value that re-masks to `[redacted]`).
 _CONTENT_PATTERNS = (
-    (_URL_USERINFO_PATTERN, _mask_keep),
     (_AUTH_HEADER_PATTERN, _mask_keep),
     (_SENSITIVE_ASSIGNMENT_QUERY, _mask_keep),
     (_SENSITIVE_ASSIGNMENT_SHELL, _mask_shell),
@@ -157,8 +214,11 @@ def redact_stream_text(text: str) -> str:
     """Mask the credential-shaped spans inside one captured process stream.
 
     Everything outside a masked span is returned byte for byte, because the
-    stream is the tool's own account of what went wrong.
+    stream is the tool's own account of what went wrong. The URL-userinfo pass
+    runs first, as a deterministic scan rather than a regex, so a long
+    scheme-like line stays linear.
     """
+    text = _mask_url_userinfo(text)
     for pattern, replace in _CONTENT_PATTERNS:
         text = pattern.sub(replace, text)
     return text

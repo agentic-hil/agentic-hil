@@ -97,6 +97,25 @@ def test_a_credentialed_index_url_in_a_stream_keeps_the_account_and_masks_the_pa
     assert stream == UV_PRIVATE_INDEX_FAILURE.replace(INDEX_SECRET, MARKER)
 
 
+def test_a_credentialed_url_after_leading_punctuation_still_masks_the_password() -> None:
+    """A `.`, `-` or `+` directly before a URL is punctuation, not part of the
+    scheme, because none of them can begin a URI scheme; the scheme starts at the
+    following letter and the credential after it is masked all the same.
+
+    A scheme-anchoring shortcut once read those three characters as proof that no
+    scheme could start next, so a stream carrying `-https://user:secret@host`,
+    `.https://…` or `+https://…` came through unchanged and leaked the password.
+    The account survives and only the secret goes, as for a URL that leads its
+    line."""
+    for lead in (".", "-", "+"):
+        line = f"hint: {lead}https://buildbot:{INDEX_SECRET}@packages.example.internal/simple/\n"
+
+        out = redact_sensitive({"stderr": line})["stderr"]
+
+        assert INDEX_SECRET not in out, f"password leaked after a leading {lead!r}"
+        assert out == line.replace(INDEX_SECRET, MARKER)
+
+
 def test_a_bearer_authorization_line_in_a_stream_masks_the_token_and_keeps_the_scheme() -> None:
     """The line still says a bearer token was sent, which is the diagnosis."""
     redacted = redact_sensitive({"stdout": PIP_BEARER_FAILURE})
@@ -248,6 +267,27 @@ def test_a_long_unterminated_value_is_masked_in_linear_time() -> None:
 
     assert elapsed < 5.0, f"redaction of a 1 MB unterminated value took {elapsed:.2f}s"
     assert out == 'PASSWORD="[redacted]'
+
+
+def test_a_long_scheme_like_run_without_a_url_is_scanned_in_linear_time() -> None:
+    """The URL-userinfo pass runs over captured output before both serializers, so
+    a long line of scheme-valid characters that never reaches `://` must not be
+    retried as a scheme from every position.
+
+    A `scheme://…` regex was quadratic on exactly this input — a captured stream
+    can carry 10k+ such bytes on one line, enough to stall result delivery — which
+    the deterministic single pass avoids by locating each `://` once. A 1 MB run
+    with no `://` finishes well under this bound and comes through byte for byte,
+    so a regression that reintroduced the quadratic scan would fail the same
+    test."""
+    line = "a" * 1_000_000
+
+    start = time.perf_counter()
+    out = redact_sensitive({"stderr": line})["stderr"]
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 5.0, f"scanning a 1 MB scheme-like run took {elapsed:.2f}s"
+    assert out == line
 
 
 def test_an_unquoted_value_runs_through_the_punctuation_that_is_valid_inside_it() -> None:
