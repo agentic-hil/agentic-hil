@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -1228,9 +1229,11 @@ def dirty_records(repo: Path, paperwork: tuple[Path, ...] = ()) -> tuple[set[str
     line that carries it: a file that was untracked (`?? fix.py`) one round and
     staged (`A  fix.py`) the next is the same unreviewed path, and forgetting it
     when its two-character status changed is how a clean verdict once exited over
-    work no review had read. `--porcelain -z` is what makes the name the whole of
-    the identity -- read raw, not through `git`'s stripping, because the leading
+    work no review had read. `--porcelain -z` is what makes the name usable as
+    that identity -- read raw, not through `git`'s stripping, because the leading
     space of a ` M` status is part of the first record and `strip()` would eat it.
+    Where a move lands the work on a name that was already dirty, the name is the
+    thing that collides and `relocated_stall` reads the content instead.
 
     Takes the same pathspecs as `uncommitted`, so the loop's own review documents
     and transcripts are not read as the implementer's work. A git that will not
@@ -1247,6 +1250,70 @@ def dirty_records(repo: Path, paperwork: tuple[Path, ...] = ()) -> tuple[set[str
     if result.returncode != 0:
         return set(), {}
     return _porcelain_z_records(result.stdout)
+
+
+def blob_id(path: Path) -> str | None:
+    """`path`'s current content as git would name it, or None when it names nothing.
+
+    Git's own object id: sha1 over `blob <length>\\0` and the bytes on disk, which
+    is the identity git itself uses to say two pathnames hold the same object. No
+    filters are applied, because both sides of every comparison here are bytes in
+    the same work tree. Read in chunks so a large dirty file is not pulled into
+    memory whole.
+
+    A directory (an untracked one is reported as a path in its own right), a path
+    that is gone, and one that will not open have no content to identify. Neither
+    has an empty file: its content is identical to every other empty file's, so
+    matching on it would say the stalled work had arrived at any path a round
+    happened to truncate. All four are None rather than a shared placeholder.
+    """
+    try:
+        if not path.is_file():
+            return None
+        size = path.stat().st_size
+        if not size:
+            return None
+        digest = hashlib.sha1(usedforsecurity=False)
+        digest.update(b"blob %d\0" % size)
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def blob_ids(repo: Path, paths: set[str]) -> dict[str, str]:
+    """The content identity of each of `paths`, the ones that have none left out."""
+    asked = ((path, blob_id(repo / path)) for path in paths)
+    return {path: blob for path, blob in asked if blob is not None}
+
+
+def relocated_stall(repo: Path, present: set[str], stalled: set[str], inherited: dict[str, str]) -> set[str]:
+    """Which of `present` now holds, byte for byte, content an outstanding path held.
+
+    The tie-breaker for where pathnames lie. Outstanding stalled work is followed
+    by name, and a move is carried by taking the round's new dirt, `present_dirty
+    - inherited_dirty`; under `--allow-dirty` a move's destination need not be new
+    dirt at all. A round that moves the stalled object onto a pathname the run
+    inherited dirty has the destination subtracted out by exactly the term that
+    keeps an operator's own uncommitted changes from being read as this round's
+    work, and the object is then outstanding under no name at all. Its bytes are
+    the one thing the move did not change, so they are what identifies it.
+
+    `stalled` is the content identity of the outstanding paths as the round found
+    them and `inherited` the same for every path that was already dirty then, both
+    taken before the implementer ran. A destination counts only when the round put
+    the stalled content there: a path whose content is what it was when the round
+    started is the state the run inherited, whoever else happens to hold the same
+    bytes, and reading it as the stall arriving would stop a run over an
+    operator's own file. Matching on content is what keeps the carry this narrow;
+    retaining every possible destination instead would cost that false stall on
+    every round that touches inherited dirt.
+    """
+    if not stalled:
+        return set()
+    return {path for path, blob in blob_ids(repo, present).items() if blob in stalled and blob != inherited.get(path)}
 
 
 def listed(entries: str, limit: int) -> str:
@@ -2622,6 +2689,14 @@ def main(argv: list[str] | None = None) -> int:
             # reconciling the carried-across stall below independently of porcelain
             # status; see `dirty_paths`.
             inherited_dirty = set() if options.dry_run else dirty_paths(repo, paperwork)
+            # And by content, for the reconciliation the pathnames cannot answer.
+            # A move can change an outstanding path's name and can land it on a
+            # name that was already dirty, where the subtraction below cannot see
+            # it; it cannot change the bytes. See `relocated_stall`. Asked only
+            # while something is outstanding to recognise: otherwise there is
+            # nothing to compare against, and a dirty tree can be a large read.
+            inherited_blobs = {} if options.dry_run or not outstanding_paths else blob_ids(repo, inherited_dirty)
+            stalled_blobs = {inherited_blobs[path] for path in outstanding_paths if path in inherited_blobs}
             try:
                 implement_round(setup, record, number, prompt, scratch, paperwork)
             except AgentError:
@@ -2696,6 +2771,12 @@ def main(argv: list[str] | None = None) -> int:
                 outstanding_paths = survived
                 if carry_new:
                     outstanding_paths |= present_dirty - inherited_dirty
+                    # That subtraction assumes the move landed on clean ground.
+                    # Under --allow-dirty it need not have: a destination the run
+                    # inherited dirty is removed by the same term, and the work
+                    # would be outstanding under no name at all. Whatever now
+                    # holds the stalled object's own bytes is that name.
+                    outstanding_paths |= relocated_stall(repo, present_dirty, stalled_blobs, inherited_blobs)
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
