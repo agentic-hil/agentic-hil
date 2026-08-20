@@ -4,6 +4,12 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Changed
+
+- **Somebody who reached the package through a search met a shelf label, on the one line every index and mirror prints next to the name.** The PyPI summary read "tools for AI-assisted embedded firmware loops" and the MCP registry description "for embedded hardware-in-the-loop testing on real devices": both name the category the project belongs to, neither names a single thing the tools do, so a reader who arrived while looking for a way to flash a board, reset it, read its UART or drive its CAN bus from an agent had nothing to recognise, and those surfaces truncate what they render, which puts the weight on the first words rather than on the whole sentence. The summary now opens on the problem the project exists for, in the README's own words, then the operations (probe, flash, reset, UART and CAN traffic, a real STM32 or other embedded target), then the policy gate that makes them safe to hand to an agent: one sentence, 271 characters against the 512 PyPI accepts, whose first 155 already carry every operation and the target. The keywords gain `mcp-server`, `uart`, `can`, `can-bus`, `pyocd`, `pytest`, `hardware-testing` and `firmware-testing` with none dropped, 21 terms the built metadata joins into 209 characters of the 512 that field allows. The project URLs gain `Documentation`, pointing at the rendered documentation site this repository already builds and declares in `mkdocs.yml` rather than at a directory listing of filenames, and `Changelog`, both labels PyPI renders as their own links in the sidebar. `server.json` names the operations too, in the same voice and inside the registry's own rules, and those rules are now checked here rather than at the end: the schema caps that description at 100 characters, the only thing enforcing the cap was `mcp-publisher validate` in the release job, which runs after the tag exists and after PyPI has the wheel, so the release contract measures the string as well as comparing it byte for byte, and a description one word too long is refused on the pull request that writes it. Nothing in `src/` changed. (#321)
+
 ## [0.17.0] - 2026-08-20
 
 ### Added
