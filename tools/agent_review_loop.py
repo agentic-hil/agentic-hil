@@ -1280,13 +1280,13 @@ def blob_id(repo: Path, relative: str) -> str | None:
     Git's own object id for the file on disk, computed the way `git add` would: the
     repository's object format -- sha1, or the sha256 an `extensions.objectFormat`
     repository asks for -- over the content a clean filter would store, `core.autocrlf`
-    and any `.gitattributes` conversion among them. That is the identity
-    `committed_blobs` reads out of the range's post-images, so a work-tree file and the
-    commit it reached are named alike. A raw hash of the bytes on disk is not: wherever
-    a filter rewrites content on the way into git, or the repository names objects in
-    sha256, the two live in different namespaces and never match, which read a stall
-    committed under its own name as still outstanding. See `blob_ids`, which hashes a
-    whole set in one pass, and does the reading.
+    and any `.gitattributes` conversion among them. Every comparison here is a
+    work-tree file against another work-tree file -- the content the round inherited
+    against the content it left -- so what matters is that both are named the same
+    way, and naming them the way git itself would keeps that identity stable even
+    where a filter rewrites content or the repository names objects in sha256, which a
+    raw byte hash cannot promise across a re-read. See `blob_ids`, which hashes a whole
+    set in one pass, and does the reading.
 
     A directory (an untracked one is reported as a path in its own right), a path
     that is gone, and one that will not open have no content to identify. Neither
@@ -1316,9 +1316,10 @@ def blob_ids(repo: Path, paths: set[str]) -> dict[str, str]:
 
     Git's own object ids, from `git hash-object` over the whole set in one pass so a
     large dirty tree costs one child rather than one per path, and with the object
-    format and clean filters the repository itself would apply -- the identity
-    `committed_blobs` compares against, not a raw hash of the bytes. Paths with no
-    content to name are dropped before git is asked; a path that races the hash away
+    format and clean filters the repository itself would apply -- so the content the
+    round inherited and the content it left are named in one namespace, not a raw hash
+    of the bytes that a filter or a sha256 repository would make disagree. Paths with
+    no content to name are dropped before git is asked; a path that races the hash away
     and fails the batch is retried on its own, so one casualty does not take the rest
     of the set with it.
     """
@@ -1436,88 +1437,6 @@ def relocated_stall(
         path for path, blob in blob_ids(repo, present).items() if blob in stalled and blob != inherited.get(path)
     }
     return by_inode | by_content
-
-
-def committed_blobs(repo: Path, base: str, head: str) -> dict[str, str]:
-    """The post-image blob id the range `base..head` left at each path it added or changed.
-
-    What a review of that range actually read, named the way git names a blob and the
-    way `blob_id` names the work tree -- the repository's object format over the content
-    a clean filter would store -- and kept by the path so a stall's bytes can be looked
-    for at the very name it was followed to, not merely somewhere in the range. A stall
-    whose bytes are the post-image at that name reached a commit the review saw; a copy
-    of its bytes committed under some other name did not put the object there, and
-    reading a stall as committed because its bytes turned up anywhere let a hard-linked
-    alias vouch for work no review read.
-
-    Renames are turned off so every changed path carries its own post-image rather
-    than a similarity score, and a deletion's all-zero id -- which no content
-    hashes to -- is dropped. An empty range, or a git that will not answer, is no
-    proof of anything committed and is the empty mapping.
-    """
-    if base == head:
-        return {}
-    result = subprocess.run(
-        ["git", "-C", str(repo), "diff-tree", "-r", "--no-renames", "--no-abbrev", base, head],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        return {}
-    blobs: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        meta, _, path = line.partition("\t")
-        fields = meta.lstrip(":").split()
-        if path and len(fields) >= 4 and set(fields[3]) != {"0"}:
-            blobs[path] = fields[3]
-    return blobs
-
-
-def committed_objects(repo: Path, base: str, head: str) -> dict[str, tuple[int, int]]:
-    """The filesystem identity now sitting at each path the range `base..head` committed.
-
-    The proof a stalled object reached a commit that its bytes alone cannot give,
-    kept by the path so a stall can be asked whether it was committed *where it was
-    followed to* rather than merely somewhere in the range. `git commit` never touches
-    the work tree, so a file committed under a name still carries the inode it had when
-    the round began; the identity captured before the round is the identity of the
-    work-tree file at the committed name afterwards. A stall whose inode is the one now
-    at the name it moved to was read by a review under that name.
-
-    Reading it by inode rather than by content is what tells a commit of the object
-    apart from a commit of a copy of its bytes: a hard link, or a rewritten duplicate,
-    can put the stall's bytes at a committed path while the object itself was atomic-
-    saved somewhere no review read, and its inode is not there to be found. Asking at
-    the followed name rather than across the range is what an alias cannot fake -- the
-    inode it carries lands on some *other* committed name, not the one the stall was
-    followed to. See `committed_blobs` for the content half, asked at the same name.
-
-    Renames are turned off so every changed path carries its own name, and a path
-    the range only deleted has no work-tree file left to identify and drops out on
-    the `object_id` that finds none. An empty range committed nothing, and a git
-    that will not answer is no proof, so both are the empty mapping.
-    """
-    if base == head:
-        return {}
-    result = subprocess.run(
-        ["git", "-C", str(repo), "diff-tree", "-r", "--no-renames", "--name-only", "--no-commit-id", base, head],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        return {}
-    objects: dict[str, tuple[int, int]] = {}
-    for path in result.stdout.splitlines():
-        if not path:
-            continue
-        obj = object_id(repo / path)
-        if obj is not None:
-            objects[path] = obj
-    return objects
 
 
 def changed_inherited_dirty(
@@ -2928,14 +2847,13 @@ def main(argv: list[str] | None = None) -> int:
             # object the tree has not committed. See `relocated_stall`. An atomic
             # save -- write a temp file and rename it over the destination --
             # changes both, so a move onto inherited dirt made that way is named by
-            # neither; the reconciliation then asks, of each outstanding object on
-            # its own, whether its inode and its content both reached this round's
-            # commits, and where one did not keeps the inherited dirt the round
-            # rewrote. See `committed_objects` and `changed_inherited_dirty`. The
-            # per-path identities are kept, not just their sets, so that question is
-            # answered object by object. All are asked only while something is
-            # outstanding to recognise: otherwise there is nothing to compare
-            # against, and a dirty tree can be a large read.
+            # neither; when a followed name has vanished the reconciliation then
+            # keeps every inherited-dirty path the round rewrote, since the stall's
+            # edited work may be hiding in one and no proof taken at a pathname can
+            # tell that tree from an operator editing their own file beside a
+            # committed stall. See `changed_inherited_dirty`. These are asked only
+            # while something is outstanding to recognise: otherwise there is nothing
+            # to compare against, and a dirty tree can be a large read.
             inherited_blobs = {} if options.dry_run or not outstanding_paths else blob_ids(repo, inherited_dirty)
             stalled_blobs = {inherited_blobs[path] for path in outstanding_paths if path in inherited_blobs}
             outstanding_ids = {} if options.dry_run or not outstanding_paths else object_ids(repo, outstanding_paths)
@@ -2992,8 +2910,7 @@ def main(argv: list[str] | None = None) -> int:
                 # earlier round ever saw. Following it first is what keeps the
                 # filter below from reading `git mv` as "committed or taken
                 # back". Applied every round, so a path renamed twice arrives.
-                followed_of = {path: moved.get(path, path) for path in outstanding_paths}
-                followed = set(followed_of.values())
+                followed = {moved.get(path, path) for path in outstanding_paths}
                 survived = {path for path in followed if path in present_dirty}
                 # An outstanding name that leaves the dirty set is safe to drop
                 # only when its work reached a commit a review read or came back
@@ -3026,55 +2943,37 @@ def main(argv: list[str] | None = None) -> int:
                     outstanding_paths |= relocated_stall(
                         repo, present_dirty, stalled_blobs, inherited_blobs, stalled_objects
                     )
-                    # Both of those identities are the object's own, and an atomic
-                    # save replaces both: write the edited bytes to a temporary file
-                    # and rename it over the destination, and the inherited dirty
-                    # name the stall moved onto takes the temp file's inode and the
-                    # temp file's bytes, so neither names it. What is left is to ask,
-                    # of each outstanding object whose followed name vanished, whether
-                    # it can be proven reviewed: a `git commit` leaves the work tree
-                    # be, so an object committed under some name still sits there with
-                    # the inode and the bytes it began with, and only an object whose
-                    # inode *and* content are what the round committed *at the name it
-                    # was followed to* was read by the review. Asking at that name, not
-                    # across the range at large, is what a hard link cannot fake -- it
-                    # carries the stall's inode onto some other committed name (the
-                    # alias) while the object itself is atomic-saved onto inherited
-                    # dirt, so the followed name holds neither its inode nor its bytes
-                    # and the fallback below is not suppressed. The inode and content
-                    # are still asked together, an inode a later file reused answering
-                    # for an unrelated commit's bytes and a copy of the bytes committed
-                    # elsewhere answering under another inode, and per object rather
-                    # than for the range, since a range-wide check let any one committed
-                    # object clear the rest. An object that clears neither half might
-                    # have been atomic-saved onto inherited dirt, so keep the paths this
-                    # round rewrote there, a false stall the operator clears by
-                    # committing being the safe error where a false clean exits 0 over
-                    # work no review saw. A contentless object -- an empty file the
-                    # byte identity had to drop -- is proven by its inode alone at that
-                    # name, the conservative reading that keeps it in rather than out.
-                    # See `committed_objects` and `changed_inherited_dirty`; the narrower
+                    # Both of those identities are the object's own, and neither
+                    # survives the round editing the stall and relocating it. An
+                    # atomic save -- write the edited bytes to a temporary file and
+                    # rename it over the destination -- gives the inherited-dirty name
+                    # the stall landed on a fresh inode and fresh bytes, so neither
+                    # identity above follows it there. Once a followed name has
+                    # vanished, then, the round may have rewritten an inherited-dirty
+                    # path with the stall's outstanding work, and no proof taken at a
+                    # pathname can rule that out. A `git commit` leaves the work tree
+                    # be, so it is tempting to read an object still sitting at its
+                    # followed name with the inode and bytes it began with as reviewed;
+                    # but a hard link puts that original inode and those original bytes
+                    # at any name -- the followed one included, once an alias is moved
+                    # back onto it -- while the edited work sits elsewhere, and a round
+                    # that simply writes that work into the inherited-dirty file in
+                    # place needs no link at all. The two are one tree: a stall
+                    # committed under its own name beside an operator's edited file, and
+                    # edited stall work hidden in that file beside a stale commit of the
+                    # original bytes, leave the very same inodes and the very same
+                    # content, differing only in what the bytes mean. So the
+                    # inherited-dirty paths this round rewrote are kept whenever a
+                    # followed name vanished, without asking a forgeable proof to clear
+                    # them -- a false stall the operator clears by committing being the
+                    # safe error where a false clean exits 0 over work no review saw.
+                    # See `changed_inherited_dirty`; the narrower `relocated_stall`
                     # identities above still carry every move they can name, so this
                     # retains only what they could not.
                     if vanished:
-                        committed_at = committed_objects(repo, last_head, head)
-                        committed_content = committed_blobs(repo, last_head, head)
-                        unreviewed = any(
-                            dest not in present_dirty
-                            and not (
-                                outstanding_ids.get(path) is not None
-                                and committed_at.get(dest) == outstanding_ids.get(path)
-                                and (
-                                    inherited_blobs.get(path) is None
-                                    or committed_content.get(dest) == inherited_blobs.get(path)
-                                )
-                            )
-                            for path, dest in followed_of.items()
+                        outstanding_paths |= changed_inherited_dirty(
+                            repo, present_dirty, inherited_dirty, inherited_blobs
                         )
-                        if unreviewed:
-                            outstanding_paths |= changed_inherited_dirty(
-                                repo, present_dirty, inherited_dirty, inherited_blobs
-                            )
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
