@@ -1308,17 +1308,48 @@ def blob_id(repo: Path, relative: str) -> str | None:
 
 
 def has_content(path: Path) -> bool:
-    """Whether `path` is a regular file with bytes in it, the only kind git is asked to name.
+    """Whether `path` is a regular file with bytes in it, the only kind hashed by its own path.
 
     A directory, a path that is gone or will not `stat`, and an empty file are all
     excluded before git is asked: the first two hold no content to identify, and every
     empty file's content is every other's, so a blob id is asked only of what a match
-    on it can tell apart. See `blob_id`.
+    on it can tell apart. A symlink is excluded too, though it has a content identity of
+    its own: `is_file` and `stat` follow it to its target, so `git hash-object` over the
+    path would name the target's content rather than the mode `120000` blob git keeps for
+    the link, and hashing its link text is `link_blob_id`'s job instead. See `blob_id`.
     """
     try:
-        return path.is_file() and path.stat().st_size > 0
+        return not path.is_symlink() and path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
+
+
+def link_blob_id(repo: Path, path: Path) -> str | None:
+    """The blob id git stores for the symlink `path` -- the hash of its link text, or None.
+
+    Git keeps a symlink as a mode `120000` blob whose content is the target path the
+    link holds, not the bytes of whatever it resolves to. `git hash-object` over the
+    path would instead follow it and hash the target file -- naming the wrong object for
+    a live link, and failing outright on a broken one that opens nothing -- so the link
+    text is read with `readlink` and hashed on its own. The raw bytes go down
+    `git hash-object --stdin`, which names them in the repository's object format just as
+    the positional transport does, so a symlink a round inherited and the symlink it left
+    compare in one namespace whatever object format the repository uses. None when the
+    link cannot be read or git will not answer, matching the other identity helpers so a
+    stall whose identity cannot be recomputed is kept rather than dropped as unchanged.
+    """
+    try:
+        text = os.readlink(os.fsencode(path))
+    except OSError:
+        return None
+    result = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "--stdin"],
+        input=text,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", "replace").strip() or None
 
 
 def blob_ids(repo: Path, paths: set[str]) -> dict[str, str]:
@@ -1332,16 +1363,30 @@ def blob_ids(repo: Path, paths: set[str]) -> dict[str, str]:
     no content to name are dropped before git is asked; a path that races the hash away
     and fails the batch is retried on its own, so one casualty does not take the rest
     of the set with it.
+
+    A symlink is a work-tree object with a content identity too, but the positional
+    transport cannot name it: `git hash-object` follows the link to its target. So the
+    regular files are hashed in the batch above, and each symlink is named separately
+    from its link text -- the mode `120000` blob git actually stores -- so a moved
+    symlink stall is followed by the same content identity as any other file. See
+    `link_blob_id`.
     """
     named = sorted(path for path in paths if has_content(repo / path))
     hashed = _hash_object(repo, named)
     if hashed is not None:
-        return dict(zip(named, hashed, strict=True))
-    resolved: dict[str, str] = {}
-    for path in named:
-        one = _hash_object(repo, [path])
-        if one:
-            resolved[path] = one[0]
+        resolved = dict(zip(named, hashed, strict=True))
+    else:
+        resolved = {}
+        for path in named:
+            one = _hash_object(repo, [path])
+            if one:
+                resolved[path] = one[0]
+    for path in sorted(paths):
+        link = repo / path
+        if path not in resolved and link.is_symlink():
+            blob = link_blob_id(repo, link)
+            if blob is not None:
+                resolved[path] = blob
     return resolved
 
 
@@ -1419,7 +1464,13 @@ def object_id(path: Path) -> tuple[int, int] | None:
     the round changed inside it. Content is the thing a move preserves and an edit
     destroys; the inode is the thing both preserve, on one filesystem.
 
-    A path that is gone or will not `stat` has no identity, and neither has one
+    Read with `lstat`, not `stat`, so a symlink is named by its own directory entry
+    rather than by whatever it points at: a move carries the link's inode, `stat`
+    would follow it to the target's -- or find nothing at all for a broken link and
+    report no identity -- and the object git has not committed is the link, not its
+    target. For a regular file the two agree, so nothing else changes.
+
+    A path that is gone or will not `lstat` has no identity, and neither has one
     whose inode a platform reports as zero -- some do rather than answer, and two
     such paths sharing that zero would be read as the same object when they are
     not. All are None rather than a value that would collide, matching `blob_id`.
@@ -1428,7 +1479,7 @@ def object_id(path: Path) -> tuple[int, int] | None:
     number can be reused for an unrelated object.
     """
     try:
-        info = path.stat()
+        info = path.lstat()
     except OSError:
         return None
     if not info.st_ino:
@@ -1509,10 +1560,22 @@ def changed_inherited_dirty(
     had none of, or lost the content it had, among them -- and unchanged when the
     two agree, which is the operator's own file this round never touched and does
     not stop the run.
+
+    A path still holding content whose identity could not be recomputed now -- a
+    symlink whose `readlink` failed, a file `git hash-object` declined -- agrees
+    with an inherited blob that was equally uncapturable only by both being absent,
+    and would drop out as unchanged though nothing proved it so. Such a path is
+    kept instead: the same conservative reading taken wherever an identity cannot be
+    established, and safe because it fires only for a path that still holds an object
+    (a symlink or a non-empty file), never the operator's own empty file or directory.
     """
     still = present & inherited_dirty
     now = blob_ids(repo, still)
-    return {path for path in still if now.get(path) != inherited_blobs.get(path)}
+    changed = {path for path in still if now.get(path) != inherited_blobs.get(path)}
+    unrecomputed = {
+        path for path in still if path not in now and (has_content(repo / path) or (repo / path).is_symlink())
+    }
+    return changed | unrecomputed
 
 
 def listed(entries: str, limit: int) -> str:

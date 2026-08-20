@@ -2272,6 +2272,79 @@ def test_an_atomic_save_over_a_newline_named_inherited_dirt_does_not_slip_a_clea
     assert "the review never saw" in f"{captured.out}{captured.err}"
 
 
+_STALLED_SYMLINK_TARGET = "the-stalled-symlink-points-here"
+_OPERATOR_SYMLINK_TARGET = "where-the-operator-left-their-own-link"
+_LEAVES_AN_UNTRACKED_BROKEN_SYMLINK_WITHOUT_COMMITTING = (
+    # A broken symlink is a work-tree object git names by the hash of its link text,
+    # not the (missing) target: `is_file`/`stat` follow it and see nothing, so it
+    # once carried neither a content nor a filesystem identity to be followed by.
+    f"pathlib.Path('fix.py').symlink_to({_STALLED_SYMLINK_TARGET!r})\n"
+    "sys.stdout.write('left an untracked broken symlink fix.py, never came back to commit it\\n')\n"
+)
+_MOVES_THE_STALLED_SYMLINK_ONTO_INHERITED_DIRT = (
+    # Move the untracked broken symlink onto the operator's dirty broken symlink. A
+    # rename does not follow either link, so renamed.py becomes the stalled symlink
+    # itself, carrying its inode; git tracked neither, so no rename record follows it,
+    # and the destination was inherited dirty, so `present_dirty - inherited_dirty`
+    # subtracts it out. Only the link's own inode and link text still name the work.
+    "pathlib.Path('fix.py').replace('renamed.py')\n"
+    # Commit only unrelated work.
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    "sys.stdout.write('moved the stalled broken symlink onto the inherited dirt, committed other.py\\n')\n"
+)
+
+
+def test_moving_a_broken_symlink_onto_an_inherited_dirty_broken_symlink_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A moved broken symlink is a stall like any other, and once had no identity to follow.
+
+    Round 1 stalls with an untracked broken symlink `fix.py`; its review requests
+    changes, so the run goes on. Round 2 moves `fix.py` onto the operator's dirty broken
+    symlink `renamed.py` and commits only an unrelated `other.py`. A broken symlink was
+    once invisible to both identities: `git hash-object` on the path opens nothing and
+    fails, and `stat` follows the link to a target that is not there and reports no
+    inode, so neither the content nor the filesystem map named the stall, the destination
+    was subtracted out as inherited dirt, and the run exited 0 over work no review read.
+    Named by its link text and its own `lstat` inode, the moved symlink is followed onto
+    `renamed.py`, so the run keeps it outstanding and stops as stalled.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted broken symlink, at the path round 2 moves onto.
+    try:
+        (repository / "renamed.py").symlink_to(_OPERATOR_SYMLINK_TARGET)
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_moves_a_broken_symlink",
+        _LEAVES_AN_UNTRACKED_BROKEN_SYMLINK_WITHOUT_COMMITTING,
+        _MOVES_THE_STALLED_SYMLINK_ONTO_INHERITED_DIRT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_moves_a_broken_symlink") == 2
+    # The committed file is the unrelated round 2 one, not the stalled work.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["other.py"]
+    # The stalled symlink sits under its new name, uncommitted and never reviewed.
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").is_symlink()
+    assert os.readlink(repository / "renamed.py") == _STALLED_SYMLINK_TARGET
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
 _MOVES_THE_STALL_BENEATH_AN_INHERITED_UNTRACKED_DIRECTORY = (
     "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
     "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
@@ -2860,6 +2933,95 @@ def test_changed_inherited_dirty_keeps_what_the_round_rewrote_and_leaves_what_it
     found = agent_review_loop.changed_inherited_dirty(tmp_path, present, inherited_dirty, inherited_blobs)
 
     assert found == {"rewritten.py", "filled.py", "cleared.py"}
+
+
+def test_content_identity_of_a_symlink_is_its_link_text_not_its_target(tmp_path: Path) -> None:
+    """A symlink is named by the mode 120000 blob git stores for it -- its link text.
+
+    `git hash-object` over a symlink path follows it: for a live link it hashes the
+    target file's content, and for a broken link it opens nothing and fails. Git stores
+    neither -- a symlink is a blob of the link text -- so `blob_ids` reads the link and
+    hashes that. A live link therefore does not borrow its target's identity, and a
+    broken link gets an identity at all, which is the tell a move onto inherited dirt
+    would otherwise leave nothing to follow.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "target.txt").write_bytes(b"the target file's own content\n")
+    try:
+        (tmp_path / "live").symlink_to("target.txt")
+        (tmp_path / "broken").symlink_to("nowhere")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+
+    found = agent_review_loop.blob_ids(tmp_path, {"live", "broken", "target.txt"})
+
+    # Every path gets an id, the broken link included.
+    assert set(found) == {"live", "broken", "target.txt"}
+    # The id is git's own for the link -- the blob it stages under mode 120000 --
+    # not the content of what it points at.
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    assert found["live"] == _in(tmp_path, "rev-parse", ":live").strip()
+    assert found["broken"] == _in(tmp_path, "rev-parse", ":broken").strip()
+    # The live link does not borrow the target's content identity.
+    assert found["live"] != found["target.txt"]
+
+
+def test_filesystem_identity_of_a_symlink_is_its_own_entry_not_its_target(tmp_path: Path) -> None:
+    """`object_id` names the link's own inode, so a move that carries it is followed.
+
+    Read through the target, a symlink would borrow the target's inode -- or none at
+    all when the link is broken and the target cannot be `stat`'d -- and a rename that
+    carried the link onto a new name would look like it landed on an unrelated object.
+    Read with `lstat`, the link has an identity of its own that the rename carries, which
+    is what lets a moved symlink stall be followed by inode.
+    """
+    (tmp_path / "target.txt").write_bytes(b"the target\n")
+    try:
+        (tmp_path / "live").symlink_to("target.txt")
+        (tmp_path / "broken").symlink_to("nowhere")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+
+    live = agent_review_loop.object_id(tmp_path / "live")
+    broken = agent_review_loop.object_id(tmp_path / "broken")
+
+    # A broken link has an identity of its own though its target cannot be stat'd.
+    assert broken is not None
+    # The live link is named by its own entry, not the target's it resolves to.
+    assert live is not None and live != agent_review_loop.object_id(tmp_path / "target.txt")
+    # A rename carries the link's inode onto the new name -- the tell a move preserves.
+    (tmp_path / "broken").rename(tmp_path / "moved")
+    assert agent_review_loop.object_id(tmp_path / "moved") == broken
+
+
+def test_changed_inherited_dirty_follows_a_symlink_by_its_link_text(tmp_path: Path) -> None:
+    """A symlink whose target string the round rewrote is a rewrite like any other file.
+
+    An atomic save can land a moved symlink stall on an inherited-dirty symlink with a
+    fresh inode and fresh link text, so the conservative backstop is all that is left to
+    catch it; it must read the destination's link text change. A link now pointing
+    somewhere new differs from the blob it began with and is kept; one left pointing
+    where the operator had it reads the same and is dropped.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    try:
+        (tmp_path / "rewritten").symlink_to("where-it-points-now")
+        (tmp_path / "untouched").symlink_to("where-the-operator-left-it")
+        (tmp_path / "started_rewritten").symlink_to("where-it-began")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+    # What the rewritten link pointed at as the round began, captured the way
+    # `inherited_blobs` is; the untouched link is its own before-state.
+    inherited_blobs = {
+        "rewritten": agent_review_loop.blob_id(tmp_path, "started_rewritten"),
+        "untouched": agent_review_loop.blob_id(tmp_path, "untouched"),
+    }
+    inherited_dirty = {"rewritten", "untouched"}
+    present = {"rewritten", "untouched"}
+
+    found = agent_review_loop.changed_inherited_dirty(tmp_path, present, inherited_dirty, inherited_blobs)
+
+    assert found == {"rewritten"}
 
 
 def test_the_second_attempt_is_told_what_is_in_the_tree_and_keeps_the_first_ones_transcript(
