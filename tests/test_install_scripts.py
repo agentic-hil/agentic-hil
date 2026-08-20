@@ -993,18 +993,53 @@ def test_both_scripts_require_an_exact_match_for_a_version_pin() -> None:
     assert "Test-VersionAtLeast" not in powershell_body.group(1), "install.ps1 compares an unpinned copy against the floor again"
 
 
-def test_the_release_floor_still_decides_whether_an_existing_copy_is_kept() -> None:
-    """The floor lost step 3, not step 1, and step 1 is where it was ever doing work.
+# The opener of a branch in either language: `if`, `elif`, `else` in the shell,
+# and the same three spelled `if`, `} elseif`, `} else` in PowerShell.
+BRANCH_OPENER = re.compile(r"^\}?\s*(?:if|elif|elseif|else)\b")
 
-    Step 1 asks whether the agentic-hil already on this PATH is new enough to keep,
-    and the release is the only answer to that: a 0.11.0 bench that is kept gets
-    written a 0.11.0 skill. Dropping the floor from step 3's proof (#310) must not
-    take that comparison with it, so both scripts are held to still making it.
+
+def _the_branch_that_holds(source: str, needle: str) -> str:
+    """The guard of the branch the one line holding `needle` sits in.
+
+    Both scripts decide "install nothing" in a single assignment inside a single
+    branch of step 1's chain, and which branch that is, is the rule under test. The
+    assignment is found by exact text and then the chain is walked upward to the
+    opener above it. A second such assignment anywhere is itself the failure, and is
+    reported as one rather than silently picked between.
+    """
+    lines = source.splitlines()
+    found = [index for index, line in enumerate(lines) if needle in line]
+    assert len(found) == 1, f"{needle} appears {len(found)} times, not once"
+    for index in range(found[0] - 1, -1, -1):
+        if BRANCH_OPENER.match(lines[index].strip()):
+            return lines[index]
+    raise AssertionError(f"{needle} sits in no branch at all")
+
+
+def test_only_a_development_installation_is_kept_from_the_package_step() -> None:
+    """The release names the run, it does not decide whether the run happens.
+
+    An installation at or above the release used to be kept, step 2 never ran, and
+    the transcript said "nothing to install" to the one person most likely to be
+    re-running the line: someone whose `agentic-hil upgrade` had just failed on a
+    current installation. The one-line installer is the emergency anchor, so an
+    existing installation always reaches the manager, which is idempotent, and the
+    comparison against the release only chooses the word (#315).
+
+    A development tree is the single exception, and it is the exception #291 built:
+    step 2 would replace an editable checkout with a release from PyPI. Both scripts
+    are held to that being the only branch that installs nothing, and to still making
+    the release comparison that names the other two.
     """
     shell = _code_only(_shell_source())
     assert 'version_at_least "$installed" "$RELEASE"' in shell
+    assert "refreshing this current installation" in shell
+    assert "version_is_development" in _the_branch_that_holds(shell, "NEEDS_PACKAGE=0")
+
     powershell = _code_only(_powershell_source())
     assert "Test-VersionAtLeast -Found $installed -Floor $Release" in powershell
+    assert "refreshing this current installation" in powershell
+    assert "Test-VersionIsDevelopment" in _the_branch_that_holds(powershell, "$needsPackage = $false")
 
 
 def test_both_scripts_install_the_same_release() -> None:
@@ -1097,7 +1132,7 @@ def test_an_installation_below_the_release_is_upgraded_rather_than_kept(tmp_path
 
     transcript = f"{result.stdout}{result.stderr}"
     assert result.returncode == 0, transcript
-    assert "skipping the package install" not in transcript, transcript
+    assert "nothing to install" not in transcript, transcript
     assert "0.11.0 is older than" in transcript, transcript
     assert marker.is_file(), transcript
     assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
@@ -1127,6 +1162,155 @@ def _the_release_below(release: str) -> str:
         return f"{major}.{minor - 1}.0"
     assert major > 0, f"there is no release below {release} for a window to serve"
     return f"{major - 1}.0.0"
+
+
+def _rerun_over_an_existing_installation(tmp_path: Path, *, installed: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """A machine that already has agentic-hil, and one unpinned rerun of the line.
+
+    The copy on PATH reports `installed` and writes "existing" to the marker if it is
+    the one the machine half ends up calling; the copy `uv tool install` writes into
+    the manager's own bin reports the release and writes "fresh". Which name is in
+    the marker is therefore which installation step 4 registered the skill out of.
+
+    The stub uv appends every invocation to a log, so "the manager ran" is a fact
+    about this run rather than a reading of the transcript: on the kept path no uv
+    invocation happens at all and the log is never created.
+
+    Returns the finished run, the marker file, and that log.
+    """
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    user_bin = home / ".local" / "bin"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, user_bin, uv_bin, tools):
+        directory.mkdir(parents=True)
+
+    marker = tmp_path / "who-ran-agent-install"
+    uv_log = tmp_path / "uv-invocations"
+
+    _stub_executable(
+        user_bin / "agentic-hil",
+        'case "$1" in\n'
+        f'  --version) echo "{installed}" ;;\n'
+        f'  agent-install) echo "existing" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n",
+    )
+    # A stub claude, so agent detection has a claude-code to register for.
+    _stub_executable(tools / "claude", "exit 0\n")
+    _stub_executable(
+        tools / "uv",
+        f'echo "$*" >> "{uv_log}"\n'
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        f'  --version) echo "{_release()}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-can"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={
+            "HOME": str(home),
+            "PATH": f"{tools}:{user_bin}:/usr/bin:/bin",
+            "UV_TOOL_BIN_DIR": str(uv_bin),
+        },
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    return result, marker, uv_log
+
+
+def test_an_installation_at_the_release_is_refreshed_through_the_manager(tmp_path: Path) -> None:
+    """The emergency anchor, run end to end through a POSIX shell.
+
+    A bench watched `agentic-hil upgrade` fail on a current installation and did the
+    one thing the README tells it to do: it ran the install line again. Step 1 found
+    a copy at the release, kept it, and step 2 answered "nothing to install", so the
+    documented rescue path had nothing to rescue with (#315).
+
+    An existing installation reaches the manager now whatever it reports. The
+    managers are idempotent, so a genuinely current copy costs one resolve and says
+    so, and a copy that is current but broken is replaced by the same command that
+    would have upgraded an older one. Step 1's comparison still runs; it names the
+    run instead of deciding it.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    release = _release()
+    result, marker, uv_log = _rerun_over_an_existing_installation(tmp_path, installed=release)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert f"agentic-hil {release} is here and not older than {release}, refreshing this current installation" in transcript, transcript
+    assert "nothing to install" not in transcript, transcript
+    # The manager ran, and it ran the install rather than only being asked where its
+    # bin directory is.
+    assert uv_log.is_file(), transcript
+    invocations = uv_log.read_text(encoding="utf-8")
+    assert "tool install --upgrade agentic-hil" in invocations, invocations
+    # And step 4 registered out of what the manager just wrote, not out of the copy
+    # that was already on PATH.
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+
+
+def test_a_development_installation_is_kept_and_the_transcript_says_why(tmp_path: Path) -> None:
+    """The one installation the anchor must not drag through PyPI (#291).
+
+    An editable checkout reports X.Y.Z.devN, and `uv tool install --upgrade` would
+    replace the operator's own working copy with a release. That copy is kept, no
+    manager is invoked at all, and the transcript says which kind of installation it
+    kept and what installing over it would have cost, because "nothing to install"
+    on its own is exactly the answer #315 removed everywhere else.
+
+    Both directions of the number are run. The keep used to be a side effect of the
+    comparison, so it held only while the development tree sat above the release;
+    a checkout of an older branch reported a lower number and was quietly replaced.
+    The marker is the proof of the second half: the development copy is still the one
+    step 4 registers the skill out of.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    release = _release()
+    major, minor, patch = (int(part) for part in release.split("."))
+    above = f"{major}.{minor}.{patch + 1}.dev0"
+    below = f"{_the_release_below(release)}.dev1"
+
+    for index, installed in enumerate((above, below)):
+        result, marker, uv_log = _rerun_over_an_existing_installation(tmp_path / f"tree{index}", installed=installed)
+
+        transcript = f"{result.stdout}{result.stderr}"
+        assert result.returncode == 0, transcript
+        assert f"agentic-hil {installed} is a development version, so it is kept" in transcript, transcript
+        assert "would replace an editable checkout with a release from PyPI" in transcript, transcript
+        assert "nothing to install, the development installation stays as it is" in transcript, transcript
+        # Nothing reached the manager: not the install, not even the question about
+        # where its bin directory is.
+        assert not uv_log.exists(), transcript
+        assert marker.is_file(), transcript
+        assert marker.read_text(encoding="utf-8").strip() == "existing", transcript
 
 
 def _release_window_run(
