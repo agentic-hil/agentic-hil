@@ -1952,6 +1952,72 @@ def test_editing_the_operators_own_dirty_file_is_not_read_as_the_stall_arriving(
     assert (repository / "renamed.py").read_text(encoding="utf-8") == _OPERATOR_DIRT + _ROUND_TWO_EDIT
 
 
+_MOVES_THE_STALLED_FILE_ONTO_INHERITED_DIRT_AND_EDITS_IT = (
+    # The move-onto-inherited-dirt case, but the round edits the file after it
+    # lands. `replace` carries the stalled fix.py's inode onto renamed.py, and the
+    # truncating write then changes its bytes in place while keeping that inode, so
+    # the content the round began with is gone from the tree. Neither the pathname
+    # subtraction nor the content match can name the work any longer; only the
+    # inode the move preserved still does.
+    "pathlib.Path('fix.py').replace('renamed.py')\n"
+    f"pathlib.Path('renamed.py').write_text({FIX + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    # Then reuse the stalled name for unrelated content and commit it, so the name
+    # round 1 knew leaves the dirty set with nothing of the stall in it.
+    f"pathlib.Path('fix.py').write_text({_A_DIFFERENT_FIX!r}, encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: a different fix.py entirely'], check=True)\n"
+    "sys.stdout.write('moved the stall onto the inherited dirt, edited it, and committed a different fix.py\\n')\n"
+)
+
+
+def test_editing_the_stalled_file_after_moving_it_onto_inherited_dirt_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A move onto inherited dirt plus an edit changes the bytes, not the inode.
+
+    The sharper edge of the move-onto-inherited-dirt case: round 2 not only moves
+    round 1's untracked `fix.py` onto the operator's dirty `renamed.py`, it also
+    edits the file once it lands. Now all three of the cheaper identities miss it.
+    The name round 1 knew left the dirty set; the name it lives under is subtracted
+    out by `present_dirty - inherited_dirty`, because that path was inherited
+    dirty; and the content the round captured is gone, so matching bytes cannot
+    find it either. The one thing the move could not take away is the inode the
+    filesystem carried onto the new name and the in-place edit reused, so the
+    destination is recognised by that, `outstanding_paths` does not end empty, and
+    round 2's clean verdict stops the run as stalled rather than exiting 0 over
+    round 1's work sitting untracked under a name no review ever read.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the pathname round 2 will move onto.
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_moves_onto_dirt_and_edits",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _MOVES_THE_STALLED_FILE_ONTO_INHERITED_DIRT_AND_EDITS_IT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_moves_onto_dirt_and_edits") == 2
+    # The committed fix.py is the unrelated round 2 file, not the stalled work.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: a different fix.py entirely"
+    assert _in(repository, "show", "HEAD:fix.py") == _A_DIFFERENT_FIX
+    # The stalled work, plus the round-2 edit, is untracked and outside every range.
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX + _ROUND_TWO_EDIT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
 def test_content_identity_is_only_asked_of_a_path_that_has_content(tmp_path: Path) -> None:
     """A directory, a path that is gone and an empty file identify nothing.
 
@@ -1975,6 +2041,32 @@ def test_content_identity_is_only_asked_of_a_path_that_has_content(tmp_path: Pat
     # Git's own object id for the bytes on disk, so git agrees about them.
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     assert _in(tmp_path, "hash-object", "--no-filters", "here.py").strip() == found["here.py"]
+
+
+def test_filesystem_identity_tells_apart_files_that_content_cannot(tmp_path: Path) -> None:
+    """Two paths with the same bytes get distinct inodes; an empty file still gets one.
+
+    Where `blob_ids` reads the bytes, `object_ids` reads the filesystem's own
+    identity, and the two disagree exactly where a move plus an edit needs them to.
+    Same-content paths that `blob_ids` cannot tell apart have distinct inodes here,
+    and an empty file -- which `blob_ids` drops because every empty file shares its
+    content -- has an identity of its own, so a stalled file emptied after a move
+    is still followed. A path that is gone has none either way.
+    """
+    (tmp_path / "here.py").write_bytes(b"same bytes\n")
+    (tmp_path / "elsewhere.py").write_bytes(b"same bytes\n")
+    (tmp_path / "empty.py").write_bytes(b"")
+    asked = {"here.py", "elsewhere.py", "empty.py", "gone.py"}
+
+    found = agent_review_loop.object_ids(tmp_path, asked)
+
+    assert set(found) == {"here.py", "elsewhere.py", "empty.py"}
+    # Identical bytes, distinct objects -- the tell `blob_ids` cannot give.
+    assert found["here.py"] != found["elsewhere.py"]
+    # A rename carries the inode with it; the empty file keeps the identity a move
+    # would preserve even as the round rewrites what is in it.
+    (tmp_path / "here.py").rename(tmp_path / "moved.py")
+    assert agent_review_loop.object_id(tmp_path / "moved.py") == found["here.py"]
 
 
 def test_the_second_attempt_is_told_what_is_in_the_tree_and_keeps_the_first_ones_transcript(

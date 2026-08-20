@@ -1312,8 +1312,47 @@ def blob_ids(repo: Path, paths: set[str]) -> dict[str, str]:
     return {path: blob for path, blob in asked if blob is not None}
 
 
-def relocated_stall(repo: Path, present: set[str], stalled: set[str], inherited: dict[str, str]) -> set[str]:
-    """Which of `present` now holds, byte for byte, content an outstanding path held.
+def object_id(path: Path) -> tuple[int, int] | None:
+    """`path`'s filesystem identity -- device and inode -- or None when it has none.
+
+    The identity a move keeps when an edit takes the bytes away. `rename` and
+    `replace` carry a file's inode onto its new name, and a later truncating write
+    reuses that same inode rather than making a new one, so the object git will
+    not have committed is still the object sitting under the new name however much
+    the round changed inside it. Content is the thing a move preserves and an edit
+    destroys; the inode is the thing both preserve, on one filesystem.
+
+    A path that is gone or will not `stat` has no identity, and neither has one
+    whose inode a platform reports as zero -- some do rather than answer, and two
+    such paths sharing that zero would be read as the same object when they are
+    not. All are None rather than a value that would collide, matching `blob_id`.
+    The device is carried alongside the inode because an inode number is only
+    unique within its filesystem, and a cross-device move is exactly where the
+    number can be reused for an unrelated object.
+    """
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    if not info.st_ino:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def object_ids(repo: Path, paths: set[str]) -> dict[str, tuple[int, int]]:
+    """The filesystem identity of each of `paths`, the ones that have none left out."""
+    asked = ((path, object_id(repo / path)) for path in paths)
+    return {path: obj for path, obj in asked if obj is not None}
+
+
+def relocated_stall(
+    repo: Path,
+    present: set[str],
+    stalled: set[str],
+    inherited: dict[str, str],
+    stalled_objects: set[tuple[int, int]],
+) -> set[str]:
+    """Which of `present` now holds an object an outstanding path held -- by inode or byte.
 
     The tie-breaker for where pathnames lie. Outstanding stalled work is followed
     by name, and a move is carried by taking the round's new dirt, `present_dirty
@@ -1321,22 +1360,36 @@ def relocated_stall(repo: Path, present: set[str], stalled: set[str], inherited:
     dirt at all. A round that moves the stalled object onto a pathname the run
     inherited dirty has the destination subtracted out by exactly the term that
     keeps an operator's own uncommitted changes from being read as this round's
-    work, and the object is then outstanding under no name at all. Its bytes are
-    the one thing the move did not change, so they are what identifies it.
+    work, and the object is then outstanding under no name at all. What the move
+    did not change is what identifies it.
 
-    `stalled` is the content identity of the outstanding paths as the round found
-    them and `inherited` the same for every path that was already dirty then, both
-    taken before the implementer ran. A destination counts only when the round put
-    the stalled content there: a path whose content is what it was when the round
-    started is the state the run inherited, whoever else happens to hold the same
-    bytes, and reading it as the stall arriving would stop a run over an
-    operator's own file. Matching on content is what keeps the carry this narrow;
-    retaining every possible destination instead would cost that false stall on
-    every round that touches inherited dirt.
+    Its inode is the first such thing, and the one an edit cannot take away: a
+    move on one filesystem lands the outstanding object under a new name with its
+    inode intact, and a round that then rewrites the file in place keeps that same
+    inode, so `stalled_objects` -- the identities of the outstanding paths as the
+    round found them -- still names it when the bytes no longer do. An inode a
+    move carried onto a fresh name was that object's alone when the round began,
+    so a match there is the move and nothing else; no guard against inherited dirt
+    is needed, because inherited dirt has an inode of its own.
+
+    Its bytes are the second, for the move an inode cannot follow -- across a
+    device boundary, where `rename` copies and the number is not kept. `stalled`
+    is the content identity of the outstanding paths as the round found them and
+    `inherited` the same for every path that was already dirty then. A destination
+    counts on content only when the round put the stalled content there: a path
+    whose content is what it was when the round started is the state the run
+    inherited, whoever else happens to hold the same bytes, and reading it as the
+    stall arriving would stop a run over an operator's own file. That guard is
+    what keeps the content half this narrow; retaining every possible destination
+    instead would cost a false stall on every round that touches inherited dirt.
     """
-    if not stalled:
+    if not stalled and not stalled_objects:
         return set()
-    return {path for path, blob in blob_ids(repo, present).items() if blob in stalled and blob != inherited.get(path)}
+    by_inode = {path for path, obj in object_ids(repo, present).items() if obj in stalled_objects}
+    by_content = {
+        path for path, blob in blob_ids(repo, present).items() if blob in stalled and blob != inherited.get(path)
+    }
+    return by_inode | by_content
 
 
 def listed(entries: str, limit: int) -> str:
@@ -2712,14 +2765,21 @@ def main(argv: list[str] | None = None) -> int:
             # reconciling the carried-across stall below independently of porcelain
             # status; see `dirty_paths`.
             inherited_dirty = set() if options.dry_run else dirty_paths(repo, paperwork)
-            # And by content, for the reconciliation the pathnames cannot answer.
-            # A move can change an outstanding path's name and can land it on a
-            # name that was already dirty, where the subtraction below cannot see
-            # it; it cannot change the bytes. See `relocated_stall`. Asked only
-            # while something is outstanding to recognise: otherwise there is
-            # nothing to compare against, and a dirty tree can be a large read.
+            # And by content and by filesystem identity, for the reconciliation
+            # the pathnames cannot answer. A move can change an outstanding path's
+            # name and can land it on a name that was already dirty, where the
+            # subtraction below cannot see it. A pure move does not change the
+            # bytes, and no move on one filesystem changes the inode even when the
+            # round then edits the file in place; between them they still name the
+            # object the tree has not committed. See `relocated_stall`. Both are
+            # asked only while something is outstanding to recognise: otherwise
+            # there is nothing to compare against, and a dirty tree can be a large
+            # read.
             inherited_blobs = {} if options.dry_run or not outstanding_paths else blob_ids(repo, inherited_dirty)
             stalled_blobs = {inherited_blobs[path] for path in outstanding_paths if path in inherited_blobs}
+            stalled_objects = (
+                set() if options.dry_run or not outstanding_paths else set(object_ids(repo, outstanding_paths).values())
+            )
             try:
                 implement_round(setup, record, number, prompt, scratch, paperwork)
             except AgentError:
@@ -2798,8 +2858,12 @@ def main(argv: list[str] | None = None) -> int:
                     # Under --allow-dirty it need not have: a destination the run
                     # inherited dirty is removed by the same term, and the work
                     # would be outstanding under no name at all. Whatever now
-                    # holds the stalled object's own bytes is that name.
-                    outstanding_paths |= relocated_stall(repo, present_dirty, stalled_blobs, inherited_blobs)
+                    # holds the stalled object's own inode -- or, where the move
+                    # crossed a device and could not carry it, its bytes -- is
+                    # that name.
+                    outstanding_paths |= relocated_stall(
+                        repo, present_dirty, stalled_blobs, inherited_blobs, stalled_objects
+                    )
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
