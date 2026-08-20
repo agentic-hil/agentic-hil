@@ -2035,6 +2035,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "interface": {"status": "ignored", "note": "OpenOCD selects the transport through interface_cfg."},
         "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Either an OpenOCD search name such as `interface/stlink.cfg`, which OpenOCD resolves against its own script path and which therefore does not have to exist on this host, or an absolute path to an existing file outside the workspace. A path under the system temporary directory is refused: it is cleared without warning and the configuration would stop describing this bench."},
         "target_cfg": {"status": "required", "default": "target/stm32f4x.cfg", "note": "OpenOCD script, passed as `-f`, a search name or an absolute path outside the workspace like interface_cfg. Must match the MCU family."},
+        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "OpenOCD reaches the target through the scripts named above, and connecting under reset is a `reset_config` decision inside them that depends on how SRST is wired for this adapter and this part. `under_reset` is therefore refused at load here rather than accepted and ignored; ask for the same effect in interface_cfg or target_cfg."},
         "flash_address": {"status": "ignored", "note": "OpenOCD takes the load address from the image."},
     },
     "stlink": {
@@ -2046,6 +2047,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "interface": {"status": "required", "default": "SWD", "enum": ["SWD", "JTAG"], "note": "Passed as `port=<interface>`."},
         "interface_cfg": {"status": "ignored"},
         "target_cfg": {"status": "ignored"},
+        "connect_mode": {"status": "optional", "default": "hotplug", "enum": ["hotplug", "under_reset"], "note": "How the probe attaches for a flash, passed as `mode=HOTPLUG` or `mode=UR` on the connect. `hotplug` connects to the running core and is what a file that does not name this key does. `under_reset` holds the target in reset for the connect, which is the fix for a first flash that fails at erase and succeeds on the retry: a core executing from flash defeats the erase it is left running through. It needs the probe's reset line wired to NRST, because STM32CubeProgrammer pairs UR with a hardware reset. Read by flash_firmware alone: probe_target stays hot plug so it remains the least intrusive call, and reset_target keeps its own NORMAL connect."},
         "flash_address": {"status": "conditional", "note": "Required to flash a .bin, which carries no load address. Not read for .elf or .hex. Pattern: 0x-prefixed hex or decimal, e.g. 0x08000000."},
     },
     "pyocd": {
@@ -2057,6 +2059,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "interface": {"status": "ignored"},
         "interface_cfg": {"status": "ignored"},
         "target_cfg": {"status": "ignored"},
+        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "This server passes no connect-mode option to pyOCD, so `under_reset` is refused at load rather than accepted and ignored. A bench that needs the flash to connect under reset runs it on `type: stlink`."},
         "flash_address": {"status": "conditional", "note": "Required to flash a .bin, which carries no load address; passed as `--base-address`. Not read for .elf or .hex."},
     },
 }
@@ -2120,6 +2123,7 @@ def debugger_backends_document() -> JsonObject:
             "optional": "read when set, and the backend works without it",
             "discovered": "found automatically when unset",
             "ignored": "never read by this backend",
+            "refused": "this backend has no equivalent, so the values it cannot carry out are rejected at load instead of being read and ignored; `enum` lists what it does accept",
         },
         "backends": DEBUGGER_FIELD_MATRIX,
         "probe_id_when_multiple_probes": MULTI_PROBE_RULE,
@@ -2337,7 +2341,17 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # limits, DTR/RTS) changes what a call does to the board rather than what the
     # board is, and none of it is what an attached probe hands you.
     ConfigKeyRule("target", named=False, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
-    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("probe_id", "executable", "interface_cfg", "target_cfg")),
+    # `connect_mode` joins the four above under the same right. It is not a
+    # permission and it widens nothing: the two values it takes are both a flash
+    # this configuration already allows, and the difference between them is
+    # whether the target is held in reset while the probe attaches. What it
+    # describes is a property of this board, that its core runs from flash on
+    # power-up and defeats an erase it is left running through, and a bench
+    # learns that from a first flash that failed and a retry that worked. Behind
+    # the permissions grant it would sit with the keys that decide authority,
+    # where nobody could set it without also being able to grant themselves
+    # flashing.
+    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("probe_id", "executable", "interface_cfg", "target_cfg", "connect_mode")),
     # `serial_number` is in the description half for the same reason `probe_id`
     # is: it is what an attached board hands you, and it says which unit this
     # entry is rather than what may be done to it. `vid`/`pid` come off the same
@@ -2552,7 +2566,7 @@ _SECTION_PURPOSE: dict[str, str] = {
     "permissions": "What may be done to this project beside its hardware: to this file itself, and to a quarantine incident on this bench.",
     "provenance": "Who wrote this file and who last changed it. A note to a reader; nothing reads it as policy.",
     "target": f"What board this is. Names in reports; `controller` is what a human recognises. Which field actually selects a target per backend, and known-good values: {TARGET_SUPPORT_URI}.",
-    "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. Which of these fields each backend requires, discovers or ignores: {DEBUGGER_BACKENDS_URI}.",
+    "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. Which of these fields each backend requires, discovers, ignores or refuses, `connect_mode` included: {DEBUGGER_BACKENDS_URI}.",
     "debug": "Typed GDB session settings: which symbols may be read and how much.",
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
     "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. From `version: 3` on an entry must say which of them identifies it: a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else an explicit `identity_source` — `vid_pid` for an adapter publishing USB ids but no serial, `device` for one publishing neither. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
@@ -3619,7 +3633,7 @@ MCP_RESOURCES: list[JsonObject] = [
         DEBUGGER_BACKENDS_URI,
         "debugger-backends",
         "Required fields per debugger backend",
-        "Which of type, executable, probe_id, target_type, interface, interface_cfg, target_cfg and flash_address each of openocd, stlink and pyocd requires, discovers, or ignores; when probe_id becomes mandatory; when flash_address is needed.",
+        "Which of type, executable, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink and pyocd requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset.",
         JSON_MIME,
     ),
     _resource_descriptor(

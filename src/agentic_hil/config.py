@@ -2633,9 +2633,53 @@ def debugger_config(raw: JsonObject, debugger_type: str, field: str = "debugger"
         flash_address=optional_string(raw.get("flash_address")),
         timeout_s=positive_timeout_config(raw.get("timeout_s"), 60.0, f"{field}.timeout_s"),
         resource_id=optional_string(raw.get("resource_id")),
+        connect_mode=debugger_connect_mode(raw.get("connect_mode"), debugger_type, f"{field}.connect_mode"),  # type: ignore[arg-type]
         permissions=debugger_permissions(mapping(raw.get("permissions"), f"{field}.permissions")),
         target=target,
     )
+
+
+# Which connect modes each backend can actually carry out, as opposed to which
+# ones the schema spells. Every backend has `hotplug`, because that is the name
+# for what all three of them have always done: connect to the target as it is.
+# `under_reset` is on the one backend that has a documented option for it and is
+# refused on the other two, so a value that would be silently ignored is a
+# refusal at load instead. That is the same rule `target_type` is *not* held to,
+# and deliberately: an ignored `target_type` is a field the wrong backend reads,
+# while an ignored `under_reset` is a bench that asked to stop erasing under a
+# running core and was told nothing.
+DEBUGGER_CONNECT_MODES: dict[str, tuple[str, ...]] = {
+    "stlink": ("hotplug", "under_reset"),
+    "openocd": ("hotplug",),
+    "pyocd": ("hotplug",),
+}
+DEFAULT_DEBUGGER_CONNECT_MODE = "hotplug"
+
+
+def debugger_connect_mode(value: object, debugger_type: str, field: str) -> str:
+    """`connect_mode` as this backend can honour it, or a refusal naming both.
+
+    Unset is the default and is how every configuration written before this key
+    existed reads, so nothing about those files changes. A value the schema does
+    not spell never reaches here (the enum refuses it first, with
+    `allowed_values`); what this adds is the per-backend half the schema cannot
+    state without an `if`/`then` per backend, and the sentence that says where
+    the same effect lives for the backend that refuses.
+    """
+    if value is None:
+        return DEFAULT_DEBUGGER_CONNECT_MODE
+    mode = str(value)
+    allowed = DEBUGGER_CONNECT_MODES.get(debugger_type, (DEFAULT_DEBUGGER_CONNECT_MODE,))
+    if mode not in allowed:
+        raise ConfigError(
+            "config_invalid",
+            f"{field} is '{mode[:64]}', which the {debugger_type} backend cannot carry out, and a value it would ignore "
+            "is refused rather than accepted. Connecting under reset is carried by STM32CubeProgrammer, so it needs "
+            "`type: stlink`; OpenOCD takes the same effect from the scripts named by interface_cfg and target_cfg, and "
+            "this server sets nothing of the kind for pyOCD.",
+            {"field": field, "value": mode[:128], "debugger_type": debugger_type, "allowed_values": list(allowed)},
+        )
+    return mode
 
 
 def debugger_permissions(raw: JsonObject) -> DebuggerPermissions:

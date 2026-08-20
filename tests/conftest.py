@@ -275,6 +275,10 @@ def write_config(
     auto_probe_ids: bool = True,
     interface_cfg: str = "interface/stlink.cfg",
     target_cfg: str = "target/stm32f4x.cfg",
+    # Omitted from the written entry by default, so the bulk of the suite keeps
+    # exercising the file that never named a connect mode and is read at the
+    # default. A test that wants the key writes it.
+    connect_mode: str | None = None,
     config_path: Path | None = None,
     auto_recover: str | None = None,
     recovery_max_attempts: int | None = None,
@@ -301,6 +305,7 @@ def write_config(
         "target_cfg": target_cfg,
         "flash_address": flash_address,
         "timeout_s": 5,
+        **({"connect_mode": connect_mode} if connect_mode is not None else {}),
     }
     # Omitted entirely by default, so the common test config exercises the same
     # "policy was never named" path a config written before recovery existed has.
