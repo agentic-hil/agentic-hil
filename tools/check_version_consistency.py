@@ -703,10 +703,7 @@ def contract_problems(root: Path) -> list[str]:
         "name": "agentic-hil",
         "displayName": "Agentic Hardware-in-the-Loop",
         "version": version,
-        "description": (
-            "Safe embedded firmware development with local hardware-in-the-loop targets, "
-            "exposed as policy-gated MCP tools (probe, flash, reset, serial, CAN)."
-        ),
+        "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
         "author": {"name": "Hannes Pauli"},
         "repository": "https://github.com/agentic-hil/agentic-hil",
         "license": "Apache-2.0",
@@ -723,10 +720,7 @@ def contract_problems(root: Path) -> list[str]:
             {
                 "name": "agentic-hil",
                 "displayName": "Agentic Hardware-in-the-Loop",
-                "description": (
-                    "Safe embedded firmware development with hardware-in-the-loop targets "
-                    "via policy-gated MCP tools."
-                ),
+                "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
                 "source": "./plugins/agentic-hil",
                 "version": version,
                 "license": "Apache-2.0",

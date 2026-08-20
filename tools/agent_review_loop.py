@@ -819,9 +819,10 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job
     reached only the leader, which is the bug this fixes -- the grandchildren
     editing the tree never saw a signal at all.
 
-    Returns only once the tree is *positively confirmed* gone. If a signal cannot
-    be delivered, or the group still has a member after the final SIGKILL and its
-    deadline, this raises CleanupUnconfirmed rather than returning: returning would
+    Returns only once the tree is *positively confirmed* gone. If the group still
+    has a member once a signal and its deadline have passed -- whether the signal
+    itself was delivered or could not be, which only decides which report is
+    raised -- this raises CleanupUnconfirmed rather than returning: returning would
     tell the caller the tree is safe to commit when a process may still be editing
     it, which is the race this exists to prevent. On Windows without a job there
     is no kernel-tracked membership to ask, so this never returns cleanly at
@@ -889,15 +890,34 @@ def _terminate_tree(process: subprocess.Popen[str], *, grace_s: float = 5.0, job
     # SIGTERM first for a clean stop, then SIGKILL for whatever ignored it. After
     # each, the leader is reaped -- a group whose only remaining member is an
     # unreaped zombie leader never looks empty -- and the group waited out.
+    #
+    # A signal that could not be delivered is not by itself the failure, and
+    # raising over it before asking anything else was issue #320. Darwin answers
+    # EPERM, not ESRCH, for a group the kernel still knows but whose every
+    # remaining member is a zombie: its group iterator skips zombies, and a pass
+    # that signalled nobody is reported as a permission failure under POSIX
+    # conformance rather than as an empty group. This path walks through exactly
+    # that state by design -- the leader is a zombie from the moment it dies until
+    # `_reap_leader` collects it, and a descendant the SIGTERM above killed is one
+    # until init collects it -- so a delivery error here routinely describes a tree
+    # that is already gone, and "could not signal" is then a survivor an operator
+    # goes looking for and cannot find.
+    #
+    # The question that decides the answer is the membership one, so it is asked
+    # first either way and the delivery error is reported only when the group also
+    # will not read empty. That swallows nothing: a group with a live member that
+    # is not ours to signal answers the `_group_gone` probe with the same refusal
+    # for the whole wait, and still raises below.
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        if not _signal_group(pgid, sig):
-            # A signal that could not be delivered leaves the group's members
-            # running with their state unknown; SIGKILL failing here is the worst
-            # case and must not be swallowed.
-            raise CleanupUnconfirmed(f"could not signal process group {pgid} with {_signal_name(sig)} while killing pid {process.pid}")
+        delivered = _signal_group(pgid, sig)
         _reap_leader(process, grace_s)
         if _group_gone(pgid, deadline=time.monotonic() + grace_s):
             return
+        if not delivered:
+            raise CleanupUnconfirmed(
+                f"could not signal process group {pgid} with {_signal_name(sig)} while killing pid {process.pid}, "
+                f"and the group still had a member after a {grace_s:.0f}s wait"
+            )
     raise CleanupUnconfirmed(
         f"process group {pgid} (agent pid {process.pid}) still had a member after SIGKILL and a {grace_s:.0f}s wait"
     )
@@ -915,8 +935,11 @@ def _signal_group(pgid: int, sig: int) -> bool:
 
     True when the signal was delivered or the group was already gone -- both mean
     there is nothing left this call failed to reach. False when it could not be
-    delivered (``PermissionError`` or another ``OSError``): the members are still
-    there and were not signalled, which the caller must not read as a clean kill.
+    delivered (``PermissionError`` or another ``OSError``): nothing in the group
+    was reached, which is not the same as something being left in it. On Darwin it
+    is also the answer for a group whose remaining members are all zombies, so the
+    caller settles it by asking whether the group still has a member rather than
+    by assuming one is there -- see `_terminate_tree`.
     """
     try:
         os.killpg(pgid, sig)
@@ -1228,9 +1251,21 @@ def dirty_records(repo: Path, paperwork: tuple[Path, ...] = ()) -> tuple[set[str
     line that carries it: a file that was untracked (`?? fix.py`) one round and
     staged (`A  fix.py`) the next is the same unreviewed path, and forgetting it
     when its two-character status changed is how a clean verdict once exited over
-    work no review had read. `--porcelain -z` is what makes the name the whole of
-    the identity -- read raw, not through `git`'s stripping, because the leading
+    work no review had read. `--porcelain -z` is what makes the name usable as
+    that identity -- read raw, not through `git`'s stripping, because the leading
     space of a ` M` status is part of the first record and `strip()` would eat it.
+    Where a move lands the work on a name that was already dirty, the name is the
+    thing that collides and `relocated_stall` reads the content instead.
+
+    `--untracked-files=all` is what makes an untracked file its own record. The
+    default mode reports a whole untracked directory as one `?? directory/` line and
+    never descends, so a stall moved beneath a directory the run inherited untracked
+    has no name of its own in either snapshot: the directory collides with itself,
+    holds no blob or inode the stall would match, and the work sits under a name no
+    review read while the loop calls the run clean. Listing every untracked file
+    gives the moved path a name the reconciliation below can carry. Ignored files are
+    still left out -- that would take `--ignored`, which this does not pass -- so the
+    loop's own paperwork under a gitignored path stays invisible as before.
 
     Takes the same pathspecs as `uncommitted`, so the loop's own review documents
     and transcripts are not read as the implementer's work. A git that will not
@@ -1238,7 +1273,7 @@ def dirty_records(repo: Path, paperwork: tuple[Path, ...] = ()) -> tuple[set[str
     no tree is touched on the strength of a question that could not be asked.
     """
     result = subprocess.run(
-        ["git", "-C", str(repo), "status", "--porcelain", "-z", *excluding(repo, paperwork)],
+        ["git", "-C", str(repo), "status", "--porcelain", "-z", "--untracked-files=all", *excluding(repo, paperwork)],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1247,6 +1282,323 @@ def dirty_records(repo: Path, paperwork: tuple[Path, ...] = ()) -> tuple[set[str
     if result.returncode != 0:
         return set(), {}
     return _porcelain_z_records(result.stdout)
+
+
+# The work-tree kind git records in a tree entry's mode, prepended to a blob id so the
+# content identity a stall is reconciled by tells a symlink apart from a regular file of
+# the same bytes. A git blob id is the hash of the content alone and carries no mode, so
+# a symlink whose link text is `x` and a regular file whose content is `x` share one blob
+# id; the tag keeps the two the distinct work-tree objects they are. Every regular file
+# takes the one non-symlink mode whatever its executable bit -- the reconciliation only
+# needs symlink told from file, and the bit is not one git tracks the same on every
+# platform. See `blob_ids`.
+REGULAR_BLOB_MODE = "100644"
+SYMLINK_BLOB_MODE = "120000"
+
+
+def blob_id(repo: Path, relative: str) -> str | None:
+    """`relative`'s current content as git would name it, or None when it names nothing.
+
+    Git's own object id for the file on disk, computed the way `git add` would: the
+    repository's object format -- sha1, or the sha256 an `extensions.objectFormat`
+    repository asks for -- over the content a clean filter would store, `core.autocrlf`
+    and any `.gitattributes` conversion among them, and tagged with the work-tree kind
+    (see `blob_ids`) so a symlink is told from a regular file of the same bytes. Every
+    comparison here is a work-tree file against another work-tree file -- the content the
+    round inherited against the content it left -- so what matters is that both are named
+    the same way, and naming them the way git itself would keeps that identity stable even
+    where a filter rewrites content or the repository names objects in sha256, which a
+    raw byte hash cannot promise across a re-read. See `blob_ids`, which hashes a whole
+    set in one pass, and does the reading.
+
+    A directory (an untracked one is reported as a path in its own right), a path
+    that is gone, and one that will not open have no content to identify. Neither
+    has an empty file: its content is identical to every other empty file's, so
+    matching on it would say the stalled work had arrived at any path a round
+    happened to truncate. All four are None rather than a shared placeholder.
+    """
+    return blob_ids(repo, {relative}).get(relative)
+
+
+def has_content(path: Path) -> bool:
+    """Whether `path` is a regular file with bytes in it, the only kind hashed by its own path.
+
+    A directory, a path that is gone or will not `stat`, and an empty file are all
+    excluded before git is asked: the first two hold no content to identify, and every
+    empty file's content is every other's, so a blob id is asked only of what a match
+    on it can tell apart. A symlink is excluded too, though it has a content identity of
+    its own: `is_file` and `stat` follow it to its target, so `git hash-object` over the
+    path would name the target's content rather than the mode `120000` blob git keeps for
+    the link, and hashing its link text is `link_blob_id`'s job instead. See `blob_id`.
+    """
+    try:
+        return not path.is_symlink() and path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def link_blob_id(repo: Path, path: Path) -> str | None:
+    """The blob id git stores for the symlink `path` -- the hash of its link text, or None.
+
+    Git keeps a symlink as a mode `120000` blob whose content is the target path the
+    link holds, not the bytes of whatever it resolves to. `git hash-object` over the
+    path would instead follow it and hash the target file -- naming the wrong object for
+    a live link, and failing outright on a broken one that opens nothing -- so the link
+    text is read with `readlink` and hashed on its own. The raw bytes go down
+    `git hash-object --stdin`, which names them in the repository's object format just as
+    the positional transport does, so a symlink a round inherited and the symlink it left
+    compare in one namespace whatever object format the repository uses. None when the
+    link cannot be read or git will not answer, matching the other identity helpers so a
+    stall whose identity cannot be recomputed is kept rather than dropped as unchanged.
+    """
+    try:
+        text = os.readlink(os.fsencode(path))
+    except OSError:
+        return None
+    result = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "--stdin"],
+        input=text,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", "replace").strip() or None
+
+
+def blob_ids(repo: Path, paths: set[str]) -> dict[str, str]:
+    """The content identity of each of `paths`, the ones that have none left out.
+
+    Git's own object ids, from `git hash-object` over the whole set in one pass so a
+    large dirty tree costs one child rather than one per path, and with the object
+    format and clean filters the repository itself would apply -- so the content the
+    round inherited and the content it left are named in one namespace, not a raw hash
+    of the bytes that a filter or a sha256 repository would make disagree. Paths with
+    no content to name are dropped before git is asked; a path that races the hash away
+    and fails the batch is retried on its own, so one casualty does not take the rest
+    of the set with it.
+
+    A symlink is a work-tree object with a content identity too, but the positional
+    transport cannot name it: `git hash-object` follows the link to its target. So the
+    regular files are hashed in the batch above, and each symlink is named separately
+    from its link text -- the mode `120000` blob git actually stores -- so a moved
+    symlink stall is followed by the same content identity as any other file. See
+    `link_blob_id`.
+
+    Each id is tagged with the work-tree kind git keeps in its tree mode -- a regular
+    file's blob under `100644`, a symlink's under `120000` (see `REGULAR_BLOB_MODE` and
+    `SYMLINK_BLOB_MODE`) -- because a git blob id is the hash of the content alone and
+    holds no mode. Untagged, a symlink whose link text is `x` and a regular file whose
+    content is `x` would share one id, and a round that replaced an inherited-dirty
+    regular file with a symlink to the same bytes -- or moved such a symlink stall onto
+    it -- would compare as unchanged and slip the stall reconciliation, exiting a run
+    clean over work no review read. The tag keeps the two the distinct objects they are,
+    in the one namespace `relocated_stall` and `changed_inherited_dirty` both compare in.
+    """
+    named = sorted(path for path in paths if has_content(repo / path))
+    hashed = _hash_object(repo, named)
+    if hashed is not None:
+        resolved = {path: f"{REGULAR_BLOB_MODE}:{blob}" for path, blob in zip(named, hashed, strict=True)}
+    else:
+        resolved = {}
+        for path in named:
+            one = _hash_object(repo, [path])
+            if one:
+                resolved[path] = f"{REGULAR_BLOB_MODE}:{one[0]}"
+    for path in sorted(paths):
+        link = repo / path
+        if path not in resolved and link.is_symlink():
+            blob = link_blob_id(repo, link)
+            if blob is not None:
+                resolved[path] = f"{SYMLINK_BLOB_MODE}:{blob}"
+    return resolved
+
+
+def _argv_batches(names: list[str], budget: int = 8000) -> list[list[str]]:
+    """`names` split into runs whose bytes fit an argv the platform will spawn.
+
+    `git hash-object` takes its paths positionally so a newline in a name is carried
+    through rather than read as a delimiter, but a command line has a length the
+    platform enforces -- `E2BIG` on POSIX, a hard character cap on Windows -- where
+    `--stdin-paths` had none. A conservative byte budget keeps each run well under the
+    smallest such limit, so a large dirty tree costs a handful of children rather than
+    raising. A single name past the budget is still a run of its own: a name cannot be
+    split, and the run that holds it is refused or answered whole by git, not here.
+    """
+    batches: list[list[str]] = []
+    current: list[str] = []
+    used = 0
+    for name in names:
+        cost = len(name.encode()) + 1
+        if current and used + cost > budget:
+            batches.append(current)
+            current, used = [], 0
+        current.append(name)
+        used += cost
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _hash_object(repo: Path, names: list[str]) -> list[str] | None:
+    """`git hash-object` for `names`, one id per name in order, or None when it would not answer.
+
+    The names are passed positionally, after `--`, not down `--stdin-paths`. That
+    transport delimits paths by newline, and a newline is a byte a POSIX filename may
+    hold, so a name that carried one was split into several: the batch then hashed the
+    wrong content under the wrong names, or returned a count that no longer lined up
+    and left the name unhashed. A rewritten inherited-dirty path named that way
+    compared as unchanged against itself and exited a run clean over work no review
+    read. A positional argv carries every byte of the name through untouched, and git
+    still reads the path's `.gitattributes` filters and the repository's object format
+    from it, so the id is the one `git add` would store.
+
+    None is the batch git refused -- a path that vanished under it among the reasons --
+    told apart from an empty set, which is simply no ids to return. The id count is
+    checked against the names because a partial answer cannot be lined back up with the
+    paths that asked for it, and a mismatch is refused rather than misattributed. The
+    call is split into runs whose argv stays within the length a platform will spawn --
+    the limit `--stdin-paths` was reached for and this transport meets again -- each run
+    keeping its order so the ids still line up with the names across the joins.
+    """
+    if not names:
+        return []
+    ids: list[str] = []
+    for batch in _argv_batches(names):
+        result = subprocess.run(
+            ["git", "-C", str(repo), "hash-object", "--", *batch],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            return None
+        ids.extend(result.stdout.splitlines())
+    return ids if len(ids) == len(names) else None
+
+
+def object_id(path: Path) -> tuple[int, int] | None:
+    """`path`'s filesystem identity -- device and inode -- or None when it has none.
+
+    The identity a move keeps when an edit takes the bytes away. `rename` and
+    `replace` carry a file's inode onto its new name, and a later truncating write
+    reuses that same inode rather than making a new one, so the object git will
+    not have committed is still the object sitting under the new name however much
+    the round changed inside it. Content is the thing a move preserves and an edit
+    destroys; the inode is the thing both preserve, on one filesystem.
+
+    Read with `lstat`, not `stat`, so a symlink is named by its own directory entry
+    rather than by whatever it points at: a move carries the link's inode, `stat`
+    would follow it to the target's -- or find nothing at all for a broken link and
+    report no identity -- and the object git has not committed is the link, not its
+    target. For a regular file the two agree, so nothing else changes.
+
+    A path that is gone or will not `lstat` has no identity, and neither has one
+    whose inode a platform reports as zero -- some do rather than answer, and two
+    such paths sharing that zero would be read as the same object when they are
+    not. All are None rather than a value that would collide, matching `blob_id`.
+    The device is carried alongside the inode because an inode number is only
+    unique within its filesystem, and a cross-device move is exactly where the
+    number can be reused for an unrelated object.
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not info.st_ino:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def object_ids(repo: Path, paths: set[str]) -> dict[str, tuple[int, int]]:
+    """The filesystem identity of each of `paths`, the ones that have none left out."""
+    asked = ((path, object_id(repo / path)) for path in paths)
+    return {path: obj for path, obj in asked if obj is not None}
+
+
+def relocated_stall(
+    repo: Path,
+    present: set[str],
+    stalled: set[str],
+    inherited: dict[str, str],
+    stalled_objects: set[tuple[int, int]],
+) -> set[str]:
+    """Which of `present` now holds an object an outstanding path held -- by inode or byte.
+
+    The tie-breaker for where pathnames lie. Outstanding stalled work is followed
+    by name, and a move is carried by taking the round's new dirt, `present_dirty
+    - inherited_dirty`; under `--allow-dirty` a move's destination need not be new
+    dirt at all. A round that moves the stalled object onto a pathname the run
+    inherited dirty has the destination subtracted out by exactly the term that
+    keeps an operator's own uncommitted changes from being read as this round's
+    work, and the object is then outstanding under no name at all. What the move
+    did not change is what identifies it.
+
+    Its inode is the first such thing, and the one an edit cannot take away: a
+    move on one filesystem lands the outstanding object under a new name with its
+    inode intact, and a round that then rewrites the file in place keeps that same
+    inode, so `stalled_objects` -- the identities of the outstanding paths as the
+    round found them -- still names it when the bytes no longer do. An inode a
+    move carried onto a fresh name was that object's alone when the round began,
+    so a match there is the move and nothing else; no guard against inherited dirt
+    is needed, because inherited dirt has an inode of its own.
+
+    Its bytes are the second, for the move an inode cannot follow -- across a
+    device boundary, where `rename` copies and the number is not kept. `stalled`
+    is the content identity of the outstanding paths as the round found them and
+    `inherited` the same for every path that was already dirty then. A destination
+    counts on content only when the round put the stalled content there: a path
+    whose content is what it was when the round started is the state the run
+    inherited, whoever else happens to hold the same bytes, and reading it as the
+    stall arriving would stop a run over an operator's own file. That guard is
+    what keeps the content half this narrow; retaining every possible destination
+    instead would cost a false stall on every round that touches inherited dirt.
+    """
+    if not stalled and not stalled_objects:
+        return set()
+    by_inode = {path for path, obj in object_ids(repo, present).items() if obj in stalled_objects}
+    by_content = {
+        path for path, blob in blob_ids(repo, present).items() if blob in stalled and blob != inherited.get(path)
+    }
+    return by_inode | by_content
+
+
+def changed_inherited_dirty(
+    repo: Path, present: set[str], inherited_dirty: set[str], inherited_blobs: dict[str, str]
+) -> set[str]:
+    """Inherited-dirty paths still dirty whose content this round rewrote.
+
+    The conservative destination a stall's own identity can no longer name. An
+    atomic save -- write a temporary file, rename it over the target -- lands the
+    outstanding object under an inherited-dirty name with a fresh inode and fresh
+    bytes, so neither identity `relocated_stall` matches on follows it there; all
+    that is left to go on is that a move onto inherited dirt rewrites its
+    destination. A path the run inherited dirty and still holds dirty whose content
+    is no longer what it began with is such a rewrite, whatever put it there, and
+    is where a stall that cannot be proven reviewed or removed might have landed.
+
+    `inherited_blobs` is the content of every inherited-dirty path as the round
+    found it; a path missing from it was empty or unreadable then. A path is
+    changed when its content now differs from that -- one that gained content it
+    had none of, or lost the content it had, among them -- and unchanged when the
+    two agree, which is the operator's own file this round never touched and does
+    not stop the run.
+
+    A path still holding content whose identity could not be recomputed now -- a
+    symlink whose `readlink` failed, a file `git hash-object` declined -- agrees
+    with an inherited blob that was equally uncapturable only by both being absent,
+    and would drop out as unchanged though nothing proved it so. Such a path is
+    kept instead: the same conservative reading taken wherever an identity cannot be
+    established, and safe because it fires only for a path that still holds an object
+    (a symlink or a non-empty file), never the operator's own empty file or directory.
+    """
+    still = present & inherited_dirty
+    now = blob_ids(repo, still)
+    changed = {path for path in still if now.get(path) != inherited_blobs.get(path)}
+    unrecomputed = {
+        path for path in still if path not in now and (has_content(repo / path) or (repo / path).is_symlink())
+    }
+    return changed | unrecomputed
 
 
 def listed(entries: str, limit: int) -> str:
@@ -2622,6 +2974,26 @@ def main(argv: list[str] | None = None) -> int:
             # reconciling the carried-across stall below independently of porcelain
             # status; see `dirty_paths`.
             inherited_dirty = set() if options.dry_run else dirty_paths(repo, paperwork)
+            # And by content and by filesystem identity, for the reconciliation
+            # the pathnames cannot answer. A move can change an outstanding path's
+            # name and can land it on a name that was already dirty, where the
+            # subtraction below cannot see it. A pure move does not change the
+            # bytes, and no move on one filesystem changes the inode even when the
+            # round then edits the file in place; between them they still name the
+            # object the tree has not committed. See `relocated_stall`. An atomic
+            # save -- write a temp file and rename it over the destination --
+            # changes both, so a move onto inherited dirt made that way is named by
+            # neither; when a followed name has vanished the reconciliation then
+            # keeps every inherited-dirty path the round rewrote, since the stall's
+            # edited work may be hiding in one and no proof taken at a pathname can
+            # tell that tree from an operator editing their own file beside a
+            # committed stall. See `changed_inherited_dirty`. These are asked only
+            # while something is outstanding to recognise: otherwise there is nothing
+            # to compare against, and a dirty tree can be a large read.
+            inherited_blobs = {} if options.dry_run or not outstanding_paths else blob_ids(repo, inherited_dirty)
+            stalled_blobs = {inherited_blobs[path] for path in outstanding_paths if path in inherited_blobs}
+            outstanding_ids = {} if options.dry_run or not outstanding_paths else object_ids(repo, outstanding_paths)
+            stalled_objects = set(outstanding_ids.values())
             try:
                 implement_round(setup, record, number, prompt, scratch, paperwork)
             except AgentError:
@@ -2692,10 +3064,52 @@ def main(argv: list[str] | None = None) -> int:
                 # finished the work left a clean tree, so `present_dirty` holds
                 # nothing new to carry; one that moved the work away left it dirty
                 # under its new name, and carrying keeps it from slipping the guard.
-                carry_new = bool(kept_uncommitted) or bool(followed - survived)
+                vanished = followed - survived
+                carry_new = bool(kept_uncommitted) or bool(vanished)
                 outstanding_paths = survived
                 if carry_new:
                     outstanding_paths |= present_dirty - inherited_dirty
+                    # That subtraction assumes the move landed on clean ground.
+                    # Under --allow-dirty it need not have: a destination the run
+                    # inherited dirty is removed by the same term, and the work
+                    # would be outstanding under no name at all. Whatever now
+                    # holds the stalled object's own inode -- or, where the move
+                    # crossed a device and could not carry it, its bytes -- is
+                    # that name.
+                    outstanding_paths |= relocated_stall(
+                        repo, present_dirty, stalled_blobs, inherited_blobs, stalled_objects
+                    )
+                    # Both of those identities are the object's own, and neither
+                    # survives the round editing the stall and relocating it. An
+                    # atomic save -- write the edited bytes to a temporary file and
+                    # rename it over the destination -- gives the inherited-dirty name
+                    # the stall landed on a fresh inode and fresh bytes, so neither
+                    # identity above follows it there. Once a followed name has
+                    # vanished, then, the round may have rewritten an inherited-dirty
+                    # path with the stall's outstanding work, and no proof taken at a
+                    # pathname can rule that out. A `git commit` leaves the work tree
+                    # be, so it is tempting to read an object still sitting at its
+                    # followed name with the inode and bytes it began with as reviewed;
+                    # but a hard link puts that original inode and those original bytes
+                    # at any name -- the followed one included, once an alias is moved
+                    # back onto it -- while the edited work sits elsewhere, and a round
+                    # that simply writes that work into the inherited-dirty file in
+                    # place needs no link at all. The two are one tree: a stall
+                    # committed under its own name beside an operator's edited file, and
+                    # edited stall work hidden in that file beside a stale commit of the
+                    # original bytes, leave the very same inodes and the very same
+                    # content, differing only in what the bytes mean. So the
+                    # inherited-dirty paths this round rewrote are kept whenever a
+                    # followed name vanished, without asking a forgeable proof to clear
+                    # them -- a false stall the operator clears by committing being the
+                    # safe error where a false clean exits 0 over work no review saw.
+                    # See `changed_inherited_dirty`; the narrower `relocated_stall`
+                    # identities above still carry every move they can name, so this
+                    # retains only what they could not.
+                    if vanished:
+                        outstanding_paths |= changed_inherited_dirty(
+                            repo, present_dirty, inherited_dirty, inherited_blobs
+                        )
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:

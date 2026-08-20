@@ -1834,6 +1834,1308 @@ def test_reusing_the_moved_untracked_name_for_a_different_commit_does_not_slip_a
     assert "the review never saw" in f"{captured.out}{captured.err}"
 
 
+_OPERATOR_DIRT = "# the operator's own work in progress, uncommitted before the run started\n"
+_MOVES_THE_STALLED_FILE_ONTO_INHERITED_DIRT = (
+    # The stalled untracked file moves onto a pathname that was already dirty when
+    # the round began, overwriting the operator's own work in progress there. The
+    # destination's dirt predates the round, so subtracting what the round started
+    # with removes exactly the name the work now lives under.
+    "pathlib.Path('fix.py').replace('renamed.py')\n"
+    # Then the name round 1 stalled under is reused for unrelated content and
+    # committed, so it leaves the dirty set with nothing of the stall in it.
+    f"pathlib.Path('fix.py').write_text({_A_DIFFERENT_FIX!r}, encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: a different fix.py entirely'], check=True)\n"
+    "sys.stdout.write('moved the stall onto the inherited dirt and committed a different fix.py\\n')\n"
+)
+
+
+def test_moving_the_stalled_file_onto_inherited_dirt_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Under --allow-dirty the destination of a move can be dirt the run inherited.
+
+    Round 1 stalls with an untracked `fix.py` and its review requests changes, so
+    the run goes on. Round 2 moves that file onto `renamed.py`, which the operator
+    had left dirty before the run started, then writes a different `fix.py` and
+    commits it. Both halves of the guard then miss the work: the name round 1 knew
+    it by left the dirty set, and the name it now lives under is subtracted out by
+    `present_dirty - inherited_dirty`, because that path was already dirty when the
+    round began. `outstanding_paths` ended empty and round 2's clean verdict on a
+    range that is only the `fix.py` commit ended the run at exit 0 with round 1's
+    work sitting untracked under a name no review ever read. A pathname is exactly
+    what a move onto already-dirty ground destroys, so the destination is
+    recognised by the content itself, and the run stops as stalled.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the pathname round 2 will move onto.
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_moves_onto_dirt",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _MOVES_THE_STALLED_FILE_ONTO_INHERITED_DIRT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_moves_onto_dirt") == 2
+    # The committed fix.py is the unrelated round 2 file, not the stalled work.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: a different fix.py entirely"
+    assert _in(repository, "show", "HEAD:fix.py") == _A_DIFFERENT_FIX
+    # The stalled work is untracked, uncommitted, and outside every reviewed range.
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+# The stall's link text, and the bytes the operator's inherited-dirty file holds, so the
+# git blob id of the symlink and of the regular file collide -- the mode-tag collision.
+_STALL_LINK_TEXT = "same-bytes"
+_WRITES_AN_UNTRACKED_SYMLINK_STALL = (
+    f"pathlib.Path('fix.py').symlink_to({_STALL_LINK_TEXT!r})\n"
+    "sys.stdout.write('wrote an untracked broken symlink fix.py, then never came back to commit it\\n')\n"
+)
+_REPLACES_THE_INHERITED_FILE_WITH_A_SYMLINK_OF_THE_STALLS_BYTES = (
+    # An unrelated commit, so the round is not a declined stall and the guard reads the range.
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    # The stalled symlink is removed, and the operator's inherited-dirty renamed.py -- a
+    # regular file whose bytes are the stall's own link text -- is replaced with a fresh
+    # symlink pointing at those same bytes. The git blob id of the two is identical; only
+    # the tree mode git records for them differs.
+    "pathlib.Path('fix.py').unlink()\n"
+    "pathlib.Path('renamed.py').unlink()\n"
+    f"pathlib.Path('renamed.py').symlink_to({_STALL_LINK_TEXT!r})\n"
+    "sys.stdout.write('committed only other.py, replaced the inherited file with a symlink of its bytes\\n')\n"
+)
+
+
+def test_replacing_inherited_dirt_with_a_symlink_of_the_stalls_bytes_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A git blob id holds no mode, so a mode swap that keeps the bytes must not read as no change.
+
+    Round 1 stalls with an untracked broken symlink `fix.py` whose link text is
+    `same-bytes`, and its review requests changes. The operator left `renamed.py` dirty
+    before the run -- a regular file whose bytes are exactly that link text. Round 2
+    commits an unrelated `other.py`, removes `fix.py`, and replaces `renamed.py` with a
+    fresh symlink pointing at `same-bytes`. The stall's inode is gone and the replacement
+    has a new one, so no identity follows it by inode; and the git blob id of a symlink to
+    `same-bytes` equals the git blob id of a file containing `same-bytes`, so an untagged
+    content identity reads `renamed.py` as the operator's own file, unchanged. Both guards
+    then drop it and round 2's clean verdict would end the run at exit 0 over a work-tree
+    object no review saw. Tagging each id with the work-tree mode keeps the symlink apart
+    from the file it replaced, so `renamed.py` stays outstanding and the run stops as
+    stalled.
+    """
+    repository = _repository(tmp_path)
+    try:
+        (tmp_path / "symlink-probe").symlink_to("target")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+    (tmp_path / "symlink-probe").unlink()
+    # The operator's own uncommitted work: a regular file whose bytes are the stall's link text.
+    (repository / "renamed.py").write_text(_STALL_LINK_TEXT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_symlink_then_replaces_inherited_file",
+        _WRITES_AN_UNTRACKED_SYMLINK_STALL,
+        _REPLACES_THE_INHERITED_FILE_WITH_A_SYMLINK_OF_THE_STALLS_BYTES,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_symlink_then_replaces_inherited_file") == 2
+    # The committed file is the unrelated round 2 one; the symlink swap reached no commit.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    # renamed.py is now an untracked symlink of the stall's bytes, outside every reviewed range.
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").is_symlink()
+    assert os.readlink(repository / "renamed.py") == _STALL_LINK_TEXT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_ROUND_TWO_EDIT = "# and a round 2 edit on top of it\n"
+_COMMITS_THE_STALL_AND_REWRITES_THE_INHERITED_DIRT = (
+    # The stalled work reaches a commit under its own name -- the review reading it.
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: finish what the stalled attempt wrote'], check=True)\n"
+    # The round also rewrites an inherited dirty file. Whether that is the operator's
+    # own continuation or the stall's edited work hidden in place, the tree is the
+    # same, so it cannot be told from a stall and is kept as one.
+    f"pathlib.Path('renamed.py').write_text({_OPERATOR_DIRT + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    "sys.stdout.write('committed the stalled fix and rewrote the inherited dirt\\n')\n"
+)
+
+
+def test_rewriting_inherited_dirt_beside_a_committed_stall_stops_as_stalled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A committed stall cannot clear an inherited file the round also rewrote.
+
+    Committing the tracked stall under its own name is no proof that the stall's work
+    reached review, because that same tree is what an attacker leaves: a hard link (or
+    a plain in-place write) can put the stall's edited work into an inherited dirty
+    file while a stale copy of its original bytes is what gets committed. Round 1
+    stalls with an untracked `fix.py`; round 2 commits it -- so `fix.py` reaches a
+    reviewed commit -- and rewrites `renamed.py`, which the operator left dirty before
+    the run started. Nothing observable says whether `renamed.py` now holds the
+    operator's own edit or the stall's hidden work, and calling it clean would exit 0
+    over the latter, so the round it rewrote is kept and the run stops as stalled with
+    the work still in the tree for the operator to commit or clear.
+    """
+    repository = _repository(tmp_path)
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_commits_beside_rewritten_dirt",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _COMMITS_THE_STALL_AND_REWRITES_THE_INHERITED_DIRT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    # The stall is committed, but the inherited file the round rewrote is retained and
+    # left exactly where the round left it, uncommitted and outside every reviewed range.
+    assert _in(repository, "show", "HEAD:fix.py") == FIX
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == _OPERATOR_DIRT + _ROUND_TWO_EDIT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_INHERITED_LF_DIRT = "def edited():\n    return 'the operator left this dirty, in LF'\n"
+_COMMITS_THE_STALL_AND_GIVES_INHERITED_DIRT_CRLF_LINE_ENDINGS = (
+    # The stall is committed under its own name, so a name vanishes and the inherited
+    # dirt is examined. renamed.py is rewritten with CRLF line endings but the same
+    # text; under core.autocrlf both the inherited LF and the new CRLF clean to the
+    # one LF blob, so git names them alike and the round changed nothing there.
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: finish the stall'], check=True)\n"
+    "pathlib.Path('renamed.py').write_bytes("
+    f"{_INHERITED_LF_DIRT!r}.replace('\\n', '\\r\\n').encode())\n"
+    "sys.stdout.write('committed the stall and gave the inherited dirt CRLF endings\\n')\n"
+)
+
+
+def test_a_crlf_only_rewrite_of_inherited_dirt_under_a_clean_filter_is_not_a_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inherited dirt named the way git names it is unchanged by a line-ending rewrite.
+
+    The retained inherited dirt is found by comparing the content the round left with
+    the content it inherited, and both must be named the way `git add` would or a
+    filter turns an untouched file into a false stall. `core.autocrlf=true` cleans CRLF
+    to LF on the way into git, so a file whose only change is its line endings stores
+    the very same blob. Round 1 stalls with an untracked `fix.py`; round 2 commits it
+    -- vanishing a followed name, which puts the inherited dirt under examination --
+    and rewrites `renamed.py` from LF to CRLF with the same text. A raw hash of the
+    bytes on disk would read the CRLF file as changed and stop the clean run as
+    stalled; naming it through git's clean filter sees the one LF blob unchanged, so
+    the operator's file is left alone and the run ends clean.
+    """
+    repository = _repository(tmp_path)
+    _in(repository, "config", "core.autocrlf", "true")
+    # The operator's own uncommitted work, in LF, before the run starts.
+    (repository / "renamed.py").write_text(_INHERITED_LF_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_reendlines_the_inherited_dirt",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _COMMITS_THE_STALL_AND_GIVES_INHERITED_DIRT_CRLF_LINE_ENDINGS,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_CLEAN
+    # The stall is committed and reviewed; the inherited file, changed only in its line
+    # endings, is named as the unchanged blob it is and left exactly where it lay.
+    assert _in(repository, "show", "HEAD:fix.py") == FIX
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_bytes() == _INHERITED_LF_DIRT.replace("\n", "\r\n").encode()
+
+
+_MOVES_THE_STALLED_FILE_ONTO_INHERITED_DIRT_AND_EDITS_IT = (
+    # The move-onto-inherited-dirt case, but the round edits the file after it
+    # lands. `replace` carries the stalled fix.py's inode onto renamed.py, and the
+    # truncating write then changes its bytes in place while keeping that inode, so
+    # the content the round began with is gone from the tree. Neither the pathname
+    # subtraction nor the content match can name the work any longer; only the
+    # inode the move preserved still does.
+    "pathlib.Path('fix.py').replace('renamed.py')\n"
+    f"pathlib.Path('renamed.py').write_text({FIX + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    # Then reuse the stalled name for unrelated content and commit it, so the name
+    # round 1 knew leaves the dirty set with nothing of the stall in it.
+    f"pathlib.Path('fix.py').write_text({_A_DIFFERENT_FIX!r}, encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: a different fix.py entirely'], check=True)\n"
+    "sys.stdout.write('moved the stall onto the inherited dirt, edited it, and committed a different fix.py\\n')\n"
+)
+
+
+def test_editing_the_stalled_file_after_moving_it_onto_inherited_dirt_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A move onto inherited dirt plus an edit changes the bytes, not the inode.
+
+    The sharper edge of the move-onto-inherited-dirt case: round 2 not only moves
+    round 1's untracked `fix.py` onto the operator's dirty `renamed.py`, it also
+    edits the file once it lands. Now all three of the cheaper identities miss it.
+    The name round 1 knew left the dirty set; the name it lives under is subtracted
+    out by `present_dirty - inherited_dirty`, because that path was inherited
+    dirty; and the content the round captured is gone, so matching bytes cannot
+    find it either. The one thing the move could not take away is the inode the
+    filesystem carried onto the new name and the in-place edit reused, so the
+    destination is recognised by that, `outstanding_paths` does not end empty, and
+    round 2's clean verdict stops the run as stalled rather than exiting 0 over
+    round 1's work sitting untracked under a name no review ever read.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the pathname round 2 will move onto.
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_moves_onto_dirt_and_edits",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _MOVES_THE_STALLED_FILE_ONTO_INHERITED_DIRT_AND_EDITS_IT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_moves_onto_dirt_and_edits") == 2
+    # The committed fix.py is the unrelated round 2 file, not the stalled work.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: a different fix.py entirely"
+    assert _in(repository, "show", "HEAD:fix.py") == _A_DIFFERENT_FIX
+    # The stalled work, plus the round-2 edit, is untracked and outside every range.
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX + _ROUND_TWO_EDIT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_ATOMICALLY_REPLACES_INHERITED_DIRT_WITH_THE_STALLED_CONTENT = (
+    # The move onto inherited dirt is itself an atomic save: the stalled content
+    # is written to a temp file and renamed over the destination, so renamed.py
+    # ends with a fresh inode -- not the stalled fix.py's -- and the stalled bytes.
+    f"pathlib.Path('atomic.tmp').write_text({FIX!r}, encoding='utf-8')\n"
+    "pathlib.Path('atomic.tmp').replace('renamed.py')\n"
+    # The stalled name is then removed and reused for an unrelated commit, so it
+    # leaves the dirty set with nothing of the stall left under it.
+    "pathlib.Path('fix.py').unlink()\n"
+    f"pathlib.Path('fix.py').write_text({_A_DIFFERENT_FIX!r}, encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: a different fix.py entirely'], check=True)\n"
+    "sys.stdout.write('atomically replaced the inherited dirt with the stalled content, committed a different fix.py\\n')\n"
+)
+
+
+def test_an_atomic_save_that_moves_the_stall_onto_inherited_dirt_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Atomic replacement is the move: a fresh inode on the destination, the stalled bytes intact.
+
+    The move onto inherited dirt performed the way editors and tools write files:
+    round 2 writes round 1's stalled content to a temp file and renames it over the
+    operator's dirty `renamed.py`, so the destination takes the temp file's inode
+    rather than the stalled fix.py's. The inode `relocated_stall` would match on is
+    gone, but the atomic save carried the stalled bytes across unchanged, so the
+    content half still names the work under its new pathname. The run keeps it
+    outstanding and stops as stalled rather than exiting 0 over round 1's work
+    sitting untracked under a name no review ever read.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the pathname round 2 will land on.
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_atomically_replaces_the_dirt",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _ATOMICALLY_REPLACES_INHERITED_DIRT_WITH_THE_STALLED_CONTENT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_atomically_replaces_the_dirt") == 2
+    # The committed fix.py is the unrelated round 2 file, not the stalled work.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: a different fix.py entirely"
+    assert _in(repository, "show", "HEAD:fix.py") == _A_DIFFERENT_FIX
+    # The stalled content is untracked under its new name, outside every range.
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_MOVES_THE_STALLED_FILE_ONTO_INHERITED_DIRT_THEN_SAVES_OVER_IT_ATOMICALLY = (
+    # A move onto inherited dirt, then an atomic save on top of it. `replace`
+    # carries the stalled fix.py's inode onto renamed.py, and the atomic save then
+    # throws that inode away: the edited bytes go to a temp file that is renamed
+    # over renamed.py, so the destination takes the temp file's inode and the temp
+    # file's bytes. Neither the inode the move preserved nor the content the round
+    # began with survives on it -- the sharper edge the in-place edit above could
+    # not reach, and how an ordinary editor or formatter writes a file.
+    "pathlib.Path('fix.py').replace('renamed.py')\n"
+    f"pathlib.Path('atomic.tmp').write_text({FIX + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    "pathlib.Path('atomic.tmp').replace('renamed.py')\n"
+    # Then reuse the stalled name for unrelated content and commit it.
+    f"pathlib.Path('fix.py').write_text({_A_DIFFERENT_FIX!r}, encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: a different fix.py entirely'], check=True)\n"
+    "sys.stdout.write('atomically saved the moved stall over the inherited dirt, committed a different fix.py\\n')\n"
+)
+
+
+def test_an_atomic_save_over_inherited_dirt_after_a_move_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The move an identity cannot follow: an atomic save replaces the inode and the bytes both.
+
+    The move-onto-inherited-dirt case pushed past where identity can reach. Round 2
+    moves round 1's untracked `fix.py` onto the operator's dirty `renamed.py`, then
+    saves the edited file the way editors do -- write a temp file, rename it over
+    the target -- which hands `renamed.py` the temp file's inode and the temp
+    file's bytes. The inode the move carried is gone, the content the round began
+    with is gone, and the stalled name has been reused for an unrelated commit, so
+    neither `relocated_stall` identity names the work. What is left to go on is
+    that the stalled content reached no commit the review read while an
+    inherited-dirty path was rewritten; the run keeps that path outstanding and
+    stops as stalled rather than exiting 0 over round 1's work sitting untracked
+    under a name no review ever read.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the pathname round 2 will move onto.
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_atomic_saves_over_the_dirt",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _MOVES_THE_STALLED_FILE_ONTO_INHERITED_DIRT_THEN_SAVES_OVER_IT_ATOMICALLY,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_atomic_saves_over_the_dirt") == 2
+    # The committed fix.py is the unrelated round 2 file, not the stalled work.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: a different fix.py entirely"
+    assert _in(repository, "show", "HEAD:fix.py") == _A_DIFFERENT_FIX
+    # The stalled work, plus the round-2 edit, is untracked and outside every range.
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX + _ROUND_TWO_EDIT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+# A newline is a byte a POSIX filename may hold; the destination is named with one so
+# the transport that hashes it is exercised on a name a newline-delimited channel splits.
+_NEWLINE_DEST = "rename\nd.py"
+_MOVES_THE_STALL_ONTO_A_NEWLINE_NAMED_INHERITED_DIRT_ATOMICALLY = (
+    f"dst = {_NEWLINE_DEST!r}\n"
+    # Move the stall onto the operator's dirty destination whose name holds a newline,
+    # then atomic-save the edited bytes over it: the edit goes to a temp file renamed
+    # over dst, so dst takes a fresh inode and fresh bytes and neither identity
+    # relocated_stall matches on follows the work there. Only the conservative backstop,
+    # which asks whether an inherited-dirty path's content was rewritten, is left.
+    "pathlib.Path('fix.py').replace(dst)\n"
+    f"pathlib.Path('atomic.tmp').write_text({FIX + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    "pathlib.Path('atomic.tmp').replace(dst)\n"
+    # Only an unrelated file is committed.
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    "sys.stdout.write('atomic-saved the edited stall onto the newline-named inherited dirt, committed other.py\\n')\n"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a newline in a filename is a POSIX-only name")
+def test_an_atomic_save_over_a_newline_named_inherited_dirt_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A newline in the destination name must not make its rewrite compare as unchanged.
+
+    The atomic-save-over-inherited-dirt case, but the operator's dirty destination is
+    named with a newline in it -- a valid POSIX filename. Round 2 moves round 1's
+    untracked `fix.py` onto it and atomic-saves edited bytes over it, so only the
+    conservative backstop -- which asks whether an inherited-dirty path's content was
+    rewritten -- is left to catch it. That backstop hashes the destination through
+    `git hash-object`; a newline-delimited transport would split the name in two and
+    hash nothing under it, so the path compared as unchanged against itself -- absent on
+    both sides -- and the run exited 0 over the edited stall no review read. Passed
+    positionally, the name is hashed whole, its content differs from the operator's own,
+    and the run keeps it outstanding and stops as stalled.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the newline-named path round 2 moves onto.
+    (repository / _NEWLINE_DEST).write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_atomic_saves_over_a_newline_name",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _MOVES_THE_STALL_ONTO_A_NEWLINE_NAMED_INHERITED_DIRT_ATOMICALLY,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_atomic_saves_over_a_newline_name") == 2
+    # The committed file is the unrelated round 2 one, not the stalled work.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["other.py"]
+    # The edited stall sits under the newline-named path, uncommitted and unreviewed.
+    assert (repository / _NEWLINE_DEST).read_text(encoding="utf-8") == FIX + _ROUND_TWO_EDIT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_STALLED_SYMLINK_TARGET = "the-stalled-symlink-points-here"
+_OPERATOR_SYMLINK_TARGET = "where-the-operator-left-their-own-link"
+_LEAVES_AN_UNTRACKED_BROKEN_SYMLINK_WITHOUT_COMMITTING = (
+    # A broken symlink is a work-tree object git names by the hash of its link text,
+    # not the (missing) target: `is_file`/`stat` follow it and see nothing, so it
+    # once carried neither a content nor a filesystem identity to be followed by.
+    f"pathlib.Path('fix.py').symlink_to({_STALLED_SYMLINK_TARGET!r})\n"
+    "sys.stdout.write('left an untracked broken symlink fix.py, never came back to commit it\\n')\n"
+)
+_MOVES_THE_STALLED_SYMLINK_ONTO_INHERITED_DIRT = (
+    # Move the untracked broken symlink onto the operator's dirty broken symlink. A
+    # rename does not follow either link, so renamed.py becomes the stalled symlink
+    # itself, carrying its inode; git tracked neither, so no rename record follows it,
+    # and the destination was inherited dirty, so `present_dirty - inherited_dirty`
+    # subtracts it out. Only the link's own inode and link text still name the work.
+    "pathlib.Path('fix.py').replace('renamed.py')\n"
+    # Commit only unrelated work.
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    "sys.stdout.write('moved the stalled broken symlink onto the inherited dirt, committed other.py\\n')\n"
+)
+
+
+def test_moving_a_broken_symlink_onto_an_inherited_dirty_broken_symlink_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A moved broken symlink is a stall like any other, and once had no identity to follow.
+
+    Round 1 stalls with an untracked broken symlink `fix.py`; its review requests
+    changes, so the run goes on. Round 2 moves `fix.py` onto the operator's dirty broken
+    symlink `renamed.py` and commits only an unrelated `other.py`. A broken symlink was
+    once invisible to both identities: `git hash-object` on the path opens nothing and
+    fails, and `stat` follows the link to a target that is not there and reports no
+    inode, so neither the content nor the filesystem map named the stall, the destination
+    was subtracted out as inherited dirt, and the run exited 0 over work no review read.
+    Named by its link text and its own `lstat` inode, the moved symlink is followed onto
+    `renamed.py`, so the run keeps it outstanding and stops as stalled.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted broken symlink, at the path round 2 moves onto.
+    try:
+        (repository / "renamed.py").symlink_to(_OPERATOR_SYMLINK_TARGET)
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_moves_a_broken_symlink",
+        _LEAVES_AN_UNTRACKED_BROKEN_SYMLINK_WITHOUT_COMMITTING,
+        _MOVES_THE_STALLED_SYMLINK_ONTO_INHERITED_DIRT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_moves_a_broken_symlink") == 2
+    # The committed file is the unrelated round 2 one, not the stalled work.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["other.py"]
+    # The stalled symlink sits under its new name, uncommitted and never reviewed.
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").is_symlink()
+    assert os.readlink(repository / "renamed.py") == _STALLED_SYMLINK_TARGET
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_MOVES_THE_STALL_BENEATH_AN_INHERITED_UNTRACKED_DIRECTORY = (
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    # Move the untracked stall beneath a directory the run inherited untracked. The
+    # default status mode reports that whole directory as one `?? operator-work/`
+    # record and never descends, so the moved file's own name never appears among the
+    # dirty paths; only listing every untracked file gives it a name to carry.
+    "pathlib.Path('fix.py').rename('operator-work/fix.py')\n"
+    "sys.stdout.write('committed only other.py and moved the stall beneath the inherited untracked dir\\n')\n"
+)
+
+
+def test_moving_a_stall_beneath_an_inherited_untracked_directory_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stall hidden inside a collapsed untracked directory still must not exit clean.
+
+    Round 1 stalls with an untracked `fix.py`; its review requests changes, so the run
+    goes on. Round 2 commits only an unrelated `other.py`, then moves `fix.py` beneath
+    `operator-work/`, a directory the run inherited untracked. Under the default
+    untracked mode git reports that directory as one `?? operator-work/` record and
+    never descends, so the moved file has no name of its own in either the inherited or
+    the present dirty paths: the directory record collides with itself and is subtracted
+    out, holds no blob or inode the stall matches, and the run exited 0 over work no
+    review read. Listing every untracked file gives `operator-work/fix.py` a name the
+    round's new dirt carries, so the run keeps it outstanding and stops as stalled.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own untracked directory, inherited before the run starts.
+    (repository / "operator-work").mkdir()
+    (repository / "operator-work" / "wip.txt").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_hides_under_an_untracked_dir",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _MOVES_THE_STALL_BENEATH_AN_INHERITED_UNTRACKED_DIRECTORY,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_hides_under_an_untracked_dir") == 2
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert _in(repository, "show", "--name-only", "--format=", "HEAD").split() == ["other.py"]
+    # The moved work is untracked, uncommitted, and outside every reviewed range.
+    assert "operator-work/fix.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert (repository / "operator-work" / "fix.py").read_text(encoding="utf-8") == FIX
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_STALLED_A = "def a():\n    return 'stalled a, written and never committed'\n"
+_STALLED_B = "def b():\n    return 'stalled b, written and never committed'\n"
+_WRITES_TWO_UNTRACKED_FILES_WITHOUT_COMMITTING = (
+    f"pathlib.Path('a.py').write_text({_STALLED_A!r}, encoding='utf-8')\n"
+    f"pathlib.Path('b.py').write_text({_STALLED_B!r}, encoding='utf-8')\n"
+    "sys.stdout.write('wrote untracked a.py and b.py, then never came back to commit them\\n')\n"
+)
+_COMMITS_ONE_STALL_AND_ATOMIC_SAVES_THE_OTHER_ONTO_INHERITED_DIRT = (
+    # a.py reaches a commit under its own name -- the review reads it, so its bytes
+    # and its inode both land among the round's commits and it is the reviewed half.
+    "subprocess.run(['git', 'add', 'a.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: commit a.py, the half a review reads'], check=True)\n"
+    # b.py moves onto the operator's dirty renamed_b.py, carrying its inode there
+    # while it is still alive, and an atomic save then throws that inode and those
+    # bytes away: the edited work goes to a temp file renamed over renamed_b.py.
+    "pathlib.Path('b.py').replace('renamed_b.py')\n"
+    # The old b.py name is reused for an unrelated commit while b.py's original inode
+    # is still alive at renamed_b.py, so the new b.py cannot be handed that inode --
+    # what makes the regression deterministic rather than a bet on the allocator.
+    f"pathlib.Path('b.py').write_text({_A_DIFFERENT_FIX!r}, encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'b.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated new b.py'], check=True)\n"
+    f"pathlib.Path('atomic.tmp').write_text({_STALLED_B + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    "pathlib.Path('atomic.tmp').replace('renamed_b.py')\n"
+    "sys.stdout.write('committed a.py, reused b.py for an unrelated commit, atomic-saved b onto the dirt\\n')\n"
+)
+
+
+def test_committing_one_of_two_stalls_does_not_clear_the_other_moved_onto_inherited_dirt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One reviewed stall must not vouch for a second the same round atomic-saved away.
+
+    Two outstanding files, and the round accounts for each on its own or not at all.
+    Round 1 stalls with untracked `a.py` and `b.py`; round 2 commits `a.py` under its
+    own name -- reviewed and gone -- while moving `b.py` onto the operator's dirty
+    `renamed_b.py` and atomic-saving edited bytes over it, then reuses the `b.py` name
+    for an unrelated commit. A guard that suppressed the destination retention the
+    moment *any* stalled blob appeared among the round's commits read `a.py`'s bytes
+    as clearing the whole round, dropped `renamed_b.py`, and exited 0 with `b.py`'s
+    work sitting untracked under a name no review read. Asking, per object, whether
+    its own inode and content both reached the round's commits keeps `b.py`
+    outstanding -- its inode is gone and its bytes were never committed -- while
+    `a.py`, whose inode and bytes are both in the commit, stops nothing, so the run
+    stalls over the one stall that was not reviewed.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the pathname round 2 will move b onto.
+    (repository / "renamed_b.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_two_then_commits_one",
+        _WRITES_TWO_UNTRACKED_FILES_WITHOUT_COMMITTING,
+        _COMMITS_ONE_STALL_AND_ATOMIC_SAVES_THE_OTHER_ONTO_INHERITED_DIRT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_two_then_commits_one") == 2
+    # a.py is committed and reviewed; the committed b.py is the unrelated round 2 one.
+    assert _in(repository, "show", "HEAD~1:a.py") == _STALLED_A
+    assert _in(repository, "show", "HEAD:b.py") == _A_DIFFERENT_FIX
+    # b.py's stalled work, plus the round-2 edit, is untracked and outside every range.
+    assert "renamed_b.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed_b.py"
+    assert (repository / "renamed_b.py").read_text(encoding="utf-8") == _STALLED_B + _ROUND_TWO_EDIT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_COMMITS_A_COPY_OF_THE_STALLED_BYTES_AND_ATOMIC_SAVES_THE_STALL_ONTO_INHERITED_DIRT = (
+    # A copy of the stalled bytes reaches a commit at another path while the stall's
+    # own inode is still alive under fix.py, so the copy is a different object -- the
+    # bytes are committed, the object is not.
+    f"pathlib.Path('copy.py').write_text({FIX!r}, encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'copy.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: a copy of the stalled bytes at another path'], check=True)\n"
+    # The stall then moves onto the operator's dirty renamed.py and an atomic save
+    # replaces both its identities: the edited work goes to a temp file renamed over
+    # renamed.py, so neither the stalled inode nor the stalled bytes name it there.
+    "pathlib.Path('fix.py').replace('renamed.py')\n"
+    f"pathlib.Path('atomic.tmp').write_text({FIX + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    "pathlib.Path('atomic.tmp').replace('renamed.py')\n"
+    "sys.stdout.write('committed a copy of the stalled bytes, atomic-saved the stall onto the dirt\\n')\n"
+)
+
+
+def test_committing_a_copy_of_the_stalled_bytes_does_not_clear_the_stall_atomic_saved_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The stalled bytes reaching a commit is not the stalled object reaching one.
+
+    Round 1 stalls with untracked `fix.py`; round 2 commits a *copy* of its bytes at
+    `copy.py`, then moves `fix.py` onto the operator's dirty `renamed.py` and
+    atomic-saves edited bytes over it. The copy puts the stalled content among the
+    round's commits without the object itself ever being committed, so a guard that
+    read stalled content in the range as the stall reviewed dropped `renamed.py` and
+    exited 0 over the work no review saw. The object's identity, not its bytes, is
+    the proof: `copy.py` is a different inode from the stalled `fix.py`, so the stall
+    clears the inode half of the check nowhere in the commit and stays outstanding,
+    and the run stops as stalled with the moved-and-edited work still in the tree.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the pathname round 2 will move onto.
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_commits_a_copy",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _COMMITS_A_COPY_OF_THE_STALLED_BYTES_AND_ATOMIC_SAVES_THE_STALL_ONTO_INHERITED_DIRT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_commits_a_copy") == 2
+    # The committed copy carries the stalled bytes; the stalled object was not committed.
+    assert _in(repository, "show", "HEAD:copy.py") == FIX
+    assert "fix.py" not in _in(repository, "status", "--porcelain")
+    # The stalled work, plus the round-2 edit, is untracked and outside every range.
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX + _ROUND_TWO_EDIT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_WRITES_AN_EMPTY_UNTRACKED_FILE_WITHOUT_COMMITTING = (
+    "pathlib.Path('empty.py').write_bytes(b'')\n"
+    "sys.stdout.write('wrote an untracked empty.py, then never came back to fill or commit it\\n')\n"
+)
+_MOVES_THE_EMPTY_STALL_ONTO_INHERITED_DIRT_THEN_ATOMIC_SAVES_REAL_WORK = (
+    # The empty stall moves onto the operator's dirty renamed.py, carrying its inode
+    # there while it is still alive. An empty file has no content identity, only this
+    # one, so the inode is the whole of what follows it.
+    "pathlib.Path('empty.py').replace('renamed.py')\n"
+    # An unrelated file is committed while the stall's inode is still alive at
+    # renamed.py, so the commit's own object cannot be handed that inode.
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    # An atomic save then writes real work over renamed.py, freeing the empty stall's
+    # inode: the edited bytes go to a temp file renamed over the destination.
+    f"pathlib.Path('atomic.tmp').write_text({FIX!r}, encoding='utf-8')\n"
+    "pathlib.Path('atomic.tmp').replace('renamed.py')\n"
+    "sys.stdout.write('moved the empty stall onto the dirt, committed other.py, atomic-saved real work over it\\n')\n"
+)
+
+
+def test_a_zero_byte_stall_atomic_saved_onto_inherited_dirt_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A contentless stall still has an inode, and the fallback must be asked for it.
+
+    Round 1 stalls with an untracked *empty* `empty.py`, which carries no content
+    identity for a byte-only check to match. Round 2 moves it onto the operator's
+    dirty `renamed.py`, commits an unrelated file, then atomic-saves real work over
+    `renamed.py`. A fallback gated on the stalled bytes existing at all never ran for
+    the empty stall, so the round-2 work landed on inherited dirt and the run exited
+    0 over it. The empty file's inode is the identity it does have, and asking the
+    fallback by inode -- contentless objects proven by inode alone -- keeps
+    `renamed.py` outstanding, so the run stops as stalled with the work still in the
+    tree.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the pathname round 2 will move onto.
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_empty_then_atomic_saves",
+        _WRITES_AN_EMPTY_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _MOVES_THE_EMPTY_STALL_ONTO_INHERITED_DIRT_THEN_ATOMIC_SAVES_REAL_WORK,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_empty_then_atomic_saves") == 2
+    # The committed file is the unrelated round 2 one, not the stalled work.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    # The round-2 work atomic-saved onto the dirt is untracked and outside every range.
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_HARD_LINKS_THE_STALL_TO_AN_ALIAS_AND_ATOMIC_SAVES_THE_STALL_ONTO_INHERITED_DIRT = (
+    # A hard link carries the stall's inode onto a second name while the stall is
+    # still alive, so alias.py and fix.py are the one object under two names.
+    "pathlib.Path('alias.py').hardlink_to('fix.py')\n"
+    # The stall then moves onto the operator's dirty renamed.py and an atomic save
+    # replaces both its identities there: the edited work goes to a temp file renamed
+    # over renamed.py, so renamed.py takes a fresh inode and the edited bytes while
+    # alias.py keeps the stall's original inode and original bytes.
+    "pathlib.Path('fix.py').replace('renamed.py')\n"
+    f"pathlib.Path('atomic.tmp').write_text({FIX + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    "pathlib.Path('atomic.tmp').replace('renamed.py')\n"
+    # Only the alias is committed. The stall's inode and its bytes both reach a commit
+    # -- but under alias.py, not the name the stall was followed to -- so a range-wide
+    # check for either would read the object as reviewed and gone.
+    "subprocess.run(['git', 'add', 'alias.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: commit the hard-linked alias'], check=True)\n"
+    "sys.stdout.write('hard-linked the stall to alias.py, atomic-saved the edit onto the dirt, committed the alias\\n')\n"
+)
+
+
+def test_committing_a_hard_linked_alias_does_not_clear_the_stall_atomic_saved_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An alias sharing the stall's inode must not prove the object itself was committed.
+
+    An inode is not one file's alone: a hard link puts it under a second name. Round 1
+    stalls with untracked `fix.py`; round 2 hard-links it to `alias.py`, moves `fix.py`
+    onto the operator's dirty `renamed.py`, atomic-saves edited bytes over it, and
+    commits only `alias.py`. The alias carries the stall's original inode *and* its
+    original bytes into the commit, so a proof that asked whether the stall's identity
+    reached the range read it as reviewed, dropped `renamed.py`, and exited 0 over the
+    edited work no review saw. No identity taken at a pathname is a sound answer here --
+    the alias can carry the stall's inode and bytes onto any committed name -- so the
+    inherited dirt the round rewrote is kept whenever a followed name vanishes,
+    whatever a proof would say. `renamed.py` holds the edited work under no reviewed
+    name, so the object stays outstanding and the run stops as stalled.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the pathname round 2 will move onto.
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_commits_a_hard_linked_alias",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _HARD_LINKS_THE_STALL_TO_AN_ALIAS_AND_ATOMIC_SAVES_THE_STALL_ONTO_INHERITED_DIRT,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_commits_a_hard_linked_alias") == 2
+    # The committed alias carries the stalled bytes; the stalled object was not committed
+    # at the name it was followed to, and the edited work is nowhere in history.
+    assert _in(repository, "show", "HEAD:alias.py") == FIX
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    # The stalled work, plus the round-2 edit, is untracked and outside every range.
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX + _ROUND_TWO_EDIT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+_HARD_LINKS_THE_STALL_AND_RETURNS_THE_ALIAS_TO_THE_FOLLOWED_NAME = (
+    # As above, but the alias is moved back onto the followed name and *that* is what
+    # gets committed. The stall's original inode and original bytes are restored at
+    # fix.py itself, so asking whether the stall was committed at the very name it was
+    # followed to now answers yes -- and still must not clear the edited work.
+    "pathlib.Path('alias.py').hardlink_to('fix.py')\n"
+    "pathlib.Path('fix.py').replace('renamed.py')\n"
+    f"pathlib.Path('atomic.tmp').write_text({FIX + _ROUND_TWO_EDIT!r}, encoding='utf-8')\n"
+    "pathlib.Path('atomic.tmp').replace('renamed.py')\n"
+    # The alias, carrying the stall's original inode and bytes, is moved back onto the
+    # followed name and committed there. fix.py now reaches a commit with exactly the
+    # identity the reconciliation captured, at exactly the name it followed.
+    "pathlib.Path('alias.py').replace('fix.py')\n"
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: commit the returned alias'], check=True)\n"
+    "sys.stdout.write('returned the alias to fix.py, atomic-saved the edit onto the dirt, committed fix.py\\n')\n"
+)
+
+
+def test_returning_a_hard_linked_alias_to_the_followed_name_does_not_clear_the_stall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stall's identity restored at its own followed name is still no proof of review.
+
+    The variant a path-keyed proof cannot answer: the alias carries the stall's
+    original inode and bytes back onto the followed name before committing, so `fix.py`
+    reaches a commit holding exactly the identity the round captured, at exactly the
+    name it was followed to. Round 1 stalls with untracked `fix.py`; round 2 hard-links
+    it to `alias.py`, moves `fix.py` onto the operator's dirty `renamed.py`,
+    atomic-saves the edited bytes over it, moves `alias.py` back onto `fix.py`, and
+    commits `fix.py`. A proof asking whether the stall's inode and bytes are what the
+    range committed at the followed name now says yes, and would drop `renamed.py` and
+    exit 0 over the edited work no review saw. Because that answer is forgeable, the
+    inherited dirt the round rewrote is kept regardless, so the stall stays outstanding
+    and the run stops as stalled.
+    """
+    repository = _repository(tmp_path)
+    # The operator's own uncommitted work, at the pathname round 2 will move onto.
+    (repository / "renamed.py").write_text(_OPERATOR_DIRT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_then_returns_a_hard_linked_alias",
+        _WRITES_AN_UNTRACKED_FILE_WITHOUT_COMMITTING,
+        _HARD_LINKS_THE_STALL_AND_RETURNS_THE_ALIAS_TO_THE_FOLLOWED_NAME,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_then_returns_a_hard_linked_alias") == 2
+    # fix.py is committed at its own followed name with the stall's original bytes; the
+    # edited work sits in renamed.py under no reviewed name and is retained.
+    assert _in(repository, "show", "HEAD:fix.py") == FIX
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").read_text(encoding="utf-8") == FIX + _ROUND_TWO_EDIT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
+def test_content_identity_is_only_asked_of_a_path_that_has_content(tmp_path: Path) -> None:
+    """A directory, a path that is gone and an empty file identify nothing.
+
+    `blob_ids` answers with git's own object id, so two paths holding the same
+    bytes get the same answer wherever they sit. The three cases with no answer
+    are left out rather than given a shared placeholder: an empty file's content
+    is identical to every other empty file's, so matching on it would report the
+    stall as having arrived anywhere a round happened to truncate a file.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "here.py").write_bytes(b"same bytes\n")
+    (tmp_path / "elsewhere.py").write_bytes(b"same bytes\n")
+    (tmp_path / "other.py").write_bytes(b"different bytes\n")
+    (tmp_path / "empty.py").write_bytes(b"")
+    (tmp_path / "subdir").mkdir()
+    asked = {"here.py", "elsewhere.py", "other.py", "empty.py", "subdir/", "gone.py"}
+
+    found = agent_review_loop.blob_ids(tmp_path, asked)
+
+    assert set(found) == {"here.py", "elsewhere.py", "other.py"}
+    assert found["here.py"] == found["elsewhere.py"] != found["other.py"]
+    # Git's own object id for the content on disk, the identity `git add` would store,
+    # tagged with the work-tree mode so a symlink is told from a file of the same bytes.
+    raw = _in(tmp_path, "hash-object", "here.py").strip()
+    assert found["here.py"] == f"{agent_review_loop.REGULAR_BLOB_MODE}:{raw}"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a newline in a filename is a POSIX-only name")
+def test_content_identity_survives_a_newline_in_the_pathname(tmp_path: Path) -> None:
+    """A newline is a byte a POSIX name may hold, and it must not split the path in two.
+
+    `blob_ids` hashes a whole set through one `git hash-object`, and a newline-delimited
+    transport would read a name that itself contains a newline as two paths -- hashing
+    the wrong bytes, or none, under a name the reconciliation then compares as unchanged.
+    Passed positionally, the name is carried through whole, so it gets an id at all, that
+    id is git's own for its content, and it differs from an unrelated file's.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    newline = "rename\nd.py"
+    (tmp_path / newline).write_bytes(b"the stalled work, under a name with a newline in it\n")
+    (tmp_path / "plain.py").write_bytes(b"an unrelated file\n")
+
+    found = agent_review_loop.blob_ids(tmp_path, {newline, "plain.py"})
+
+    # The name is hashed whole, not split, so both paths get an id and the two differ.
+    assert set(found) == {newline, "plain.py"}
+    assert found[newline] != found["plain.py"]
+    # Git's own object id for the content under that exact name, mode-tagged.
+    raw = _in(tmp_path, "hash-object", "--", newline).strip()
+    assert found[newline] == f"{agent_review_loop.REGULAR_BLOB_MODE}:{raw}"
+
+
+def test_argv_batches_split_by_byte_budget_and_never_drop_a_name() -> None:
+    """A positional argv has a length the platform enforces, so the names are batched.
+
+    The batching keeps each run's order, splits when the next name would push a run past
+    the budget, and puts a single name too large for the budget in a run of its own
+    rather than dropping or splitting it -- so concatenating the runs is exactly the
+    names asked, in order.
+    """
+    names = ["aa", "bb", "cc", "dd"]
+    # A budget of three bytes takes one two-byte name (cost 3) per run.
+    batches = agent_review_loop._argv_batches(names, budget=3)
+    assert batches == [["aa"], ["bb"], ["cc"], ["dd"]]
+    # A wider budget packs several names into a run until the next would overflow it.
+    assert agent_review_loop._argv_batches(names, budget=7) == [["aa", "bb"], ["cc", "dd"]]
+    # A name past the budget is its own run, not dropped or split.
+    assert agent_review_loop._argv_batches(["abcdefgh"], budget=3) == [["abcdefgh"]]
+    # The concatenation of the runs is always the names, in order.
+    assert [name for batch in agent_review_loop._argv_batches(names, budget=3) for name in batch] == names
+    assert agent_review_loop._argv_batches([]) == []
+
+
+def test_hash_object_lines_ids_up_across_several_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Split into runs, the ids still come back one per name and in the order asked.
+
+    The transport is chunked so a large dirty tree does not overflow the argv, and the
+    join across the runs must not scramble the answer. With the batching forced to one
+    name per run, several `git hash-object` calls answer the set, and every name still
+    gets its own id in order.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    names = []
+    for index in range(5):
+        name = f"f{index}.py"
+        (tmp_path / name).write_bytes(f"contents of {name}\n".encode())
+        names.append(name)
+    # One name per run, so the ordering across the joins is what is under test.
+    monkeypatch.setattr(
+        agent_review_loop, "_argv_batches", lambda values, budget=0: [[value] for value in values]
+    )
+
+    ids = agent_review_loop._hash_object(tmp_path, names)
+
+    assert ids is not None
+    # Each id is git's own for the matching name, in order -- the join did not scramble.
+    assert ids == [_in(tmp_path, "hash-object", "--", name).strip() for name in names]
+
+
+def test_blob_ids_use_the_repositorys_object_format_and_clean_filters(tmp_path: Path) -> None:
+    """The work-tree id is git's own, so inherited dirt and the round's edit compare alike.
+
+    Every content comparison the reconciliation makes -- what the round inherited
+    against what it left, in `relocated_stall` and `changed_inherited_dirty` -- must
+    name both sides the way git itself would, or a filter turns an untouched file into
+    a false change. A raw hash of the bytes on disk cannot: a `core.autocrlf` clean
+    filter rewrites CRLF to LF on the way into git, and an `extensions.objectFormat=sha256`
+    repository names objects in 64 hex digits, not sha1's 40. Both are here at once, and
+    hashing through git -- the path's attributes applied, the repository's format used
+    -- names the work-tree file the way `git add` would, so a line-ending-only change
+    reads as the same blob.
+    """
+    subprocess.run(["git", "init", "-q", "--object-format=sha256", str(tmp_path)], check=True)
+    for name, value in (
+        ("user.name", "A Developer"),
+        ("user.email", "dev@example.invalid"),
+        ("commit.gpgsign", "false"),
+        ("core.autocrlf", "true"),
+    ):
+        subprocess.run(["git", "-C", str(tmp_path), "config", name, value], check=True)
+    (tmp_path / "crlf.py").write_bytes(b"line one\r\nline two\r\n")
+
+    found = agent_review_loop.blob_ids(tmp_path, {"crlf.py"})
+
+    # Git's own id for the filtered content, mode-tagged, and the id part is sha256's
+    # 64 hex digits, not sha1's 40.
+    raw = _in(tmp_path, "hash-object", "crlf.py").strip()
+    assert found["crlf.py"] == f"{agent_review_loop.REGULAR_BLOB_MODE}:{raw}"
+    assert len(found["crlf.py"].split(":", 1)[1]) == 64
+    # The clean filter normalises line endings, so the LF form names the same blob.
+    (tmp_path / "crlf.py").write_bytes(b"line one\nline two\n")
+    assert agent_review_loop.blob_ids(tmp_path, {"crlf.py"}) == found
+
+
+def test_filesystem_identity_tells_apart_files_that_content_cannot(tmp_path: Path) -> None:
+    """Two paths with the same bytes get distinct inodes; an empty file still gets one.
+
+    Where `blob_ids` reads the bytes, `object_ids` reads the filesystem's own
+    identity, and the two disagree exactly where a move plus an edit needs them to.
+    Same-content paths that `blob_ids` cannot tell apart have distinct inodes here,
+    and an empty file -- which `blob_ids` drops because every empty file shares its
+    content -- has an identity of its own, so a stalled file emptied after a move
+    is still followed. A path that is gone has none either way.
+    """
+    (tmp_path / "here.py").write_bytes(b"same bytes\n")
+    (tmp_path / "elsewhere.py").write_bytes(b"same bytes\n")
+    (tmp_path / "empty.py").write_bytes(b"")
+    asked = {"here.py", "elsewhere.py", "empty.py", "gone.py"}
+
+    found = agent_review_loop.object_ids(tmp_path, asked)
+
+    assert set(found) == {"here.py", "elsewhere.py", "empty.py"}
+    # Identical bytes, distinct objects -- the tell `blob_ids` cannot give.
+    assert found["here.py"] != found["elsewhere.py"]
+    # A rename carries the inode with it; the empty file keeps the identity a move
+    # would preserve even as the round rewrites what is in it.
+    (tmp_path / "here.py").rename(tmp_path / "moved.py")
+    assert agent_review_loop.object_id(tmp_path / "moved.py") == found["here.py"]
+
+
+def test_changed_inherited_dirty_keeps_what_the_round_rewrote_and_leaves_what_it_did_not(tmp_path: Path) -> None:
+    """Rewritten, filled and cleared count as changed; the untouched and the gone do not.
+
+    The conservative backstop's one judgement: which inherited-dirty paths this
+    round rewrote. A path whose content moved from what it began with is a place a
+    move onto inherited dirt could have landed -- gaining content it had none of
+    and losing the content it had among the ways it moves -- and is kept. The
+    operator's own file the round never touched reads the same and is left out, as
+    is a path no longer present at all.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "rewritten.py").write_bytes(b"what the round left behind\n")
+    (tmp_path / "untouched.py").write_bytes(b"the operator's own work, as the round found it\n")
+    (tmp_path / "filled.py").write_bytes(b"content it had none of before\n")
+    (tmp_path / "cleared.py").write_bytes(b"")
+    # What two of them held as the round began, hashed the way the reconciliation
+    # captured `inherited_blobs`: the rewritten path had other bytes, the cleared
+    # path had content it has since lost. The filled path was empty then and so
+    # carried no content identity, which is why it is absent below.
+    (tmp_path / "started_rewritten").write_bytes(b"what the round started with\n")
+    (tmp_path / "started_cleared").write_bytes(b"content the round cleared out\n")
+    inherited_blobs = {
+        "rewritten.py": agent_review_loop.blob_id(tmp_path, "started_rewritten"),
+        "untouched.py": agent_review_loop.blob_id(tmp_path, "untouched.py"),
+        "cleared.py": agent_review_loop.blob_id(tmp_path, "started_cleared"),
+    }
+    inherited_dirty = {"rewritten.py", "untouched.py", "filled.py", "cleared.py", "gone.py"}
+    present = {"rewritten.py", "untouched.py", "filled.py", "cleared.py"}
+
+    found = agent_review_loop.changed_inherited_dirty(tmp_path, present, inherited_dirty, inherited_blobs)
+
+    assert found == {"rewritten.py", "filled.py", "cleared.py"}
+
+
+def test_content_identity_of_a_symlink_is_its_link_text_not_its_target(tmp_path: Path) -> None:
+    """A symlink is named by the mode 120000 blob git stores for it -- its link text.
+
+    `git hash-object` over a symlink path follows it: for a live link it hashes the
+    target file's content, and for a broken link it opens nothing and fails. Git stores
+    neither -- a symlink is a blob of the link text -- so `blob_ids` reads the link and
+    hashes that. A live link therefore does not borrow its target's identity, and a
+    broken link gets an identity at all, which is the tell a move onto inherited dirt
+    would otherwise leave nothing to follow.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "target.txt").write_bytes(b"the target file's own content\n")
+    try:
+        (tmp_path / "live").symlink_to("target.txt")
+        (tmp_path / "broken").symlink_to("nowhere")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+
+    found = agent_review_loop.blob_ids(tmp_path, {"live", "broken", "target.txt"})
+
+    # Every path gets an id, the broken link included.
+    assert set(found) == {"live", "broken", "target.txt"}
+    # The id is git's own for the link -- the blob it stages under mode 120000 --
+    # not the content of what it points at, and tagged with that mode.
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    live = _in(tmp_path, "rev-parse", ":live").strip()
+    broken = _in(tmp_path, "rev-parse", ":broken").strip()
+    assert found["live"] == f"{agent_review_loop.SYMLINK_BLOB_MODE}:{live}"
+    assert found["broken"] == f"{agent_review_loop.SYMLINK_BLOB_MODE}:{broken}"
+    # The live link does not borrow the target's content identity.
+    assert found["live"] != found["target.txt"]
+
+
+def test_content_identity_tells_a_symlink_apart_from_a_regular_file_of_the_same_bytes(tmp_path: Path) -> None:
+    """A git blob id carries no mode, so the work-tree kind is tagged onto it.
+
+    Git names a blob by the hash of its content alone, so a symlink whose link text is
+    `same-bytes` and a regular file whose content is `same-bytes` get the very same git
+    blob id. Left untagged, the stall reconciliation reads a round that replaced the one
+    with the other -- or moved such a symlink stall onto an inherited-dirty file of those
+    bytes -- as no change at all, and exits a run clean over work no review saw. `blob_ids`
+    tags each id with the mode git records for it, so the two are the distinct objects
+    they are, while the raw git id under each tag is still git's own.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "file").write_text("same-bytes", encoding="utf-8")
+    try:
+        (tmp_path / "link").symlink_to("same-bytes")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+
+    found = agent_review_loop.blob_ids(tmp_path, {"file", "link"})
+
+    # The raw git blob id under each tag is identical -- the collision the tag guards --
+    # yet the tagged identities differ because one is a symlink and one a regular file.
+    assert found["file"].split(":", 1)[1] == found["link"].split(":", 1)[1]
+    assert found["file"] == f"{agent_review_loop.REGULAR_BLOB_MODE}:{found['file'].split(':', 1)[1]}"
+    assert found["link"] == f"{agent_review_loop.SYMLINK_BLOB_MODE}:{found['link'].split(':', 1)[1]}"
+    assert found["file"] != found["link"]
+
+
+def test_filesystem_identity_of_a_symlink_is_its_own_entry_not_its_target(tmp_path: Path) -> None:
+    """`object_id` names the link's own inode, so a move that carries it is followed.
+
+    Read through the target, a symlink would borrow the target's inode -- or none at
+    all when the link is broken and the target cannot be `stat`'d -- and a rename that
+    carried the link onto a new name would look like it landed on an unrelated object.
+    Read with `lstat`, the link has an identity of its own that the rename carries, which
+    is what lets a moved symlink stall be followed by inode.
+    """
+    (tmp_path / "target.txt").write_bytes(b"the target\n")
+    try:
+        (tmp_path / "live").symlink_to("target.txt")
+        (tmp_path / "broken").symlink_to("nowhere")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+
+    live = agent_review_loop.object_id(tmp_path / "live")
+    broken = agent_review_loop.object_id(tmp_path / "broken")
+
+    # A broken link has an identity of its own though its target cannot be stat'd.
+    assert broken is not None
+    # The live link is named by its own entry, not the target's it resolves to.
+    assert live is not None and live != agent_review_loop.object_id(tmp_path / "target.txt")
+    # A rename carries the link's inode onto the new name -- the tell a move preserves.
+    (tmp_path / "broken").rename(tmp_path / "moved")
+    assert agent_review_loop.object_id(tmp_path / "moved") == broken
+
+
+def test_changed_inherited_dirty_follows_a_symlink_by_its_link_text(tmp_path: Path) -> None:
+    """A symlink whose target string the round rewrote is a rewrite like any other file.
+
+    An atomic save can land a moved symlink stall on an inherited-dirty symlink with a
+    fresh inode and fresh link text, so the conservative backstop is all that is left to
+    catch it; it must read the destination's link text change. A link now pointing
+    somewhere new differs from the blob it began with and is kept; one left pointing
+    where the operator had it reads the same and is dropped.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    try:
+        (tmp_path / "rewritten").symlink_to("where-it-points-now")
+        (tmp_path / "untouched").symlink_to("where-the-operator-left-it")
+        (tmp_path / "started_rewritten").symlink_to("where-it-began")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+    # What the rewritten link pointed at as the round began, captured the way
+    # `inherited_blobs` is; the untouched link is its own before-state.
+    inherited_blobs = {
+        "rewritten": agent_review_loop.blob_id(tmp_path, "started_rewritten"),
+        "untouched": agent_review_loop.blob_id(tmp_path, "untouched"),
+    }
+    inherited_dirty = {"rewritten", "untouched"}
+    present = {"rewritten", "untouched"}
+
+    found = agent_review_loop.changed_inherited_dirty(tmp_path, present, inherited_dirty, inherited_blobs)
+
+    assert found == {"rewritten"}
+
+
 def test_the_second_attempt_is_told_what_is_in_the_tree_and_keeps_the_first_ones_transcript(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2069,22 +3371,76 @@ def test_terminate_tree_reports_cleanup_unconfirmed_when_the_group_never_clears(
 def test_terminate_tree_reports_cleanup_unconfirmed_when_a_signal_cannot_be_delivered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A SIGKILL that cannot be delivered leaves the group's state unknown.
+    """A signal that cannot be delivered to a group that still has a member.
 
     `_terminate_tree` used to suppress every signalling error, so a killpg that
-    failed with EPERM was indistinguishable from one that worked. A signal that
-    did not land means the members are still there and were not stopped, which is
-    the one thing that must not be read as a clean kill."""
+    failed with EPERM was indistinguishable from one that worked. A member that
+    was never signalled is still there and still writing, which is the one thing
+    that must not be read as a clean kill. The group here really does have one --
+    the live process below, never signalled because the delivery is refused --
+    so the report names both halves: the signal that did not land, and the group
+    that did not clear. Issue #320 narrowed this to the second half; a delivery
+    error over a group that then reads empty is the tree being gone rather than
+    a survivor, and is no longer raised (see the test below)."""
     process = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
     )
     monkeypatch.setattr(agent_review_loop, "_signal_group", lambda pgid, sig: False)
     try:
-        with pytest.raises(agent_review_loop.CleanupUnconfirmed):
+        with pytest.raises(agent_review_loop.CleanupUnconfirmed) as excinfo:
             agent_review_loop._terminate_tree(process, grace_s=0.1)
     finally:
         process.kill()
         process.wait()
+
+    assert str(excinfo.value) == (
+        f"could not signal process group {process.pid} with SIGTERM while killing pid {process.pid}, "
+        "and the group still had a member after a 0s wait"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
+def test_terminate_tree_takes_an_empty_group_over_a_kill_that_could_not_be_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #320: the SIGKILL that fails because there is nobody left to kill.
+
+    Darwin answers EPERM, not ESRCH, for a group the kernel still knows but whose
+    remaining members are all zombies: its group iterator skips zombies, and a
+    pass that signalled nobody is reported as a permission failure rather than as
+    an empty group. `_terminate_tree` walks through exactly that state by design,
+    so it was raising `could not signal process group N with SIGKILL` over a tree
+    that was already gone -- a survivor an operator goes looking for and cannot
+    find, and a round refused for it.
+
+    The whole sequence the macOS leg hit is replayed here as injected answers
+    rather than as timing, so it reproduces on any POSIX host and the ending is
+    decided by the code: the SIGTERM lands, the group will not clear before its
+    deadline, the SIGKILL is refused, and by the time membership is asked again
+    the reaper has been past and the group is empty. Empty is the same positive
+    confirmation the delivered path returns on, so this returns."""
+    process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    process.wait(timeout=30)
+    attempted: list[int] = []
+
+    def killpg_as_macos_answered(pgid: int, sig: int) -> None:
+        assert pgid == process.pid
+        if sig != 0:
+            attempted.append(sig)
+            if sig == agent_review_loop.signal.SIGKILL:
+                raise PermissionError()
+            return
+        # `_group_gone` asking: unclearable until the SIGKILL has been attempted,
+        # then empty, which is the reaper collecting the last zombie member.
+        if agent_review_loop.signal.SIGKILL not in attempted:
+            raise PermissionError()
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(agent_review_loop.os, "killpg", killpg_as_macos_answered)
+
+    agent_review_loop._terminate_tree(process, grace_s=0.2)
+
+    assert attempted == [agent_review_loop.signal.SIGTERM, agent_review_loop.signal.SIGKILL]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="killpg is POSIX-only")
@@ -3040,7 +4396,7 @@ def test_run_agent_reports_a_job_it_could_not_empty_over_the_failure_that_reache
     assert started and all(process.poll() is not None for process in started)
 
 
-def _agent_with_a_descendant(tmp_path: Path) -> Path:
+def _agent_with_a_descendant(tmp_path: Path, *, descendant_ignores_sigterm: bool = False) -> Path:
     """An agent that starts one long-lived process in its own group, records both
     pids, and then blocks for the rest of the round.
 
@@ -3050,16 +4406,36 @@ def _agent_with_a_descendant(tmp_path: Path) -> Path:
     `sys.stdin.read()` is what keeps the agent there to be killed. It never
     returns in these tests, because the failure they inject lands before
     `run_agent` writes the prompt, and it is also why the agent never exits into
-    the EPIPE race an agent that stops reading hands the loop."""
+    the EPIPE race an agent that stops reading hands the loop.
+
+    The agent publishes its own pid only once the descendant has reported itself
+    ready, so a test that holds its injected failure until `agent.pid` appears is
+    holding it until the whole tree is standing rather than until the leader is.
+    With `descendant_ignores_sigterm` the descendant installs `SIG_IGN` for
+    SIGTERM before reporting ready, which is how a test asks for a group that
+    still has a live member once the SIGTERM has been and gone: without it the
+    group is empty by then, and what the second signal meets is whichever of its
+    members the reaper has not collected yet."""
+    descendant = tmp_path / "descendant.py"
+    descendant.write_text(
+        "import pathlib, signal, time\n"
+        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if descendant_ignores_sigterm else "")
+        + "pathlib.Path('child.ready').write_text('1', encoding='utf-8')\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
     script = tmp_path / "agent_with_a_descendant.py"
     script.write_text(
-        "import os, pathlib, subprocess, sys\n"
+        "import os, pathlib, subprocess, sys, time\n"
         "devnull = open(os.devnull, 'w')\n"
         "child = subprocess.Popen(\n"
-        "    [sys.executable, '-c', 'import time; time.sleep(120)'],\n"
+        "    [sys.executable, str(pathlib.Path(__file__).with_name('descendant.py'))],\n"
         "    stdout=devnull, stderr=devnull,\n"
         ")\n"
         "pathlib.Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+        "ready, deadline = pathlib.Path('child.ready'), time.monotonic() + 30\n"
+        "while not ready.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.02)\n"
         "pathlib.Path('agent.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
         "sys.stdin.read()\n",
         encoding="utf-8",
@@ -3124,10 +4500,21 @@ def test_run_agent_reports_a_posix_group_that_will_not_clear_over_the_failure_th
     have been collected yet is not asserted, because a member that has just been
     killed is briefly a zombie and `kill(pid, 0)` cannot tell that from a live
     one -- the waiting that normally settles it is exactly what this test has
-    taken away."""
+    taken away.
+
+    That is also why the descendant ignores SIGTERM (issue #320). Forcing the
+    liveness answer to no leaves the group's real membership to say what it likes,
+    and with a descendant that dies of the SIGTERM the group is down to whatever
+    the reaper has not collected yet by the time the SIGKILL goes out: nothing at
+    all under a fast one, a zombie under a slower one. Darwin refuses to signal a
+    group of nothing but zombies, so on the leg that met one the run ended on the
+    delivery report instead of on this one and the assertion below met the wrong
+    string. A member that outlives the SIGTERM makes the group the test claims to
+    have the group it actually has, and the SIGKILL is then delivered on every
+    POSIX host rather than on most of them."""
     workdir = tmp_path / "work"
     workdir.mkdir()
-    agent = _agent_with_a_descendant(tmp_path)
+    agent = _agent_with_a_descendant(tmp_path, descendant_ignores_sigterm=True)
     _exploding_reader_thread(monkeypatch, RuntimeError("can't start new thread"), not_before=workdir / "agent.pid")
     monkeypatch.setattr(agent_review_loop, "_group_gone", lambda pgid, *, deadline: False)
     signalled: list[int] = []
