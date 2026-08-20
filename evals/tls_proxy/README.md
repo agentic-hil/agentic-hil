@@ -35,7 +35,8 @@ The image builds that bench from nothing:
 - its CA generated at build time and installed into the system store with
   `update-ca-certificates`, so the machine trusts the proxy;
 - `HTTP_PROXY` and `HTTPS_PROXY` exported for every program in the image;
-- `uv`, installed before any of that, the way the bench already had it.
+- `uv`, installed before any of that, the way the bench already had it, from the
+  installer version and hash `install.sh` itself pins.
 
 Then the entrypoint runs three steps in order and stops at the first one that
 fails:
@@ -82,7 +83,10 @@ and runs everywhere.
 ## Trust boundary
 
 The CA is generated inside the image, is trusted by that one container, and its
-key never leaves it. Nothing here relaxes certificate verification: there is no
+key never leaves it. The base image is pinned by digest and the uv bootstrap is
+pinned by version and checked against its hash before it runs, so nothing the
+image installs is a moving download piped into a shell. Nothing here relaxes
+certificate verification: there is no
 `--insecure`, no `--trusted-host`, no `SSL_CERT_FILE`, and a test asserts there
 never will be. Both attempts a run makes verify the chain; the only thing that
 changes between them is which store the chain is checked against.

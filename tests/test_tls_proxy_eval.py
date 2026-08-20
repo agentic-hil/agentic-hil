@@ -144,6 +144,22 @@ def test_the_base_image_is_pinned_by_digest() -> None:
         assert re.search(r"@sha256:[0-9a-f]{64}\b", line), line
 
 
+def test_the_uv_bootstrap_is_pinned_and_checked_before_it_runs() -> None:
+    """The same refusal `install.sh` makes, in the image that installs uv.
+
+    A moving `astral.sh/uv/install.sh` serves whatever is current, so piping it
+    into a shell is both an unchecked download and a second moving part beside
+    the base image digest. The version and the hash are the ones `install.sh`
+    already pins, and they are bumped together.
+    """
+    dockerfile = _code_only(_dockerfile())
+
+    assert "astral.sh/uv/install.sh" not in dockerfile, dockerfile
+    assert re.search(r"astral\.sh/uv/\$\{UV_INSTALLER_VERSION\}/install\.sh", dockerfile), dockerfile
+    assert "sha256sum -c -" in dockerfile, dockerfile
+    assert re.search(r"ARG UV_INSTALLER_SHA256=[0-9a-f]{64}\b", dockerfile), dockerfile
+
+
 def test_the_machine_trusts_the_proxy_through_its_own_store() -> None:
     """The bench shape in one step: the CA goes where the machine looks.
 

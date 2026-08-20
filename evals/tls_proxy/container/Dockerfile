@@ -49,7 +49,19 @@ WORKDIR /home/bench
 # proxying is in the environment. Astral's own installer goes through curl, so
 # it would survive the proxy too; it runs here so that the run itself measures
 # agentic-hil rather than uv's bootstrap.
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+#
+# Pinned to the version `install.sh` pins and checked against the hash
+# `install.sh` carries, for the two reasons that file gives: the moving
+# https://astral.sh/uv/install.sh serves whatever is current, and piping a
+# download nobody checked into a shell is the one thing this project's
+# installers refuse to do. It is also what makes two runs of this eval
+# comparable, the same argument as the digest above. Bump both together.
+ARG UV_INSTALLER_VERSION=0.12.5
+ARG UV_INSTALLER_SHA256=504511fbbbd811aeaba6738abc79408956b6c7da0ca35437b3dcc24a41efc111
+RUN curl -LsSf "https://astral.sh/uv/${UV_INSTALLER_VERSION}/install.sh" -o /tmp/uv-installer.sh \
+    && echo "${UV_INSTALLER_SHA256}  /tmp/uv-installer.sh" | sha256sum -c - \
+    && sh /tmp/uv-installer.sh \
+    && rm /tmp/uv-installer.sh
 
 # From this line on the environment is the bench: every outbound request from
 # any program in this image goes through mitmproxy on loopback, and nothing is

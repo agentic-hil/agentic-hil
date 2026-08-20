@@ -134,6 +134,9 @@ sys.exit(probe.connect_ex((sys.argv[1], int(sys.argv[2]))))
 
 heading "The bench"
 printf 'proxy environment: HTTPS_PROXY=%s HTTP_PROXY=%s\n' "$HTTPS_PROXY" "$HTTP_PROXY"
+# Named in every transcript, because uv is the program whose trust decision this
+# whole run is about and its wording is what the installer's detection matches.
+printf 'package manager: %s\n' "$(uv --version)"
 start_proxy
 
 # curl reads this machine's own store, which now holds the proxy's CA. It is the
