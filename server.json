@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.agentic-hil/agentic-hil",
   "title": "Agentic HIL",
-  "description": "Policy-gated MCP tools for embedded hardware-in-the-loop testing on real devices.",
+  "description": "Policy-gated MCP tools to probe, flash, reset, and exchange UART and CAN traffic with real embedded targets (STM32 and more) for hardware-in-the-loop testing by AI agents.",
   "version": "0.17.0",
   "repository": {
     "url": "https://github.com/agentic-hil/agentic-hil",

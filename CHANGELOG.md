@@ -4,6 +4,12 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Changed
+
+- **The one surface searchers actually reach now says what the tools do.** The 2026-08-20 discoverability baseline found exactly one organic path to this project: search snippets of the PyPI description mirrored by libraries.io, while the GitHub repository itself appeared in none of 72 checks. The PyPI summary now leads with the test problem and names the operations (probe, flash, reset, UART and CAN traffic, STM32), the keywords cover the terms real queries use (mcp-server, uart, can-bus, pyocd, pytest, hardware-testing), the project URLs add the changelog and the docs tree, and server.json describes the operations instead of the genre, so registries rendering it say what connecting an agent gets.
+
 ## [0.17.0] - 2026-08-20
 
 ### Added
