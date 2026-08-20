@@ -3237,7 +3237,7 @@ def test_run_agent_reports_a_job_it_could_not_empty_over_the_failure_that_reache
     assert started and all(process.poll() is not None for process in started)
 
 
-def _agent_with_a_descendant(tmp_path: Path) -> Path:
+def _agent_with_a_descendant(tmp_path: Path, *, descendant_ignores_sigterm: bool = False) -> Path:
     """An agent that starts one long-lived process in its own group, records both
     pids, and then blocks for the rest of the round.
 
@@ -3247,16 +3247,36 @@ def _agent_with_a_descendant(tmp_path: Path) -> Path:
     `sys.stdin.read()` is what keeps the agent there to be killed. It never
     returns in these tests, because the failure they inject lands before
     `run_agent` writes the prompt, and it is also why the agent never exits into
-    the EPIPE race an agent that stops reading hands the loop."""
+    the EPIPE race an agent that stops reading hands the loop.
+
+    The agent publishes its own pid only once the descendant has reported itself
+    ready, so a test that holds its injected failure until `agent.pid` appears is
+    holding it until the whole tree is standing rather than until the leader is.
+    With `descendant_ignores_sigterm` the descendant installs `SIG_IGN` for
+    SIGTERM before reporting ready, which is how a test asks for a group that
+    still has a live member once the SIGTERM has been and gone: without it the
+    group is empty by then, and what the second signal meets is whichever of its
+    members the reaper has not collected yet."""
+    descendant = tmp_path / "descendant.py"
+    descendant.write_text(
+        "import pathlib, signal, time\n"
+        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if descendant_ignores_sigterm else "")
+        + "pathlib.Path('child.ready').write_text('1', encoding='utf-8')\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
     script = tmp_path / "agent_with_a_descendant.py"
     script.write_text(
-        "import os, pathlib, subprocess, sys\n"
+        "import os, pathlib, subprocess, sys, time\n"
         "devnull = open(os.devnull, 'w')\n"
         "child = subprocess.Popen(\n"
-        "    [sys.executable, '-c', 'import time; time.sleep(120)'],\n"
+        "    [sys.executable, str(pathlib.Path(__file__).with_name('descendant.py'))],\n"
         "    stdout=devnull, stderr=devnull,\n"
         ")\n"
         "pathlib.Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+        "ready, deadline = pathlib.Path('child.ready'), time.monotonic() + 30\n"
+        "while not ready.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.02)\n"
         "pathlib.Path('agent.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
         "sys.stdin.read()\n",
         encoding="utf-8",
@@ -3321,10 +3341,21 @@ def test_run_agent_reports_a_posix_group_that_will_not_clear_over_the_failure_th
     have been collected yet is not asserted, because a member that has just been
     killed is briefly a zombie and `kill(pid, 0)` cannot tell that from a live
     one -- the waiting that normally settles it is exactly what this test has
-    taken away."""
+    taken away.
+
+    That is also why the descendant ignores SIGTERM (issue #320). Forcing the
+    liveness answer to no leaves the group's real membership to say what it likes,
+    and with a descendant that dies of the SIGTERM the group is down to whatever
+    the reaper has not collected yet by the time the SIGKILL goes out: nothing at
+    all under a fast one, a zombie under a slower one. Darwin refuses to signal a
+    group of nothing but zombies, so on the leg that met one the run ended on the
+    delivery report instead of on this one and the assertion below met the wrong
+    string. A member that outlives the SIGTERM makes the group the test claims to
+    have the group it actually has, and the SIGKILL is then delivered on every
+    POSIX host rather than on most of them."""
     workdir = tmp_path / "work"
     workdir.mkdir()
-    agent = _agent_with_a_descendant(tmp_path)
+    agent = _agent_with_a_descendant(tmp_path, descendant_ignores_sigterm=True)
     _exploding_reader_thread(monkeypatch, RuntimeError("can't start new thread"), not_before=workdir / "agent.pid")
     monkeypatch.setattr(agent_review_loop, "_group_gone", lambda pgid, *, deadline: False)
     signalled: list[int] = []
