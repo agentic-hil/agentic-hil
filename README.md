@@ -33,6 +33,8 @@ powershell -c "irm https://agentic-hil.github.io/install.ps1|iex"
 
 One line installs the package user-local (through `uv` where it exists, `pip --user` otherwise) and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository: no project configuration is written, no shell profile is edited. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
 
+The same line is also the repair line: run it again on a machine that already has Agentic HIL and it reinstalls in place, which is the way back when `agentic-hil upgrade` itself fails.
+
 Prefer to read before you run? Take the script and its SHA-256 from the same release, check one against the other, and run the file you checked:
 
 ```bash

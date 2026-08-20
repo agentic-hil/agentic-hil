@@ -30,6 +30,8 @@ agentic-hil --version
 agentic-hil setup --help
 ```
 
+The one-line installer is that same fix in one command, and it repairs in place: an installation already on the machine always goes through the package manager again, so when `agentic-hil upgrade` itself fails, or the installation is current but broken, running `curl -LsSf https://agentic-hil.github.io/install.sh | sh` (PowerShell: `irm https://agentic-hil.github.io/install.ps1 | iex`) reinstalls it and re-registers the agent halves out of the fresh copy. It says which it is doing, `upgrading` or `refreshing this current installation`, and an editable development checkout is the one thing it keeps rather than replaces.
+
 If that fails, use `uv` or `pipx` instead:
 
 ```bash
