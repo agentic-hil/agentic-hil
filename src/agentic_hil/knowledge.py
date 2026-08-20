@@ -1248,10 +1248,17 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "If the refusal repeats on the retry, ask the device about protection rather than about wiring: read the "
             "option bytes with STM32CubeProgrammer yourself (`-ob displ`) and look for read-out protection, write "
             "protection or PCROP over the sectors the image covers.",
-            "The durable fix for a core that defeats the erase is connecting under reset for the flash operation "
-            "(`mode=UR` on this programmer). Agentic HIL cannot express a connect mode in `debuggers.<name>` yet, so "
-            "until it can, the retry is the workaround and this is the reason to keep it in the plan rather than in "
-            "somebody's memory.",
+            "The durable fix for a core that defeats the erase is connecting under reset for the flash, so the core is "
+            "held in reset while the probe attaches and never runs during the erase. Set "
+            "`debuggers.<name>.connect_mode` to `under_reset` (STM32CubeProgrammer's `mode=UR`); `project_config_set` "
+            "writes it, because it sits under `allow_config_description_write` and grants nothing the flash did not "
+            "already allow. Only `type: stlink` carries it and only `flash_firmware` reads it, so `probe_target`, "
+            "`reset_target` and the memory reads keep the connect their own operation decides. It needs the probe's "
+            "reset line wired to the target's NRST, which an on-board ST-Link already has and a board wired with "
+            "SWDIO, SWCLK and ground alone does not — there the connect fails rather than falls back. A running MCP "
+            "server puts the change in force with `project_config_reload_description` or a restart, because "
+            "`connect_mode` is a description key it re-reads and not a permission. Until then the retry above is the "
+            "workaround, and the plan is the place for that rather than somebody's memory.",
         ),
         do_not=(
             "Do not read this as a reset problem. No reset failed, and re-seating the reset line, changing "

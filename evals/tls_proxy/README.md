@@ -24,8 +24,11 @@ The one-line installer already knows this shape. A failed install whose text
 says the chain ended outside the roots it was checking against is retried once
 with `UV_SYSTEM_CERTS=1`, so `uv` reads the machine's own store instead, with
 verification still on (`trust_failure()` in `install.sh`, #293). `agentic-hil
-upgrade` does not know it yet, which is why an operator on such a bench can
-install but cannot upgrade.
+upgrade` now makes the same move (#326): a manager that fails with that
+signature is run a second time against this machine's own store, verification
+still on. The seed this container installs is a *released* version from before
+that fix, so on the bench built here the upgrade still fails at proof 1 — the
+behaviour an operator on 0.16.0 still meets, and the reason the eval seeds it.
 
 ## What the container does
 
@@ -93,9 +96,16 @@ the chain is checked against.
 
 ## What comes next
 
-#326 teaches `agentic-hil upgrade` the same move the installer already makes:
-recognise a trust failure and retry once against the machine's own store. When
-it lands, this eval gains a third proof, run after proof 1 and before proof 2:
-the upgrade self-heals, so the operator on a proxied bench never has to reach
-for the installer at all. Until then proof 1 is expected to fail, and it failing
-is the reason the file exists.
+#326 taught `agentic-hil upgrade` the same move the installer already makes:
+recognise a trust failure and retry once against the machine's own store,
+verification still on. That retry is pinned by
+`tests/test_upgrade_certificates.py`, which stubs the manager and runs
+everywhere without Docker. This container does not exercise it yet, and the
+reason is structural: it installs only *released* artifacts — the seed and the
+one-line installer both come off the index and the releases page — and the fix
+is newer than the release the bench seeds, so proof 1 reproduces the failure
+that release still has. When a release carrying the retry is what this bench
+seeds, the eval gains a third proof, run after proof 1 and before proof 2: the
+upgrade heals itself, so the operator on a proxied bench never has to reach for
+the installer at all. Until then proof 1 is expected to fail, and it failing is
+the reason the file exists.

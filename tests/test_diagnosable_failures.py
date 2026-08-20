@@ -164,6 +164,13 @@ def test_the_erase_refusal_carries_the_retry_and_the_connect_mode_remedy(tmp_pat
     assert "Retry the flash once" in steps
     assert "under reset" in steps
     assert "programmer_output" in steps
+    # The durable fix is the connect_mode key this range added, named exactly and
+    # with the reload-or-restart step that puts a changed description in force --
+    # not the stale claim that Agentic HIL "cannot express a connect mode" yet.
+    assert "connect_mode" in steps
+    assert "under_reset" in steps
+    assert "project_config_reload_description" in steps
+    assert "cannot express" not in steps
     assert "reset problem" in avoid
     assert "allow_mass_erase" in avoid
 

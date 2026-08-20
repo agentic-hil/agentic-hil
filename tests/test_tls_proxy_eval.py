@@ -273,11 +273,20 @@ def test_every_proof_prints_a_verdict_line() -> None:
         assert label in entrypoint, label
 
 
-def test_the_readme_names_the_follow_up_that_adds_the_third_proof() -> None:
-    """#326 teaches `agentic-hil upgrade` the retry; the eval gains a proof then."""
+def test_the_readme_records_the_retry_landed_and_the_container_proof_waits_on_a_release() -> None:
+    """#326 landed the upgrade retry; the container gains its proof once a release seeds it.
+
+    The retry the installer already made is now in `agentic-hil upgrade` too, so
+    the README must not still promise it as work `agentic-hil upgrade` "does not
+    know yet". What stays genuinely pending is a release carrying the retry for
+    this bench to seed, after which the eval gains its third proof; the README
+    names #326 and points at the unit test that pins the retry in the meantime.
+    """
     readme = README.read_text(encoding="utf-8")
 
     assert "#326" in readme, readme
+    assert "does not know it yet" not in readme, readme
+    assert "test_upgrade_certificates.py" in readme, readme
 
 
 def test_no_workflow_runs_this_eval_by_default() -> None:

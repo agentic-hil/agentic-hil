@@ -833,14 +833,34 @@ def _manager_run(manager: str, command: list[str]) -> tuple[subprocess.Completed
                 [_persistent_export(attempt)],
             ),
         )
+    # The second attempt failed too, but not necessarily for the reason the first
+    # did. Only a retry whose own words name a trust failure again says the
+    # machine's store does not carry the proxy CA either; a retry that failed
+    # while resolving, downloading or installing got *past* the trust failure and
+    # then fell over somewhere else, and telling that operator to install a CA
+    # sends them at the wrong thing. So the retry is classified on its own output
+    # rather than assumed to have ended the way the first attempt did.
+    if _trust_failure(_manager_output(install_result)):
+        return (
+            retried,
+            install_result,
+            _certificate_note(
+                f"{diagnosis} {retried_with}, and that attempt failed the same way: the proxy's own CA is missing from "
+                f"this machine's store as well, so pointing a manager at that store cannot help until it is there.",
+                f"{retried_briefly}, and that attempt failed the same way",
+                [_INSTALL_THE_PROXY_CA, _persistent_export(attempt)],
+            ),
+        )
     return (
         retried,
         install_result,
         _certificate_note(
-            f"{diagnosis} {retried_with}, and that attempt failed the same way: the proxy's own CA is missing from "
-            f"this machine's store as well, so pointing a manager at that store cannot help until it is there.",
-            f"{retried_briefly}, and that attempt failed the same way",
-            [_INSTALL_THE_PROXY_CA, _persistent_export(attempt)],
+            f"{diagnosis} {retried_with}, and that got the manager past the trust failure: the second attempt names no "
+            f"untrusted certificate, so this machine's store was read, but it then failed for a reason of its own. That "
+            f"reason is the manager's to report and is preserved under install; it is not a certificate to install, so "
+            f"do not change the trust store on account of it.",
+            f"{retried_briefly}, which got past the trust failure but then failed for a different reason the manager records under install",
+            [_persistent_export(attempt)],
         ),
     )
 

@@ -75,6 +75,11 @@ UV_TRUST_FAILURE = subprocess.CompletedProcess[str](
 # the proxy's CA either fails identically, which is the end the refusal has to
 # tell apart from the first one.
 UV_TRUST_FAILURE_AGAIN = subprocess.CompletedProcess[str]([], 2, "", "error: Failed to upgrade agentic-hil\n  Caused by: invalid peer certificate: UnknownIssuer")
+# A second attempt that got past the trust failure — its words name no
+# certificate at all — and then fell over resolving dependencies. That is a
+# different failure from the first, and the third end the refusal has to tell
+# apart: the store was read, so the proxy CA is not what is missing now.
+UV_RETRY_FAILS_ANEW = subprocess.CompletedProcess[str]([], 1, "", "error: no solution found when resolving dependencies")
 PIP_TRUST_FAILURE = subprocess.CompletedProcess[str](
     [],
     1,
@@ -239,6 +244,45 @@ def test_both_attempts_failing_is_a_refusal_that_carries_both_of_them(monkeypatc
     assert any("Install the proxy's own CA" in step for step in result["next_steps"])
     assert any("Export UV_SYSTEM_CERTS=1" in step for step in result["next_steps"])
     # Never a way to a switch that turns verification off, on any path here.
+    assert "--allow-insecure-host" not in json.dumps(result)
+    assert "--trusted-host" not in json.dumps(result)
+
+
+def test_a_retry_that_gets_past_the_trust_failure_is_not_reported_as_a_missing_ca(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second attempt read the store, and then failed for a reason of its own.
+
+    Once `UV_SYSTEM_CERTS=1` lets uv reach the index, a failure there is a
+    resolution or install failure, not the trust failure again — its words name
+    no certificate at all. Reporting it as "the proxy's own CA is missing" would
+    send the operator to edit a trust store that had just started working and
+    bury the manager's real reason under a certificate diagnosis. So the retry is
+    classified on its own output: it got past the trust failure, and what stopped
+    it next is the manager's to name and is kept under `install`.
+    """
+    attempts = stub_manager(monkeypatch, answers=[UV_TRUST_FAILURE, UV_RETRY_FAILS_ANEW], version_after=__version__)
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_failed"
+    assert len(attempts) == 2
+    # It got past the trust failure, and is not diagnosed as one.
+    assert "got the manager past the trust failure" in result["summary"]
+    assert "the proxy's own CA is missing" not in result["summary"]
+    assert "failed the same way" not in result["summary"]
+    assert result["certificates"].endswith("failed for a different reason the manager records under install.")
+    # And so the CA install is not prescribed: the store just worked, and the new
+    # failure is not a certificate to install.
+    assert not any("Install the proxy's own CA" in step for step in result["next_steps"])
+    # The new failure survives where the renderer walks for it, and the first
+    # attempt's certificate error is still kept beside it under `install`.
+    install = result["install"]
+    assert install["stderr"] == UV_RETRY_FAILS_ANEW.stderr
+    assert install["certificate_retry"]["first_attempt"]["stderr"] == UV_TRUST_FAILURE.stderr
+    # The standing export still stands: the store did answer the trust failure,
+    # so exporting it keeps the next upgrade from needing a second attempt at all.
+    assert any("Export UV_SYSTEM_CERTS=1" in step for step in result["next_steps"])
+    # Still no path to a switch that turns verification off.
     assert "--allow-insecure-host" not in json.dumps(result)
     assert "--trusted-host" not in json.dumps(result)
 
