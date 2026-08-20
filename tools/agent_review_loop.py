@@ -1428,6 +1428,51 @@ def committed_blobs(repo: Path, base: str, head: str) -> set[str]:
     return blobs
 
 
+def committed_objects(repo: Path, base: str, head: str) -> set[tuple[int, int]]:
+    """The filesystem identities now sitting at the paths the range `base..head` committed.
+
+    The proof a stalled object reached a commit that its bytes alone cannot give,
+    and the reason `committed_blobs` is not asked to give it by itself. `git commit`
+    never touches the work tree, so a file committed under a name still carries the
+    inode it had when the round began; the identity captured before the round is the
+    identity of the work-tree file at the committed name afterwards. A stall whose
+    inode is among these was read by a review under some committed name, however its
+    own name moved to get there.
+
+    Content alone cannot say as much. A copy of the stall's bytes committed at
+    another path, while the stall itself was atomic-saved somewhere no review read,
+    puts those bytes in `committed_blobs` without the object ever reaching a commit;
+    an inode a later file reused after the stall freed it carries the bytes of an
+    unrelated commit rather than the stall's. Each is half a proof, so the caller
+    counts an object reviewed only when both its inode and its content reached the
+    range -- a copy fails the inode half, a reuse fails the content half.
+
+    Renames are turned off so every changed path carries its own name, and a path
+    the range only deleted has no work-tree file left to identify and drops out on
+    the `object_id` that finds none. An empty range committed nothing, and a git
+    that will not answer is no proof, so both are the empty set.
+    """
+    if base == head:
+        return set()
+    result = subprocess.run(
+        ["git", "-C", str(repo), "diff-tree", "-r", "--no-renames", "--name-only", "--no-commit-id", base, head],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        return set()
+    objects: set[tuple[int, int]] = set()
+    for path in result.stdout.splitlines():
+        if not path:
+            continue
+        obj = object_id(repo / path)
+        if obj is not None:
+            objects.add(obj)
+    return objects
+
+
 def changed_inherited_dirty(
     repo: Path, present: set[str], inherited_dirty: set[str], inherited_blobs: dict[str, str]
 ) -> set[str]:
@@ -2836,16 +2881,18 @@ def main(argv: list[str] | None = None) -> int:
             # object the tree has not committed. See `relocated_stall`. An atomic
             # save -- write a temp file and rename it over the destination --
             # changes both, so a move onto inherited dirt made that way is named by
-            # neither; the reconciliation falls back to the content the round did
-            # commit and the inherited dirt it rewrote. See `changed_inherited_dirty`.
-            # All are asked only while something is outstanding to recognise:
-            # otherwise there is nothing to compare against, and a dirty tree can
-            # be a large read.
+            # neither; the reconciliation then asks, of each outstanding object on
+            # its own, whether its inode and its content both reached this round's
+            # commits, and where one did not keeps the inherited dirt the round
+            # rewrote. See `committed_objects` and `changed_inherited_dirty`. The
+            # per-path identities are kept, not just their sets, so that question is
+            # answered object by object. All are asked only while something is
+            # outstanding to recognise: otherwise there is nothing to compare
+            # against, and a dirty tree can be a large read.
             inherited_blobs = {} if options.dry_run or not outstanding_paths else blob_ids(repo, inherited_dirty)
             stalled_blobs = {inherited_blobs[path] for path in outstanding_paths if path in inherited_blobs}
-            stalled_objects = (
-                set() if options.dry_run or not outstanding_paths else set(object_ids(repo, outstanding_paths).values())
-            )
+            outstanding_ids = {} if options.dry_run or not outstanding_paths else object_ids(repo, outstanding_paths)
+            stalled_objects = set(outstanding_ids.values())
             try:
                 implement_round(setup, record, number, prompt, scratch, paperwork)
             except AgentError:
@@ -2898,7 +2945,8 @@ def main(argv: list[str] | None = None) -> int:
                 # earlier round ever saw. Following it first is what keeps the
                 # filter below from reading `git mv` as "committed or taken
                 # back". Applied every round, so a path renamed twice arrives.
-                followed = {moved.get(path, path) for path in outstanding_paths}
+                followed_of = {path: moved.get(path, path) for path in outstanding_paths}
+                followed = set(followed_of.values())
                 survived = {path for path in followed if path in present_dirty}
                 # An outstanding name that leaves the dirty set is safe to drop
                 # only when its work reached a commit a review read or came back
@@ -2932,25 +2980,48 @@ def main(argv: list[str] | None = None) -> int:
                         repo, present_dirty, stalled_blobs, inherited_blobs, stalled_objects
                     )
                     # Both of those identities are the object's own, and an atomic
-                    # save replaces both: write the edited bytes to a temporary
-                    # file and rename it over the destination, and the inherited
-                    # dirty name the stall moved onto has the temp file's inode and
-                    # the temp file's bytes, so neither names it. When a followed
-                    # name vanished with no porcelain rename to account for it and
-                    # the stalled content reached no commit the review read, the
-                    # work cannot be proven reviewed or removed; keep the
-                    # inherited-dirty paths this round rewrote, since a move onto
-                    # inherited dirt always rewrites its destination and a false
-                    # stall is the safe error where a false clean exits 0 over work
-                    # no review saw. See `changed_inherited_dirty`. Asked only when
-                    # a name vanished and there is content to have committed, so an
-                    # operator's own edit stops nothing while the stall is accounted
-                    # for. The narrower identities above still carry every move they
-                    # can name, so this retains only what they could not.
-                    if vanished and stalled_blobs and not (stalled_blobs & committed_blobs(repo, last_head, head)):
-                        outstanding_paths |= changed_inherited_dirty(
-                            repo, present_dirty, inherited_dirty, inherited_blobs
+                    # save replaces both: write the edited bytes to a temporary file
+                    # and rename it over the destination, and the inherited dirty
+                    # name the stall moved onto takes the temp file's inode and the
+                    # temp file's bytes, so neither names it. What is left is to ask,
+                    # of each outstanding object whose followed name vanished, whether
+                    # it can be proven reviewed: a `git commit` leaves the work tree
+                    # be, so an object committed under some name still sits there with
+                    # the inode and the bytes it began with, and only an object whose
+                    # inode *and* content both reached this round's commits was read
+                    # by the review. The two are asked together on purpose -- an inode
+                    # a later file reused answers for an unrelated commit's bytes, a
+                    # copy of the stall's bytes committed elsewhere answers under
+                    # another inode -- and per object rather than for the range at
+                    # large, since a range-wide check let any one committed object
+                    # clear the rest. An object that clears neither half might have
+                    # been atomic-saved onto inherited dirt, so keep the paths this
+                    # round rewrote there, a false stall the operator clears by
+                    # committing being the safe error where a false clean exits 0 over
+                    # work no review saw. A contentless object -- an empty file the
+                    # byte identity had to drop -- is proven by its inode alone, the
+                    # conservative reading that keeps it in rather than out. See
+                    # `committed_objects` and `changed_inherited_dirty`; the narrower
+                    # identities above still carry every move they can name, so this
+                    # retains only what they could not.
+                    if vanished:
+                        committed_ids = committed_objects(repo, last_head, head)
+                        committed_content = committed_blobs(repo, last_head, head)
+                        unreviewed = any(
+                            dest not in present_dirty
+                            and not (
+                                outstanding_ids.get(path) in committed_ids
+                                and (
+                                    inherited_blobs.get(path) is None
+                                    or inherited_blobs.get(path) in committed_content
+                                )
+                            )
+                            for path, dest in followed_of.items()
                         )
+                        if unreviewed:
+                            outstanding_paths |= changed_inherited_dirty(
+                                repo, present_dirty, inherited_dirty, inherited_blobs
+                            )
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
