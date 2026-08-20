@@ -16,7 +16,13 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_PYOCD, FAKE_PYOCD_UNKNOWN_TARGET, write_authoritative_config, write_config
+from conftest import (
+    FAKE_PYOCD,
+    FAKE_PYOCD_UNKNOWN_TARGET,
+    FAKE_STLINK_ERASE_REFUSED,
+    write_authoritative_config,
+    write_config,
+)
 
 from agentic_hil.backends.pyocd import (
     PyOCDBackend,
@@ -24,6 +30,7 @@ from agentic_hil.backends.pyocd import (
     pack_install_commands,
     parse_pyocd_targets,
 )
+from agentic_hil.backends.stlink import STLinkBackend
 from agentic_hil.cli import doctor
 from agentic_hil.config import load_config
 from agentic_hil.tools import AgenticHILToolService
@@ -37,6 +44,128 @@ PYOCD_TARGET_NOT_RECOGNIZED = (
     "available target types. See <https://pyocd.io/docs/target_support.html> for how to install "
     "additional target support. [__main__]"
 )
+
+
+# Verbatim from the bench report behind #327: STM32CubeProgrammer v2.22.0 driving
+# an ST-LINK V3SET against a NUCLEO-F446RE. Ten first flashes over four hours all
+# ended here after a constant ~310 ms; every immediate retry programmed and
+# verified. It is a literal for the same reason the pyOCD one above is: the two
+# words that decided the old classification, `Reset mode` in the connect banner
+# and `failed` in the last line, are lines apart and about different things, and
+# paraphrasing the transcript would hide exactly that.
+STLINK_ERASE_REFUSED_TRANSCRIPT = """      -------------------------------------------------------------------
+                       STM32CubeProgrammer v2.22.0
+      -------------------------------------------------------------------
+
+ST-LINK SN  : 002E00073431511834333935
+Board       : NUCLEO-F446RE
+Voltage     : 3.27V
+SWD freq    : 8000 KHz
+Connect mode: Hot Plug
+Reset mode  : Software reset
+Device ID   : 0x421
+Device name : STM32F446
+
+Memory Programming ...
+Opening and parsing file: firmware.elf
+
+Erasing memory corresponding to segment 0:
+Erasing internal memory sectors [0 5]
+Error: failed to erase memory
+"""
+
+
+def stlink_backend(workspace: Path) -> STLinkBackend:
+    return STLinkBackend(load_config(str(write_config(workspace, debugger_type="stlink"))))
+
+
+def flash_through_the_service(workspace: Path, executable: Path) -> dict:
+    firmware = workspace / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True, exist_ok=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = load_config(str(write_config(workspace, debugger_type="stlink", debugger_executable=executable, probe_id="STLINK123")))
+    service = AgenticHILToolService(config)
+    try:
+        return service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+    finally:
+        service.close()
+
+
+def test_the_real_erase_refusal_is_classified_as_an_erase_failure(tmp_path: Path) -> None:
+    """The regression #327 is about.
+
+    Every STM32CubeProgrammer action prints a connect banner carrying `Reset mode
+    : Software reset`, and the reset rule matched any output holding the word
+    `reset` beside a failure word, so the one transcript that says `erase` was
+    reported as a failed reset.
+    """
+    backend = stlink_backend(tmp_path)
+
+    assert backend._classify_output(STLINK_ERASE_REFUSED_TRANSCRIPT, "flash_firmware") == "flash_erase_failed"
+
+
+def test_a_real_reset_failure_is_still_a_reset_failure(tmp_path: Path) -> None:
+    """The mirror image of the fix: the erase rule must not swallow the reset one.
+
+    A transcript with no erase line in it keeps answering `reset_failed`, so the
+    narrower classification is a new branch rather than a redirected one.
+    """
+    backend = stlink_backend(tmp_path)
+    transcript = "ST-LINK SN  : STLINK123\nDevice name : STM32F446\nError: failed to reset the target\n"
+
+    assert backend._classify_output(transcript, "flash_firmware") == "reset_failed"
+
+
+def test_the_erase_refusal_names_hot_plug_and_protection_rather_than_the_reset_line(tmp_path: Path) -> None:
+    """What the operator reads, driven through the real backend and the real CLI.
+
+    The old answer was `Debugger failed to reset the target.` with `reset line
+    wiring issue` first among the likely causes, which is a bench inspection
+    nobody needed.
+    """
+    refused = flash_through_the_service(tmp_path, FAKE_STLINK_ERASE_REFUSED)
+    causes = " ".join(refused["likely_causes"])
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "flash_erase_failed"
+    assert refused["backend_error_type"] == "flash_erase_failed"
+    assert "erase" in refused["summary"]
+    assert "hot plug" in causes and "protect" in causes
+    assert "reset line wiring issue" not in refused["likely_causes"]
+
+
+def test_the_erase_refusal_carries_the_programmers_own_words(tmp_path: Path) -> None:
+    """A failure carries its diagnosis, and here the diagnosis is one printed line.
+
+    It used to survive only in the log file the result names by path, so the
+    result an agent relays to a person held every fact except the decisive one.
+    Nested under `programmer_output` so the human rendering prints the capture as
+    a literal block instead of flattening it into a row.
+    """
+    refused = flash_through_the_service(tmp_path, FAKE_STLINK_ERASE_REFUSED)
+    output = refused["programmer_output"]
+
+    assert "Error: failed to erase memory" in output["stderr"]
+    assert "Erasing internal memory sectors [0 5]" in output["stdout"]
+    # The banner too, because the operator's next question is whether the part
+    # was even identified, and this transcript answers it.
+    assert "Device name : STM32F446" in output["stdout"]
+    assert output["returncode"] == 1
+    # And the log file the result names still holds the same capture, so the two
+    # accounts of one run cannot disagree.
+    assert refused["log_path"]
+
+
+def test_the_erase_refusal_carries_the_retry_and_the_connect_mode_remedy(tmp_path: Path) -> None:
+    refused = flash_through_the_service(tmp_path, FAKE_STLINK_ERASE_REFUSED)
+    steps = " ".join(refused["remediation"])
+    avoid = " ".join(refused["do_not"])
+
+    assert "Retry the flash once" in steps
+    assert "under reset" in steps
+    assert "programmer_output" in steps
+    assert "reset problem" in avoid
+    assert "allow_mass_erase" in avoid
 
 
 def test_pyocd_target_type_names_are_compared_the_way_pyocd_normalises_them() -> None:

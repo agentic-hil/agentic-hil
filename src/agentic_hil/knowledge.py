@@ -1216,6 +1216,38 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "this was undocumented.",
         ),
     ),
+    "flash_erase_failed:stlink": ErrorRemedy(
+        meaning=(
+            "The device refused to erase the flash STM32CubeProgrammer was about to write, and the programmer said so "
+            "in its own words: `Error: failed to erase memory`. The whole transcript travels with the result under "
+            "`programmer_output`, because the line that names the failed operation is the diagnosis. Nothing was "
+            "verified and no new image is on the board.\n\n"
+            "The measured case on a NUCLEO-F446RE is the first flash after power-up, refused after about 310 ms with "
+            "the device correctly identified, while every immediate retry programmed and verified. That pattern is a "
+            "core still executing from flash while the programmer connects in hot-plug mode, not a wiring fault: this "
+            "used to be reported as `reset_failed` with `reset line wiring issue` among its causes, and the reset line "
+            "was never the thing that was wrong."
+        ),
+        remediation=(
+            "Retry the flash once. On the bench this was measured on, the retry programmed and verified every time.",
+            "Read `programmer_output.stdout` before anything else. It is the programmer's own account of what it "
+            "erased, wrote and verified, and it is what says which operation stopped.",
+            "If the refusal repeats on the retry, ask the device about protection rather than about wiring: read the "
+            "option bytes with STM32CubeProgrammer yourself (`-ob displ`) and look for read-out protection, write "
+            "protection or PCROP over the sectors the image covers.",
+            "The durable fix for a core that defeats the erase is connecting under reset for the flash operation "
+            "(`mode=UR` on this programmer). Agentic HIL cannot express a connect mode in `debuggers.<name>` yet, so "
+            "until it can, the retry is the workaround and this is the reason to keep it in the plan rather than in "
+            "somebody's memory.",
+        ),
+        do_not=(
+            "Do not read this as a reset problem. No reset failed, and re-seating the reset line, changing "
+            "`debuggers.<name>.interface` or power-cycling on that theory changes nothing about a refused erase.",
+            "Do not grant `allow_mass_erase` to force the erase through. That permission makes this service refuse "
+            "flashing outright, it erases the whole device rather than the sectors the image covers, and it answers a "
+            "protection refusal by destroying more than the failed operation ever asked for.",
+        ),
+    ),
     # -- The one flag whose whole value is that it is never silently degraded ---
     CAN_INTERFACE_NOT_FOUND_ERROR: ErrorRemedy(
         meaning=(

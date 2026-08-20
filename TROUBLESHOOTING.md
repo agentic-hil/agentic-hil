@@ -237,6 +237,26 @@ Fix: inspect `log_path`, confirm the artifact matches the target, power-cycle th
 
 Not this: `error_type: "debugger_command_rejected"`, which carries `target_contacted: false` and the `rejected_commands` OpenOCD would not run. OpenOCD stopped inside its own interpreter, before it opened the probe, so the board was never driven and there is nothing on it to inspect, power-cycle or recover. The named commands are either unknown to the installed OpenOCD or belong to its run stage and were reached before `init`; check the version `debugger_info` reports, and the scripts named by `interface_cfg` and `target_cfg`.
 
+Not this either: `error_type: "flash_erase_failed"`, which is section 10a.
+
+## 10a. The First Flash After Power-Up Is Refused At The Erase
+
+Symptom: `flash_firmware` on an ST-Link fails with `error_type: "flash_erase_failed"`, and `programmer_output` in the result ends:
+
+```
+Erasing memory corresponding to segment 0:
+Erasing internal memory sectors [0 5]
+Error: failed to erase memory
+```
+
+The part was identified, the voltage and SWD frequency in the same transcript are normal, and an immediate second attempt programs and verifies in a couple of seconds.
+
+What it means: the device refused to erase the sectors this image covers. It is not a reset failure and not a probe failure. The measured case is a core still executing from flash when STM32CubeProgrammer connects in hot-plug mode, which is why it hits the first flash after power-up and not the retry a second later. The other cause worth checking is protection over those sectors: read-out protection, write protection or PCROP.
+
+Fix: retry the flash. If the refusal repeats, read the option bytes yourself (`STM32_Programmer_CLI -c port=SWD -ob displ`) and look at the protection over the sectors the image covers, rather than at the reset line. Connecting under reset for the flash operation is the durable fix for a core that defeats the erase, and Agentic HIL cannot express a connect mode under `debuggers.<name>` yet, so until it can, the retry is the workaround and belongs in the plan rather than in somebody's memory.
+
+Do not grant `allow_mass_erase` to force it through. That permission makes this service refuse flashing outright, and a mass erase answers a protection refusal by erasing the whole device.
+
 ## 11. COM Port Does Not Work
 
 Symptom: COM tools cannot start a session, return permission errors, or read no expected serial text.

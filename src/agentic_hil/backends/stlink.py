@@ -12,6 +12,7 @@ from agentic_hil.artifacts import looks_like_intel_hex, sha256_file
 from agentic_hil.backends.common import (
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
+    CompletedCommand,
     command_for_log,
     contains_any,
     contains_failure_text,
@@ -133,6 +134,22 @@ GDB_SYMBOL_MISSING_MARKERS = ["no symbol", "not defined"]
 STLINK_SERIAL_PATTERN = re.compile(r"^\s*ST-?LINK\s+SN\s*:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
 STLINK_DEVICE_PATTERN = re.compile(r"^\s*Device\s+name\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 STLINK_EMPTY_MARKERS = ["no st-link detected", "no stlink detected", "0 st-link detected", "0 stlink detected"]
+# STM32CubeProgrammer's own words for a flash erase the device would not carry
+# out. Measured on a NUCLEO-F446RE against STM32CubeProgrammer v2.22.0, where a
+# first flash after power-up ends:
+#
+#     Erasing memory corresponding to segment 0:
+#     Erasing internal memory sectors [0 5]
+#     Error: failed to erase memory
+#
+# One phrase, because one phrase is what that bench proved. The catalogue used
+# to read this transcript as `reset_failed`: the connect banner every action
+# prints carries `Reset mode  : Software reset`, the refusal carries `failed`,
+# and the reset rule below matches any output holding both, so a programmer that
+# said "erase" sent the operator to the reset line (#327). A phrase nobody has
+# seen a programmer print does not belong here; adding one on a guess would
+# claim an erase refusal for a transcript that never refused an erase.
+STLINK_ERASE_REFUSAL_MARKERS = ["failed to erase memory"]
 
 
 class STLinkBackend:
@@ -485,7 +502,7 @@ class STLinkBackend:
         if completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, completed), audit_error)
             confirmation = self._confirm_operation_success(output, STLINK_SUCCESS_CONFIRMATION.get(tool, []) if success_text is None else success_text)
             if not confirmation["confirmed"]:
                 # Confirmation is all-or-nothing here, so this branch is also
@@ -494,9 +511,9 @@ class STLinkBackend:
                 # did match travel with the ones that were looked for, so the
                 # result says how far the CLI got rather than leaving a caller
                 # to read the worst case out of the error_type.
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, {"confirmed": False, "expected_success_text": confirmation["expected"], "matched_success_text": confirmation["matched"]}), audit_error)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._unconfirmed_backend_error_type(tool), log_path, completed, {"confirmed": False, "expected_success_text": confirmation["expected"], "matched_success_text": confirmation["matched"]}), audit_error)
             return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "success_confirmed": True, "operation_result": {"confirmed": True, "matched_success_text": confirmation["matched"]}, "summary": "STM32CubeProgrammer CLI command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
-        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path), audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path, completed), audit_error)
 
     def _connection_args(self, mode: Literal["HOTPLUG", "NORMAL"]) -> list[str]:
         args = ["-c", f"port={self.config.debugger.interface}", f"mode={mode}"]
@@ -517,7 +534,7 @@ class STLinkBackend:
             return True
         return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
 
-    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, operation_result: JsonObject | None = None) -> JsonObject:
+    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, completed: CompletedCommand, operation_result: JsonObject | None = None) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
         # next, scoped to this backend, because the checks differ per tool: an
         # ST-Link transport is chosen with `interface`, an OpenOCD one with
@@ -526,6 +543,8 @@ class STLinkBackend:
         result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
         if operation_result is not None:
             result["operation_result"] = operation_result
+        if backend_error_type == "flash_erase_failed":
+            result.update(erase_refusal_evidence(completed))
         if self._proves_no_contact(tool, backend_error_type):
             # The ST-Link probe is the only transport STM32CubeProgrammer has
             # to the target, and "no ST-LINK detected" is its report that the
@@ -698,6 +717,13 @@ class STLinkBackend:
             return "target_not_detected"
         if contains_any(lower, ["no device found", "device not found", "unable to connect"]):
             return "target_not_detected"
+        # Ahead of the verify and reset rules, because it is more specific than
+        # either and both would swallow it. The two below match on one word plus
+        # any failure word anywhere in the transcript; this one matches the line
+        # the programmer wrote about the operation that actually stopped, and a
+        # refused erase is its own failure with its own causes and its own fix.
+        if contains_any(lower, STLINK_ERASE_REFUSAL_MARKERS):
+            return "flash_erase_failed"
         if "verify" in lower and contains_any(lower, ["failed", "mismatch", "error"]):
             return "verify_failed"
         if "reset" in lower and contains_any(lower, ["failed", "error"]):
@@ -714,10 +740,28 @@ class STLinkBackend:
         return BACKEND_ERROR_TO_PUBLIC_ERROR.get(backend_error_type, backend_error_type)
 
     def _summary_for_error(self, error_type: str) -> str:
-        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "memory_read_failed": "Debugger failed to read the requested target memory.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "unknown_debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
+        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "flash_erase_failed": "STM32CubeProgrammer could not erase the target's flash, so the firmware was not written.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "memory_read_failed": "Debugger failed to read the requested target memory.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "unknown_debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
 
     def _likely_causes(self, error_type: str) -> list[str]:
-        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "target_state_unconfirmed": ["STM32CubeProgrammer exited successfully without printing every line that confirms the operation; operation_result names which of them did print","debuggers.<name>.executable is a wrapper that discards the CLI's output", "this STM32CubeProgrammer version words its confirmation differently"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "reset_failed": ["reset line wiring issue", "target is not responding"], "memory_read_failed": ["STM32CubeProgrammer exited without printing 'Data read successfully', so the read is unconfirmed", "the symbol's address is not readable memory on this target", "debug probe or target stopped responding mid-read"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
+        return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "target_state_unconfirmed": ["STM32CubeProgrammer exited successfully without printing every line that confirms the operation; operation_result names which of them did print","debuggers.<name>.executable is a wrapper that discards the CLI's output", "this STM32CubeProgrammer version words its confirmation differently"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "flash_erase_failed": ["the core was running from flash when the programmer connected under hot plug, so it defeated the erase; an immediate retry usually succeeds", "the sectors this image covers are protected (write protection, PCROP, or a read-out protection level that refuses the erase)", "an earlier flash operation had not finished and left the flash controller busy"], "reset_failed": ["reset line wiring issue", "target is not responding"], "memory_read_failed": ["STM32CubeProgrammer exited without printing 'Data read successfully', so the read is unconfirmed", "the symbol's address is not readable memory on this target", "debug probe or target stopped responding mid-read"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
+
+
+def erase_refusal_evidence(completed: CompletedCommand) -> JsonObject:
+    """The programmer's own words about an erase it would not carry out.
+
+    A failure carries its diagnosis, and for this one the diagnosis is a line
+    STM32CubeProgrammer wrote: `Error: failed to erase memory`. Until now the
+    only place those words survived was the log file the result names by path,
+    so an operator who read the result read `reset_failed`, "reset line wiring
+    issue", and nothing the programmer had actually said (#327).
+
+    Nested under `programmer_output` with the process's own return code, in the
+    shape `stdout`/`stderr` are captured everywhere else in this project, so the
+    human rendering prints them as literal blocks rather than as one flattened
+    row. Nothing is summarised away into a prose field: the whole captured
+    output travels, exactly as the log file holds it.
+    """
+    return {"programmer_output": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}}
 
 
 def gdb_symbol_query_args(gdb_executable: str, elf_path: str, symbol: str) -> list[str]:
