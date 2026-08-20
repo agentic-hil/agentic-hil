@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentic-hil"
 version = "0.17.1.dev0"
-description = "Agentic Hardware-in-the-Loop (Agentic HIL) tools for AI-assisted embedded firmware loops"
+description = "A green build is not enough: Agentic HIL lets an AI agent probe, flash, reset and exchange UART and CAN traffic with a real STM32 or other embedded target, through policy-gated MCP tools instead of a raw debugger shell, so hardware-in-the-loop tests run unattended in CI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -25,7 +25,15 @@ keywords = [
   "agentic-hil",
   "agentic",
   "agentic_hil",
-  "stm32"
+  "stm32",
+  "mcp-server",
+  "uart",
+  "can",
+  "can-bus",
+  "pyocd",
+  "pytest",
+  "hardware-testing",
+  "firmware-testing"
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -62,7 +70,9 @@ dev = [
 
 [project.urls]
 Homepage = "https://github.com/agentic-hil/agentic-hil"
+Documentation = "https://agentic-hil.readthedocs.io/"
 Repository = "https://github.com/agentic-hil/agentic-hil.git"
+Changelog = "https://github.com/agentic-hil/agentic-hil/blob/master/CHANGELOG.md"
 Issues = "https://github.com/agentic-hil/agentic-hil/issues"
 
 [project.scripts]

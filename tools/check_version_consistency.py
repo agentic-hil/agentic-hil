@@ -102,6 +102,13 @@ TAG_PIN = re.compile(r"""([^\s"'`@]+)@v(\d+\.\d+\.\d+)(?![\w.])""")
 # follow the release for the transcript to be true.
 INSTALL_SH_RELEASE = re.compile(r'^RELEASE="(\d+\.\d+\.\d+)"$', re.MULTILINE)
 INSTALL_PS1_RELEASE = re.compile(r"^\$Release = '(\d+\.\d+\.\d+)'$", re.MULTILINE)
+# The MCP registry schema server.json names declares `maxLength: 100` on
+# `description`, and `mcp-publisher validate` enforces it. That validation runs
+# in the release job, after the tag exists and after PyPI has the wheel, so a
+# description one word too long is discovered at the worst moment. The number
+# is restated here so a pull request that rewrites the description is refused
+# on the pull request instead.
+REGISTRY_DESCRIPTION_LIMIT = 100
 
 # The sweep walks the working tree, so it meets whatever else lives there.
 SKIPPED_DIRECTORIES = frozenset(
@@ -633,6 +640,12 @@ def contract_problems(root: Path) -> list[str]:
     Every version here is the release: a registry entry, a marketplace listing
     and an install command a reader copies all describe the release they can
     install, never the tree that is being worked on.
+
+    One field is measured as well as compared. The byte-for-byte comparison
+    speaks only for the string an earlier release already chose; the moment
+    somebody deliberately rewrites the description in both this file and
+    server.json, the registry schema's length rule is the only thing left that
+    can break, and it breaks in the release job rather than here.
     """
     version = release_version(root)
     found = []
@@ -657,7 +670,7 @@ def contract_problems(root: Path) -> list[str]:
         "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
         "name": "io.github.agentic-hil/agentic-hil",
         "title": "Agentic HIL",
-        "description": "Policy-gated MCP tools for embedded hardware-in-the-loop testing on real devices.",
+        "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
         "version": version,
         "repository": {
             "url": "https://github.com/agentic-hil/agentic-hil",
@@ -679,6 +692,12 @@ def contract_problems(root: Path) -> list[str]:
     }
     if registry != expected_registry:
         found.append("server.json differs from the locally validated release contract")
+    described = registry.get("description")
+    if isinstance(described, str) and len(described) > REGISTRY_DESCRIPTION_LIMIT:
+        found.append(
+            f"server.json description is {len(described)} characters, over the "
+            f"{REGISTRY_DESCRIPTION_LIMIT} the MCP registry schema allows"
+        )
 
     expected_plugin = {
         "name": "agentic-hil",
