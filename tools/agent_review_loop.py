@@ -1284,16 +1284,29 @@ def dirty_records(repo: Path, paperwork: tuple[Path, ...] = ()) -> tuple[set[str
     return _porcelain_z_records(result.stdout)
 
 
+# The work-tree kind git records in a tree entry's mode, prepended to a blob id so the
+# content identity a stall is reconciled by tells a symlink apart from a regular file of
+# the same bytes. A git blob id is the hash of the content alone and carries no mode, so
+# a symlink whose link text is `x` and a regular file whose content is `x` share one blob
+# id; the tag keeps the two the distinct work-tree objects they are. Every regular file
+# takes the one non-symlink mode whatever its executable bit -- the reconciliation only
+# needs symlink told from file, and the bit is not one git tracks the same on every
+# platform. See `blob_ids`.
+REGULAR_BLOB_MODE = "100644"
+SYMLINK_BLOB_MODE = "120000"
+
+
 def blob_id(repo: Path, relative: str) -> str | None:
     """`relative`'s current content as git would name it, or None when it names nothing.
 
     Git's own object id for the file on disk, computed the way `git add` would: the
     repository's object format -- sha1, or the sha256 an `extensions.objectFormat`
     repository asks for -- over the content a clean filter would store, `core.autocrlf`
-    and any `.gitattributes` conversion among them. Every comparison here is a
-    work-tree file against another work-tree file -- the content the round inherited
-    against the content it left -- so what matters is that both are named the same
-    way, and naming them the way git itself would keeps that identity stable even
+    and any `.gitattributes` conversion among them, and tagged with the work-tree kind
+    (see `blob_ids`) so a symlink is told from a regular file of the same bytes. Every
+    comparison here is a work-tree file against another work-tree file -- the content the
+    round inherited against the content it left -- so what matters is that both are named
+    the same way, and naming them the way git itself would keeps that identity stable even
     where a filter rewrites content or the repository names objects in sha256, which a
     raw byte hash cannot promise across a re-read. See `blob_ids`, which hashes a whole
     set in one pass, and does the reading.
@@ -1370,23 +1383,33 @@ def blob_ids(repo: Path, paths: set[str]) -> dict[str, str]:
     from its link text -- the mode `120000` blob git actually stores -- so a moved
     symlink stall is followed by the same content identity as any other file. See
     `link_blob_id`.
+
+    Each id is tagged with the work-tree kind git keeps in its tree mode -- a regular
+    file's blob under `100644`, a symlink's under `120000` (see `REGULAR_BLOB_MODE` and
+    `SYMLINK_BLOB_MODE`) -- because a git blob id is the hash of the content alone and
+    holds no mode. Untagged, a symlink whose link text is `x` and a regular file whose
+    content is `x` would share one id, and a round that replaced an inherited-dirty
+    regular file with a symlink to the same bytes -- or moved such a symlink stall onto
+    it -- would compare as unchanged and slip the stall reconciliation, exiting a run
+    clean over work no review read. The tag keeps the two the distinct objects they are,
+    in the one namespace `relocated_stall` and `changed_inherited_dirty` both compare in.
     """
     named = sorted(path for path in paths if has_content(repo / path))
     hashed = _hash_object(repo, named)
     if hashed is not None:
-        resolved = dict(zip(named, hashed, strict=True))
+        resolved = {path: f"{REGULAR_BLOB_MODE}:{blob}" for path, blob in zip(named, hashed, strict=True)}
     else:
         resolved = {}
         for path in named:
             one = _hash_object(repo, [path])
             if one:
-                resolved[path] = one[0]
+                resolved[path] = f"{REGULAR_BLOB_MODE}:{one[0]}"
     for path in sorted(paths):
         link = repo / path
         if path not in resolved and link.is_symlink():
             blob = link_blob_id(repo, link)
             if blob is not None:
-                resolved[path] = blob
+                resolved[path] = f"{SYMLINK_BLOB_MODE}:{blob}"
     return resolved
 
 

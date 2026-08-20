@@ -1898,6 +1898,83 @@ def test_moving_the_stalled_file_onto_inherited_dirt_does_not_slip_a_clean_run_p
     assert "the review never saw" in f"{captured.out}{captured.err}"
 
 
+# The stall's link text, and the bytes the operator's inherited-dirty file holds, so the
+# git blob id of the symlink and of the regular file collide -- the mode-tag collision.
+_STALL_LINK_TEXT = "same-bytes"
+_WRITES_AN_UNTRACKED_SYMLINK_STALL = (
+    f"pathlib.Path('fix.py').symlink_to({_STALL_LINK_TEXT!r})\n"
+    "sys.stdout.write('wrote an untracked broken symlink fix.py, then never came back to commit it\\n')\n"
+)
+_REPLACES_THE_INHERITED_FILE_WITH_A_SYMLINK_OF_THE_STALLS_BYTES = (
+    # An unrelated commit, so the round is not a declined stall and the guard reads the range.
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+    # The stalled symlink is removed, and the operator's inherited-dirty renamed.py -- a
+    # regular file whose bytes are the stall's own link text -- is replaced with a fresh
+    # symlink pointing at those same bytes. The git blob id of the two is identical; only
+    # the tree mode git records for them differs.
+    "pathlib.Path('fix.py').unlink()\n"
+    "pathlib.Path('renamed.py').unlink()\n"
+    f"pathlib.Path('renamed.py').symlink_to({_STALL_LINK_TEXT!r})\n"
+    "sys.stdout.write('committed only other.py, replaced the inherited file with a symlink of its bytes\\n')\n"
+)
+
+
+def test_replacing_inherited_dirt_with_a_symlink_of_the_stalls_bytes_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A git blob id holds no mode, so a mode swap that keeps the bytes must not read as no change.
+
+    Round 1 stalls with an untracked broken symlink `fix.py` whose link text is
+    `same-bytes`, and its review requests changes. The operator left `renamed.py` dirty
+    before the run -- a regular file whose bytes are exactly that link text. Round 2
+    commits an unrelated `other.py`, removes `fix.py`, and replaces `renamed.py` with a
+    fresh symlink pointing at `same-bytes`. The stall's inode is gone and the replacement
+    has a new one, so no identity follows it by inode; and the git blob id of a symlink to
+    `same-bytes` equals the git blob id of a file containing `same-bytes`, so an untagged
+    content identity reads `renamed.py` as the operator's own file, unchanged. Both guards
+    then drop it and round 2's clean verdict would end the run at exit 0 over a work-tree
+    object no review saw. Tagging each id with the work-tree mode keeps the symlink apart
+    from the file it replaced, so `renamed.py` stays outstanding and the run stops as
+    stalled.
+    """
+    repository = _repository(tmp_path)
+    try:
+        (tmp_path / "symlink-probe").symlink_to("target")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+    (tmp_path / "symlink-probe").unlink()
+    # The operator's own uncommitted work: a regular file whose bytes are the stall's link text.
+    (repository / "renamed.py").write_text(_STALL_LINK_TEXT, encoding="utf-8")
+    agent = _agent(
+        tmp_path,
+        "stalls_symlink_then_replaces_inherited_file",
+        _WRITES_AN_UNTRACKED_SYMLINK_STALL,
+        _REPLACES_THE_INHERITED_FILE_WITH_A_SYMLINK_OF_THE_STALLS_BYTES,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--no-stall-retry", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "stalls_symlink_then_replaces_inherited_file") == 2
+    # The committed file is the unrelated round 2 one; the symlink swap reached no commit.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert "renamed.py" not in _in(repository, "log", "--name-only", "--format=")
+    # renamed.py is now an untracked symlink of the stall's bytes, outside every reviewed range.
+    assert _in(repository, "status", "--porcelain").strip() == "?? renamed.py"
+    assert (repository / "renamed.py").is_symlink()
+    assert os.readlink(repository / "renamed.py") == _STALL_LINK_TEXT
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+
+
 _ROUND_TWO_EDIT = "# and a round 2 edit on top of it\n"
 _COMMITS_THE_STALL_AND_REWRITES_THE_INHERITED_DIRT = (
     # The stalled work reaches a commit under its own name -- the review reading it.
@@ -2765,8 +2842,10 @@ def test_content_identity_is_only_asked_of_a_path_that_has_content(tmp_path: Pat
 
     assert set(found) == {"here.py", "elsewhere.py", "other.py"}
     assert found["here.py"] == found["elsewhere.py"] != found["other.py"]
-    # Git's own object id for the content on disk, the identity `git add` would store.
-    assert _in(tmp_path, "hash-object", "here.py").strip() == found["here.py"]
+    # Git's own object id for the content on disk, the identity `git add` would store,
+    # tagged with the work-tree mode so a symlink is told from a file of the same bytes.
+    raw = _in(tmp_path, "hash-object", "here.py").strip()
+    assert found["here.py"] == f"{agent_review_loop.REGULAR_BLOB_MODE}:{raw}"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="a newline in a filename is a POSIX-only name")
@@ -2789,8 +2868,9 @@ def test_content_identity_survives_a_newline_in_the_pathname(tmp_path: Path) -> 
     # The name is hashed whole, not split, so both paths get an id and the two differ.
     assert set(found) == {newline, "plain.py"}
     assert found[newline] != found["plain.py"]
-    # Git's own object id for the content under that exact name.
-    assert _in(tmp_path, "hash-object", "--", newline).strip() == found[newline]
+    # Git's own object id for the content under that exact name, mode-tagged.
+    raw = _in(tmp_path, "hash-object", "--", newline).strip()
+    assert found[newline] == f"{agent_review_loop.REGULAR_BLOB_MODE}:{raw}"
 
 
 def test_argv_batches_split_by_byte_budget_and_never_drop_a_name() -> None:
@@ -2867,9 +2947,11 @@ def test_blob_ids_use_the_repositorys_object_format_and_clean_filters(tmp_path: 
 
     found = agent_review_loop.blob_ids(tmp_path, {"crlf.py"})
 
-    # Sha256's 64 hex digits, not sha1's 40, and git's own id for the filtered content.
-    assert len(found["crlf.py"]) == 64
-    assert found["crlf.py"] == _in(tmp_path, "hash-object", "crlf.py").strip()
+    # Git's own id for the filtered content, mode-tagged, and the id part is sha256's
+    # 64 hex digits, not sha1's 40.
+    raw = _in(tmp_path, "hash-object", "crlf.py").strip()
+    assert found["crlf.py"] == f"{agent_review_loop.REGULAR_BLOB_MODE}:{raw}"
+    assert len(found["crlf.py"].split(":", 1)[1]) == 64
     # The clean filter normalises line endings, so the LF form names the same blob.
     (tmp_path / "crlf.py").write_bytes(b"line one\nline two\n")
     assert agent_review_loop.blob_ids(tmp_path, {"crlf.py"}) == found
@@ -2958,12 +3040,42 @@ def test_content_identity_of_a_symlink_is_its_link_text_not_its_target(tmp_path:
     # Every path gets an id, the broken link included.
     assert set(found) == {"live", "broken", "target.txt"}
     # The id is git's own for the link -- the blob it stages under mode 120000 --
-    # not the content of what it points at.
+    # not the content of what it points at, and tagged with that mode.
     subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
-    assert found["live"] == _in(tmp_path, "rev-parse", ":live").strip()
-    assert found["broken"] == _in(tmp_path, "rev-parse", ":broken").strip()
+    live = _in(tmp_path, "rev-parse", ":live").strip()
+    broken = _in(tmp_path, "rev-parse", ":broken").strip()
+    assert found["live"] == f"{agent_review_loop.SYMLINK_BLOB_MODE}:{live}"
+    assert found["broken"] == f"{agent_review_loop.SYMLINK_BLOB_MODE}:{broken}"
     # The live link does not borrow the target's content identity.
     assert found["live"] != found["target.txt"]
+
+
+def test_content_identity_tells_a_symlink_apart_from_a_regular_file_of_the_same_bytes(tmp_path: Path) -> None:
+    """A git blob id carries no mode, so the work-tree kind is tagged onto it.
+
+    Git names a blob by the hash of its content alone, so a symlink whose link text is
+    `same-bytes` and a regular file whose content is `same-bytes` get the very same git
+    blob id. Left untagged, the stall reconciliation reads a round that replaced the one
+    with the other -- or moved such a symlink stall onto an inherited-dirty file of those
+    bytes -- as no change at all, and exits a run clean over work no review saw. `blob_ids`
+    tags each id with the mode git records for it, so the two are the distinct objects
+    they are, while the raw git id under each tag is still git's own.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "file").write_text("same-bytes", encoding="utf-8")
+    try:
+        (tmp_path / "link").symlink_to("same-bytes")
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow creating a symlink")
+
+    found = agent_review_loop.blob_ids(tmp_path, {"file", "link"})
+
+    # The raw git blob id under each tag is identical -- the collision the tag guards --
+    # yet the tagged identities differ because one is a symlink and one a regular file.
+    assert found["file"].split(":", 1)[1] == found["link"].split(":", 1)[1]
+    assert found["file"] == f"{agent_review_loop.REGULAR_BLOB_MODE}:{found['file'].split(':', 1)[1]}"
+    assert found["link"] == f"{agent_review_loop.SYMLINK_BLOB_MODE}:{found['link'].split(':', 1)[1]}"
+    assert found["file"] != found["link"]
 
 
 def test_filesystem_identity_of_a_symlink_is_its_own_entry_not_its_target(tmp_path: Path) -> None:
