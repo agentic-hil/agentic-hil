@@ -474,19 +474,71 @@ uv_manages_tool() {
     uv tool list 2>/dev/null | grep -q '^agentic-hil[[:space:]]'
 }
 
+# The extras uv recorded for the tool it owns, one per line, printed only when uv
+# keeps a receipt this can read; a non-zero return says there was none to read.
+# uv writes `agentic-hil[can,pyocd]` into a receipt beside the tool environment as
+# `extras = ["can", "pyocd"]`, and reading it back is what lets a refresh add the
+# extra THIS run asks for without dropping one an earlier install or a hand edit
+# recorded. Only the first requirement object is read, which is the agentic-hil
+# requirement uv records first, so a `--with` a hand edit added stays out of it.
+uv_recorded_extras() {
+    uv_tool_root=$(uv tool dir 2>/dev/null) || return 1
+    uv_receipt="${uv_tool_root%/}/agentic-hil/uv-receipt.toml"
+    [ -r "$uv_receipt" ] || return 1
+    sed -n 's/.*requirements = \[//p' "$uv_receipt" \
+        | sed 's/}.*//' \
+        | grep -o 'extras = \[[^][]*\]' \
+        | grep -o '"[^"]*"' \
+        | tr -d '"'
+    return 0
+}
+
+# The requirement a uv-managed refresh reinstalls from: this run's extras merged
+# with the ones uv already recorded (passed as $1, whitespace-separated and
+# possibly empty), spelled agentic-hil[...] with this run's pin if there is one.
+# Merging closes both gaps at once — the recorded pyocd an earlier install left
+# survives (a bare `tool install agentic-hil[can]` would drop it), and the `can` a
+# --can run wants is added even when the recorded requirement was bare (a bare
+# `tool upgrade` would never add it).
+refresh_spec() {
+    refresh_extras=""
+    if [ "$WITH_CAN" -eq 1 ]; then
+        refresh_extras="can"
+    fi
+    for recorded_extra in $1; do
+        case " $refresh_extras " in
+            *" $recorded_extra "*) ;;
+            *) refresh_extras="${refresh_extras:+$refresh_extras }$recorded_extra" ;;
+        esac
+    done
+    refresh_result="agentic-hil"
+    if [ -n "$refresh_extras" ]; then
+        refresh_result="agentic-hil[$(printf '%s' "$refresh_extras" | tr ' ' ',')]"
+    fi
+    if [ -n "$PINNED" ]; then
+        refresh_result="${refresh_result}==${PINNED}"
+    fi
+    printf '%s' "$refresh_result"
+}
+
 install_with_uv() {
     case "$INSTALL_MODE" in
         refresh)
             if uv_manages_tool; then
-                # `uv tool upgrade` reinstalls from the requirement uv recorded,
-                # and that requirement already names the extras this tool carries,
-                # so a refresh cannot drop a capability the way `tool install` with
-                # only this run's extras would; `agentic-hil[can,pyocd]` stays
-                # `[can,pyocd]` rather than being rewritten to this run's `[can]`.
-                # --reinstall is what makes it replace the files even when the
-                # recorded version is already current, which is the whole of the
-                # repair the anchor is here for.
-                run_uv tool upgrade --reinstall agentic-hil
+                # uv owns this tool. Reinstall from the requirement uv recorded
+                # merged with this run's extras: the recorded `[can,pyocd]`
+                # survives (a `tool install agentic-hil[can]` would drop pyocd)
+                # and a `--can` a bare recorded requirement never had is added (a
+                # `tool upgrade` would never add it). --reinstall replaces the
+                # files even when the recorded version is already current, which is
+                # the repair the anchor exists for. When uv keeps no readable
+                # receipt, fall back to the upgrade that preserves whatever it did
+                # record rather than reinstalling from extras this could not read.
+                if recorded_extras=$(uv_recorded_extras); then
+                    run_uv tool install --upgrade --reinstall "$(refresh_spec "$recorded_extras")"
+                else
+                    run_uv tool upgrade --reinstall agentic-hil
+                fi
                 return 0
             fi
             run_uv tool install --upgrade --reinstall "$(package_spec)"

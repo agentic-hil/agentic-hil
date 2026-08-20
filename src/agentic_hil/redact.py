@@ -70,26 +70,41 @@ _ASSIGNMENT_NAME = (
 # A quoted value has to be masked through its *matching* closing quote, not up to
 # the first delimiter inside it: `PASSWORD='correct horse battery staple'` and
 # `PASSWORD="alpha,beta"` carry the credential across the space and the comma that
-# a bare-token value would stop at, and stopping there emitted the tail in clear
-# text. So a quote after `=` switches passes: the value is everything up to the
-# same quote — an escaped quote (`\"`) does not close it, and a value that never
-# closes ends at the line — and the quote characters themselves survive so the
-# line still reads as an assignment. Re-masking `[redacted]` between the quotes
-# yields `[redacted]` again, so a second pass is a no-op.
+# a bare-token value would stop at, and a value quoted across a newline
+# (`PASSWORD="alpha<newline>beta"`) carries it across that too; stopping at any of
+# them emitted the tail in clear text. So a quote after `=` switches passes, in
+# two arms. The first consumes the value through the matching closing quote
+# wherever it is, line boundaries included: an escaped quote (`\"`) does not close
+# it and an escaped anything (`\<newline>`, a line continuation) is consumed
+# whole, so the credential is masked to the quote that really ends it. The second
+# arm is the fallback for a value that never closes, which the shell reads as the
+# rest of its line, so the mask ends there rather than eating the lines that
+# follow. Either way the quote characters survive so the line still reads as an
+# assignment, and re-masking `[redacted]` between the quotes yields `[redacted]`
+# again, so a second pass is a no-op.
 _SENSITIVE_ASSIGNMENT_QUOTED = re.compile(
     r"(?P<keep>" + _ASSIGNMENT_NAME + r"(?P<quote>[\"']))"
+    r"(?:"
+    r"(?:\\[\s\S]|(?!(?P=quote))[^\\])*?(?P<close>(?P=quote))"
+    r"|"
     r"(?:\\.|(?!(?P=quote))[^\\\r\n])*"
-    r"(?P<close>(?P=quote))?",
+    r")",
     re.IGNORECASE,
 )
 
 # An unquoted value is a shell token, a query parameter or a command flag, so it
-# ends at whatever ends a value in those contexts, which is what keeps the rest of
-# the line byte-identical; a bracket is excluded so a second pass over an
-# already-masked stream is a no-op. The value cannot begin with a quote — that is
-# the quoted pass's job above — because the character class excludes both quotes.
+# ends only at what actually ends a value in those contexts — whitespace, a query
+# `&`, a fragment `#`, a shell `;` or a closing `)` — and runs through the commas
+# and brackets that are ordinary inside a value (`PASSWORD=alpha,beta` is one
+# value, not `alpha` and a leaked `,beta`, and `PASSWORD=abc[def` is one value,
+# not `abc` and a leaked `[def`). Keeping the rest of the line byte-identical is
+# the point, so nothing else is treated as a boundary. A second pass is still a
+# no-op: the `[redacted]` the first pass wrote is itself such a value and
+# re-masks to `[redacted]`, so brackets do not need to be boundaries to reach
+# idempotence. The value cannot begin with a quote — that is the quoted pass's job
+# above — because the character class excludes both quotes.
 _SENSITIVE_ASSIGNMENT_UNQUOTED = re.compile(
-    r"(?P<keep>" + _ASSIGNMENT_NAME + r")[^\s\"'\[\]&#;,)]+",
+    r"(?P<keep>" + _ASSIGNMENT_NAME + r")[^\s\"'&#;)]+",
     re.IGNORECASE,
 )
 

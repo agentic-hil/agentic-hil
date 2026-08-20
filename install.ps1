@@ -183,16 +183,69 @@ function Test-UvManagesTool {
     return $false
 }
 
+function Get-UvRecordedExtras {
+    # The extras uv recorded for the tool it owns, as a string[], or $null when uv
+    # keeps no receipt this can read. uv writes `agentic-hil[can,pyocd]` into a
+    # receipt beside the tool environment as `extras = ["can", "pyocd"]`, and
+    # reading it back is what lets a refresh add the extra THIS run asks for
+    # without dropping one an earlier install or a hand edit recorded. Only the
+    # first requirement object is read, which is the agentic-hil requirement uv
+    # records first. The comma before the return keeps an empty result an empty
+    # array rather than letting PowerShell collapse it to $null, so "no extras
+    # recorded" stays distinct from "no receipt to read".
+    $probe = Invoke-Captured -File 'uv' -Arguments @('tool', 'dir')
+    if ($probe.ExitCode -ne 0) { return $null }
+    $receipt = Join-Path (Join-Path $probe.Output.Trim() 'agentic-hil') 'uv-receipt.toml'
+    if (-not (Test-Path -LiteralPath $receipt)) { return $null }
+    $text = Get-Content -LiteralPath $receipt -Raw
+    $extras = New-Object System.Collections.Generic.List[string]
+    $requirements = [regex]::Match($text, 'requirements = \[(.*)')
+    if ($requirements.Success) {
+        $firstObject = ($requirements.Groups[1].Value -split '\}', 2)[0]
+        $extrasMatch = [regex]::Match($firstObject, 'extras = \[([^\]]*)\]')
+        if ($extrasMatch.Success) {
+            foreach ($quoted in [regex]::Matches($extrasMatch.Groups[1].Value, '"([^"]*)"')) {
+                $extras.Add($quoted.Groups[1].Value)
+            }
+        }
+    }
+    return ,$extras.ToArray()
+}
+
+function Get-RefreshSpec {
+    # This run's extras merged with the ones uv already recorded, spelled
+    # agentic-hil[...] with this run's pin if there is one. Merging adds the [can]
+    # a --can run wants even to a bare recorded requirement, and keeps a recorded
+    # extra (a hand-added pyocd) a bare `tool install agentic-hil[can]` would drop.
+    param([string[]]$Recorded)
+    $extras = New-Object System.Collections.Generic.List[string]
+    if ($WithCan) { $extras.Add('can') }
+    foreach ($extra in $Recorded) {
+        if (-not $extras.Contains($extra)) { $extras.Add($extra) }
+    }
+    $spec = 'agentic-hil'
+    if ($extras.Count -gt 0) { $spec = "agentic-hil[$([string]::Join(',', $extras))]" }
+    if ($Version) { $spec = "$spec==$Version" }
+    return $spec
+}
+
 function Install-WithUv {
     if ($script:InstallMode -eq 'refresh') {
         if (Test-UvManagesTool) {
-            # `uv tool upgrade` reinstalls from the requirement uv recorded, and
-            # that requirement already names the extras this tool carries, so a
-            # refresh keeps `agentic-hil[can,pyocd]` as `[can,pyocd]` rather than
-            # rewriting it to this run's `[can]`. --reinstall is what replaces the
-            # files even when the recorded version is already current, which is
-            # the whole of the repair the anchor is here for.
-            Invoke-Uv -Arguments @('tool', 'upgrade', '--reinstall', 'agentic-hil')
+            # uv owns this tool. Reinstall from the requirement uv recorded merged
+            # with this run's extras: the recorded `[can,pyocd]` survives (a
+            # `tool install agentic-hil[can]` would drop pyocd) and a `--can` a
+            # bare recorded requirement never had is added (a `tool upgrade` would
+            # never add it). --reinstall replaces the files even when the recorded
+            # version is already current, which is the repair the anchor exists
+            # for. When uv keeps no readable receipt, fall back to the upgrade that
+            # preserves whatever it did record.
+            $recorded = Get-UvRecordedExtras
+            if ($null -ne $recorded) {
+                Invoke-Uv -Arguments @('tool', 'install', '--upgrade', '--reinstall', (Get-RefreshSpec -Recorded $recorded))
+            } else {
+                Invoke-Uv -Arguments @('tool', 'upgrade', '--reinstall', 'agentic-hil')
+            }
             return
         }
         Invoke-Uv -Arguments @('tool', 'install', '--upgrade', '--reinstall', (Get-PackageSpec))

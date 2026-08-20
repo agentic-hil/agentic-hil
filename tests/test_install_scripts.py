@@ -1339,40 +1339,89 @@ def test_a_development_installation_is_kept_and_the_transcript_says_why(tmp_path
         assert marker.read_text(encoding="utf-8").strip() == "existing", transcript
 
 
-def test_refreshing_a_uv_tool_keeps_the_extras_it_was_installed_with(tmp_path: Path) -> None:
-    """The regression a `uv tool install --upgrade agentic-hil[can]` refresh caused.
+def _uv_refresh_stub(release: str, uv_log: Path, pycan_marker: Path, marker: Path) -> str:
+    """A uv stub for the merge-on-refresh path, shared by the preserve and add
+    cases below. It answers `tool dir` with the tool root and `tool dir --bin`
+    with the bin directory, so the script can find the receipt and the console
+    script; it answers `tool list` so uv is seen to own the tool; and its `tool
+    install` models real uv, recording exactly the requirement it is handed. It
+    rewrites the receipt to the extras of that requirement, drops a python-can
+    marker when `can` is among them, and (only under --reinstall) writes the
+    repaired console script whose agent-install reports "fresh"."""
+    return (
+        f'echo "$*" >> "{uv_log}"\n'
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  if [ "$3" = "--bin" ]; then echo "$UV_TOOL_BIN_DIR"; else echo "$UV_TOOL_ROOT"; fi\n'
+        "  exit 0\n"
+        "fi\n"
+        # uv owns this tool, so the probe finds it and the refresh reads the receipt.
+        'if [ "$1" = "tool" ] && [ "$2" = "list" ]; then\n'
+        f'  echo "agentic-hil v{release}"\n'
+        "  exit 0\n"
+        "fi\n"
+        # `tool install` records the requirement it is handed, extras and all. The
+        # merge is what hands it the recorded extras plus this run's, so the receipt
+        # it writes here is what proves both survived. --reinstall repairs the files.
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  case "$*" in\n'
+        "    *--reinstall*) : ;;\n"
+        "    *) exit 0 ;;\n"
+        "  esac\n"
+        '  for spec in "$@"; do :; done\n'
+        '  extras=$(printf \'%s\' "$spec" | sed -n \'s/[^[]*\\[\\([^]]*\\)\\].*/\\1/p\' | tr \',\' \' \')\n'
+        '  quoted=""\n'
+        '  for e in $extras; do\n'
+        '    if [ -z "$quoted" ]; then quoted="\\"$e\\""; else quoted="$quoted, \\"$e\\""; fi\n'
+        "  done\n"
+        '  printf \'requirements = [{ name = "agentic-hil", extras = [%s] }]\\n\' "$quoted" > "$UV_TOOL_ROOT/agentic-hil/uv-receipt.toml"\n'
+        '  case " $extras " in\n'
+        f'    *" can "*) echo installed > "{pycan_marker}" ;;\n'
+        "  esac\n"
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        f'  --version) echo "{release}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "  exit 0\n"
+        "fi\n"
+        # The upgrade path is the fallback for a receipt this cannot read. It must
+        # not be taken when the receipt is present, so it leaves the copy damaged;
+        # taking it wrongly is then caught by the "fresh" marker assertion.
+        'if [ "$1" = "tool" ] && [ "$2" = "upgrade" ]; then\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
 
-    A bench installed as `agentic-hil[can,pyocd]` and re-ran the canonical line,
-    which asks for `[can]` only. `uv tool install` records the requirement it is
-    handed, so refreshing through it rewrote the tool to `[can]` and dropped the
-    pyOCD dependency the bench was using. When uv already owns the tool the
-    refresh goes through `uv tool upgrade` instead, which reinstalls from the
-    requirement uv recorded, extras and all, so `[can,pyocd]` stays `[can,pyocd]`.
 
-    --reinstall is still what makes the upgrade replace a current-but-broken copy:
-    the stub only writes the repaired console script for that flag, so the "fresh"
-    marker also proves the repair happened.
-    """
-    if os.name != "posix":
-        pytest.skip("the shell install flow is exercised on the POSIX half")
+def _run_uv_refresh(tmp_path: Path, recorded_receipt: str) -> tuple[subprocess.CompletedProcess[str], str, Path, Path, Path]:
+    """Drive `install.sh` end to end against a uv-managed tool whose receipt records
+    ``recorded_receipt``. Returns the process, the uv invocation log, and the three
+    files the assertions read: the rewritten receipt, the python-can marker, and the
+    agent-install marker."""
     shell = _posix_shell()
-
     release = _release()
     home = tmp_path / "home"
     project = home / "project"
     uv_bin = tmp_path / "uv-tools" / "bin"
+    uv_root = tmp_path / "uv-tools" / "tools"
+    receipt_dir = uv_root / "agentic-hil"
     tools = tmp_path / "tools"
-    for directory in (project, uv_bin, tools):
+    for directory in (project, uv_bin, receipt_dir, tools):
         directory.mkdir(parents=True)
 
     marker = tmp_path / "who-ran-agent-install"
-    extras_marker = tmp_path / "extras-the-refreshed-tool-carries"
+    pycan_marker = tmp_path / "python-can-was-installed"
     uv_log = tmp_path / "uv-invocations"
-    # The requirement uv recorded when the tool was installed: both extras. `uv
-    # tool upgrade` reinstalls from it and leaves it alone; a `tool install` with
-    # this run's spec would overwrite it with `[can]`.
-    receipt = tmp_path / "uv-recorded-extras"
-    receipt.write_text("can pyocd\n", encoding="utf-8")
+    # The requirement uv recorded when the tool was installed, in the receipt uv
+    # keeps beside the tool environment. The refresh reads it to decide the
+    # requirement it reinstalls from.
+    receipt = receipt_dir / "uv-receipt.toml"
+    receipt.write_text(recorded_receipt, encoding="utf-8")
 
     # The tool uv already owns, sitting in its own bin, which is on PATH. It is the
     # damaged copy the refresh has to replace: it answers --version but writes
@@ -1386,55 +1435,7 @@ def test_refreshing_a_uv_tool_keeps_the_extras_it_was_installed_with(tmp_path: P
         "exit 0\n",
     )
     _stub_executable(tools / "claude", "exit 0\n")
-    _stub_executable(
-        tools / "uv",
-        f'echo "$*" >> "{uv_log}"\n'
-        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
-        '  echo "$UV_TOOL_BIN_DIR"\n'
-        "  exit 0\n"
-        "fi\n"
-        # uv owns this tool, so the probe finds it and the refresh takes the
-        # upgrade path rather than a fresh install.
-        'if [ "$1" = "tool" ] && [ "$2" = "list" ]; then\n'
-        f'  echo "agentic-hil v{release}"\n'
-        "  exit 0\n"
-        "fi\n"
-        # `tool upgrade` reinstalls from the recorded requirement and leaves it
-        # untouched, so the extras survive. --reinstall is what repairs the files.
-        'if [ "$1" = "tool" ] && [ "$2" = "upgrade" ]; then\n'
-        '  case "$*" in\n'
-        "    *--reinstall*) : ;;\n"
-        "    *) exit 0 ;;\n"
-        "  esac\n"
-        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
-        "#!/bin/sh\n"
-        'case "\\$1" in\n'
-        f'  --version) echo "{release}" ;;\n'
-        f'  agent-install) cat "{receipt}" > "{extras_marker}"; echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
-        "esac\n"
-        "exit 0\n"
-        "STUB\n"
-        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
-        "  exit 0\n"
-        "fi\n"
-        # A `tool install` here would be the bug: it would rewrite the recorded
-        # requirement to this run's spec and drop pyocd. Model that so a wrong path
-        # is caught by the extras assertion, not passed over.
-        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
-        f'  echo "can" > "{receipt}"\n'
-        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
-        "#!/bin/sh\n"
-        'case "\\$1" in\n'
-        f'  --version) echo "{release}" ;;\n'
-        f'  agent-install) cat "{receipt}" > "{extras_marker}"; echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
-        "esac\n"
-        "exit 0\n"
-        "STUB\n"
-        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
-        "  exit 0\n"
-        "fi\n"
-        "exit 0\n",
-    )
+    _stub_executable(tools / "uv", _uv_refresh_stub(release, uv_log, pycan_marker, marker))
 
     result = subprocess.run(
         [shell, str(SHELL_SCRIPT)],
@@ -1447,28 +1448,113 @@ def test_refreshing_a_uv_tool_keeps_the_extras_it_was_installed_with(tmp_path: P
             "HOME": str(home),
             "PATH": f"{tools}:{uv_bin}:/usr/bin:/bin",
             "UV_TOOL_BIN_DIR": str(uv_bin),
+            "UV_TOOL_ROOT": str(uv_root),
         },
         timeout=SCRIPT_TIMEOUT_S,
         check=False,
     )
+    invocations = uv_log.read_text(encoding="utf-8") if uv_log.is_file() else ""
+    return result, invocations, receipt, pycan_marker, marker
 
+
+def test_refreshing_a_uv_tool_keeps_the_extras_it_was_installed_with(tmp_path: Path) -> None:
+    """The regression a `uv tool install --upgrade agentic-hil[can]` refresh caused.
+
+    A bench installed as `agentic-hil[can,pyocd]` and re-ran the canonical line,
+    which asks for `[can]` only. `uv tool install` records the requirement it is
+    handed, so refreshing through it with this run's spec alone rewrote the tool to
+    `[can]` and dropped the pyOCD dependency the bench was using. The refresh now
+    reads the extras uv recorded and merges them with this run's, so it reinstalls
+    from `agentic-hil[can,pyocd]` and `[can,pyocd]` survives.
+
+    --reinstall is still what makes the install replace a current-but-broken copy:
+    the stub only writes the repaired console script for that flag, so the "fresh"
+    marker also proves the repair happened.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(
+        tmp_path,
+        'requirements = [{ name = "agentic-hil", extras = ["can", "pyocd"] }]\n',
+    )
+
+    release = _release()
     transcript = f"{result.stdout}{result.stderr}"
     assert result.returncode == 0, transcript
     assert f"agentic-hil {release} is here and not older than {release}, refreshing this current installation" in transcript, transcript
-    assert uv_log.is_file(), transcript
-    invocations = uv_log.read_text(encoding="utf-8")
-    # The refresh went through `uv tool upgrade --reinstall`, not a `tool install`
-    # that would have rewritten the requirement to this run's `[can]`.
-    assert "tool upgrade --reinstall agentic-hil" in invocations, invocations
-    assert "tool install" not in invocations, invocations
+    # The refresh reinstalled from the merged requirement, not a bare
+    # `agentic-hil[can]` that would have dropped pyocd, and not the `tool upgrade`
+    # fallback that leaves the copy damaged.
+    assert "tool install --upgrade --reinstall agentic-hil[can,pyocd]" in invocations, invocations
+    assert "tool upgrade" not in invocations, invocations
     # The repair happened: step 4 registered out of the reinstalled copy.
     assert marker.is_file(), transcript
     assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
-    # And the refreshed tool still carries the pyocd extra it was installed with.
-    assert extras_marker.is_file(), transcript
-    carried = extras_marker.read_text(encoding="utf-8").split()
-    assert "pyocd" in carried, carried
-    assert "can" in carried, carried
+    # The receipt the reinstall recorded still names both extras, and the can extra
+    # pulled its dependency in.
+    recorded = receipt.read_text(encoding="utf-8")
+    assert '"pyocd"' in recorded, recorded
+    assert '"can"' in recorded, recorded
+    assert pycan_marker.is_file(), transcript
+
+
+def test_refreshing_a_bare_uv_tool_adds_the_can_extra_this_run_asks_for(tmp_path: Path) -> None:
+    """The other half of the merge: a requested extra that was missing is added.
+
+    A bench installed the tool bare — `agentic-hil`, no extras — and re-ran the
+    canonical line, which enables `[can]` by default. A `uv tool upgrade` would
+    reinstall from the bare recorded requirement and never add the extra, so the
+    documented --can option could not enable CAN on an existing uv installation and
+    the run reported success without installing what it named. The refresh now
+    merges this run's `can` into the recorded requirement and reinstalls from
+    `agentic-hil[can]`, so the receipt records `can` and python-can is pulled in.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(
+        tmp_path,
+        'requirements = [{ name = "agentic-hil" }]\n',
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    # The refresh reinstalled from the merged requirement, adding the can this run
+    # asked for that the bare recorded requirement did not have.
+    assert "tool install --upgrade --reinstall agentic-hil[can]" in invocations, invocations
+    assert "tool upgrade" not in invocations, invocations
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+    # The resulting receipt records the extra, and the dependency it pulls in landed.
+    recorded = receipt.read_text(encoding="utf-8")
+    assert '"can"' in recorded, recorded
+    assert pycan_marker.is_file(), transcript
+
+
+def test_both_scripts_merge_the_recorded_extras_into_a_uv_refresh() -> None:
+    """The merge-on-refresh contract, pinned on both scripts.
+
+    A uv-managed refresh must reinstall from the extras uv recorded merged with
+    this run's, so it neither drops a recorded extra nor ignores a requested one.
+    The PowerShell side has no interpreter in every checkout, so this static check
+    is its regression guard: it reads uv's receipt, builds the merged spec, and
+    hands it to `tool install --reinstall` rather than reinstalling the bare name
+    through `tool upgrade` when the receipt is there.
+    """
+    shell = _code_only(_shell_source())
+    powershell = _code_only(_powershell_source())
+
+    # Both read the requirement uv recorded, from the receipt beside the tool env.
+    assert "uv-receipt.toml" in shell, shell
+    assert "uv-receipt.toml" in powershell, powershell
+    # Both build the merged requirement and reinstall from it under --reinstall.
+    assert re.search(r'tool install --upgrade --reinstall "\$\(refresh_spec ', shell), shell
+    assert re.search(r"'tool', 'install', '--upgrade', '--reinstall', \(Get-RefreshSpec", powershell), powershell
+    # And the pre-fix bare-name upgrade is only the fallback for an unreadable
+    # receipt, not the path a present receipt takes.
+    assert "refresh_spec" in shell, shell
+    assert "Get-RefreshSpec" in powershell, powershell
 
 
 def test_refreshing_a_pip_installation_forces_the_reinstall(tmp_path: Path) -> None:

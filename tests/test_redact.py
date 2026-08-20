@@ -179,6 +179,55 @@ def test_a_quoted_assignment_that_never_closes_masks_to_the_line_end() -> None:
     assert out == "  PASSWORD='[redacted]\n  next line kept\n"
 
 
+def test_a_quoted_assignment_masks_across_a_newline_inside_the_value() -> None:
+    """A value quoted across a line break is still one credential up to its
+    matching quote, so the mask crosses the newline instead of stopping at it and
+    emitting the second line in clear text. Everything after the closing quote is
+    byte-identical."""
+    line = 'PASSWORD="alpha\nbeta gamma" rest\n'
+
+    out = redact_sensitive({"stdout": line})["stdout"]
+
+    assert "alpha" not in out
+    assert "beta gamma" not in out
+    assert out == 'PASSWORD="[redacted]" rest\n'
+
+
+def test_a_quoted_assignment_masks_across_an_escaped_line_continuation() -> None:
+    """A backslash-newline inside the value is a line continuation, not the end of
+    the value, so it is consumed whole and the credential after it is masked too
+    rather than leaking past the break."""
+    line = 'token="alpha\\\nbeta" trailing=kept\n'
+
+    out = redact_sensitive({"stderr": line})["stderr"]
+
+    assert "beta" not in out
+    assert out == 'token="[redacted]" trailing=kept\n'
+
+
+def test_an_unquoted_value_runs_through_the_punctuation_that_is_valid_inside_it() -> None:
+    """A comma and a bracket are ordinary characters in a shell token and in query
+    data, so the value runs through them to the space that ends the token; a mask
+    that stopped at the comma or the bracket left the tail in clear text.
+
+    Idempotence does not depend on treating the bracket as a boundary: the
+    `[redacted]` the first pass writes is itself masked back to `[redacted]`."""
+    comma = "  env: PASSWORD=alpha,beta rest\n"
+    bracket = "  env: PASSWORD=abc[def rest\n"
+
+    comma_out = redact_sensitive({"stdout": comma})["stdout"]
+    bracket_out = redact_sensitive({"stdout": bracket})["stdout"]
+
+    assert "alpha,beta" not in comma_out
+    assert ",beta" not in comma_out
+    assert comma_out == "  env: PASSWORD=[redacted] rest\n"
+    assert "abc" not in bracket_out
+    assert "[def" not in bracket_out
+    assert bracket_out == "  env: PASSWORD=[redacted] rest\n"
+    assert redact_sensitive({"stdout": comma_out})["stdout"] == comma_out
+    assert redact_sensitive({"stdout": bracket_out})["stdout"] == bracket_out
+
+
 def test_a_second_pass_over_a_masked_quoted_assignment_changes_nothing() -> None:
     """Redacting `'[redacted]'` again yields `'[redacted]'`, so the quoted pass is
     idempotent the same way the unquoted one is."""
