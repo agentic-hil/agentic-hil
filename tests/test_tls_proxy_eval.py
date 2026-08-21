@@ -225,20 +225,21 @@ def test_the_failing_proof_runs_with_the_variable_removed() -> None:
 
 
 def test_only_provisioning_reaches_for_the_system_store() -> None:
-    """The variable is a prefix on the two installs that provision, never an export.
+    """The variable is a prefix on the installs that provision, never an export.
 
-    Two commands set it, and both are a `uv tool install` that builds a bench for
-    a later proof to measure: the seed for proof 1, and proof 2's own by-name
-    install of the environment this checkout is overlaid onto. Neither is an
-    export, which would outlive the command and hand proof 1 the very thing it is
-    measuring the absence of. The lines that merely print those commands back to
+    Three commands set it, and each is a `uv tool install` that builds a bench for
+    a later proof to measure: the seed for proof 1, proof 2's own by-name install
+    of the environment this checkout is overlaid onto, and proof 3's restore of
+    the released seed so the installer has an older release to upgrade off. None is
+    an export, which would outlive the command and hand proof 1 the very thing it
+    is measuring the absence of. The lines that merely print those commands back to
     the reader are not command prefixes and are not counted.
     """
     code = _code_only(_entrypoint())
     prefixes = [line.strip() for line in code.splitlines() if re.match(r"\s*(if )?UV_SYSTEM_CERTS=1 ", line)]
 
     assert "export UV_SYSTEM_CERTS" not in code, code
-    assert len(prefixes) == 2, prefixes
+    assert len(prefixes) == 3, prefixes
     for prefix in prefixes:
         assert re.match(r"(if )?UV_SYSTEM_CERTS=1 uv tool install", prefix), prefixes
 

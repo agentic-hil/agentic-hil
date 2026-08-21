@@ -69,8 +69,12 @@ fails:
    not a stub. Because this checkout is newer than any release, the upgrade the
    retry completes is an already-current one; what it proves is that the retry
    reached the index with verification on and the command reported success.
-4. **Proof 3, the anchor repairs it.** The released one-line installer, fetched
-   and run exactly as an operator would type it:
+4. **Proof 3, the anchor repairs it.** Proof 2 left this checkout overlaid on a
+   force-installed latest release, so the bench is first returned to the seeded
+   0.16.0 — receipt and files alike — the version an operator from before the
+   retry would still be on and the one the installer has a real upgrade to make
+   from. Then the released one-line installer, fetched and run exactly as an
+   operator would type it:
    `curl -LsSf https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh | sh`.
    The run asserts that the installer met the same certificate failure, said it
    was switching to this machine's own store, exited zero, and left the current
@@ -94,7 +98,7 @@ proxy. It takes a few minutes. Nothing is written outside the container, and
 `--rm` removes it either way.
 
 Under pytest the same build and run live in
-`tests/test_tls_proxy_eval.py::test_the_container_reproduces_both_halves_of_the_bench`,
+`tests/test_tls_proxy_eval.py::test_the_container_reproduces_every_proof_of_the_bench`,
 which skips unless Docker is present **and** `AGENTIC_HIL_TLS_PROXY_EVAL=1` is
 set. It is not part of default CI, for the same reason it is opt-in here: it
 costs network and minutes. Set `AGENTIC_HIL_TLS_PROXY_EVAL_IMAGE` to build and

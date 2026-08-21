@@ -18,9 +18,10 @@
 # error is the entire point of this container.
 #
 # The first assertion that fails ends the run non-zero. Later proofs depend on
-# earlier ones (proof 1 needs the seeded 0.16.0, proof 2 reprovisions it
-# unpinned, proof 3 replaces it), so there is nothing to learn from continuing
-# past a failure.
+# earlier ones (proof 1 needs the seeded 0.16.0, proof 2 reprovisions it unpinned
+# and overlays this checkout, proof 3 restores the seed and lets the released
+# installer upgrade off it), so there is nothing to learn from continuing past a
+# failure.
 
 set -u
 
@@ -34,6 +35,7 @@ INSTALLER_URL="$RELEASES_LATEST/download/install.sh"
 
 PROXY_LOG=/tmp/mitmdump.log
 SEED_LOG=/tmp/seed.log
+RESEED_LOG=/tmp/reseed.log
 UPGRADE_REPORT=/tmp/upgrade.json
 UPGRADE_ERRORS=/tmp/upgrade.err
 INSTALLER_LOG=/tmp/installer.log
@@ -298,6 +300,30 @@ pass "proof 2, the upgrade under review met the trust failure and healed itself 
     "$candidate_note"
 
 heading "Proof 3: the released one-line installer, on the same bench, unchanged"
+# Proof 2 left this checkout overlaid on a force-installed latest release, so uv's
+# receipt already names the latest version even though the files on disk are this
+# working tree's. The released installer upgrades in place with `uv tool install
+# --upgrade agentic-hil`; against a receipt that already says "latest", uv checks
+# the environment, finds nothing newer, installs nothing, and never reaches the
+# index at all -- the overlaid dev files would survive and this proof would prove
+# nothing. So put the bench back where this installer's audience actually sits:
+# the released 0.16.0, receipt and files alike, an operator from before the retry
+# with a real upgrade still to make.
+printf 'setup: UV_SYSTEM_CERTS=1 uv tool install --force "%s"\n' "$SEED_REQUIREMENT"
+if UV_SYSTEM_CERTS=1 uv tool install --force "$SEED_REQUIREMENT" >"$RESEED_LOG" 2>&1; then
+    verbatim "uv output" "$RESEED_LOG"
+else
+    verbatim "uv output" "$RESEED_LOG"
+    fail "proof 3 setup, the released seed $SEED_VERSION could not be restored for the installer to upgrade from" \
+        "with no released version below the latest, the installer has nothing to move and never reaches the index"
+fi
+reseeded=$(agentic-hil --version 2>/dev/null)
+if [ "$reseeded" != "$SEED_VERSION" ]; then
+    fail "proof 3 setup, the bench was not returned to the released $SEED_VERSION" \
+        "agentic-hil --version answered '$reseeded', so the installer would not be upgrading off the seed"
+fi
+printf 'setup: the bench is back on the released %s, the version the installer upgrades from\n' "$SEED_VERSION"
+
 printf 'command: curl -LsSf %s | sh\n' "$INSTALLER_URL"
 curl -LsSf "$INSTALLER_URL" | sh >"$INSTALLER_LOG" 2>&1
 installer_status=$?
