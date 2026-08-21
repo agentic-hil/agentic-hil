@@ -431,8 +431,8 @@ def test_the_refused_erase_incident_stands_down_and_owes_no_operator_recovery(tm
     `nothing_to_recover: true` rather than clearing anything. The retry the
     remedy points at is simply accepted; there is no `recover --confirm-safe-state`
     step before it, and the remedy text must not claim one. What does still hold
-    is that the flash is indeterminate — `cleanup_required` and `cleanup_reasons`
-    say so — until a retry programs and verifies.
+    is that the flash is indeterminate, `cleanup_required` and `cleanup_reasons`
+    say so, until a retry programs and verifies.
     """
     result, service, _ = flash_through_stlink(tmp_path, FAKE_STLINK_ERASE_REFUSED)
     try:
@@ -447,7 +447,7 @@ def test_the_refused_erase_incident_stands_down_and_owes_no_operator_recovery(tm
         assert result["cleanup_required"] is True
         assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
 
-        # There is nothing standing to clear, so recovery is a no-op — the exact
+        # There is nothing standing to clear, so recovery is a no-op, the exact
         # thing the obsolete remedy text sent an operator to do.
         recovered = service.call("hardware_recover", {})
         assert recovered["ok"] is True
@@ -473,9 +473,9 @@ def test_the_refused_erase_incident_inside_a_declared_run_holds_until_the_run_st
     call ends. A call made inside a declared run does not: the run owns the hold,
     so the failed flash comes back `quarantined: true` with no
     `incident_stood_down`, and the declared run keeps the probe until
-    `bench_run_stop`. Within the run the incident still owes no operator gate —
+    `bench_run_stop`. Within the run the incident still owes no operator gate,
     `hardware_recover` answers `nothing_to_recover: true` and a retry is accepted
-    without a recovery step — but the stand-down is the run teardown's, which
+    without a recovery step, but the stand-down is the run teardown's, which
     `bench_run_stop` performs. Both variants live in the docs, so both are pinned.
     """
     firmware = tmp_path / "build" / "firmware.elf"
@@ -492,7 +492,7 @@ def test_the_refused_erase_incident_inside_a_declared_run_holds_until_the_run_st
         assert result["error_type"] == "flash_erase_failed"
         # The declared run owns the hold, so this call does not stand the incident
         # down: it stays quarantined and the run keeps the probe. This is the exact
-        # place the previous catalogue text was wrong — it promised the stand-down
+        # place the previous catalogue text was wrong, it promised the stand-down
         # unconditionally.
         assert result["quarantined"] is True
         assert "incident_stood_down" not in result
@@ -510,7 +510,7 @@ def test_the_refused_erase_incident_inside_a_declared_run_holds_until_the_run_st
         assert service.coordinator.run_active is True
 
         # And a retry is accepted rather than refused with `resource_quarantined`,
-        # just as the remedy says — but here it stays quarantined, because the run
+        # just as the remedy says, but here it stays quarantined, because the run
         # still holds the incident and only `bench_run_stop` stands it down.
         retry = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
         assert retry.get("error_type") != "resource_quarantined"
@@ -550,7 +550,7 @@ def test_a_progress_bar_between_the_announcement_and_the_refusal_is_work_underwa
     A progress bar belongs to a phase that is running, so a transcript carrying
     one is `flash_change_underway` even though no download line ever appeared. A
     transcript that reaches only the announcement and the refusal is the weaker
-    `erase_refused_effect_unconfirmed` reading — still quarantined, because the
+    `erase_refused_effect_unconfirmed` reading, still quarantined, because the
     announcement lines do not prove the device left the flash alone.
     """
     announced_only = erase_abort_point("Erasing memory corresponding to segment 0:\nErasing internal memory sectors [0 5]\nError: failed to erase memory\n")

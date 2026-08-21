@@ -29,7 +29,7 @@ verification still on (`trust_failure()` in `install.sh`, #293). `agentic-hil
 upgrade` now makes the same move (#326): a manager that fails with that
 signature is run a second time against this machine's own store, verification
 still on. The seed this container installs is a *released* version from before
-that fix, so on the bench built here the upgrade still fails at proof 1 — the
+that fix, so on the bench built here the upgrade still fails at proof 1, the
 behaviour an operator on 0.16.0 still meets, and the reason the eval seeds it.
 
 ## What the container does
@@ -65,13 +65,13 @@ fails:
    the report: the first attempt carries the trust failure, the retry adds
    `UV_SYSTEM_CERTS=1`, and the result says that second attempt is the one that
    got through. This is the live check of the real CLI, uv, the child environment
-   and the machine's own store together — the fix in `src/agentic_hil/upgrade.py`,
+   and the machine's own store together, the fix in `src/agentic_hil/upgrade.py`,
    not a stub. Because this checkout is newer than any release, the upgrade the
    retry completes is an already-current one; what it proves is that the retry
    reached the index with verification on and the command reported success.
 4. **Proof 3, the anchor repairs it.** Proof 2 left this checkout overlaid on a
    force-installed latest release, so the bench is first returned to the seeded
-   0.16.0 — receipt and files alike — the version an operator from before the
+   0.16.0, receipt and files alike, the version an operator from before the
    retry would still be on and the one the installer has a real upgrade to make
    from. Then the released one-line installer, fetched and run exactly as an
    operator would type it:
@@ -129,7 +129,7 @@ review without waiting for a release to carry it: proof 2 does not install a
 released artifact, it installs one by name only to reach the index the way proof
 1 does, then replaces the code with this working tree's.
 
-What is still keyed to a release is proof 1's seed. It is 0.16.0 on purpose — a
+What is still keyed to a release is proof 1's seed. It is 0.16.0 on purpose, a
 version from before the retry, so proof 1 reproduces the failure an operator on
 that release still meets, and proof 3 shows the installer is their way through.
 When the retry ships in a release old enough to seed a bench that then has a

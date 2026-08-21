@@ -75,8 +75,8 @@ UV_TRUST_FAILURE = subprocess.CompletedProcess[str](
 # the proxy's CA either fails identically, which is the end the refusal has to
 # tell apart from the first one.
 UV_TRUST_FAILURE_AGAIN = subprocess.CompletedProcess[str]([], 2, "", "error: Failed to upgrade agentic-hil\n  Caused by: invalid peer certificate: UnknownIssuer")
-# A second attempt that got past the trust failure — its words name no
-# certificate at all — and then fell over resolving dependencies. That is a
+# A second attempt that got past the trust failure, its words name no
+# certificate at all, and then fell over resolving dependencies. That is a
 # different failure from the first, and the third end the refusal has to tell
 # apart: the store was read, so the proxy CA is not what is missing now.
 UV_RETRY_FAILS_ANEW = subprocess.CompletedProcess[str]([], 1, "", "error: no solution found when resolving dependencies")
@@ -252,7 +252,7 @@ def test_a_retry_that_gets_past_the_trust_failure_is_not_reported_as_a_missing_c
     """The second attempt read the store, and then failed for a reason of its own.
 
     Once `UV_SYSTEM_CERTS=1` lets uv reach the index, a failure there is a
-    resolution or install failure, not the trust failure again — its words name
+    resolution or install failure, not the trust failure again, its words name
     no certificate at all. Reporting it as "the proxy's own CA is missing" would
     send the operator to edit a trust store that had just started working and
     bury the manager's real reason under a certificate diagnosis. So the retry is
