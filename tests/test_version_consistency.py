@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 from check_version_consistency import (  # noqa: E402
     DISTRIBUTION,
+    REGISTRY_DESCRIPTION_LIMIT,
     RELEASE,
     UNTRACKED_MENTIONS,
     contract_problems,
@@ -768,6 +769,23 @@ def test_a_persisted_plugin_mcp_command_is_refused(tree: Path) -> None:
     (tree / "plugins" / "agentic-hil" / ".mcp.json").write_text("{}", encoding="utf-8")
 
     assert any("MCP server command" in problem for problem in contract_problems(tree))
+
+
+def test_the_shipped_registry_description_fits_the_schema(tree: Path) -> None:
+    """The string this tree publishes, measured rather than trusted."""
+    registry = json.loads((tree / "server.json").read_text(encoding="utf-8"))
+
+    assert len(registry["description"]) <= REGISTRY_DESCRIPTION_LIMIT
+
+
+def test_a_registry_description_over_the_schema_limit_is_refused(tree: Path) -> None:
+    """`mcp-publisher validate` would refuse it at release, past the point of return."""
+    path = tree / "server.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["description"] = "x" * (REGISTRY_DESCRIPTION_LIMIT + 1)
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+    assert any("MCP registry schema allows" in problem for problem in contract_problems(tree))
 
 
 def test_the_printed_list_names_every_position_and_its_count() -> None:

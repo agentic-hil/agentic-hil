@@ -93,14 +93,22 @@ EXPECTED_VERSION_FIELD = re.compile(r"""["']expected_version["']\s*:\s*["']([^"'
 # `actions/checkout@v4` and every other third-party pin carries somebody
 # else's version and must stay invisible to this gate.
 TAG_PIN = re.compile(r"""([^\s"'`@]+)@v(\d+\.\d+\.\d+)(?![\w.])""")
-# The release each one-line installer installs, and the version an installation
-# already on the machine has to reach to be left alone. Both are a single
-# constant at the top of their script, and both have to follow the release: an
-# installer holding a number below it answers "nothing to install" to the very
-# person re-running the line to get current, and then registers the skill out of
-# the copy it kept.
+# The release each one-line installer names, a single constant at the top of its
+# script. It is what step 1 compares an installation already on the machine
+# against, and what the transcript then calls the run: a constant left behind the
+# release tells a returning user that the copy being refreshed is current when it
+# is a release old. Step 2 reaches the package manager either way now (#315), so
+# this no longer decides whether anything is installed, and it still has to
+# follow the release for the transcript to be true.
 INSTALL_SH_RELEASE = re.compile(r'^RELEASE="(\d+\.\d+\.\d+)"$', re.MULTILINE)
 INSTALL_PS1_RELEASE = re.compile(r"^\$Release = '(\d+\.\d+\.\d+)'$", re.MULTILINE)
+# The MCP registry schema server.json names declares `maxLength: 100` on
+# `description`, and `mcp-publisher validate` enforces it. That validation runs
+# in the release job, after the tag exists and after PyPI has the wheel, so a
+# description one word too long is discovered at the worst moment. The number
+# is restated here so a pull request that rewrites the description is refused
+# on the pull request instead.
+REGISTRY_DESCRIPTION_LIMIT = 100
 
 # The sweep walks the working tree, so it meets whatever else lives there.
 SKIPPED_DIRECTORIES = frozenset(
@@ -632,6 +640,12 @@ def contract_problems(root: Path) -> list[str]:
     Every version here is the release: a registry entry, a marketplace listing
     and an install command a reader copies all describe the release they can
     install, never the tree that is being worked on.
+
+    One field is measured as well as compared. The byte-for-byte comparison
+    speaks only for the string an earlier release already chose; the moment
+    somebody deliberately rewrites the description in both this file and
+    server.json, the registry schema's length rule is the only thing left that
+    can break, and it breaks in the release job rather than here.
     """
     version = release_version(root)
     found = []
@@ -656,7 +670,7 @@ def contract_problems(root: Path) -> list[str]:
         "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
         "name": "io.github.agentic-hil/agentic-hil",
         "title": "Agentic HIL",
-        "description": "Policy-gated MCP tools for embedded hardware-in-the-loop testing on real devices.",
+        "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
         "version": version,
         "repository": {
             "url": "https://github.com/agentic-hil/agentic-hil",
@@ -678,15 +692,18 @@ def contract_problems(root: Path) -> list[str]:
     }
     if registry != expected_registry:
         found.append("server.json differs from the locally validated release contract")
+    described = registry.get("description")
+    if isinstance(described, str) and len(described) > REGISTRY_DESCRIPTION_LIMIT:
+        found.append(
+            f"server.json description is {len(described)} characters, over the "
+            f"{REGISTRY_DESCRIPTION_LIMIT} the MCP registry schema allows"
+        )
 
     expected_plugin = {
         "name": "agentic-hil",
         "displayName": "Agentic Hardware-in-the-Loop",
         "version": version,
-        "description": (
-            "Safe embedded firmware development with local hardware-in-the-loop targets, "
-            "exposed as policy-gated MCP tools (probe, flash, reset, serial, CAN)."
-        ),
+        "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
         "author": {"name": "Hannes Pauli"},
         "repository": "https://github.com/agentic-hil/agentic-hil",
         "license": "Apache-2.0",
@@ -703,10 +720,7 @@ def contract_problems(root: Path) -> list[str]:
             {
                 "name": "agentic-hil",
                 "displayName": "Agentic Hardware-in-the-Loop",
-                "description": (
-                    "Safe embedded firmware development with hardware-in-the-loop targets "
-                    "via policy-gated MCP tools."
-                ),
+                "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
                 "source": "./plugins/agentic-hil",
                 "version": version,
                 "license": "Apache-2.0",

@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.agentic-hil/agentic-hil",
   "title": "Agentic HIL",
-  "description": "Policy-gated MCP tools for embedded hardware-in-the-loop testing on real devices.",
-  "version": "0.17.0",
+  "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
+  "version": "0.18.0",
   "repository": {
     "url": "https://github.com/agentic-hil/agentic-hil",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "agentic-hil",
-      "version": "0.17.0",
+      "version": "0.18.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

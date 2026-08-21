@@ -55,6 +55,22 @@ _FALLBACK_WIDTH = 88
 # "everything else" must not print them a second time.
 _HANDLED_EVERYWHERE = frozenset({"ok", "tool", "summary", "next_step", "next_steps", "remediation", "do_not", "warnings", "error_type", "meaning"})
 
+# The names a captured subprocess carries its own words under, wherever the
+# document nests them. A result that ran a package manager, a debugger or a
+# build keeps the tool's output here, and the tool wrote it in lines: reflowing
+# it into a key/value row turns a stack of `error:` lines into one unreadable
+# strip, which is the same as not printing it.
+_PROCESS_OUTPUT_KEYS = frozenset({"stdout", "stderr"})
+# How much captured output a report prints before it says it is cutting. A
+# manager that fails writes a handful of lines and a build that fails writes
+# thousands, and the line that names the cause sits at either end of them, so
+# the cut is taken out of the middle and both ends survive it. Nothing is ever
+# dropped without the rendering saying how much.
+_LITERAL_MAX_LINES = 40
+_LITERAL_HEAD_LINES = 20
+_LITERAL_TAIL_LINES = 15
+_LITERAL_MAX_LINE_CHARS = 500
+
 
 def render_result(result: JsonObject, command: str | None = None) -> str:
     """The document, rendered for a person, ending in exactly one newline."""
@@ -152,6 +168,80 @@ def _fields(pairs: Sequence[tuple[str, object]], indent: str = _INDENT) -> list[
         head = f"{indent}{label.ljust(label_width)}  "
         lines.extend(_wrap(value, indent=head, hanging=" " * len(head)))
     return lines
+
+
+def _process_output(key: object, value: object) -> str:
+    """The captured output this member holds, or "" when it is not one.
+
+    Keyed on the name rather than on the shape, because that is what a caller
+    reading the document goes by too, and a multi-line string under any other
+    name is prose the wrapper is right about.
+    """
+    if not isinstance(key, str) or key not in _PROCESS_OUTPUT_KEYS:
+        return ""
+    return value if isinstance(value, str) and value.strip() else ""
+
+
+def _clip_line(line: str) -> str:
+    """One captured line, and how much of it was left out when it is enormous."""
+    if len(line) <= _LITERAL_MAX_LINE_CHARS:
+        return line
+    return f"{line[:_LITERAL_MAX_LINE_CHARS]} [... {len(line) - _LITERAL_MAX_LINE_CHARS} characters not shown ...]"
+
+
+def _literal_block(text: str, indent: str) -> list[str]:
+    """Captured output, printed the way the process wrote it.
+
+    Indented and otherwise untouched: no wrapping, no reflowing, no quoting. The
+    whole point of this block is that the operator reads their own machine's
+    error in their own machine's words, and every transformation this module
+    applies to prose is a transformation that would move them. `splitlines`
+    rather than `split("\\n")` so a progress bar written with carriage returns
+    comes apart into lines instead of arriving as one.
+    """
+    lines = [line.rstrip() for line in text.splitlines()]
+    while lines and not lines[-1]:
+        lines.pop()
+    if len(lines) > _LITERAL_MAX_LINES:
+        cut = len(lines) - _LITERAL_HEAD_LINES - _LITERAL_TAIL_LINES
+        lines = [*lines[:_LITERAL_HEAD_LINES], f"[... {cut} lines not shown ...]", *lines[-_LITERAL_TAIL_LINES:]]
+    return [f"{indent}{_clip_line(line)}" for line in lines]
+
+
+def _members(value: Mapping[str, object]) -> tuple[list[tuple[str, object]], list[tuple[str, object]]]:
+    """An object's members, split into the rows and the things that need a body.
+
+    One split, used by every pass over an object, so a nested object and a
+    captured stream are placed the same way at every depth and in every section.
+    """
+    rows: list[tuple[str, object]] = []
+    bodies: list[tuple[str, object]] = []
+    for key, item in value.items():
+        if _renderable_scalar(item) and not _process_output(key, item):
+            rows.append((key, item))
+        else:
+            bodies.append((str(key), item))
+    return rows, bodies
+
+
+def _member_lines(key: str, value: object, indent: str) -> list[str]:
+    """One member that does not fit on a row, under its own key.
+
+    Captured output becomes a literal block, a nested object is rendered by the
+    same rules one level in, a list is unfolded. A member with nothing to say
+    contributes nothing: a heading with nothing under it says less than no
+    heading at all, and is what a structure this pass could not render produced.
+    """
+    captured = _process_output(key, value)
+    if captured:
+        return [f"{indent}{key}", *_literal_block(captured, indent + _INDENT)]
+    if isinstance(value, Mapping) and value:
+        body = _nested_mapping(value, indent + _INDENT)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and value and not _renderable_scalar(value):
+        body = _nested_sequence(value, indent + _INDENT)
+    else:
+        return []
+    return [f"{indent}{key}", *body] if body else []
 
 
 def _bullets(items: Iterable[object], indent: str = _INDENT) -> list[str]:
@@ -298,12 +388,30 @@ def render_refusal(result: JsonObject) -> list[str]:
     if isinstance(meaning, str) and meaning.strip():
         lines.append("")
         lines.extend(_wrap(meaning, indent=_INDENT))
-    details = _fields([(key, value) for key, value in result.items() if key not in _HANDLED_EVERYWHERE and _renderable_scalar(value)])
-    lines.extend(_section("Details", details))
+    lines.extend(_section("Details", _refusal_details(result)))
     steps, avoid = _remediation(result)
     lines.extend(_section("What to do", _numbered(steps)))
     lines.extend(_section("Do not", _bullets(avoid)))
     lines.extend(_tail(result))
+    return lines
+
+
+def _refusal_details(result: JsonObject) -> list[str]:
+    """Everything the refusal carries that its own place has not already taken.
+
+    A refusal that ran something carries the diagnosis in a nested object rather
+    than in a field: `upgrade_failed` puts the manager's returncode and the
+    manager's own words under `install`, and a Details section that printed only
+    scalars showed an operator every fact about the failure except the one that
+    says why it happened, and sent them back to `--json` to read their own
+    machine's error. So the nested objects are rendered under their key and the
+    captured streams are printed as the process wrote them. It stays a report:
+    rows first, then the objects that need a body, and never a dump of braces.
+    """
+    rows, bodies = _members({key: value for key, value in result.items() if key not in _HANDLED_EVERYWHERE})
+    lines = _fields(rows)
+    for key, value in bodies:
+        lines.extend(_member_lines(key, value, _INDENT))
     return lines
 
 
@@ -312,9 +420,9 @@ def render_generic(result: JsonObject) -> list[str]:
 
     The summary as prose, then the scalar fields the document carries, then the
     lists and the nested results it carries, then the next step. It never dumps
-    JSON: a nested object is rendered by the same rules one level in, and an
-    object too deep to render that way is reported by name and count rather than
-    printed, so nothing is silently dropped and nothing is unreadable.
+    JSON: a nested object is rendered by the same rules one level in, however
+    deep it goes, and captured process output is printed as a block rather than
+    reflowed, so nothing is silently dropped and nothing is unreadable.
     """
     lines = _headline(result)
     if not lines and result.get("ok") is True:
@@ -324,7 +432,10 @@ def render_generic(result: JsonObject) -> list[str]:
     for key, value in result.items():
         if key in _HANDLED_EVERYWHERE:
             continue
-        if _renderable_scalar(value):
+        captured = _process_output(key, value)
+        if captured:
+            blocks.extend(_section(key, _literal_block(captured, _INDENT)))
+        elif _renderable_scalar(value):
             scalars.append((key, value))
         elif isinstance(value, Mapping):
             blocks.extend(_section(key, _nested_mapping(value)))
@@ -339,21 +450,19 @@ def render_generic(result: JsonObject) -> list[str]:
 
 
 def _nested_mapping(value: Mapping[str, object], indent: str = _INDENT) -> list[str]:
-    """One level of a nested object: its own summary if it has one, else its scalars."""
+    """A nested object: its own summary if it has one, else its members.
+
+    Its rows first, then whatever needs a body, one indent further in, by the
+    same rules and to whatever depth the object goes. A `verification` inside an
+    `install` inside a refusal is a real shape this project builds, and stopping
+    the walk at a fixed depth would have dropped it without saying so.
+    """
     if _looks_like_result(value):
         return _result_lines(value, indent)
-    lines = _fields([(key, item) for key, item in value.items() if _renderable_scalar(item)], indent=indent)
-    for key, item in value.items():
-        body: list[str] = []
-        if isinstance(item, Mapping) and item:
-            body = _nested_mapping(item, indent + _INDENT) if _looks_like_result(item) else _fields([(name, sub) for name, sub in item.items() if _renderable_scalar(sub)], indent=indent + _INDENT)
-        elif isinstance(item, Sequence) and not isinstance(item, (str, bytes)) and item and not _renderable_scalar(item):
-            body = _nested_sequence(item, indent + _INDENT)
-        # A heading with nothing under it says less than no heading at all, and
-        # is what a structure nested deeper than this pass renders produced.
-        if body:
-            lines.append(f"{indent}{key}")
-            lines.extend(body)
+    rows, bodies = _members(value)
+    lines = _fields(rows, indent=indent)
+    for key, item in bodies:
+        lines.extend(_member_lines(key, item, indent))
     return lines
 
 
@@ -366,13 +475,14 @@ def _nested_sequence(value: Sequence[object], indent: str = _INDENT) -> list[str
             # The first scalar field carries the bullet, because a list of small
             # objects is nearly always a list of named things and a bare `-` with
             # the name on the line under it reads as an empty entry.
-            rows = [(key, sub) for key, sub in item.items() if _renderable_scalar(sub)]
+            rows, bodies = _members(item)
             if rows:
                 lines.extend(_wrap(_scalar(rows[0][1]), indent=f"{indent}- ", hanging=f"{indent}  "))
                 lines.extend(_fields(rows[1:], indent=indent + _INDENT * 2))
             else:
                 lines.append(f"{indent}-")
-            lines.extend(_nested_mapping({key: sub for key, sub in item.items() if not _renderable_scalar(sub)}, indent + _INDENT * 2))
+            for key, sub in bodies:
+                lines.extend(_member_lines(key, sub, indent + _INDENT * 2))
         else:
             lines.extend(_bullets([item], indent=indent))
     return lines
@@ -385,16 +495,21 @@ def _looks_like_result(value: Mapping[str, object]) -> bool:
 def _result_lines(value: Mapping[str, object], indent: str = _INDENT) -> list[str]:
     """A nested result: its verdict, its summary, its own fields, its remediation.
 
-    The fields come with it rather than being summarised away. A nested result
-    is where `config_status` publishes the digest an operator compares against a
-    running server, and a rendering that kept only the sentence would have been
-    the one place this layer lost something somebody acts on.
+    The fields come with it rather than being summarised away, and so does what
+    it nests under them. A nested result is where `config_status` publishes the
+    digest an operator compares against a running server, and where a step that
+    ran something keeps what it ran and what came back; a rendering that kept
+    only the sentence would have been the one place this layer lost something
+    somebody acts on. The advice stays last, under the facts it is advice about.
     """
     lines = _wrap(_summary(value) or _verdict(value) or "ok", indent=indent)
     error_type = _error_type(value)
     if error_type:
         lines.extend(_fields([("error_type", error_type)], indent=indent))
-    lines.extend(_fields([(key, item) for key, item in value.items() if key not in _HANDLED_EVERYWHERE and _renderable_scalar(item)], indent=indent))
+    rows, bodies = _members({key: item for key, item in value.items() if key not in _HANDLED_EVERYWHERE})
+    lines.extend(_fields(rows, indent=indent))
+    for key, item in bodies:
+        lines.extend(_member_lines(key, item, indent))
     if error_type:
         steps, avoid = _remediation(dict(value))
         lines.extend(_numbered(steps, indent=indent + _INDENT))

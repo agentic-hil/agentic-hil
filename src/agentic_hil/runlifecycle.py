@@ -83,10 +83,17 @@ RUN_RECORDS_KEPT = 100
 # is running, and the start command would then time out on a run that was fine.
 RECORD_WRITE_ATTEMPTS = 10
 RECORD_WRITE_BACKOFF_S = 0.02
-# The reader's half of the same contention: a read that lands in the instant
-# the writer's os.replace swaps the record answers a sharing violation on
-# Windows. That is a moment, not a state, so the read waits it out a few times
-# before it calls the state unreadable.
+# The reader's half of the same contention, and it has more than one face. A
+# read that lands in the instant the writer's os.replace swaps the record meets
+# whichever one the platform shows. Windows answers a sharing violation. POSIX
+# answers with the file rule instead: the rename drops the replaced inode's link
+# count to zero while the reader still holds it open, which reads as "not a
+# single-link regular file", and a reader that opens a moment earlier finds the
+# name leading to a different inode by the time it checks, which reads as
+# "changed while it was being opened". A writer that is not atomic adds two
+# more, a name that is briefly absent and a file only half of which has landed.
+# None of those is a state the record is in; each is a moment between two states,
+# so the read waits it out a few times before it calls the state unreadable.
 _RECORD_READ_ATTEMPTS = 6
 _RECORD_READ_RETRY_DELAY_S = 0.05
 # How long after a worker process exits the start command waits for its record
@@ -143,31 +150,60 @@ def stop_path(config: AgenticHILConfig, handle: str) -> Path:
 def read_run_record(config: AgenticHILConfig, handle: str) -> JsonObject | None:
     """One run's record, or None when this bench has never heard of it.
 
-    A read can meet the writer's own ``os.replace``: on Windows that answers a
-    sharing violation, which is a moment rather than a state, so the read
-    retries briefly (the writer holds the same patience for a reader) before it
-    calls the state unreadable. A complete read that fails validation stays
-    terminal on the first answer: the replace is atomic, so a parsed file is a
-    whole file."""
+    A read can meet the writer publishing the next record, and a publication is
+    a moment rather than a state: what a reader sees while one is under way says
+    nothing about what the run is doing, only that it is being said again. So
+    every face of that moment is waited out rather than reported, and they are
+    not all the same face. Windows refuses a rename over a file somebody has
+    open, POSIX lets it through and leaves the reader holding an inode the file
+    rule no longer recognises, and a writer that unlinked before it renamed
+    would show a name that is briefly absent or a file only half of which has
+    landed. The patience is bounded and it is patience, not denial: what a
+    record still torn on the last look ends in is the refusal it always ended
+    in, still naming the reason that look gave, because the decisive cause is
+    the whole of what a caller can act on.
+
+    Two answers are not waited on, and for the same reason: they are states
+    rather than moments. A file that was not there on the very first look is a
+    handle this bench has never heard of, which is what ``run_not_found`` is for
+    and what the start command polls on, so it is answered at once and only a
+    file that was there and then was not counts as a transition. And a record
+    that parses whole while naming a version this code cannot read is another
+    version's file, which no amount of looking again will change."""
+    path = record_path(config, handle)
+    # Whether any look in this call found something under the name. It is what
+    # separates "there is no such run" from "the writer is between two steps".
+    seen = False
     for attempt in range(_RECORD_READ_ATTEMPTS):
+        last_look = attempt == _RECORD_READ_ATTEMPTS - 1
         try:
-            text = safe_read_text(record_path(config, handle))
-            break
+            text = safe_read_text(path)
         except FileNotFoundError:
-            return None
-        except ConfigError as error:
-            raise ConfigError("run_state_invalid", "Test run state could not be read.", {"run": handle, "backend_error": str(error)}) from error
-        except (OSError, UnicodeDecodeError) as error:
-            if attempt == _RECORD_READ_ATTEMPTS - 1:
+            if not seen or last_look:
+                return None
+            time.sleep(_RECORD_READ_RETRY_DELAY_S)
+            continue
+        except (ConfigError, OSError, UnicodeDecodeError) as error:
+            # Every refusal safe_read_text can raise here is a statement about
+            # the file as it is in this instant, and the instant is exactly what
+            # the writer's replace changes.
+            seen = True
+            if last_look:
                 raise ConfigError("run_state_invalid", "Test run state could not be read.", {"run": handle, "backend_error": str(error)}) from error
             time.sleep(_RECORD_READ_RETRY_DELAY_S)
-    try:
-        value = json.loads(text)
-    except ValueError as error:
-        raise ConfigError("run_state_invalid", "Test run state is not valid JSON.", {"run": handle, "backend_error": str(error)}) from error
-    if not isinstance(value, dict) or value.get("version") != RUN_RECORD_VERSION:
-        raise ConfigError("run_state_invalid", "Test run state is not a record this version can read.", {"run": handle})
-    return value
+            continue
+        seen = True
+        try:
+            value = json.loads(text)
+        except ValueError as error:
+            if last_look:
+                raise ConfigError("run_state_invalid", "Test run state is not valid JSON.", {"run": handle, "backend_error": str(error)}) from error
+            time.sleep(_RECORD_READ_RETRY_DELAY_S)
+            continue
+        if not isinstance(value, dict) or value.get("version") != RUN_RECORD_VERSION:
+            raise ConfigError("run_state_invalid", "Test run state is not a record this version can read.", {"run": handle})
+        return value
+    return None
 
 
 def worker_is_gone(config: AgenticHILConfig, handle: str) -> bool:
@@ -188,7 +224,15 @@ def worker_is_gone(config: AgenticHILConfig, handle: str) -> bool:
 
 def stop_requested_at(config: AgenticHILConfig, handle: str) -> str | None:
     """When a stop was asked for, or None. The file's existence is the request;
-    its content is only there to say who asked and when."""
+    its content is only there to say who asked and when.
+
+    This reader wants no retry of the record reader's kind, and for a reason
+    worth stating rather than leaving to look like an omission. The record has
+    many states and a reader that catches it mid-publication must not report the
+    moment as one of them; this file has one, and the request is the file being
+    there. So every way of failing to read it lands on the same answer the file's
+    existence already gives, an in-flight replace included, and waiting would
+    only make a stop slower to take effect."""
     try:
         text = safe_read_text(stop_path(config, handle))
     except FileNotFoundError:
@@ -209,11 +253,20 @@ def stop_requested_at(config: AgenticHILConfig, handle: str) -> str | None:
 def write_run_record(config: AgenticHILConfig, handle: str, record: JsonObject) -> None:
     """Publish a run's record, retrying while a reader holds the old one.
 
-    The write is atomic, which is what makes a reader safe; what it is not is
-    uncontended. A rename over a file somebody has open is refused on Windows,
-    and the readers here are status polls that arrive whenever they arrive, so
-    the write asks again rather than treating another process's curiosity as a
-    reason the run cannot say what it is doing."""
+    The write is atomic, and that is a property of one call rather than a habit
+    of this one: :func:`~agentic_hil.config.atomic_write_text` writes a whole new
+    file under a temporary name in the record's own directory and renames it over
+    the record, so the name never leads to nothing and never leads to half a
+    document, and the temporary is in the same directory precisely so the rename
+    is a rename rather than a copy across filesystems. Nothing here unlinks the
+    record first, which is what would open a window where a reader finds no file
+    at all, and the reader's patience is sized for the moment a rename is rather
+    than for a window a writer left open.
+
+    What the write is not is uncontended. A rename over a file somebody has open
+    is refused on Windows, and the readers here are status polls that arrive
+    whenever they arrive, so the write asks again rather than treating another
+    process's curiosity as a reason the run cannot say what it is doing."""
     path = record_path(config, handle)
     text = json.dumps(record, indent=2) + "\n"
     for attempt in range(RECORD_WRITE_ATTEMPTS):

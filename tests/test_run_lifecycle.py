@@ -22,7 +22,7 @@ import pytest
 from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
 from test_test_reactor import RecordingService, write_test_config
 
-from agentic_hil.config import load_authoritative_config, load_config
+from agentic_hil.config import ConfigError, load_authoritative_config, load_config
 from agentic_hil.test_reactor import TestReactor, load_test_config
 
 LONG_DELAY_PLAN = "version: 4\nsteps:\n  - {device: dut, action: delay, duration_ms: 600000}\n"
@@ -687,6 +687,282 @@ def test_a_record_read_that_never_gets_an_answer_is_bounded_and_honest(tmp_path:
     assert caught.value.error_type == "run_state_invalid"
     assert "held forever" in str(caught.value.details.get("backend_error"))
     assert len(asked) == runlifecycle._RECORD_READ_ATTEMPTS
+
+
+# --- the record's publication, seen from a reader that arrives inside it ------
+#
+# A record is published by writing a whole new file beside it and renaming that
+# over it, so a reader can arrive in the middle of the rename. What it meets
+# there depends on the platform and never on the run: Windows refuses the rename
+# while the reader holds the file, and POSIX lets the rename through and leaves
+# the reader holding an inode whose last link the rename removed, or looking at a
+# name that now leads to a different inode. Both POSIX faces come back out of
+# `safe_read_text` as the refusals below, which is how #312 read on a slow macOS
+# runner: a status poll answered "Test run state could not be read" for a run
+# that was perfectly fine and about to say so.
+#
+# The race is placed rather than raced. Timing it would mean a test that fails
+# once in a thousand runs on somebody else's machine, which is the shape of the
+# bug and no way to hold a fix to it, so the writer's transition is handed to the
+# reader as the script it would have seen.
+
+
+def single_link_refusal(path: Path) -> ConfigError:
+    """What POSIX answers a read of an inode the rename has just unlinked.
+
+    The reader opened the old record, the writer's rename replaced the name, and
+    the file rule now sees a regular file with no links at all."""
+    return ConfigError("unsafe_configured_path", "Configured file must be a single-link regular file.", {"path": str(path)})
+
+
+def swapped_inode_refusal(path: Path) -> ConfigError:
+    """What POSIX answers when the rename lands between the open and the check
+    that the name still leads to the file that was opened."""
+    return ConfigError("unsafe_configured_path", "Configured file changed while it was being opened.", {"path": str(path)})
+
+
+class ScriptedReads:
+    """`safe_read_text` with a written script, so the transition is placed exactly.
+
+    Answers the record with each scripted answer in turn and holds on the last
+    one once the script runs out; an exception in the script is raised instead of
+    returned. The stop file is answered as a file that is not there, because a
+    status read asks for both and only the record is what these tests are about."""
+
+    def __init__(self, *answers: object) -> None:
+        self.answers = list(answers)
+        self.record_reads = 0
+
+    def __call__(self, path) -> str:
+        if str(path).endswith(".stop"):
+            raise FileNotFoundError(str(path))
+        self.record_reads += 1
+        answer = self.answers[min(self.record_reads, len(self.answers)) - 1]
+        if isinstance(answer, BaseException):
+            raise answer
+        return str(answer)
+
+
+def torn_record_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *answers: object) -> tuple[object, str, ScriptedReads]:
+    """A bench whose record reads follow a script, with the retry delay removed."""
+    import agentic_hil.runlifecycle as runlifecycle
+
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    reads = ScriptedReads(*answers)
+    monkeypatch.setattr(runlifecycle, "safe_read_text", reads)
+    monkeypatch.setattr(runlifecycle, "_RECORD_READ_RETRY_DELAY_S", 0.0)
+    return config, "run-0123456789abcdef", reads
+
+
+def whole_record(state: str = "running", **fields: object) -> str:
+    import agentic_hil.runlifecycle as runlifecycle
+
+    return json.dumps({"version": runlifecycle.RUN_RECORD_VERSION, "state": state, **fields})
+
+
+def test_a_record_read_that_meets_the_rename_on_posix_waits_it_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The failure in #312 exactly: the file rule refused the record because the
+    # writer's rename had taken the reader's inode out of the directory. Nothing
+    # about the run had gone wrong, and the second face of the same instant is
+    # the same non-answer, so both are waited out.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, handle, reads = torn_record_bench(
+        tmp_path,
+        monkeypatch,
+        single_link_refusal(Path("record.json")),
+        swapped_inode_refusal(Path("record.json")),
+        whole_record("running"),
+    )
+
+    value = runlifecycle.read_run_record(config, handle)
+
+    assert value == {"version": runlifecycle.RUN_RECORD_VERSION, "state": "running"}
+    assert reads.record_reads == 3
+
+
+def test_a_record_read_that_meets_a_half_written_file_waits_for_the_whole_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An empty file and a truncated one are the faces a writer that did not
+    # rename would show. This writer does rename, so a reader never meets them
+    # here; a reader that treated them as corruption would still be wrong, and
+    # would be wrong on the day somebody publishes this file another way.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, handle, reads = torn_record_bench(
+        tmp_path,
+        monkeypatch,
+        "",
+        '{"version": 1, "state": "run',
+        whole_record("running", run_ok=None),
+    )
+
+    value = runlifecycle.read_run_record(config, handle)
+
+    assert value["state"] == "running"
+    assert reads.record_reads == 3
+
+
+def test_a_record_that_vanishes_after_it_was_seen_waits_for_the_name_to_come_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The window an unlink-first writer would open: the name was there a moment
+    # ago and is not there now. That is a transition, not an answer, and it is
+    # told apart from "no such run" by the look that already found something.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, handle, reads = torn_record_bench(
+        tmp_path,
+        monkeypatch,
+        single_link_refusal(Path("record.json")),
+        FileNotFoundError("the name is between two steps"),
+        whole_record("finished", run_ok=True),
+    )
+
+    value = runlifecycle.read_run_record(config, handle)
+
+    assert value["state"] == "finished"
+    assert value["run_ok"] is True
+    assert reads.record_reads == 3
+
+
+def test_a_handle_with_no_record_at_all_is_answered_on_the_first_look(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The patience must not be paid by the answer that is not a transition. A
+    # handle this bench never issued has no record and never will, and the start
+    # command polls this same read while a worker is coming up, so a missing file
+    # nothing has yet seen is answered at once rather than waited on six times.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, handle, reads = torn_record_bench(tmp_path, monkeypatch, FileNotFoundError("never issued"))
+
+    assert runlifecycle.read_run_record(config, handle) is None
+    assert reads.record_reads == 1
+
+
+def test_a_record_that_stays_torn_is_refused_with_the_reason_the_last_look_gave(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Patience, not denial. A file that never parses is not a transition however
+    # long it is watched, and the refusal still hands over the parser's own
+    # complaint rather than a tidier sentence with the cause taken out of it.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, handle, reads = torn_record_bench(tmp_path, monkeypatch, '{"version": 1, "state": "run')
+
+    with pytest.raises(ConfigError) as caught:
+        runlifecycle.read_run_record(config, handle)
+
+    assert caught.value.error_type == "run_state_invalid"
+    assert caught.value.summary == "Test run state is not valid JSON."
+    assert "Unterminated string" in str(caught.value.details.get("backend_error"))
+    assert reads.record_reads == runlifecycle._RECORD_READ_ATTEMPTS
+
+
+def test_a_record_the_file_rule_keeps_refusing_still_names_the_file_rule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A path that is genuinely unsafe answers the same refusal it always did,
+    # one bounded wait later, and the decisive cause travels with it in the
+    # backend error and on the exception chain. Waiting out a moment must never
+    # turn into swallowing a reason.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, handle, reads = torn_record_bench(tmp_path, monkeypatch, single_link_refusal(Path("record.json")))
+
+    with pytest.raises(ConfigError) as caught:
+        runlifecycle.read_run_record(config, handle)
+
+    assert caught.value.error_type == "run_state_invalid"
+    assert caught.value.summary == "Test run state could not be read."
+    assert "single-link regular file" in str(caught.value.details.get("backend_error"))
+    assert isinstance(caught.value.__cause__, ConfigError)
+    assert caught.value.__cause__.error_type == "unsafe_configured_path"
+    assert reads.record_reads == runlifecycle._RECORD_READ_ATTEMPTS
+
+
+def test_a_record_from_a_version_this_code_cannot_read_is_not_waited_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A whole document that names another version is a state, not a moment: it
+    # will say the same thing on the sixth look, so it is refused on the first.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, handle, reads = torn_record_bench(tmp_path, monkeypatch, json.dumps({"version": 999, "state": "running"}))
+
+    with pytest.raises(ConfigError) as caught:
+        runlifecycle.read_run_record(config, handle)
+
+    assert caught.value.summary == "Test run state is not a record this version can read."
+    assert reads.record_reads == 1
+
+
+def test_a_status_poll_that_meets_the_rename_answers_the_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The reader #312 was actually reported by: a test waiting on a detached run
+    # asks `run_status` in a loop, and one poll landing inside the writer's
+    # rename raised out of the loop and failed the run's own test. It answers the
+    # record now, which is what it was asking for.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, handle, _ = torn_record_bench(
+        tmp_path,
+        monkeypatch,
+        single_link_refusal(Path("record.json")),
+        whole_record("stopped", run_ok=False, error_type="run_stopped", report_path="report.json"),
+    )
+
+    status = runlifecycle.run_status(config, handle)
+
+    assert status["ok"] is True
+    assert status["state"] == "stopped"
+    assert status["error_type"] == "run_stopped"
+
+
+def test_a_stop_request_that_cannot_be_read_is_still_a_stop_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stop file has one state and the file being there is it, so the reader
+    # that meets its replacement needs no patience: every way of failing to read
+    # it lands on the answer its existence already gave, and waiting would only
+    # make a stop slower.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    handle = "run-0123456789abcdef"
+
+    def refused_read(path):
+        raise single_link_refusal(path)
+
+    monkeypatch.setattr(runlifecycle, "safe_read_text", refused_read)
+
+    assert runlifecycle.stop_requested_at(config, handle) is not None
+
+
+def test_the_record_writer_publishes_only_by_rename_and_never_unlinks_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The reader's patience is bounded because the writer's transition is one
+    # rename, in the record's own directory, over a name that always leads to a
+    # whole document. A writer that unlinked first would open a window of
+    # unbounded length instead, and no retry count is the right one for that.
+    # Observed from inside the rename: at the instant the next record is about to
+    # be published the name still holds the whole of the previous one.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    handle = "run-0123456789abcdef"
+    runlifecycle.runs_directory(config).mkdir(parents=True, exist_ok=True)
+    path = runlifecycle.record_path(config, handle)
+    real_replace = os.replace
+    at_the_rename: list[bytes | None] = []
+
+    def observed_replace(source, destination, **directory_fds):
+        at_the_rename.append(path.read_bytes() if path.exists() else None)
+        return real_replace(source, destination, **directory_fds)
+
+    monkeypatch.setattr(os, "replace", observed_replace)
+    starting = {"version": runlifecycle.RUN_RECORD_VERSION, "state": "starting"}
+    running = {"version": runlifecycle.RUN_RECORD_VERSION, "state": "running"}
+    runlifecycle.write_run_record(config, handle, starting)
+    published = path.read_bytes()
+    runlifecycle.write_run_record(config, handle, running)
+
+    assert len(at_the_rename) == 2, at_the_rename
+    # Nothing existed before the first publication, and the first publication was
+    # still whole and still the published bytes when the second one landed.
+    assert at_the_rename[0] is None
+    assert at_the_rename[1] == published
+    assert json.loads(published.decode("utf-8")) == starting
+    assert json.loads(path.read_text(encoding="utf-8")) == running
 
 
 def test_a_worker_that_finished_in_the_instant_of_the_probe_is_not_called_gone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
