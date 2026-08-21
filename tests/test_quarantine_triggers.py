@@ -465,6 +465,71 @@ def test_the_refused_erase_incident_stands_down_and_owes_no_operator_recovery(tm
         service.close()
 
 
+def test_the_refused_erase_incident_inside_a_declared_run_holds_until_the_run_stops(tmp_path: Path) -> None:
+    """The other lifecycle variant the catalogue and TROUBLESHOOTING.md describe.
+
+    A bare `flash_firmware` call is its own implicit single-action run, and the
+    test above pins that its refused-erase incident stands down the moment the
+    call ends. A call made inside a declared run does not: the run owns the hold,
+    so the failed flash comes back `quarantined: true` with no
+    `incident_stood_down`, and the declared run keeps the probe until
+    `bench_run_stop`. Within the run the incident still owes no operator gate —
+    `hardware_recover` answers `nothing_to_recover: true` and a retry is accepted
+    without a recovery step — but the stand-down is the run teardown's, which
+    `bench_run_stop` performs. Both variants live in the docs, so both are pinned.
+    """
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True, exist_ok=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = config_for(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK_ERASE_REFUSED, probe_id="STLINK123")
+    service = AgenticHILToolService(config)
+    try:
+        started = service.call("bench_run_start", {"devices": [{"kind": "debugger"}]})
+        assert started["ok"] is True, started
+        assert service.coordinator.run_active is True
+
+        result = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+        assert result["error_type"] == "flash_erase_failed"
+        # The declared run owns the hold, so this call does not stand the incident
+        # down: it stays quarantined and the run keeps the probe. This is the exact
+        # place the previous catalogue text was wrong — it promised the stand-down
+        # unconditionally.
+        assert result["quarantined"] is True
+        assert "incident_stood_down" not in result
+        assert service.coordinator.blocked is True
+        assert service.coordinator.run_active is True
+        # The flash is indeterminate, exactly as in the bare-call case.
+        assert result["cleanup_required"] is True
+        assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+
+        # The incident still owes no operator gate inside the run: `hardware_recover`
+        # finds nothing standing to clear, and the run's hold is untouched by it.
+        recovered = service.call("hardware_recover", {})
+        assert recovered["ok"] is True
+        assert recovered["nothing_to_recover"] is True
+        assert service.coordinator.run_active is True
+
+        # And a retry is accepted rather than refused with `resource_quarantined`,
+        # just as the remedy says — but here it stays quarantined, because the run
+        # still holds the incident and only `bench_run_stop` stands it down.
+        retry = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+        assert retry.get("error_type") != "resource_quarantined"
+        assert retry["error_type"] == "flash_erase_failed"
+        assert retry["quarantined"] is True
+        assert service.coordinator.run_active is True
+
+        # The stand-down is the run teardown's: `bench_run_stop` performs it, its
+        # result carries the `incident_stood_down` the failed call did not, and
+        # only then is the bench handed back.
+        stopped = service.call("bench_run_stop")
+        assert stopped["ok"] is True
+        assert stopped["incident_stood_down"]["reasons"] == ["debugger_result_unconfirmed"]
+        assert service.coordinator.blocked is False
+        assert service.coordinator.run_active is False
+    finally:
+        service.close()
+
+
 def test_a_transcript_that_cannot_place_the_failure_keeps_the_quarantine() -> None:
     """When in doubt the quarantine stays, and the result says which it is.
 
