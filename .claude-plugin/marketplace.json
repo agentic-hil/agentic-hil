@@ -8,7 +8,7 @@
       "displayName": "Agentic Hardware-in-the-Loop",
       "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
       "source": "./plugins/agentic-hil",
-      "version": "0.17.0",
+      "version": "0.18.0",
       "license": "Apache-2.0"
     }
   ]
