@@ -1221,14 +1221,17 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "The device refused to erase the flash STM32CubeProgrammer was about to write, and the programmer said so "
             "in its own words: `Error: failed to erase memory`. The whole transcript travels with the result under "
             "`programmer_output`, because the line that names the failed operation is the diagnosis. Nothing was "
-            "verified and no new image is on the board.\n\n"
-            "Whether the old one survived is answered by `erase_abort_point`, read off that same transcript. "
-            "`erase_refused_before_flash_changed` means no line reports an erase or a download having started, so the "
-            "board holds what it held and the call is a refusal: nothing is quarantined and nothing needs recovering. "
+            "verified.\n\n"
+            "How far the failure can be placed is answered by `erase_abort_point`, read off that same transcript, and "
+            "it is a diagnostic reading rather than a safety verdict: a refused erase leaves the flash contents "
+            "unconfirmed, so the `debugger_result_unconfirmed` quarantine stands whichever reading fits. "
+            "`erase_refused_effect_unconfirmed` means the refusal is there and no line reports a write completing, but "
+            "the transcript does not establish that no sector was erased before the refusal — its progress and download "
+            "lines are not guaranteed across versions, quiet or piped output and abort paths, and `failed to erase "
+            "memory` also covers a protection refusal that can strike after unprotected sectors have already gone. "
             "`flash_change_underway` means a line says a phase had started, so flash is neither the old image nor the "
-            "new one and the `debugger_result_unconfirmed` quarantine stands. `abort_point_unreadable` means the "
-            "transcript does not settle it, and the quarantine stands for that reason. `evidence_line` is the line "
-            "each reading was taken from.\n\n"
+            "new one. `abort_point_unreadable` means the transcript does not place the failure at all. `evidence_line` "
+            "is the line each reading was taken from.\n\n"
             "The measured case on a NUCLEO-F446RE is the first flash after power-up, refused after about 310 ms with "
             "the device correctly identified, while every immediate retry programmed and verified. That pattern is a "
             "core still executing from flash while the programmer connects in hot-plug mode, not a wiring fault: this "
@@ -1236,15 +1239,17 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "was never the thing that was wrong."
         ),
         remediation=(
-            "Retry the flash once. On the bench this was measured on, the retry programmed and verified every time, "
-            "and under `erase_refused_before_flash_changed` the retry is safe by the transcript rather than by "
-            "optimism: nothing was written, the lease was released, and there is nothing to recover first.",
+            "Retry the flash once, after clearing the incident. On the bench this was measured on, a core still "
+            "executing from flash under hot plug defeated the erase and every immediate retry programmed and verified, "
+            "so the retry is the substantive fix. It is not a free retry, though: a refused erase does not prove the "
+            "flash is untouched, so the failed call leaves an incident standing, and `agentic-hil recover "
+            "--confirm-safe-state` is what hands the bench back before the retry can run.",
             "Read `programmer_output.stdout` before anything else. It is the programmer's own account of what it "
             "erased, wrote and verified, and it is what says which operation stopped.",
-            "Under `flash_change_underway` or `abort_point_unreadable`, which is the result that says `retry_safe: "
-            "false` and leaves an incident standing, treat the board as holding neither image: reflashing or "
-            "`agentic-hil recover --confirm-safe-state` is the way out of it, not a retry on the assumption that the "
-            "erase never happened.",
+            "Treat the board as holding an indeterminate image whichever reading `erase_abort_point` gave — "
+            "`erase_refused_effect_unconfirmed` no less than `flash_change_underway` or `abort_point_unreadable`, "
+            "because none of them proves the flash is unchanged. Recovering and reflashing is the way through it, not "
+            "a retry on the assumption that the erase never happened.",
             "If the refusal repeats on the retry, ask the device about protection rather than about wiring: read the "
             "option bytes with STM32CubeProgrammer yourself (`-ob displ`) and look for read-out protection, write "
             "protection or PCROP over the sectors the image covers.",

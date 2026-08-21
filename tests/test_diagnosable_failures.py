@@ -130,6 +130,10 @@ def test_the_erase_refusal_names_hot_plug_and_protection_rather_than_the_reset_l
     assert refused["error_type"] == "flash_erase_failed"
     assert refused["backend_error_type"] == "flash_erase_failed"
     assert "erase" in refused["summary"]
+    # The summary says the flash is unconfirmed, not that nothing was written: a
+    # refused erase does not prove the board is untouched.
+    assert "unconfirmed" in refused["summary"]
+    assert "not written" not in refused["summary"]
     assert "hot plug" in causes and "protect" in causes
     assert "reset line wiring issue" not in refused["likely_causes"]
 

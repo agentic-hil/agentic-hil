@@ -341,35 +341,41 @@ def flash_through_stlink(workspace: Path, executable: Path):
         raise
 
 
-def test_a_programmer_that_refused_the_erase_leaves_the_board_where_it_was(tmp_path: Path) -> None:
-    """The bench report behind #328, end to end.
+def test_a_programmer_that_refused_the_erase_leaves_the_flash_unconfirmed(tmp_path: Path) -> None:
+    """A refused erase does not prove the board is untouched, so it quarantines.
 
-    STM32CubeProgrammer refused the erase before it wrote anything, and the
-    quarantine that followed cost more than the failure did: the lease it left on
-    `cleanup_required` refused a later `debug_dump_symbol_ihex` with
-    `resource_busy`, the run had to be stopped and reopened, and ending a run
-    resets the target, so RAM-resident measurements went with it.
+    #328's first cut released the lease and reported `hardware_state: unchanged`
+    and `retry_safe: true` on the strength of no progress or download line having
+    been captured. That is an absence of evidence, not proof: STM32CubeProgrammer's
+    progress lines are not guaranteed across versions, quiet or piped output and
+    abort paths, and `failed to erase memory` also covers a protection refusal
+    that can strike after unprotected sectors in the same range have already been
+    erased. The failure still carries the programmer's own transcript and the
+    reading that places it, but the flash is treated as unconfirmed and the
+    incident stands, exactly as it does for a mid-flash failure.
     """
     result, service, config = flash_through_stlink(tmp_path, FAKE_STLINK_ERASE_REFUSED)
     try:
         assert result["error_type"] == "flash_erase_failed"
-        # The probe was opened and the part was identified, so the claim is about
-        # the flash content and not about contact.
-        assert result["target_contacted"] is True
-        assert result["side_effect_committed"] is False
-        assert result["side_effect_status"] == "not_started"
-        assert result["hardware_state"] == "unchanged"
-        assert result["retry_safe"] is True
-        assert result["lease_state"] == "released"
-        assert_refused_without_quarantine(result, config)
-        assert service.coordinator.blocked is False
-        assert service.coordinator.leases == {}
-        # And the bench stays in service: the retry this failure's own remediation
-        # names is answerable, rather than meeting `resource_quarantined`.
-        assert service.call("flash_firmware", {"image_path": "build/firmware.elf"})["error_type"] == "flash_erase_failed"
+        # No safety claim is drawn from the refusal, so the same four fields the
+        # mid-flash failure carries hold here too.
+        assert result["side_effect_status"] == "unknown"
+        assert result["retry_safe"] is False
+        assert result.get("hardware_state") != "unchanged"
+        assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+        # The diagnostic evidence still travels: which line the refusal was read
+        # from, and the programmer's own words under `programmer_output`.
+        abort_point = result["erase_abort_point"]
+        assert abort_point["reading"] == "erase_refused_effect_unconfirmed"
+        assert abort_point["evidence_line"] == "Error: failed to erase memory"
+        assert "Error: failed to erase memory" in result["programmer_output"]["stderr"]
+        # The refusal no longer relaxes the fields the coordination layer keys on:
+        # no `hardware_state: unchanged`, and a side effect it must treat as
+        # unconfirmed rather than as proven absent.
+        assert result.get("side_effect_committed") is not False
+        assert result["summary"].endswith("unconfirmed.")
     finally:
         service.close()
-    assert_no_quarantine_record(config)
 
 
 def test_the_refusal_names_the_line_it_read_the_board_state_off(tmp_path: Path) -> None:
@@ -378,9 +384,9 @@ def test_the_refusal_names_the_line_it_read_the_board_state_off(tmp_path: Path) 
     try:
         abort_point = result["erase_abort_point"]
 
-        assert abort_point["reading"] == "erase_refused_before_flash_changed"
+        assert abort_point["reading"] == "erase_refused_effect_unconfirmed"
         assert abort_point["evidence_line"] == "Error: failed to erase memory"
-        assert "no line reports an erase or a download having started" in abort_point["evidence_rule"]
+        assert "does not establish that no sector was erased before the refusal" in abort_point["evidence_rule"]
     finally:
         service.close()
 
@@ -406,6 +412,11 @@ def test_a_failure_with_a_segment_already_written_keeps_the_quarantine(tmp_path:
         assert result["error_type"] == "flash_erase_failed"
         assert abort_point["reading"] == "flash_change_underway"
         assert abort_point["evidence_line"] == "File download complete"
+        # The summary must not deny the write its own evidence records: segment 0
+        # is on the board, so "the firmware was not written" would contradict the
+        # `flash_change_underway` reading this same result carries.
+        assert "neither the old image nor the new one" in result["summary"]
+        assert "not written" not in result["summary"]
     finally:
         service.close()
 
@@ -425,17 +436,18 @@ def test_a_transcript_that_cannot_place_the_failure_keeps_the_quarantine() -> No
 
 
 def test_a_progress_bar_between_the_announcement_and_the_refusal_is_work_underway() -> None:
-    """The announcement lines are not evidence and the bar is.
+    """The bar reads as work under way; the announcement alone does not.
 
-    `Erasing internal memory sectors [0 5]` is printed before the device is asked
-    for anything, which is what lets the refused case be read as untouched flash.
     A progress bar belongs to a phase that is running, so a transcript carrying
-    one is the other reading even though no download line ever appeared.
+    one is `flash_change_underway` even though no download line ever appeared. A
+    transcript that reaches only the announcement and the refusal is the weaker
+    `erase_refused_effect_unconfirmed` reading — still quarantined, because the
+    announcement lines do not prove the device left the flash alone.
     """
     announced_only = erase_abort_point("Erasing memory corresponding to segment 0:\nErasing internal memory sectors [0 5]\nError: failed to erase memory\n")
     started = erase_abort_point("Erasing internal memory sectors [0 5]\n[=========                     ] 18%\nError: failed to erase memory\n")
 
-    assert announced_only["reading"] == "erase_refused_before_flash_changed"
+    assert announced_only["reading"] == "erase_refused_effect_unconfirmed"
     assert started["reading"] == "flash_change_underway"
     assert started["evidence_line"] == "[=========                     ] 18%"
 

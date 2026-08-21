@@ -163,9 +163,10 @@ STLINK_EMPTY_MARKERS = ["no st-link detected", "no stlink detected", "0 st-link 
 # claim an erase refusal for a transcript that never refused an erase.
 STLINK_ERASE_REFUSAL_MARKERS = ["failed to erase memory"]
 # The lines STM32CubeProgrammer prints once it has begun changing what is in
-# flash, and therefore the lines that decide the quarantine (#328). Each one is
-# printed after the operation it names has started, which is the whole property
-# that makes it evidence:
+# flash, and therefore the lines that separate the `flash_change_underway`
+# reading from the weaker one (#328). Each one is printed after the operation it
+# names has started, which is the whole property that makes it positive evidence
+# a phase ran:
 #
 # * `Download in Progress` opens the write phase for a segment, and the erase for
 #   that segment is behind it.
@@ -177,8 +178,12 @@ STLINK_ERASE_REFUSAL_MARKERS = ["failed to erase memory"]
 # `Erasing memory corresponding to segment 0:` and `Erasing internal memory
 # sectors [0 5]` are deliberately not in this set: the programmer prints both
 # before it asks the device for anything, so they name what it intends to erase
-# rather than what it erased. That is why a transcript can end at the refusal
-# with nothing in flash having moved.
+# rather than what it erased. Their absence from the change set is what makes a
+# refusal reached with only those lines the weaker `erase_refused_effect_unconfirmed`
+# reading -- but the *absence* of a change marker is not itself proof no sector
+# was erased (these lines are not guaranteed across versions, quiet or piped
+# output and abort paths), so that reading is unconfirmed and quarantined, not a
+# claim that flash is untouched.
 STLINK_FLASH_CHANGE_MARKERS = [
     "download in progress",
     "file download complete",
@@ -186,27 +191,20 @@ STLINK_FLASH_CHANGE_MARKERS = [
     "mass erase successfully achieved",
     "[=",
 ]
-# The two readings #328 allows, and the third that is neither. The first is the
-# only one that relaxes the quarantine; the other two keep it, because a
-# transcript that says work was under way and a transcript that says nothing
-# usable are both answers of "this bench does not know what is in flash".
-ERASE_REFUSED_BEFORE_FLASH_CHANGED = "erase_refused_before_flash_changed"
+# The three readings `erase_abort_point` distinguishes. None of them relaxes the
+# quarantine: a refused erase leaves the flash contents unconfirmed whichever
+# reading fits, because the transcript can place *a* line of the failure but
+# cannot prove that no sector was erased before the refusal (#328 originally read
+# the absence of a progress or download marker as that proof, which it is not:
+# STM32CubeProgrammer's progress lines are not guaranteed across versions, quiet
+# or piped output and abort paths, and `failed to erase memory` also covers a
+# protection refusal that can strike after unprotected sectors in the same range
+# have already been erased). The readings differ only in how far the transcript
+# accounts for the failure, which is what an operator reads to choose a next
+# step, not a safety verdict this layer trusts.
+ERASE_REFUSED_EFFECT_UNCONFIRMED = "erase_refused_effect_unconfirmed"
 FLASH_CHANGE_UNDERWAY = "flash_change_underway"
 ERASE_ABORT_POINT_UNREADABLE = "abort_point_unreadable"
-# The markers a flash failure carries when the programmer's own transcript proves
-# nothing in flash moved. Deliberately not `NOT_CONTACTED`: the probe was opened
-# and the part was identified, so `target_contacted` is true and saying otherwise
-# would be a second false claim in place of the one being fixed. What is claimed
-# is narrower and is exactly what the transcript supports: no write was
-# committed, the board holds what it held, and the retry this bench measured as
-# reliable is safe.
-FLASH_UNCHANGED: JsonObject = {
-    "target_contacted": True,
-    "side_effect_committed": False,
-    "side_effect_status": "not_started",
-    "hardware_state": "unchanged",
-    "retry_safe": True,
-}
 
 
 class STLinkBackend:
@@ -619,7 +617,14 @@ class STLinkBackend:
         if operation_result is not None:
             result["operation_result"] = operation_result
         if backend_error_type == "flash_erase_failed":
-            result.update(erase_refusal_evidence(completed))
+            evidence = erase_refusal_evidence(completed)
+            result.update(evidence)
+            # The generic `_summary_for_error` string cannot say more than "could
+            # not erase", but the transcript reading can, and one of its readings
+            # is a segment that was already written -- a summary that still said
+            # "the firmware was not written" there would contradict the result's
+            # own `flash_change_underway` evidence.
+            result["summary"] = self._erase_failure_summary(evidence["erase_abort_point"]["reading"])
         if self._proves_no_contact(tool, backend_error_type):
             # The ST-Link probe is the only transport STM32CubeProgrammer has
             # to the target, and "no ST-LINK detected" is its report that the
@@ -815,7 +820,22 @@ class STLinkBackend:
         return BACKEND_ERROR_TO_PUBLIC_ERROR.get(backend_error_type, backend_error_type)
 
     def _summary_for_error(self, error_type: str) -> str:
-        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "flash_erase_failed": "STM32CubeProgrammer could not erase the target's flash, so the firmware was not written.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "memory_read_failed": "Debugger failed to read the requested target memory.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "unknown_debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
+        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "flash_erase_failed": "STM32CubeProgrammer could not erase the target's flash, so its contents are unconfirmed.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "memory_read_failed": "Debugger failed to read the requested target memory.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "unknown_debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
+
+    def _erase_failure_summary(self, reading: str) -> str:
+        """The erase-failure summary the transcript reading actually supports.
+
+        A single generic line for `flash_erase_failed` had to claim "the firmware
+        was not written", which is false for a transcript that reports a segment
+        downloaded before a later segment's erase was refused. Each reading says
+        only what its own evidence carries, and none of them says the flash is
+        unchanged, because a refused erase does not establish that.
+        """
+        return {
+            FLASH_CHANGE_UNDERWAY: "STM32CubeProgrammer could not erase the target's flash after a write phase had begun, so the flash holds neither the old image nor the new one and its contents are unconfirmed.",
+            ERASE_REFUSED_EFFECT_UNCONFIRMED: "STM32CubeProgrammer refused to erase the target's flash; its output reports no completed write, but whether any sector was erased before the refusal is not established, so the flash contents are unconfirmed.",
+            ERASE_ABORT_POINT_UNREADABLE: "STM32CubeProgrammer could not erase the target's flash and its output does not establish how far it got, so the flash contents are unconfirmed.",
+        }.get(reading, self._summary_for_error("flash_erase_failed"))
 
     def _likely_causes(self, error_type: str) -> list[str]:
         return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "target_state_unconfirmed": ["STM32CubeProgrammer exited successfully without printing every line that confirms the operation; operation_result names which of them did print","debuggers.<name>.executable is a wrapper that discards the CLI's output", "this STM32CubeProgrammer version words its confirmation differently"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "flash_erase_failed": ["the core was running from flash when the programmer connected under hot plug, so it defeated the erase; an immediate retry usually succeeds", "the sectors this image covers are protected (write protection, PCROP, or a read-out protection level that refuses the erase)", "an earlier flash operation had not finished and left the flash controller busy"], "reset_failed": ["reset line wiring issue", "target is not responding"], "memory_read_failed": ["STM32CubeProgrammer exited without printing 'Data read successfully', so the read is unconfirmed", "the symbol's address is not readable memory on this target", "debug probe or target stopped responding mid-read"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
@@ -836,46 +856,47 @@ def erase_refusal_evidence(completed: CompletedCommand) -> JsonObject:
     row. Nothing is summarised away into a prose field: the whole captured
     output travels, exactly as the log file holds it.
 
-    `erase_abort_point` is the reading of that same transcript the quarantine
-    turns on, and the markers that go with it are added only for the reading
-    that earns them.
+    `erase_abort_point` reads that same transcript to say how far the failure can
+    be placed. It is carried for the operator, not to relax the quarantine: a
+    refused erase leaves flash unconfirmed, so no reading attaches a
+    `hardware_state`/`retry_safe` verdict and the coordination layer quarantines
+    the incident as it does any other unconfirmed effect.
     """
     abort_point = erase_abort_point(f"{completed.stdout}{completed.stderr}")
-    evidence: JsonObject = {
+    return {
         "programmer_output": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr},
         "erase_abort_point": abort_point,
     }
-    if abort_point["reading"] == ERASE_REFUSED_BEFORE_FLASH_CHANGED:
-        evidence.update(FLASH_UNCHANGED)
-    return evidence
 
 
 def erase_abort_point(output: str) -> JsonObject:
-    """How far a refused erase got, read off the programmer's transcript.
+    """How far a refused erase can be placed, read off the programmer's transcript.
 
-    `debugger_result_unconfirmed` is the right answer to a flash whose landing
-    nobody can account for, and it was the answer to every failed flash, which
-    is a wider claim than the evidence supports. Its cost is not theoretical: on
-    the bench behind #328 the lease it left on `cleanup_required` later refused a
-    `debug_dump_symbol_ihex` with `resource_busy`, the run had to be stopped and
-    reopened to reach coverage data, and ending a run under `auto_recover:
-    reset_halt` resets the target, so the RAM-resident measurements went with it.
-    All of that for a programmer that had refused before it wrote anything.
+    This reads the transcript for the operator, not to clear the incident. A
+    refused erase leaves flash unconfirmed regardless of the reading: the
+    transcript can show that a write phase had begun, but its silence about one
+    is not proof that no sector was erased. STM32CubeProgrammer's progress and
+    download lines are not guaranteed across versions, quiet or piped output and
+    abort paths, and `failed to erase memory` also covers a protection refusal
+    that can strike after unprotected sectors in the same range have already been
+    erased. An earlier revision (#328) relaxed the quarantine on the refused
+    reading; it no longer does, because "no progress line was captured" cannot
+    carry `hardware_state: unchanged` and `retry_safe: true` for a downstream
+    reader to trust.
 
-    Whether a failed erase leaves flash determinate depends on where it failed,
-    so the decision comes from the transcript and never from the exit code. Three
-    readings, and only the first relaxes anything:
+    Three readings, all of which keep the quarantine and differ only in how far
+    the transcript accounts for the failure:
 
-    * ``erase_refused_before_flash_changed`` -- the erase refusal is in the
-      transcript and no line in it says any erase or write phase had started.
-      The programmer announced what it meant to erase and was refused, so the
-      board holds what it held.
+    * ``erase_refused_effect_unconfirmed`` -- the erase refusal is in the
+      transcript and no line in it reports a write phase completing. The
+      programmer announced an erase and was refused, but whether any sector was
+      erased before the refusal is not established, so the flash contents are
+      unconfirmed.
     * ``flash_change_underway`` -- a line says a phase had started before the
       failure hit. Partially erased or partially written flash is precisely what
-      the quarantine exists for, and this keeps it unchanged.
-    * ``abort_point_unreadable`` -- the transcript will not answer the question.
-      The quarantine stays, and the result says so rather than trading safety
-      for convenience.
+      the quarantine exists for.
+    * ``abort_point_unreadable`` -- the transcript will not answer the question
+      at all, not even to place the refusal line.
 
     Every reading names the line it read, so an operator can disagree with
     evidence rather than with a feeling. The unreadable one names the last line
@@ -898,9 +919,9 @@ def erase_abort_point(output: str) -> JsonObject:
             "evidence_rule": "The transcript carries no line placing the failure before or after the first flash operation, so where it stopped is not established and the quarantine stands.",
         }
     return {
-        "reading": ERASE_REFUSED_BEFORE_FLASH_CHANGED,
+        "reading": ERASE_REFUSED_EFFECT_UNCONFIRMED,
         "evidence_line": refusal,
-        "evidence_rule": "The erase was refused and no line reports an erase or a download having started, so nothing in flash was changed and the board holds the image it held before this call.",
+        "evidence_rule": "The erase was refused and no line reports a write phase completing, but the transcript does not establish that no sector was erased before the refusal, so the flash contents are unconfirmed and the quarantine stands.",
     }
 
 

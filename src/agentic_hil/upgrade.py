@@ -636,6 +636,13 @@ _SYSTEM_CERT_BUNDLES = (
     "/etc/ssl/cert.pem",
 )
 
+# The values that turn UV_SYSTEM_CERTS off. An operator who exported one of these
+# has deliberately kept uv on its own bundled roots, which is an opt-out to
+# preserve rather than proof uv read this machine's store: setting the variable
+# again would leave it disabled, and overriding it would silently reverse a
+# choice they made. Any other non-empty value is read as enabling the store.
+_UV_SYSTEM_CERTS_DISABLED_VALUES = frozenset({"0", "false", "no", "off", "n", "f"})
+
 # The one thing that fixes a proxy neither the manager's roots nor this machine's
 # store trusts. Named as a step and never performed: it writes to a trust store,
 # which is the operator's, and the alternative an impatient reader reaches for is
@@ -693,6 +700,11 @@ def _system_cert_bundle() -> str | None:
     return None
 
 
+def _uv_system_certs_disabled(value: str) -> bool:
+    """Whether an exported UV_SYSTEM_CERTS explicitly turns the system store off."""
+    return value.strip().lower() in _UV_SYSTEM_CERTS_DISABLED_VALUES
+
+
 def _system_store_attempt(manager: str) -> _SystemStoreAttempt:
     """What pointing this manager at this machine's own store would take.
 
@@ -705,10 +717,31 @@ def _system_store_attempt(manager: str) -> _SystemStoreAttempt:
     that is also the whole reason there is no second attempt in that case: it was
     in force for the attempt that just failed, so setting it again would repeat a
     failed run rather than retry it, and overriding it would quietly swap the
-    bundle they chose for one this module picked.
+    bundle they chose for one this module picked. Two of those inherited values
+    do not name the system store, though, and the remedy has to say so: a
+    `UV_SYSTEM_CERTS` set to a disabled value kept uv on its own roots, so the
+    fix is to enable it rather than to install a CA into a store uv is not
+    reading; and a `PIP_CERT` names one specific bundle, so the CA has to go into
+    that bundle rather than only into the machine store pip was told to ignore.
     """
     if manager == "uv":
-        if os.environ.get("UV_SYSTEM_CERTS", "").strip():
+        configured = os.environ.get("UV_SYSTEM_CERTS", "").strip()
+        if configured and _uv_system_certs_disabled(configured):
+            return _SystemStoreAttempt(
+                no_attempt=(
+                    f"UV_SYSTEM_CERTS is set to {configured!r} here, which keeps uv on its own bundled roots, so uv did "
+                    f"not read this machine's store on the attempt that failed. That opt-out is yours to hold, so it was "
+                    f"not overridden and no second attempt was made against it."
+                ),
+                no_attempt_brief=f"not retried, because UV_SYSTEM_CERTS is set to the disabled value {configured!r} here, an opt-out this leaves in place",
+                next_step=(
+                    "To let uv read this machine's own certificate store, set UV_SYSTEM_CERTS to 1 (or unset it) and "
+                    "make sure the proxy's own CA certificate is installed in that store; until uv is reading the store, "
+                    "installing the CA there cannot help, and no switch that turns verification off is a fallback. "
+                    "TROUBLESHOOTING.md section 1 is the rest of it."
+                ),
+            )
+        if configured:
             return _SystemStoreAttempt(
                 no_attempt=(
                     "UV_SYSTEM_CERTS is already set in this environment, so uv read this machine's own store on the "
@@ -718,14 +751,21 @@ def _system_store_attempt(manager: str) -> _SystemStoreAttempt:
                 next_step=_INSTALL_THE_PROXY_CA,
             )
         return _SystemStoreAttempt("UV_SYSTEM_CERTS", "1")
-    if os.environ.get("PIP_CERT", "").strip():
+    pip_cert = os.environ.get("PIP_CERT", "").strip()
+    if pip_cert:
         return _SystemStoreAttempt(
             no_attempt=(
-                "PIP_CERT is already set in this environment, so pip read the bundle it names on the attempt that "
-                "just failed and a second one would only repeat it."
+                f"PIP_CERT is already set in this environment, so pip read the bundle it names ({pip_cert}) on the "
+                f"attempt that just failed and a second one would only repeat it."
             ),
             no_attempt_brief="not retried, because PIP_CERT is already set here and was in force for the attempt that failed",
-            next_step=_INSTALL_THE_PROXY_CA,
+            next_step=(
+                f"Add the proxy's own CA certificate to the bundle PIP_CERT names ({pip_cert}) -- that is the only "
+                f"certificate source pip read on the attempt that failed, so installing a CA anywhere else does not "
+                f"reach it -- or point PIP_CERT at a bundle that already trusts the proxy (unsetting it falls back to "
+                f"pip's default) and run the upgrade again. No switch that turns verification off is a fallback. "
+                f"TROUBLESHOOTING.md section 1 is the rest of it."
+            ),
         )
     bundle = _system_cert_bundle()
     if bundle is None:

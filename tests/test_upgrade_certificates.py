@@ -361,6 +361,68 @@ def test_an_exported_pip_cert_keeps_the_bundle_the_operator_chose(monkeypatch: p
     assert "/etc/ssl/certs/ca-certificates.crt" not in json.dumps(result)
 
 
+def test_a_disabled_uv_system_certs_is_a_missing_enable_not_a_missing_ca(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`UV_SYSTEM_CERTS=false` keeps uv on its bundled roots, so it never read the store.
+
+    An exported value is not overridden, but a disabled one is not the same as an
+    enabled one: uv is on its own roots by the operator's own choice, so it did
+    not read this machine's store on the attempt that failed. Saying it did, and
+    prescribing a CA install into a store uv is not reading, would be two wrong
+    turns. The opt-out is theirs and stays; the remedy is to name how to enable
+    the store rather than to reverse their choice for them.
+    """
+    monkeypatch.setenv("UV_SYSTEM_CERTS", "false")
+    attempts = stub_manager(monkeypatch, answers=[UV_TRUST_FAILURE], version_after=__version__)
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    assert result["ok"] is False
+    # No retry: the disabled value was in force for the one attempt, and it is
+    # neither repeated nor overridden.
+    assert len(attempts) == 1
+    assert attempts[0].inherited
+    assert os.environ["UV_SYSTEM_CERTS"] == "false"
+    assert "certificate_retry" not in result["install"]
+    # The summary says uv stayed on its own roots, not that it read the store.
+    assert "keeps uv on its own bundled roots" in result["summary"]
+    assert "uv did not read this machine's store on the attempt that failed" in result["summary"]
+    assert "read this machine's own store on the attempt that just failed" not in result["summary"]
+    assert result["certificates"].startswith("Not retried, because UV_SYSTEM_CERTS is set to the disabled value")
+    # The remedy is to enable the store, not only to install a CA into it.
+    steps = " ".join(result["next_steps"])
+    assert "set UV_SYSTEM_CERTS to 1" in steps
+    assert "until uv is reading the store, installing the CA there cannot help" in steps
+
+
+def test_a_custom_pip_cert_is_told_to_trust_its_own_bundle_not_the_machine_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """pip reads the bundle PIP_CERT names, so a CA in the machine store need not reach it.
+
+    Installing the proxy CA only into this machine's certificate store does not
+    change the file the operator pointed pip at. The remedy names that file and
+    says to add the CA there, or to change or unset PIP_CERT, rather than sending
+    the operator at a store pip was told to read past.
+    """
+    chosen = tmp_path / "corporate-roots.pem"
+    chosen.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+    monkeypatch.setenv("PIP_CERT", str(chosen))
+    attempts = stub_manager(monkeypatch, answers=[PIP_TRUST_FAILURE], manager="pip", command=PIP_UPGRADE, version_after=__version__)
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    assert len(attempts) == 1
+    assert attempts[0].inherited
+    assert "certificate_retry" not in result["install"]
+    # The remedy names the operator's own bundle, both in the summary and in the
+    # step, so the CA goes where pip actually reads.
+    assert str(chosen) in result["summary"]
+    steps = " ".join(result["next_steps"])
+    assert f"Add the proxy's own CA certificate to the bundle PIP_CERT names ({chosen})" in steps
+    assert "or point PIP_CERT at a bundle that already trusts the proxy" in steps
+    # And it does not fall back to the blanket machine-store instruction, which
+    # cannot reach a bundle pip was pointed at instead of the store.
+    assert "Install the proxy's own CA certificate into this machine's certificate store" not in steps
+
+
 def test_the_retry_never_writes_to_this_processs_own_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """The child gets the variable; the process the operator started does not.
 
