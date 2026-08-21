@@ -168,6 +168,16 @@ def test_the_erase_refusal_carries_the_retry_and_the_connect_mode_remedy(tmp_pat
     assert "Retry the flash once" in steps
     assert "under reset" in steps
     assert "programmer_output" in steps
+    # The remedy describes the real lifecycle: this ordinary incident stands down
+    # when the call ends, so `hardware_recover` over it is a no-op and the retry
+    # needs no recovery step. The obsolete claim that the incident stays standing
+    # and must be cleared with `recover --confirm-safe-state` before the retry is
+    # gone, and the text may not drift back to it.
+    assert "stands down" in steps
+    assert "nothing_to_recover" in steps
+    assert "Nothing has to be recovered first" in steps
+    assert "leaves an incident standing" not in steps
+    assert "before the retry can run" not in steps
     # The durable fix is the connect_mode key this range added, named exactly and
     # with the reload-or-restart step that puts a changed description in force --
     # not the stale claim that Agentic HIL "cannot express a connect mode" yet.

@@ -1239,17 +1239,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "was never the thing that was wrong."
         ),
         remediation=(
-            "Retry the flash once, after clearing the incident. On the bench this was measured on, a core still "
-            "executing from flash under hot plug defeated the erase and every immediate retry programmed and verified, "
-            "so the retry is the substantive fix. It is not a free retry, though: a refused erase does not prove the "
-            "flash is untouched, so the failed call leaves an incident standing, and `agentic-hil recover "
-            "--confirm-safe-state` is what hands the bench back before the retry can run.",
+            "Retry the flash once. On the bench this was measured on, a core still executing from flash under hot "
+            "plug defeated the erase and every immediate retry programmed and verified, so the retry is the "
+            "substantive fix. Nothing has to be recovered first: this is an ordinary `debugger_result_unconfirmed` "
+            "incident that owes no gate, so it stands down when the failed call ends — the result carries "
+            "`incident_stood_down` and `quarantined: false`, the bench is handed back automatically, and the next "
+            "flash is simply accepted. `hardware_recover` over it answers `nothing_to_recover: true`, because there "
+            "is nothing standing to clear; `recover --confirm-safe-state` is for a quarantine that actually holds the "
+            "bench, such as `resource_quarantined` or a broken audit, which this is not. It is not a free retry, "
+            "though: a refused erase does not prove the flash is untouched, which the result still says — "
+            "`cleanup_required` stays true and `cleanup_reasons` still names `debugger_result_unconfirmed` — so the "
+            "board holds an indeterminate image until a retry programs and verifies.",
             "Read `programmer_output.stdout` before anything else. It is the programmer's own account of what it "
             "erased, wrote and verified, and it is what says which operation stopped.",
             "Treat the board as holding an indeterminate image whichever reading `erase_abort_point` gave — "
             "`erase_refused_effect_unconfirmed` no less than `flash_change_underway` or `abort_point_unreadable`, "
-            "because none of them proves the flash is unchanged. Recovering and reflashing is the way through it, not "
-            "a retry on the assumption that the erase never happened.",
+            "because none of them proves the flash is unchanged. Reflashing is the way through it, not a retry taken "
+            "as proof the erase never happened; the reflash needs no recovery step ahead of it, because the incident "
+            "stood down when the failed call ended, but read it as writing over an unknown image rather than a clean "
+            "one.",
             "If the refusal repeats on the retry, ask the device about protection rather than about wiring: read the "
             "option bytes with STM32CubeProgrammer yourself (`-ob displ`) and look for read-out protection, write "
             "protection or PCROP over the sectors the image covers.",

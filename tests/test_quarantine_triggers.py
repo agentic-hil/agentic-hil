@@ -421,6 +421,50 @@ def test_a_failure_with_a_segment_already_written_keeps_the_quarantine(tmp_path:
         service.close()
 
 
+def test_the_refused_erase_incident_stands_down_and_owes_no_operator_recovery(tmp_path: Path) -> None:
+    """The lifecycle the catalogue and TROUBLESHOOTING.md have to describe.
+
+    A refused erase opens a `debugger_result_unconfirmed` incident, and that
+    incident owes no gate: it stands down when the failed `flash_firmware` call
+    ends, so the result carries `incident_stood_down` and `quarantined: false`,
+    the bench is not held, and `hardware_recover` over it answers
+    `nothing_to_recover: true` rather than clearing anything. The retry the
+    remedy points at is simply accepted; there is no `recover --confirm-safe-state`
+    step before it, and the remedy text must not claim one. What does still hold
+    is that the flash is indeterminate — `cleanup_required` and `cleanup_reasons`
+    say so — until a retry programs and verifies.
+    """
+    result, service, _ = flash_through_stlink(tmp_path, FAKE_STLINK_ERASE_REFUSED)
+    try:
+        assert result["error_type"] == "flash_erase_failed"
+        # The bench is handed back when the call ends: not held, and the result
+        # says so in both fields the coordination layer sets.
+        assert result["quarantined"] is False
+        assert result["incident_stood_down"]["reasons"] == ["debugger_result_unconfirmed"]
+        assert service.coordinator.blocked is False
+        # The flash is still indeterminate, which is the part the stand-down does
+        # not change: a refused erase does not prove the board untouched.
+        assert result["cleanup_required"] is True
+        assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+
+        # There is nothing standing to clear, so recovery is a no-op — the exact
+        # thing the obsolete remedy text sent an operator to do.
+        recovered = service.call("hardware_recover", {})
+        assert recovered["ok"] is True
+        assert recovered["nothing_to_recover"] is True
+        assert recovered["was_quarantined"] is False
+
+        # And the retry the remedy points at is accepted without any recovery
+        # step: it meets the same programmer and fails the same way, but the call
+        # runs rather than being refused with `resource_quarantined`.
+        retry = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+        assert retry.get("error_type") != "resource_quarantined"
+        assert retry["error_type"] == "flash_erase_failed"
+        assert retry["quarantined"] is False
+    finally:
+        service.close()
+
+
 def test_a_transcript_that_cannot_place_the_failure_keeps_the_quarantine() -> None:
     """When in doubt the quarantine stays, and the result says which it is.
 
