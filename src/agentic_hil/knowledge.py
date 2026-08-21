@@ -1216,6 +1216,77 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "this was undocumented.",
         ),
     ),
+    "flash_erase_failed:stlink": ErrorRemedy(
+        meaning=(
+            "The device refused to erase the flash STM32CubeProgrammer was about to write, and the programmer said so "
+            "in its own words: `Error: failed to erase memory`. The whole transcript travels with the result under "
+            "`programmer_output`, because the line that names the failed operation is the diagnosis. Nothing was "
+            "verified.\n\n"
+            "How far the failure can be placed is answered by `erase_abort_point`, read off that same transcript, and "
+            "it is a diagnostic reading rather than a safety verdict: a refused erase leaves the flash contents "
+            "unconfirmed, so the `debugger_result_unconfirmed` quarantine stands whichever reading fits. "
+            "`erase_refused_effect_unconfirmed` means the refusal is there and no line reports a write completing, but "
+            "the transcript does not establish that no sector was erased before the refusal, its progress and download "
+            "lines are not guaranteed across versions, quiet or piped output and abort paths, and `failed to erase "
+            "memory` also covers a protection refusal that can strike after unprotected sectors have already gone. "
+            "`flash_change_underway` means a line says a phase had started, so flash is neither the old image nor the "
+            "new one. `abort_point_unreadable` means the transcript does not place the failure at all. `evidence_line` "
+            "is the line each reading was taken from.\n\n"
+            "The measured case on a NUCLEO-F446RE is the first flash after power-up, refused after about 310 ms with "
+            "the device correctly identified, while every immediate retry programmed and verified. That pattern is a "
+            "core still executing from flash while the programmer connects in hot-plug mode, not a wiring fault: this "
+            "used to be reported as `reset_failed` with `reset line wiring issue` among its causes, and the reset line "
+            "was never the thing that was wrong."
+        ),
+        remediation=(
+            "Retry the flash once. On the bench this was measured on, a core still executing from flash under hot "
+            "plug defeated the erase and every immediate retry programmed and verified, so the retry is the "
+            "substantive fix. Nothing has to be recovered first: this is an ordinary `debugger_result_unconfirmed` "
+            "incident that owes no gate. When the failed call is a bare `flash_firmware`, its own implicit "
+            "single-action run, that incident stands down the moment the call ends: the result carries "
+            "`incident_stood_down` and `quarantined: false`, the bench is handed back automatically, and the next "
+            "flash is simply accepted. When the call ran inside a declared run (`bench_run_start` … "
+            "`bench_run_stop`), the run owns the hold, so the failed result stays `quarantined: true` with no "
+            "`incident_stood_down`, and the declared run keeps the probe until `bench_run_stop` performs the run "
+            "teardown and the same stand-down then. Either way the incident owes nobody a signature: "
+            "`hardware_recover` over it answers `nothing_to_recover: true`, because there is nothing standing to "
+            "clear, and a retry is accepted without a recovery step rather than being refused with "
+            "`resource_quarantined`. `recover --confirm-safe-state` is for a quarantine that actually holds the "
+            "bench, such as `resource_quarantined` or a broken audit, which this is not. It is not a free retry, "
+            "though: a refused erase does not prove the flash is untouched, which the result still says, "
+            "`cleanup_required` stays true and `cleanup_reasons` still names `debugger_result_unconfirmed`, so the "
+            "board holds an indeterminate image until a retry programs and verifies.",
+            "Read `programmer_output.stdout` before anything else. It is the programmer's own account of what it "
+            "erased, wrote and verified, and it is what says which operation stopped.",
+            "Treat the board as holding an indeterminate image whichever reading `erase_abort_point` gave, "
+            "`erase_refused_effect_unconfirmed` no less than `flash_change_underway` or `abort_point_unreadable`, "
+            "because none of them proves the flash is unchanged. Reflashing is the way through it, not a retry taken "
+            "as proof the erase never happened; the reflash needs no recovery step ahead of it, a bare call's "
+            "incident has already stood down, and a declared run's is one the reflash is allowed to run under, but "
+            "read it as writing over an unknown image rather than a clean one.",
+            "If the refusal repeats on the retry, ask the device about protection rather than about wiring: read the "
+            "option bytes with STM32CubeProgrammer yourself (`-ob displ`) and look for read-out protection, write "
+            "protection or PCROP over the sectors the image covers.",
+            "The durable fix for a core that defeats the erase is connecting under reset for the flash, so the core is "
+            "held in reset while the probe attaches and never runs during the erase. Set "
+            "`debuggers.<name>.connect_mode` to `under_reset` (STM32CubeProgrammer's `mode=UR`); `project_config_set` "
+            "writes it, because it sits under `allow_config_description_write` and grants nothing the flash did not "
+            "already allow. Only `type: stlink` carries it and only `flash_firmware` reads it, so `probe_target`, "
+            "`reset_target` and the memory reads keep the connect their own operation decides. It needs the probe's "
+            "reset line wired to the target's NRST, which an on-board ST-Link already has and a board wired with "
+            "SWDIO, SWCLK and ground alone does not, there the connect fails rather than falls back. A running MCP "
+            "server puts the change in force with `project_config_reload_description` or a restart, because "
+            "`connect_mode` is a description key it re-reads and not a permission. Until then the retry above is the "
+            "workaround, and the plan is the place for that rather than somebody's memory.",
+        ),
+        do_not=(
+            "Do not read this as a reset problem. No reset failed, and re-seating the reset line, changing "
+            "`debuggers.<name>.interface` or power-cycling on that theory changes nothing about a refused erase.",
+            "Do not grant `allow_mass_erase` to force the erase through. That permission makes this service refuse "
+            "flashing outright, it erases the whole device rather than the sectors the image covers, and it answers a "
+            "protection refusal by destroying more than the failed operation ever asked for.",
+        ),
+    ),
     # -- The one flag whose whole value is that it is never silently degraded ---
     CAN_INTERFACE_NOT_FOUND_ERROR: ErrorRemedy(
         meaning=(
@@ -1990,6 +2061,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "interface": {"status": "ignored", "note": "OpenOCD selects the transport through interface_cfg."},
         "interface_cfg": {"status": "required", "default": "interface/stlink.cfg", "note": "OpenOCD script, passed as `-f`. Either an OpenOCD search name such as `interface/stlink.cfg`, which OpenOCD resolves against its own script path and which therefore does not have to exist on this host, or an absolute path to an existing file outside the workspace. A path under the system temporary directory is refused: it is cleared without warning and the configuration would stop describing this bench."},
         "target_cfg": {"status": "required", "default": "target/stm32f4x.cfg", "note": "OpenOCD script, passed as `-f`, a search name or an absolute path outside the workspace like interface_cfg. Must match the MCU family."},
+        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "OpenOCD reaches the target through the scripts named above, and connecting under reset is a `reset_config` decision inside them that depends on how SRST is wired for this adapter and this part. `under_reset` is therefore refused at load here rather than accepted and ignored; ask for the same effect in interface_cfg or target_cfg."},
         "flash_address": {"status": "ignored", "note": "OpenOCD takes the load address from the image."},
     },
     "stlink": {
@@ -2001,6 +2073,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "interface": {"status": "required", "default": "SWD", "enum": ["SWD", "JTAG"], "note": "Passed as `port=<interface>`."},
         "interface_cfg": {"status": "ignored"},
         "target_cfg": {"status": "ignored"},
+        "connect_mode": {"status": "optional", "default": "hotplug", "enum": ["hotplug", "under_reset"], "note": "How the probe attaches for a flash, passed as `mode=HOTPLUG` or `mode=UR` on the connect. `hotplug` connects to the running core and is what a file that does not name this key does. `under_reset` holds the target in reset for the connect, which is the fix for a first flash that fails at erase and succeeds on the retry: a core executing from flash defeats the erase it is left running through. It needs the probe's reset line wired to NRST, because STM32CubeProgrammer pairs UR with a hardware reset. Read by flash_firmware alone: probe_target stays hot plug so it remains the least intrusive call, and reset_target keeps its own NORMAL connect."},
         "flash_address": {"status": "conditional", "note": "Required to flash a .bin, which carries no load address. Not read for .elf or .hex. Pattern: 0x-prefixed hex or decimal, e.g. 0x08000000."},
     },
     "pyocd": {
@@ -2012,6 +2085,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "interface": {"status": "ignored"},
         "interface_cfg": {"status": "ignored"},
         "target_cfg": {"status": "ignored"},
+        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "This server passes no connect-mode option to pyOCD, so `under_reset` is refused at load rather than accepted and ignored. A bench that needs the flash to connect under reset runs it on `type: stlink`."},
         "flash_address": {"status": "conditional", "note": "Required to flash a .bin, which carries no load address; passed as `--base-address`. Not read for .elf or .hex."},
     },
 }
@@ -2075,6 +2149,7 @@ def debugger_backends_document() -> JsonObject:
             "optional": "read when set, and the backend works without it",
             "discovered": "found automatically when unset",
             "ignored": "never read by this backend",
+            "refused": "this backend has no equivalent, so the values it cannot carry out are rejected at load instead of being read and ignored; `enum` lists what it does accept",
         },
         "backends": DEBUGGER_FIELD_MATRIX,
         "probe_id_when_multiple_probes": MULTI_PROBE_RULE,
@@ -2292,7 +2367,17 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # limits, DTR/RTS) changes what a call does to the board rather than what the
     # board is, and none of it is what an attached probe hands you.
     ConfigKeyRule("target", named=False, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
-    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("probe_id", "executable", "interface_cfg", "target_cfg")),
+    # `connect_mode` joins the four above under the same right. It is not a
+    # permission and it widens nothing: the two values it takes are both a flash
+    # this configuration already allows, and the difference between them is
+    # whether the target is held in reset while the probe attaches. What it
+    # describes is a property of this board, that its core runs from flash on
+    # power-up and defeats an erase it is left running through, and a bench
+    # learns that from a first flash that failed and a retry that worked. Behind
+    # the permissions grant it would sit with the keys that decide authority,
+    # where nobody could set it without also being able to grant themselves
+    # flashing.
+    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("probe_id", "executable", "interface_cfg", "target_cfg", "connect_mode")),
     # `serial_number` is in the description half for the same reason `probe_id`
     # is: it is what an attached board hands you, and it says which unit this
     # entry is rather than what may be done to it. `vid`/`pid` come off the same
@@ -2507,7 +2592,7 @@ _SECTION_PURPOSE: dict[str, str] = {
     "permissions": "What may be done to this project beside its hardware: to this file itself, and to a quarantine incident on this bench.",
     "provenance": "Who wrote this file and who last changed it. A note to a reader; nothing reads it as policy.",
     "target": f"What board this is. Names in reports; `controller` is what a human recognises. Which field actually selects a target per backend, and known-good values: {TARGET_SUPPORT_URI}.",
-    "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. Which of these fields each backend requires, discovers or ignores: {DEBUGGER_BACKENDS_URI}.",
+    "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. Which of these fields each backend requires, discovers, ignores or refuses, `connect_mode` included: {DEBUGGER_BACKENDS_URI}.",
     "debug": "Typed GDB session settings: which symbols may be read and how much.",
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
     "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. From `version: 3` on an entry must say which of them identifies it: a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else an explicit `identity_source` — `vid_pid` for an adapter publishing USB ids but no serial, `device` for one publishing neither. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
@@ -3574,7 +3659,7 @@ MCP_RESOURCES: list[JsonObject] = [
         DEBUGGER_BACKENDS_URI,
         "debugger-backends",
         "Required fields per debugger backend",
-        "Which of type, executable, probe_id, target_type, interface, interface_cfg, target_cfg and flash_address each of openocd, stlink and pyocd requires, discovers, or ignores; when probe_id becomes mandatory; when flash_address is needed.",
+        "Which of type, executable, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink and pyocd requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset.",
         JSON_MIME,
     ),
     _resource_descriptor(

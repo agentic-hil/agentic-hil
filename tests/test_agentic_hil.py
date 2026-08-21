@@ -5604,6 +5604,55 @@ def test_stlink_backend_probes_and_flashes_with_probe_id(tmp_path: Path) -> None
     assert "-w" in log_text
     assert "-v" in log_text
     assert "-rst" not in log_text
+    # The configuration above names no connect_mode, which is every file written
+    # before that key existed. Such a flash connects exactly as it always has.
+    assert "mode=UR" not in log_text
+
+
+def test_stlink_flash_connects_under_reset_when_the_configuration_asks_for_it(tmp_path: Path) -> None:
+    """`connect_mode: under_reset` has to reach the programmer's own argv.
+
+    Nothing about the failure it fixes is visible in a result field: the bench it
+    came from refused its first flash after every power-up at the erase and took
+    the immediate retry, which is a core executing from flash interfering with
+    the erase of the memory it is running out of. So what is asserted is the
+    option, `mode=UR`, in the spelling STM32CubeProgrammer's own `--connect`
+    usage prints, on the command that flashes.
+
+    And on that command alone. `probe_target` is the least intrusive call this
+    backend makes and erases nothing, so it keeps connecting hot plug whatever
+    the file says, and `reset_target` keeps the NORMAL connect its own operation
+    decides. A connect mode that leaked into either would change what reading and
+    resetting do to a target, which is not what this key was set for.
+    """
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink", probe_id="STLINK123", connect_mode="under_reset")))
+    service = AgenticHILToolService(config)
+    try:
+        probe = mcp_tool_call(service, "probe_target")
+        flash = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.elf"})
+        reset = mcp_tool_call(service, "reset_target", {"mode": "run"})
+    finally:
+        service.close()
+
+    assert flash["ok"] is True, flash
+    flash_log = (tmp_path / flash["log_path"]).read_text(encoding="utf-8")
+    assert "mode=UR" in flash_log
+    assert "mode=HOTPLUG" not in flash_log
+    assert "port=SWD" in flash_log, "the transport is still the configured one"
+    assert "sn=STLINK123" in flash_log, "and so is the probe"
+
+    assert probe["ok"] is True, probe
+    probe_log = (tmp_path / probe["log_path"]).read_text(encoding="utf-8")
+    assert "mode=HOTPLUG" in probe_log
+    assert "mode=UR" not in probe_log
+
+    assert reset["ok"] is True, reset
+    reset_log = (tmp_path / reset["log_path"]).read_text(encoding="utf-8")
+    assert "mode=NORMAL" in reset_log
+    assert "mode=UR" not in reset_log
 
 
 def test_pyocd_backend_probes_flashes_and_resets_with_probe_and_target(tmp_path: Path) -> None:

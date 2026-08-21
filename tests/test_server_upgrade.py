@@ -92,7 +92,7 @@ def fake_manager(
     platform branch has a test of its own, on both sides."""
     calls: list[list[str]] = []
 
-    def run(invoked: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+    def run(invoked: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         calls.append(invoked)
         if invoked[-1] == "--version":
             return subprocess.CompletedProcess(invoked, 0, f"{version_after}\n", "")

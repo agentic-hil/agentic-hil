@@ -263,6 +263,20 @@ class DebuggerConfig:
     flash_address: str | None
     timeout_s: float
     resource_id: str | None = None
+    # How the probe attaches to the target for a flash. `hotplug` connects to the
+    # running core and is what every configuration written before this key
+    # existed does, so it is the default and nothing changes for a file that does
+    # not name it. `under_reset` holds the target in reset while the connection
+    # is made, which is the remedy for a core executing from flash that defeats
+    # the erase: the bench this came from failed its first flash after every
+    # power-up and succeeded on every immediate retry.
+    #
+    # Read by the ST-Link backend, which spells the two as STM32CubeProgrammer's
+    # `mode=HOTPLUG` and `mode=UR`, and read there for the flash command alone: a
+    # probe must stay the least intrusive call this server makes, and a reset
+    # resets whatever the connect did. The other two backends refuse
+    # `under_reset` at load rather than accepting a value they would ignore.
+    connect_mode: Literal["hotplug", "under_reset"] = "hotplug"
     permissions: DebuggerPermissions = field(default_factory=DebuggerPermissions)
     # Unset means the project target; a named probe on a second board overrides it.
     target: TargetConfig | None = None

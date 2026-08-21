@@ -108,6 +108,33 @@ can_buses:
       allow_write: false
 ```
 
+## Connecting Under Reset
+
+Some boards refuse their first flash after every power-up and take the immediate retry without complaint. The failure is at the erase, and the cause is the core: it is executing from flash while the probe attaches to it and interferes with the erase of the memory it is running out of. The retry works because by then the board has been reset by the failed attempt.
+
+`debuggers.<name>.connect_mode` is how a bench says so once instead of retrying forever:
+
+```yaml
+debuggers:
+  dut:
+    type: "stlink"
+    probe_id: "066AFF495451885087171450"
+    connect_mode: "under_reset"   # hold the target in reset while the probe attaches
+```
+
+| Value | What the flash does |
+|---|---|
+| `hotplug` | attaches to the running core. The default, and what every configuration written before this key existed does, so nothing changes for a file that omits it. |
+| `under_reset` | holds the target in reset while the connection is made, so the core never runs during the erase. STM32CubeProgrammer's `mode=UR`. |
+
+Three things bound it:
+
+- **Only `type: stlink` carries it.** OpenOCD reaches the target through the scripts named by `interface_cfg` and `target_cfg`, and connecting under reset is a `reset_config` decision inside them that depends on how SRST is wired for that adapter and part; ask for it there. This server passes no connect-mode option to pyOCD at all. Both backends *refuse* `under_reset` when the file is loaded, with `config_invalid` naming the field, rather than reading a value they would then ignore.
+- **Only `flash_firmware` reads it.** `probe_target` keeps connecting hot plug, because it is the least intrusive call this server makes and it erases nothing. `reset_target` and the typed memory reads keep their own connect: what they do to the target is decided by the operation, not by this key.
+- **The reset line has to be wired.** STM32CubeProgrammer pairs `UR` with a hardware reset, so the probe's reset pin must reach the target's NRST. On a Nucleo with its on-board ST-Link it already does; on a board wired with SWDIO, SWCLK and ground alone it does not, and the connect will fail rather than fall back.
+
+`connect_mode` sits with the other things the bench *is*, under `allow_config_description_write`: it grants nothing, and both of its values are a flash the configuration already allows.
+
 ## Artifact Roots
 
 `artifacts.allowed_roots` lists the directories under `workspace_root` that firmware may be flashed from and debug dumps written to, each including its subdirectories. There is exactly one spelling for the whole project:
@@ -135,7 +162,7 @@ permissions:
   allow_upgrade: true                       # lift this installation to the newest release
 ```
 
-`allow_config_description_write` opens `target.*`, `debuggers.<name>.probe_id` / `executable` / `interface_cfg` / `target_cfg`, `com_ports.<name>.device` / `baudrate` / `serial_number`, and every `can_buses.<name>` field except its permissions. `allow_config_permissions_write` opens every permission key in the file: each `permissions:` block, and the two grants that sit directly on a section rather than inside one, `artifacts.allow_upload` and `debug.allow_all_symbols`. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would in the same motion have handed over the permissions block.
+`allow_config_description_write` opens `target.*`, `debuggers.<name>.probe_id` / `executable` / `interface_cfg` / `target_cfg` / `connect_mode`, `com_ports.<name>.device` / `baudrate` / `serial_number`, and every `can_buses.<name>` field except its permissions. `allow_config_permissions_write` opens every permission key in the file: each `permissions:` block, and the two grants that sit directly on a section rather than inside one, `artifacts.allow_upload` and `debug.allow_all_symbols`. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would in the same motion have handed over the permissions block.
 
 `allow_upgrade` is the one that is not about this file. It opens `server_upgrade`, which replaces the installed package with the newest release, because on an MCP host without a shell there is otherwise no way for the main surface to perform the basic maintenance of its own server. It takes no version, so it cannot be used to install a release that reads the rest of this block differently, and it is subject to the same ratchet as everything else here: an agent can set it false and never true.
 

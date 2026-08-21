@@ -41,6 +41,13 @@ the console script performs is run through the same interpreter. Still loading
 is `upgrade_failed` with `installation_intact`; not loading is
 `installation_broken`, with the one command that repairs it and the extras it
 must carry, both read before the manager ran.
+
+One failure is answered rather than only reported, and it is the one the
+project's own installer has answered since #293: a manager that came back
+saying it could not trace the index's certificate to a root it trusts is a
+bench behind a TLS-intercepting proxy, and it is retried once against this
+machine's own certificate store. Whatever comes of that, the result says what
+was tried and carries both attempts' words.
 """
 
 from __future__ import annotations
@@ -55,6 +62,7 @@ import sys
 import sysconfig
 from contextlib import suppress
 from pathlib import Path
+from typing import NamedTuple
 
 from agentic_hil import __version__
 from agentic_hil.config import ConfigError
@@ -559,8 +567,17 @@ def _processes_holding_installation() -> list[JsonObject]:
     return sorted(holders, key=lambda holder: holder["pid"])
 
 
-def _run_upgrade_process(command: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=600, check=False)
+def _run_upgrade_process(command: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """One child process, output captured, wait bounded.
+
+    `env` is the whole environment the child is given, and `None` is the
+    inheritance every call but the certificate retry wants. The retry hands in a
+    copy of this process's environment with one variable added rather than
+    exporting that variable here: `os.environ` belongs to the process the
+    operator started, and a module that wrote to it would change every later
+    child of this run and every caller that shares the interpreter.
+    """
+    return subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, timeout=600, check=False)
 
 
 def _process_result(completed: subprocess.CompletedProcess[str]) -> JsonObject:
@@ -570,6 +587,336 @@ def _process_result(completed: subprocess.CompletedProcess[str]) -> JsonObject:
     if completed.stderr.strip():
         result["stderr"] = completed.stderr.strip()
     return result
+
+
+# ---------------------------------------------------------------------------
+# The TLS-intercepting proxy, met here the way the installer already meets it.
+#
+# A bench behind a proxy that re-signs TLS gets `invalid peer certificate:
+# UnknownIssuer` out of uv, because uv validates against roots compiled into its
+# own binary while curl and the system package manager on the same host read the
+# machine's store and keep working. That is what makes the cause recognisable,
+# and `install.sh` has recognised it since #293: it retries the manager once
+# against this machine's own store and says what it did. `agentic-hil upgrade`
+# runs the same managers against the same index, so it recognises the same thing
+# and answers it the same way rather than handing the operator a certificate
+# chain and the job of re-deriving a remedy this project already encodes.
+#
+# The two lists below are a deliberate mirror rather than a shared definition,
+# and the sibling copies are `trust_failure()` and `system_cert_bundle()` in
+# install.sh (install.ps1 spells the same signatures as one regular expression in
+# `Test-TrustFailure`). They cannot be one copy: the installer runs on a machine
+# where this package does not exist yet, so it can read nothing from here, and
+# this module cannot call a POSIX shell function. A change to either list is a
+# change to all of them.
+
+# The patterns of `trust_failure()` in install.sh, in its order and its casing:
+# what a chain that ends outside the manager's own roots looks like from uv
+# (rustls), pip (OpenSSL) and curl. A failure that says none of this is a failure
+# about something else, and is never retried.
+_TRUST_FAILURE_SIGNATURES = (
+    "invalid peer certificate",
+    "UnknownIssuer",
+    "self-signed certificate",
+    "self signed certificate",
+    "certificate verify failed",
+    "CERTIFICATE_VERIFY_FAILED",
+    "unable to get local issuer certificate",
+)
+
+# The candidates `system_cert_bundle()` in install.sh walks, in its order: the
+# first readable one is the file pip is pointed at. uv needs no such list because
+# it takes a switch, and pip takes a file. None of these exists on Windows, which
+# is why `install.ps1` leaves `PIP_CERT` to the operator there and why this list
+# simply finds nothing on that host.
+_SYSTEM_CERT_BUNDLES = (
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/ca-bundle.pem",
+    "/etc/ssl/cert.pem",
+)
+
+# The values that turn UV_SYSTEM_CERTS off. An operator who exported one of these
+# has deliberately kept uv on its own bundled roots, which is an opt-out to
+# preserve rather than proof uv read this machine's store: setting the variable
+# again would leave it disabled, and overriding it would silently reverse a
+# choice they made. Any other non-empty value is read as enabling the store.
+_UV_SYSTEM_CERTS_DISABLED_VALUES = frozenset({"0", "false", "no", "off", "n", "f"})
+
+# The one thing that fixes a proxy neither the manager's roots nor this machine's
+# store trusts. Named as a step and never performed: it writes to a trust store,
+# which is the operator's, and the alternative an impatient reader reaches for is
+# a switch that turns verification off, which this project offers nowhere.
+_INSTALL_THE_PROXY_CA = (
+    "Install the proxy's own CA certificate into this machine's certificate store. Until that is done there is "
+    "nothing this command can be pointed at that trusts what the proxy presents, and no switch that turns "
+    "verification off is a fallback. TROUBLESHOOTING.md section 1 is the rest of it."
+)
+
+
+class _SystemStoreAttempt(NamedTuple):
+    """The one environment change a second attempt would make, or why there is none.
+
+    Exactly one half is filled. `variable` and `value` are what the child gets
+    that the first attempt did not; the other three are what a result owes an
+    operator when there is nothing new to try, because "retried and it failed
+    too" and "not retried, and here is why" are different answers and only one of
+    them is ever true. `no_attempt_brief` says the same as `no_attempt` in one
+    clause, for the field rather than for the paragraph.
+    """
+
+    variable: str = ""
+    value: str = ""
+    no_attempt: str = ""
+    no_attempt_brief: str = ""
+    next_step: str = ""
+
+
+class _CertificateNote(NamedTuple):
+    """What a run that met a proxy adds to whatever result it ends in.
+
+    `said` is the prose the summary gains, because a caller that reads one line
+    of a result reads that one. `fields` are what goes on the document beside it:
+    `certificates`, which is the same fact in one sentence and exists because two
+    surfaces rewrite the summary and would otherwise drop it, and `next_steps`.
+    Both empty is a run that met no proxy at all.
+    """
+
+    said: str
+    fields: JsonObject
+
+
+def _trust_failure(output: str) -> bool:
+    """Whether a manager's own words name a certificate it could not trace to a root."""
+    return any(signature in output for signature in _TRUST_FAILURE_SIGNATURES)
+
+
+def _system_cert_bundle() -> str | None:
+    """The first readable bundle of the installer's list, or None where there is none."""
+    for candidate in _SYSTEM_CERT_BUNDLES:
+        with suppress(OSError):
+            if Path(candidate).is_file() and os.access(candidate, os.R_OK):
+                return candidate
+    return None
+
+
+def _uv_system_certs_disabled(value: str) -> bool:
+    """Whether an exported UV_SYSTEM_CERTS explicitly turns the system store off."""
+    return value.strip().lower() in _UV_SYSTEM_CERTS_DISABLED_VALUES
+
+
+def _system_store_attempt(manager: str) -> _SystemStoreAttempt:
+    """What pointing this manager at this machine's own store would take.
+
+    uv reads a switch (`UV_SYSTEM_CERTS`), pip reads a file (`PIP_CERT`), and
+    pipx is a pip: it resolves and installs through the pip inside the
+    environment it manages, which reads that variable out of its own environment
+    like any other.
+
+    A variable the operator has already exported is left exactly as it is, and
+    that is also the whole reason there is no second attempt in that case: it was
+    in force for the attempt that just failed, so setting it again would repeat a
+    failed run rather than retry it, and overriding it would quietly swap the
+    bundle they chose for one this module picked. Two of those inherited values
+    do not name the system store, though, and the remedy has to say so: a
+    `UV_SYSTEM_CERTS` set to a disabled value kept uv on its own roots, so the
+    fix is to enable it rather than to install a CA into a store uv is not
+    reading; and a `PIP_CERT` names one specific bundle, so the CA has to go into
+    that bundle rather than only into the machine store pip was told to ignore.
+    """
+    if manager == "uv":
+        configured = os.environ.get("UV_SYSTEM_CERTS", "").strip()
+        if configured and _uv_system_certs_disabled(configured):
+            return _SystemStoreAttempt(
+                no_attempt=(
+                    f"UV_SYSTEM_CERTS is set to {configured!r} here, which keeps uv on its own bundled roots, so uv did "
+                    f"not read this machine's store on the attempt that failed. That opt-out is yours to hold, so it was "
+                    f"not overridden and no second attempt was made against it."
+                ),
+                no_attempt_brief=f"not retried, because UV_SYSTEM_CERTS is set to the disabled value {configured!r} here, an opt-out this leaves in place",
+                next_step=(
+                    "To let uv read this machine's own certificate store, set UV_SYSTEM_CERTS to 1 (or unset it) and "
+                    "make sure the proxy's own CA certificate is installed in that store; until uv is reading the store, "
+                    "installing the CA there cannot help, and no switch that turns verification off is a fallback. "
+                    "TROUBLESHOOTING.md section 1 is the rest of it."
+                ),
+            )
+        if configured:
+            return _SystemStoreAttempt(
+                no_attempt=(
+                    "UV_SYSTEM_CERTS is already set in this environment, so uv read this machine's own store on the "
+                    "attempt that just failed and a second one would only repeat it."
+                ),
+                no_attempt_brief="not retried, because UV_SYSTEM_CERTS is already set here and was in force for the attempt that failed",
+                next_step=_INSTALL_THE_PROXY_CA,
+            )
+        return _SystemStoreAttempt("UV_SYSTEM_CERTS", "1")
+    pip_cert = os.environ.get("PIP_CERT", "").strip()
+    if pip_cert:
+        return _SystemStoreAttempt(
+            no_attempt=(
+                f"PIP_CERT is already set in this environment, so pip read the bundle it names ({pip_cert}) on the "
+                f"attempt that just failed and a second one would only repeat it."
+            ),
+            no_attempt_brief="not retried, because PIP_CERT is already set here and was in force for the attempt that failed",
+            next_step=(
+                f"Add the proxy's own CA certificate to the bundle PIP_CERT names ({pip_cert}) -- that is the only "
+                f"certificate source pip read on the attempt that failed, so installing a CA anywhere else does not "
+                f"reach it -- or point PIP_CERT at a bundle that already trusts the proxy (unsetting it falls back to "
+                f"pip's default) and run the upgrade again. No switch that turns verification off is a fallback. "
+                f"TROUBLESHOOTING.md section 1 is the rest of it."
+            ),
+        )
+    bundle = _system_cert_bundle()
+    if bundle is None:
+        return _SystemStoreAttempt(
+            no_attempt=(
+                f"No certificate bundle was readable at any of {', '.join(_SYSTEM_CERT_BUNDLES)}, which is the list "
+                f"the one-line installer searches, so there was nothing to point pip at and no second attempt was made."
+            ),
+            no_attempt_brief="not retried, because no certificate bundle was found on this host for pip to be pointed at",
+            next_step=(
+                "Set PIP_CERT to this machine's certificate bundle and run the upgrade again. TROUBLESHOOTING.md "
+                "section 1 is the rest of it."
+            ),
+        )
+    return _SystemStoreAttempt("PIP_CERT", bundle)
+
+
+def _trust_diagnosis(manager: str) -> str:
+    """The cause, in the words that let an operator recognise their own network."""
+    if manager == "uv":
+        return (
+            "That is a certificate uv could not trace to a root it carries, which is what a TLS-intercepting proxy "
+            "looks like from inside uv: uv validates against roots compiled into its own binary, while curl and the "
+            "system package manager on the same host read this machine's own store and keep working."
+        )
+    return (
+        f"That is a certificate {manager} could not trace to a trusted root, which is what a TLS-intercepting proxy "
+        f"re-signing this connection looks like from inside it."
+    )
+
+
+def _persistent_export(attempt: _SystemStoreAttempt) -> str:
+    """The standing fix TROUBLESHOOTING recommends, so the retry is never needed again."""
+    return (
+        f"Export {attempt.variable}={attempt.value} in the environment this bench upgrades from, so every later "
+        f"upgrade reads this machine's own certificate store without needing a second attempt. TROUBLESHOOTING.md "
+        f"section 1 is the rest of it."
+    )
+
+
+def _certificate_note(said: str, brief: str, next_steps: list[str]) -> _CertificateNote:
+    """One outcome of meeting a proxy, in the two lengths a result needs it in.
+
+    `said` is a paragraph and `brief` is a clause, because they are read in
+    different places: the paragraph goes in the summary a person reads first, and
+    the clause goes in a field beside it. The same paragraph in both would be one
+    notice printed twice on one screen, which reads as two.
+    """
+    return _CertificateNote(said, {"certificates": f"{brief[:1].upper()}{brief[1:]}.", "next_steps": next_steps})
+
+
+def _manager_run(manager: str, command: list[str]) -> tuple[subprocess.CompletedProcess[str], JsonObject, _CertificateNote]:
+    """The manager, run once, and run once more when its own words name the proxy.
+
+    Three values: the attempt whose outcome this upgrade reports, that attempt's
+    `install` payload, and the certificate fields the result carries, which are
+    empty whenever the manager said nothing about a certificate at all.
+
+    The retried attempt is the one reported, and the attempt it replaces is kept
+    under `install.certificate_retry.first_attempt` rather than dropped. A
+    refusal after both attempts has to carry both managers' own words: the first
+    is what names the proxy, and the second is what says this machine's store did
+    not help either, and neither one alone is the diagnosis.
+
+    Exactly one extra attempt, and only ever with verification on. There is no
+    path through here to `--allow-insecure-host`, `--trusted-host` or any other
+    switch that turns checking off, which is the same promise the installer makes.
+    """
+    first = _run_upgrade_process(command)
+    first_result = _process_result(first)
+    if first.returncode == 0 or not _trust_failure(_manager_output(first_result)):
+        return first, first_result, _CertificateNote("", {})
+
+    diagnosis = _trust_diagnosis(manager)
+    attempt = _system_store_attempt(manager)
+    if attempt.no_attempt:
+        return first, first_result, _certificate_note(f"{diagnosis} {attempt.no_attempt}", attempt.no_attempt_brief, [attempt.next_step])
+
+    retry_record: JsonObject = {"variable": attempt.variable, "value": attempt.value, "first_attempt": first_result}
+    retried_with = f"It was retried once with {attempt.variable}={attempt.value} in the manager's environment, so it read this machine's own certificate store, with verification on in both attempts"
+    retried_briefly = f"retried once against this machine's own certificate store with {attempt.variable}={attempt.value}"
+    try:
+        retried = _run_upgrade_process(command, env={**os.environ, attempt.variable: attempt.value})
+    except (OSError, subprocess.TimeoutExpired) as error:
+        # The retry never produced an outcome, so the first attempt stays the one
+        # being reported and the diagnosis it earned is not thrown away with it.
+        return (
+            first,
+            {**first_result, "certificate_retry": {**retry_record, "exception_type": type(error).__name__, "detail": str(error)}},
+            _certificate_note(
+                f"{diagnosis} {retried_with}, and that second attempt did not finish: {type(error).__name__}.",
+                f"{retried_briefly}, and that attempt did not finish ({type(error).__name__})",
+                [_persistent_export(attempt)],
+            ),
+        )
+
+    install_result = {**_process_result(retried), "certificate_retry": retry_record}
+    if retried.returncode == 0:
+        return (
+            retried,
+            install_result,
+            _certificate_note(
+                f"{diagnosis} {retried_with}, and that second attempt is the one that succeeded.",
+                f"{retried_briefly}, and that is the attempt that succeeded",
+                [_persistent_export(attempt)],
+            ),
+        )
+    # The second attempt failed too, but not necessarily for the reason the first
+    # did. Only a retry whose own words name a trust failure again says the
+    # machine's store does not carry the proxy CA either; a retry that failed
+    # while resolving, downloading or installing got *past* the trust failure and
+    # then fell over somewhere else, and telling that operator to install a CA
+    # sends them at the wrong thing. So the retry is classified on its own output
+    # rather than assumed to have ended the way the first attempt did.
+    if _trust_failure(_manager_output(install_result)):
+        return (
+            retried,
+            install_result,
+            _certificate_note(
+                f"{diagnosis} {retried_with}, and that attempt failed the same way: the proxy's own CA is missing from "
+                f"this machine's store as well, so pointing a manager at that store cannot help until it is there.",
+                f"{retried_briefly}, and that attempt failed the same way",
+                [_INSTALL_THE_PROXY_CA, _persistent_export(attempt)],
+            ),
+        )
+    return (
+        retried,
+        install_result,
+        _certificate_note(
+            f"{diagnosis} {retried_with}, and that got the manager past the trust failure: the second attempt names no "
+            f"untrusted certificate, so this machine's store was read, but it then failed for a reason of its own. That "
+            f"reason is the manager's to report and is preserved under install; it is not a certificate to install, so "
+            f"do not change the trust store on account of it.",
+            f"{retried_briefly}, which got past the trust failure but then failed for a different reason the manager records under install",
+            [_persistent_export(attempt)],
+        ),
+    )
+
+
+def _with_certificate_note(outcome: JsonObject, note: _CertificateNote) -> JsonObject:
+    """The outcome, plus what happened about certificates, wherever it ended up.
+
+    One place rather than five. A trust failure is answered the same way whether
+    the retry then upgraded the machine, found nothing left to do, failed again
+    or left an installation that will not load, and what happened belongs in the
+    summary on every one of them, because that is the line a person reads first.
+    """
+    if not note.said:
+        return outcome
+    summary = str(outcome.get("summary", "")).strip()
+    return {**outcome, **note.fields, "summary": f"{summary} {note.said}".strip()}
 
 
 # ---------------------------------------------------------------------------
@@ -930,7 +1277,7 @@ def replace_installation(*, tool: str) -> JsonObject:
         return _nothing_to_install(tool, manager, command, previous_version, resolution)
 
     try:
-        installed = _run_upgrade_process(command)
+        installed, install_result, certificates = _manager_run(manager, command)
     except (OSError, subprocess.TimeoutExpired) as error:
         return _failed_upgrade(
             tool,
@@ -943,17 +1290,19 @@ def replace_installation(*, tool: str) -> JsonObject:
             exception_type=type(error).__name__,
             detail=str(error),
         )
-    install_result = _process_result(installed)
     if installed.returncode != 0:
-        return _failed_upgrade(
-            tool,
-            manager,
-            command,
-            previous_version,
-            installed_extras,
-            reinstall_command,
-            summary="Agentic HIL package manager reported an upgrade failure.",
-            install=install_result,
+        return _with_certificate_note(
+            _failed_upgrade(
+                tool,
+                manager,
+                command,
+                previous_version,
+                installed_extras,
+                reinstall_command,
+                summary="Agentic HIL package manager reported an upgrade failure.",
+                install=install_result,
+            ),
+            certificates,
         )
 
     verification, current_version = _loaded_version()
@@ -963,30 +1312,36 @@ def replace_installation(*, tool: str) -> JsonObject:
         # here named the verification step and stopped, which told an operator
         # that something could not be loaded without telling them their
         # installation was gone or what single command brings it back.
-        return _installation_broken(
-            {"ok": False, "tool": tool, "manager": manager, "command": command, "python": sys.executable, "previous_version": previous_version, "install": install_result},
-            installed_extras,
-            reinstall_command,
-            verification,
-            "Agentic HIL package manager completed, but the installation it left cannot be loaded.",
+        return _with_certificate_note(
+            _installation_broken(
+                {"ok": False, "tool": tool, "manager": manager, "command": command, "python": sys.executable, "previous_version": previous_version, "install": install_result},
+                installed_extras,
+                reinstall_command,
+                verification,
+                "Agentic HIL package manager completed, but the installation it left cannot be loaded.",
+            ),
+            certificates,
         )
 
     if current_version == previous_version:
-        return _upgrade_changed_nothing(tool, manager, command, previous_version, current_version, install_result)
+        return _with_certificate_note(_upgrade_changed_nothing(tool, manager, command, previous_version, current_version, install_result), certificates)
 
-    return {
-        "ok": True,
-        "tool": tool,
-        "upgraded_on_disk": True,
-        "summary": f"Agentic HIL upgraded from {previous_version} to {current_version} on disk.",
-        "manager": manager,
-        "command": command,
-        "python": sys.executable,
-        "previous_version": previous_version,
-        "version": current_version,
-        "install": install_result,
-        "restart_required": True,
-    }
+    return _with_certificate_note(
+        {
+            "ok": True,
+            "tool": tool,
+            "upgraded_on_disk": True,
+            "summary": f"Agentic HIL upgraded from {previous_version} to {current_version} on disk.",
+            "manager": manager,
+            "command": command,
+            "python": sys.executable,
+            "previous_version": previous_version,
+            "version": current_version,
+            "install": install_result,
+            "restart_required": True,
+        },
+        certificates,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1152,12 +1507,19 @@ def _reported_as_running_code(result: JsonObject, config: AgenticHILConfig) -> J
         reported["extras_warning"] = extras
     if not result.get("upgraded_on_disk"):
         return reported
+    # The summary is rewritten here rather than extended, so anything the shared
+    # implementation put in it has to be carried over by name. `certificates` is
+    # the one such sentence: an upgrade that only worked because it was retried
+    # against this machine's own store must say so on this surface too, or the
+    # operator learns nothing about the proxy that will meet the next one.
+    certificates = result.get("certificates")
+    retry_steps = [step for step in result.get("next_steps") or [] if isinstance(step, str)]
     return {
         **reported,
         "summary": (
             f"Agentic HIL was upgraded from {result['previous_version']} to {result['version']} on disk. This server is "
             f"still running {__version__} and will until it is restarted; nothing about this call changed the code "
-            "answering it."
+            "answering it." + (f" {certificates}" if isinstance(certificates, str) and certificates else "")
         ),
-        "next_steps": list(_RESTART_STEPS),
+        "next_steps": [*_RESTART_STEPS, *retry_steps],
     }

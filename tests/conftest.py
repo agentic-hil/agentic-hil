@@ -181,6 +181,8 @@ FAKE_STLINK_HALT_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_halt_u
 FAKE_STLINK_PARTIAL_CONFIRMATION = ROOT / "tests" / "fixtures" / "fake_stlink_partial_confirmation.py"
 FAKE_STLINK_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_stlink_no_target.py"
 FAKE_STLINK_NO_PROBE = ROOT / "tests" / "fixtures" / "fake_stlink_no_probe.py"
+FAKE_STLINK_ERASE_REFUSED = ROOT / "tests" / "fixtures" / "fake_stlink_erase_refused.py"
+FAKE_STLINK_ERASE_MID_FLASH = ROOT / "tests" / "fixtures" / "fake_stlink_erase_mid_flash.py"
 FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
 FAKE_PYOCD_UNKNOWN_TARGET = ROOT / "tests" / "fixtures" / "fake_pyocd_unknown_target.py"
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
@@ -273,6 +275,10 @@ def write_config(
     auto_probe_ids: bool = True,
     interface_cfg: str = "interface/stlink.cfg",
     target_cfg: str = "target/stm32f4x.cfg",
+    # Omitted from the written entry by default, so the bulk of the suite keeps
+    # exercising the file that never named a connect mode and is read at the
+    # default. A test that wants the key writes it.
+    connect_mode: str | None = None,
     config_path: Path | None = None,
     auto_recover: str | None = None,
     recovery_max_attempts: int | None = None,
@@ -299,6 +305,7 @@ def write_config(
         "target_cfg": target_cfg,
         "flash_address": flash_address,
         "timeout_s": 5,
+        **({"connect_mode": connect_mode} if connect_mode is not None else {}),
     }
     # Omitted entirely by default, so the common test config exercises the same
     # "policy was never named" path a config written before recovery existed has.

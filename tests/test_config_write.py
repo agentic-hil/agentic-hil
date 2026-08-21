@@ -66,6 +66,7 @@ def bench(
     *,
     config_root: Path | None = None,
     device_permissions: dict[str, bool] | None = None,
+    debugger_type: str = "openocd",
     **grants: bool,
 ) -> tuple[Path, Path]:
     """A configuration with one probe, one port and one CAN bus, opened as asked.
@@ -88,6 +89,7 @@ def bench(
         config_root=root,
         config_version=2,
         permissions=device_permissions or {},
+        debugger_type=debugger_type,
         com_ports_yaml=COM_PORTS,
         can_buses_yaml=CAN_BUSES,
     )
@@ -992,6 +994,53 @@ def test_the_whole_path_works_over_mcp(tmp_path: Path, monkeypatch: pytest.Monke
         tools.close()
 
     assert document_of(path)["debuggers"]["dut"]["probe_id"] == "066AFF495451885087171450"
+
+
+def test_connect_mode_is_opened_by_the_description_grant_and_reaches_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The key an agent needs after a bench keeps failing its first flash.
+
+    It sits with the four fields that already say what the bench *is*, not with
+    the permissions: both of its values are a flash this configuration already
+    allows, and which one this board needs is a fact about the board. So the
+    description grant alone has to be enough to write it, and the value has to
+    arrive in the file rather than in a refusal."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    tools = service(workspace)
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE, {})
+        writable = {entry["key"]: entry for entry in described["writable_keys"]}
+        written = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.connect_mode", "under_reset")))
+    finally:
+        tools.close()
+
+    assert "debuggers.dut.connect_mode" in writable
+    assert writable["debuggers.dut.connect_mode"]["right"] == CONFIG_DESCRIPTION_RIGHT
+    assert writable["debuggers.dut.connect_mode"]["value_schema"]["enum"] == ["hotplug", "under_reset"]
+    assert written["ok"] is True, written
+    assert written["permissions_changed"] == [], "a connect mode grants nothing"
+    assert document_of(path)["debuggers"]["dut"]["connect_mode"] == "under_reset"
+
+
+def test_a_connect_mode_the_backend_cannot_carry_out_rolls_the_file_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-backend half is enforced on the write path too, by the loader.
+
+    Nothing in this surface knows what OpenOCD can do; what it does know is that
+    the file it just wrote has to load as authoritative before it may replace the
+    one that did. So the same refusal a hand-edited file gets arrives here, and
+    the bench keeps the configuration it had."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.connect_mode", "under_reset")))
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "config_invalid"
+    assert refused["field"] == "debuggers.dut.connect_mode"
+    assert refused["allowed_values"] == ["hotplug"]
+    assert path.read_bytes() == before, "nothing changed"
 
 
 def test_the_server_says_before_the_first_call_that_this_is_the_way_to_change_a_config() -> None:

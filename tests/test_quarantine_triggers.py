@@ -30,11 +30,14 @@ from conftest import (
     FAKE_OPENOCD_MISSING_CFG,
     FAKE_OPENOCD_NO_TARGET,
     FAKE_OPENOCD_UNCONFIRMED,
+    FAKE_STLINK_ERASE_MID_FLASH,
+    FAKE_STLINK_ERASE_REFUSED,
     FAKE_STLINK_NO_PROBE,
     FAKE_STLINK_UNCONFIRMED,
     write_config,
 )
 
+from agentic_hil.backends.stlink import erase_abort_point
 from agentic_hil.config import load_config
 from agentic_hil.coordination import HardwareCoordinator, debugger_effect_resources
 from agentic_hil.knowledge import (
@@ -323,6 +326,239 @@ def test_a_reset_the_openocd_fake_aborts_after_init_is_still_an_incident(tmp_pat
         assert service.coordinator.blocked is False
     finally:
         service.close()
+
+
+def flash_through_stlink(workspace: Path, executable: Path):
+    firmware = workspace / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True, exist_ok=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = config_for(workspace, debugger_type="stlink", debugger_executable=executable, probe_id="STLINK123")
+    service = AgenticHILToolService(config)
+    try:
+        return service.call("flash_firmware", {"image_path": "build/firmware.elf"}), service, config
+    except BaseException:
+        service.close()
+        raise
+
+
+def test_a_programmer_that_refused_the_erase_leaves_the_flash_unconfirmed(tmp_path: Path) -> None:
+    """A refused erase does not prove the board is untouched, so it quarantines.
+
+    #328's first cut released the lease and reported `hardware_state: unchanged`
+    and `retry_safe: true` on the strength of no progress or download line having
+    been captured. That is an absence of evidence, not proof: STM32CubeProgrammer's
+    progress lines are not guaranteed across versions, quiet or piped output and
+    abort paths, and `failed to erase memory` also covers a protection refusal
+    that can strike after unprotected sectors in the same range have already been
+    erased. The failure still carries the programmer's own transcript and the
+    reading that places it, but the flash is treated as unconfirmed and the
+    incident stands, exactly as it does for a mid-flash failure.
+    """
+    result, service, config = flash_through_stlink(tmp_path, FAKE_STLINK_ERASE_REFUSED)
+    try:
+        assert result["error_type"] == "flash_erase_failed"
+        # No safety claim is drawn from the refusal, so the same four fields the
+        # mid-flash failure carries hold here too.
+        assert result["side_effect_status"] == "unknown"
+        assert result["retry_safe"] is False
+        assert result.get("hardware_state") != "unchanged"
+        assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+        # The diagnostic evidence still travels: which line the refusal was read
+        # from, and the programmer's own words under `programmer_output`.
+        abort_point = result["erase_abort_point"]
+        assert abort_point["reading"] == "erase_refused_effect_unconfirmed"
+        assert abort_point["evidence_line"] == "Error: failed to erase memory"
+        assert "Error: failed to erase memory" in result["programmer_output"]["stderr"]
+        # The refusal no longer relaxes the fields the coordination layer keys on:
+        # no `hardware_state: unchanged`, and a side effect it must treat as
+        # unconfirmed rather than as proven absent.
+        assert result.get("side_effect_committed") is not False
+        assert result["summary"].endswith("unconfirmed.")
+    finally:
+        service.close()
+
+
+def test_the_refusal_names_the_line_it_read_the_board_state_off(tmp_path: Path) -> None:
+    """An operator has to be able to disagree with evidence rather than a feeling."""
+    result, service, _ = flash_through_stlink(tmp_path, FAKE_STLINK_ERASE_REFUSED)
+    try:
+        abort_point = result["erase_abort_point"]
+
+        assert abort_point["reading"] == "erase_refused_effect_unconfirmed"
+        assert abort_point["evidence_line"] == "Error: failed to erase memory"
+        assert "does not establish that no sector was erased before the refusal" in abort_point["evidence_rule"]
+    finally:
+        service.close()
+
+
+def test_a_failure_with_a_segment_already_written_keeps_the_quarantine(tmp_path: Path) -> None:
+    """The other reading of the same refusal line, and the whole reason the
+    decision is taken from the transcript rather than from the exit code.
+
+    Segment 0 was erased and downloaded, segment 1's erase was refused, and flash
+    now holds neither the old image nor the new one. That is exactly what
+    `debugger_result_unconfirmed` is for, and nothing here may talk it away.
+    """
+    result, service, _ = flash_through_stlink(tmp_path, FAKE_STLINK_ERASE_MID_FLASH)
+    try:
+        # Asserted before the new fields on purpose: these four are what this
+        # branch must not change, and they hold on the shipped code too.
+        assert result["side_effect_status"] == "unknown"
+        assert result["retry_safe"] is False
+        assert result.get("hardware_state") != "unchanged"
+        assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+
+        abort_point = result["erase_abort_point"]
+        assert result["error_type"] == "flash_erase_failed"
+        assert abort_point["reading"] == "flash_change_underway"
+        assert abort_point["evidence_line"] == "File download complete"
+        # The summary must not deny the write its own evidence records: segment 0
+        # is on the board, so "the firmware was not written" would contradict the
+        # `flash_change_underway` reading this same result carries.
+        assert "neither the old image nor the new one" in result["summary"]
+        assert "not written" not in result["summary"]
+    finally:
+        service.close()
+
+
+def test_the_refused_erase_incident_stands_down_and_owes_no_operator_recovery(tmp_path: Path) -> None:
+    """The lifecycle the catalogue and TROUBLESHOOTING.md have to describe.
+
+    A refused erase opens a `debugger_result_unconfirmed` incident, and that
+    incident owes no gate: it stands down when the failed `flash_firmware` call
+    ends, so the result carries `incident_stood_down` and `quarantined: false`,
+    the bench is not held, and `hardware_recover` over it answers
+    `nothing_to_recover: true` rather than clearing anything. The retry the
+    remedy points at is simply accepted; there is no `recover --confirm-safe-state`
+    step before it, and the remedy text must not claim one. What does still hold
+    is that the flash is indeterminate, `cleanup_required` and `cleanup_reasons`
+    say so, until a retry programs and verifies.
+    """
+    result, service, _ = flash_through_stlink(tmp_path, FAKE_STLINK_ERASE_REFUSED)
+    try:
+        assert result["error_type"] == "flash_erase_failed"
+        # The bench is handed back when the call ends: not held, and the result
+        # says so in both fields the coordination layer sets.
+        assert result["quarantined"] is False
+        assert result["incident_stood_down"]["reasons"] == ["debugger_result_unconfirmed"]
+        assert service.coordinator.blocked is False
+        # The flash is still indeterminate, which is the part the stand-down does
+        # not change: a refused erase does not prove the board untouched.
+        assert result["cleanup_required"] is True
+        assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+
+        # There is nothing standing to clear, so recovery is a no-op, the exact
+        # thing the obsolete remedy text sent an operator to do.
+        recovered = service.call("hardware_recover", {})
+        assert recovered["ok"] is True
+        assert recovered["nothing_to_recover"] is True
+        assert recovered["was_quarantined"] is False
+
+        # And the retry the remedy points at is accepted without any recovery
+        # step: it meets the same programmer and fails the same way, but the call
+        # runs rather than being refused with `resource_quarantined`.
+        retry = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+        assert retry.get("error_type") != "resource_quarantined"
+        assert retry["error_type"] == "flash_erase_failed"
+        assert retry["quarantined"] is False
+    finally:
+        service.close()
+
+
+def test_the_refused_erase_incident_inside_a_declared_run_holds_until_the_run_stops(tmp_path: Path) -> None:
+    """The other lifecycle variant the catalogue and TROUBLESHOOTING.md describe.
+
+    A bare `flash_firmware` call is its own implicit single-action run, and the
+    test above pins that its refused-erase incident stands down the moment the
+    call ends. A call made inside a declared run does not: the run owns the hold,
+    so the failed flash comes back `quarantined: true` with no
+    `incident_stood_down`, and the declared run keeps the probe until
+    `bench_run_stop`. Within the run the incident still owes no operator gate,
+    `hardware_recover` answers `nothing_to_recover: true` and a retry is accepted
+    without a recovery step, but the stand-down is the run teardown's, which
+    `bench_run_stop` performs. Both variants live in the docs, so both are pinned.
+    """
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True, exist_ok=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    config = config_for(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK_ERASE_REFUSED, probe_id="STLINK123")
+    service = AgenticHILToolService(config)
+    try:
+        started = service.call("bench_run_start", {"devices": [{"kind": "debugger"}]})
+        assert started["ok"] is True, started
+        assert service.coordinator.run_active is True
+
+        result = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+        assert result["error_type"] == "flash_erase_failed"
+        # The declared run owns the hold, so this call does not stand the incident
+        # down: it stays quarantined and the run keeps the probe. This is the exact
+        # place the previous catalogue text was wrong, it promised the stand-down
+        # unconditionally.
+        assert result["quarantined"] is True
+        assert "incident_stood_down" not in result
+        assert service.coordinator.blocked is True
+        assert service.coordinator.run_active is True
+        # The flash is indeterminate, exactly as in the bare-call case.
+        assert result["cleanup_required"] is True
+        assert result["cleanup_reasons"] == ["debugger_result_unconfirmed"]
+
+        # The incident still owes no operator gate inside the run: `hardware_recover`
+        # finds nothing standing to clear, and the run's hold is untouched by it.
+        recovered = service.call("hardware_recover", {})
+        assert recovered["ok"] is True
+        assert recovered["nothing_to_recover"] is True
+        assert service.coordinator.run_active is True
+
+        # And a retry is accepted rather than refused with `resource_quarantined`,
+        # just as the remedy says, but here it stays quarantined, because the run
+        # still holds the incident and only `bench_run_stop` stands it down.
+        retry = service.call("flash_firmware", {"image_path": "build/firmware.elf"})
+        assert retry.get("error_type") != "resource_quarantined"
+        assert retry["error_type"] == "flash_erase_failed"
+        assert retry["quarantined"] is True
+        assert service.coordinator.run_active is True
+
+        # The stand-down is the run teardown's: `bench_run_stop` performs it, its
+        # result carries the `incident_stood_down` the failed call did not, and
+        # only then is the bench handed back.
+        stopped = service.call("bench_run_stop")
+        assert stopped["ok"] is True
+        assert stopped["incident_stood_down"]["reasons"] == ["debugger_result_unconfirmed"]
+        assert service.coordinator.blocked is False
+        assert service.coordinator.run_active is False
+    finally:
+        service.close()
+
+
+def test_a_transcript_that_cannot_place_the_failure_keeps_the_quarantine() -> None:
+    """When in doubt the quarantine stays, and the result says which it is.
+
+    Reached when the refusal line the classification was taken from cannot be
+    found line by line: the reading is neither of the two the transcript is
+    supposed to support, so nothing is relaxed and the last line the programmer
+    printed travels as the evidence that it does not answer the question.
+    """
+    coarse = erase_abort_point("ST-LINK SN  : STLINK123\nDevice name : STM32F446\nError: operation failed\n")
+
+    assert coarse["reading"] == "abort_point_unreadable"
+    assert coarse["evidence_line"] == "Error: operation failed"
+
+
+def test_a_progress_bar_between_the_announcement_and_the_refusal_is_work_underway() -> None:
+    """The bar reads as work under way; the announcement alone does not.
+
+    A progress bar belongs to a phase that is running, so a transcript carrying
+    one is `flash_change_underway` even though no download line ever appeared. A
+    transcript that reaches only the announcement and the refusal is the weaker
+    `erase_refused_effect_unconfirmed` reading, still quarantined, because the
+    announcement lines do not prove the device left the flash alone.
+    """
+    announced_only = erase_abort_point("Erasing memory corresponding to segment 0:\nErasing internal memory sectors [0 5]\nError: failed to erase memory\n")
+    started = erase_abort_point("Erasing internal memory sectors [0 5]\n[=========                     ] 18%\nError: failed to erase memory\n")
+
+    assert announced_only["reading"] == "erase_refused_effect_unconfirmed"
+    assert started["reading"] == "flash_change_underway"
+    assert started["evidence_line"] == "[=========                     ] 18%"
 
 
 # ---------------------------------------------------------------------------

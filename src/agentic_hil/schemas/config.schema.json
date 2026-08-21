@@ -98,7 +98,7 @@
         "allow_config_description_write": {
           "type": "boolean",
           "default": false,
-          "description": "Whether an agent may change this bench's description field-wise through project_config_set: target.*, debuggers.<name>.probe_id/executable/interface_cfg/target_cfg, com_ports.<name>.device/baudrate, and every can_buses.<name> field except its permissions. It never reaches a permission key — no permissions: block, and neither artifacts.allow_upload nor debug.allow_all_symbols — so it decides nothing about what may be done to the hardware. This is the grant for the common case: a board was attached after init and its identity has to be entered."
+          "description": "Whether an agent may change this bench's description field-wise through project_config_set: target.*, debuggers.<name>.probe_id/executable/interface_cfg/target_cfg/connect_mode, com_ports.<name>.device/baudrate, and every can_buses.<name> field except its permissions. It never reaches a permission key (no permissions: block, and neither artifacts.allow_upload nor debug.allow_all_symbols), so it decides nothing about what may be done to the hardware. This is the grant for the common case: a board was attached after init and its identity has to be entered."
         },
         "allow_config_permissions_write": {
           "type": "boolean",
@@ -235,6 +235,15 @@
               "SWD",
               "JTAG"
             ]
+          },
+          "connect_mode": {
+            "type": "string",
+            "default": "hotplug",
+            "enum": [
+              "hotplug",
+              "under_reset"
+            ],
+            "description": "How the probe attaches to the target for a flash. hotplug connects to the running core, which is what every configuration written before this key existed does and what the default keeps doing. under_reset holds the target in reset while the connection is made, which is the remedy for a core that runs from flash and defeats the erase; it needs the probe's reset line wired to the target's NRST (an on-board ST-Link has it). Read by the stlink backend only, where it selects STM32CubeProgrammer's mode=HOTPLUG or mode=UR for the flash command; probe_target keeps connecting hot plug so it stays the least intrusive call, and reset_target keeps its own NORMAL connect. openocd and pyocd refuse under_reset at load rather than ignoring it."
           },
           "interface_cfg": {
             "type": "string",

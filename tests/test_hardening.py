@@ -1829,6 +1829,64 @@ def test_an_openocd_search_name_loads_on_a_host_with_no_script_tree(tmp_path: Pa
     assert openocd_script_kind(entry.interface_cfg) == OPENOCD_SCRIPT_SEARCH_NAME
 
 
+def test_connect_mode_defaults_to_hot_plug_and_stlink_accepts_under_reset(tmp_path: Path) -> None:
+    """The key is optional, and its default is what every older file already did.
+
+    Both halves matter here. A configuration that never heard of `connect_mode`
+    has to keep flashing exactly as it did, which is what the default states, and
+    a configuration that asks for the fix has to come out of the loader carrying
+    it rather than being normalised away."""
+    unset = load_config(str(write_config(tmp_path / "unset", debugger_type="stlink", probe_id="STLINK123")))
+    asked = load_config(str(write_config(tmp_path / "asked", debugger_type="stlink", probe_id="STLINK123", connect_mode="under_reset")))
+    spelled_out = load_config(str(write_config(tmp_path / "spelled", debugger_type="stlink", probe_id="STLINK123", connect_mode="hotplug")))
+
+    assert unset.debuggers["dut"].connect_mode == "hotplug"
+    assert asked.debuggers["dut"].connect_mode == "under_reset"
+    assert spelled_out.debuggers["dut"].connect_mode == "hotplug"
+
+
+@pytest.mark.parametrize("debugger_type", ["openocd", "pyocd"])
+def test_connect_mode_under_reset_is_refused_by_the_backends_that_would_ignore_it(tmp_path: Path, debugger_type: str) -> None:
+    """A value a backend cannot carry out is a refusal, not a silent no-op.
+
+    `target_type` on OpenOCD is read and ignored, and that is tolerable: it is a
+    field belonging to another backend, sitting in an entry that names its own.
+    An ignored `under_reset` is a different thing. It is a bench saying its first
+    flash keeps failing at the erase under a running core, and accepting the word
+    while changing nothing would leave that bench believing it had been fixed.
+    The refusal names the field, what this backend accepts, and where the same
+    effect lives for it."""
+    with pytest.raises(ConfigError) as refused:
+        load_config(str(write_config(tmp_path, debugger_type=debugger_type, target_type="stm32f446retx", connect_mode="under_reset")))
+
+    assert refused.value.error_type == "config_invalid"
+    assert refused.value.details["field"] == "debuggers.dut.connect_mode"
+    assert refused.value.details["value"] == "under_reset"
+    assert refused.value.details["allowed_values"] == ["hotplug"]
+    assert "stlink" in refused.value.summary
+    assert "interface_cfg" in refused.value.summary, "OpenOCD's own way to the same effect is named"
+
+    # And the value every backend does have still loads, so the refusal is about
+    # the one mode rather than about the key.
+    accepted = load_config(str(write_config(tmp_path / "hotplug", debugger_type=debugger_type, target_type="stm32f446retx", connect_mode="hotplug")))
+    assert accepted.debuggers["dut"].connect_mode == "hotplug"
+
+
+def test_a_connect_mode_the_schema_does_not_spell_is_refused_with_both_values(tmp_path: Path) -> None:
+    """`mode=UR` is the programmer's spelling, not this configuration's.
+
+    A person who read the STM32CubeProgrammer documentation will try `UR` here,
+    and the answer has to be the enum rather than a backend message, because the
+    fix is to write the other word rather than to change backend."""
+    with pytest.raises(ConfigError) as refused:
+        load_config(str(write_config(tmp_path, debugger_type="stlink", probe_id="STLINK123", connect_mode="UR")))
+
+    assert refused.value.error_type == "config_invalid"
+    assert refused.value.details["field"] == "debuggers.dut.connect_mode"
+    assert refused.value.details["allowed_values"] == ["hotplug", "under_reset"]
+    assert refused.value.details["value"] == "UR"
+
+
 def test_the_generated_configuration_adopts_a_probe_on_a_host_with_no_script_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The whole sequence the install eval ran, through the real writer and parser.
 

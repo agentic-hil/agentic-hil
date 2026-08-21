@@ -56,6 +56,29 @@ updates:
         patterns:
           - "*"
 
+  # The TLS-proxy eval's base image is pinned by digest for the same reason, and
+  # needs an entry of its own: the docker ecosystem reads the Dockerfile in the
+  # directory it is given and nothing below it, so the entry above says nothing
+  # about this one. That eval is a bench a reader is invited to build and run
+  # themselves, which makes a digest that never moves worse here than anywhere.
+  #
+  # No major ignore. debian:bookworm-slim names the Debian release in the tag,
+  # so moving to the next one is a tag change nobody's bot can propose, and
+  # every digest move inside bookworm is exactly the security refresh this entry
+  # exists for.
+  - package-ecosystem: docker
+    directory: "/evals/tls_proxy/container"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:50"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    groups:
+      tls-proxy-eval-container:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
