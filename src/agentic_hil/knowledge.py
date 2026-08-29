@@ -306,6 +306,22 @@ def _substitutions() -> dict[str, str]:
     }
 
 
+# The one thing that fixes a proxy neither the manager's roots nor this machine's
+# store trusts. Standing text, which is why it lives here: `upgrade_failed` says
+# it as a catalogue step on every refusal, and `upgrade.py` attaches it as a
+# case-specific `next_steps` entry on the outcomes whose own catalogue entry does
+# not carry it. One string for both, so the two can neither drift nor be printed
+# twice on one screen.
+#
+# Named as a step and never performed: it writes to a trust store, which is the
+# operator's, and the alternative an impatient reader reaches for is a switch
+# that turns verification off, which this project offers nowhere.
+INSTALL_THE_PROXY_CA = (
+    "Install the proxy's own CA certificate into this machine's certificate store. Until that is done there is "
+    "nothing this command can be pointed at that trusts what the proxy presents, and no switch that turns "
+    "verification off is a fallback. TROUBLESHOOTING.md section 1 is the rest of it."
+)
+
 # Keys are "<error_type>" or "<error_type>:<scope>", where scope is the config
 # field the error names or the debugger backend that raised it. Lookup falls back
 # from the scoped key to the bare one, so a scope nobody wrote an entry for still
@@ -439,6 +455,55 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "the manager will resolve against an environment that no longer has the package in it.",
             "Do not delete the scripts directory, the environment or the leftover console script to clean up first. "
             "The reinstall replaces what it needs to, and a hand-cleared PATH entry is one more thing to put back.",
+        ),
+    ),
+    "upgrade_failed": ErrorRemedy(
+        meaning=(
+            "The package manager that owns this installation ran and did not finish, and the installation it was "
+            "going to replace is still the one that was there. The second half is measured rather than assumed: once "
+            "the manager had stopped, the same import the `agentic-hil` console script performs was run through the "
+            "same interpreter, and it answered the version this process was already running. So nothing was replaced, "
+            "nothing is half replaced, and the bench, the configuration and every board are exactly as they were; "
+            "`previous_version` and `version` on this result are the same number, and `installation_intact` says so. "
+            "Why it stopped is the manager's own account: `install` carries it when the manager produced any output, "
+            "and `exception_type` with `detail` when the manager could not be run at all. The usual reasons are an "
+            "index or a network that could not be reached, a TLS-intercepting proxy re-signing the connection to the "
+            "index, a package manager that is broken or no longer where it was, and a release that was withdrawn "
+            "between the resolution and the download."
+        ),
+        remediation=(
+            "Read `install.stderr` on this result. That is the manager saying why it stopped, in its own words, and "
+            "for most of these it is the whole diagnosis. The human rendering prints it as a literal block, so it is "
+            "on the screen without `--json`; if there is no `install` at all, `exception_type` and `detail` say that "
+            "the manager could not be started or did not return in time, which is a different thing from a manager "
+            "that ran and refused.",
+            "If this result carries `certificates`, the cause was a TLS-intercepting proxy and this command has "
+            "already answered it once by itself: that clause says which store was tried and what came of it, and "
+            "`next_steps` names the one export or bundle that settles it for this machine, measured on this host "
+            "rather than described in general. Do that before anything else here.",
+            INSTALL_THE_PROXY_CA,
+            "Otherwise deal with the reason `install.stderr` gives and run the upgrade again. Nothing was removed, so "
+            "there is nothing to undo first and the second attempt starts exactly where the first one did.",
+            "If it keeps failing, the one-line installer is the repair path, and on a machine that already has an "
+            "installation it repairs in place: `curl -LsSf https://agentic-hil.github.io/install.sh | sh`, or in "
+            "PowerShell `irm https://agentic-hil.github.io/install.ps1 | iex`. It goes through the package manager "
+            "again, recognises the same certificate signatures and retries against this machine's own store by "
+            "itself, and re-registers the agent halves out of the fresh copy. Run it with the agent host closed.",
+        ),
+        do_not=(
+            "Do not report this as a broken or a half-replaced installation. Those are two other answers, "
+            "`installation_broken` and `installation_changed_after_failed_upgrade`, and this is the one where the "
+            "probe found the previous release still loading. Telling an operator their bench is down when it is "
+            "running sends them to a reinstall that nothing here needs.",
+            "Do not reach for a switch that turns certificate verification off, on any manager. This project offers "
+            "none, anywhere, and does not name one: a trust failure it could not answer is a CA to install, not a "
+            "check to remove. TROUBLESHOOTING.md section 1 is the rest of it.",
+            "Do not uninstall the package, delete the environment, or force a reinstall to give the next attempt a "
+            "clean start. Nothing was removed by this failure, and the working installation this result names is the "
+            "one such a cleanup destroys.",
+            "Do not retry through `sudo pip` or `pip install --break-system-packages` because a system Python refused "
+            "the install. That message is the distribution saying the interpreter is not yours to write into; `uv` "
+            "and `pipx` install into environments of their own and need no exception.",
         ),
     ),
     "installation_changed_after_failed_upgrade": ErrorRemedy(

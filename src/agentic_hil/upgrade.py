@@ -70,7 +70,7 @@ from typing import NamedTuple
 from agentic_hil import __version__
 from agentic_hil.config import ConfigError
 from agentic_hil.configwrite import NOT_STARTED
-from agentic_hil.knowledge import remediation_fields
+from agentic_hil.knowledge import INSTALL_THE_PROXY_CA, remediation_fields
 from agentic_hil.process import ProcessImage, snapshot_process_images
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -647,14 +647,13 @@ _SYSTEM_CERT_BUNDLES = (
 _UV_SYSTEM_CERTS_DISABLED_VALUES = frozenset({"0", "false", "no", "off", "n", "f"})
 
 # The one thing that fixes a proxy neither the manager's roots nor this machine's
-# store trusts. Named as a step and never performed: it writes to a trust store,
-# which is the operator's, and the alternative an impatient reader reaches for is
-# a switch that turns verification off, which this project offers nowhere.
-_INSTALL_THE_PROXY_CA = (
-    "Install the proxy's own CA certificate into this machine's certificate store. Until that is done there is "
-    "nothing this command can be pointed at that trusts what the proxy presents, and no switch that turns "
-    "verification off is a fallback. TROUBLESHOOTING.md section 1 is the rest of it."
-)
+# store trusts, taken from the catalogue rather than written again here. It is
+# standing text, so `upgrade_failed` states it as a catalogue step on every
+# refusal of that type; attaching it as a step as well is what keeps the outcomes
+# with a catalogue entry of their own -- `installation_broken` and
+# `installation_changed_after_failed_upgrade` -- from losing it. Where both would
+# say it, `_with_certificate_note` drops the copy.
+_INSTALL_THE_PROXY_CA = INSTALL_THE_PROXY_CA
 
 
 class _SystemStoreAttempt(NamedTuple):
@@ -924,11 +923,27 @@ def _with_certificate_note(outcome: JsonObject, note: _CertificateNote) -> JsonO
     the retry then upgraded the machine, found nothing left to do, failed again
     or left an installation that will not load, and what happened belongs in the
     summary on every one of them, because that is the line a person reads first.
+
+    A step the outcome's own catalogue entry already carries is dropped here
+    rather than attached twice. `upgrade_failed` states the standing proxy remedy
+    as remediation, and the rendering prints remediation as What to do and
+    `next_steps` as Next steps, so the same numbered sentence would appear twice
+    on one screen and read as two instructions. Dropping it at the merge rather
+    than at the source is what keeps it on the outcomes whose catalogue entry does
+    not carry it: an installation left broken behind a proxy still needs the CA
+    named, and `installation_broken` does not say it.
     """
     if not note.said:
         return outcome
     summary = str(outcome.get("summary", "")).strip()
-    return {**outcome, **note.fields, "summary": f"{summary} {note.said}".strip()}
+    standing = {step for step in outcome.get("remediation") or [] if isinstance(step, str)}
+    fields = dict(note.fields)
+    steps = [step for step in fields.get("next_steps") or [] if step not in standing]
+    if steps:
+        fields["next_steps"] = steps
+    else:
+        fields.pop("next_steps", None)
+    return {**outcome, **fields, "summary": f"{summary} {note.said}".strip()}
 
 
 # ---------------------------------------------------------------------------
@@ -1114,6 +1129,12 @@ def _failed_upgrade(
             "version": loaded,
             "restart_required": False,
             "verification": verification,
+            # The standing text, from the same catalogue its two siblings below
+            # read: what the manager's own words are worth, what a `certificates`
+            # clause means, and the one-line installer as the repair path. It is
+            # on the document and not only in the rendering, because the MCP
+            # caller reads the document and acts out of `remediation`.
+            **remediation_fields("upgrade_failed"),
         }
     if loaded is not None:
         return _upgrade_changed_on_disk(base, previous_version, loaded, installed_extras, reinstall_command, verification, summary)
