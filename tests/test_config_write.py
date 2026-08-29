@@ -1164,8 +1164,8 @@ def test_a_type_only_switch_is_refused_even_when_the_entry_already_carries_the_n
     one. Reading the post-change document would find all three present and let a
     `type`-only switch to openocd through, leaving the entry on openocd with the
     scripts generation happened to write and the ST-Link binary run as if it were
-    openocd. Nothing here was dropped to force the refusal — the entry is exactly
-    what this project produces — and the switch is refused all the same, because
+    openocd. Nothing here was dropped to force the refusal, the entry is exactly
+    what this project produces, and the switch is refused all the same, because
     the *request* carried none of the fields the switch across needs. The refusal
     names every one of them so one more call lands the whole entry."""
     workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
@@ -1211,13 +1211,13 @@ def test_writing_the_type_an_entry_already_has_is_not_a_switch_and_demands_nothi
 def test_writing_openocd_to_an_entry_whose_type_is_omitted_is_a_no_op_not_a_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`type` is optional and defaults to openocd, so re-stating that default switches nothing.
 
-    An entry that omits `type` already loads on openocd — the loader reads the
-    field as `raw.get("type", "openocd")` — so writing `openocd` to it moves the
+    An entry that omits `type` already loads on openocd, the loader reads the
+    field as `raw.get("type", "openocd")`, so writing `openocd` to it moves the
     entry from openocd to openocd, which is no switch at all. Measured against the
     raw field rather than the effective backend, the absent `type` reads as
     nothing and the write looks like a switch onto openocd, and the entry is then
     refused for the `executable`, `interface_cfg` and `target_cfg` a real switch
-    would demand — though it is leaving no backend that chose them, and the refusal
+    would demand, though it is leaving no backend that chose them, and the refusal
     would name an executable belonging to a backend the entry is not leaving. The
     comparison uses the loader's own default, so this lands on the description
     grant and the entry keeps every field it already had."""

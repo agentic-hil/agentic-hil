@@ -1035,8 +1035,8 @@ def _effective_debugger_type(entry: JsonObject) -> str:
     ``type`` is optional, and an omitted or placeholder value loads as
     ``openocd`` because the loader reads it as ``raw.get("type", "openocd")``. A
     switch is measured against this effective backend, not against the raw field,
-    so re-writing the backend an entry is already on — including ``openocd`` on an
-    entry that never named a type — is the no-op it looks like rather than a
+    so re-writing the backend an entry is already on, including ``openocd`` on an
+    entry that never named a type, is the no-op it looks like rather than a
     switch that re-demands that backend's other fields."""
     value = entry.get(DEBUGGER_TYPE_FIELD)
     return value if isinstance(value, str) and value != "" else DEFAULT_DEBUGGER_TYPE
@@ -1059,9 +1059,9 @@ def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[Resol
     entry carries an ``executable`` chosen for its old backend; reading the
     document would let any of those stand in for the values the new backend
     actually needs, and the switch would land equipped for the wrong one. So a
-    real switch — one whose requested ``type`` differs from the entry's effective
+    real switch, one whose requested ``type`` differs from the entry's effective
     backend, which is what its ``type`` field names or ``openocd`` when the
-    optional field is omitted — has to carry, in the same call, every writable
+    optional field is omitted, has to carry, in the same call, every writable
     field the new backend requires and a fresh ``executable`` (a path, or ``null``
     to have the new backend's
     binary discovered) whenever the entry it leaves named one. The refusal names
@@ -1099,8 +1099,8 @@ def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[Resol
         old_entry = original_section.get(resolved.entry)
         old_type = _effective_debugger_type(old_entry) if isinstance(old_entry, dict) else None
         if old_type == backend:
-            # Not a switch: the entry already runs on this backend — its `type`
-            # names it, or it omits the optional field and defaults to openocd —
+            # Not a switch: the entry already runs on this backend, its `type`
+            # names it, or it omits the optional field and defaults to openocd,
             # so nothing it carries was chosen for a backend it is leaving.
             continue
         here = supplied.get(resolved.entry, set())

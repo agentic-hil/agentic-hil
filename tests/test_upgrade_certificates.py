@@ -759,8 +759,8 @@ def test_the_standing_proxy_remedy_is_said_once_and_the_measured_one_beside_it(m
 
     The proxy CA imperative is a measured next step attached only when a run met
     a proxy, not an unconditional catalogue item, so a failure that met none
-    never reads it (finding #2). When one did, it is said once — here under Next
-    steps, beside the export measured on this host — and never doubled onto What
+    never reads it (finding #2). When one did, it is said once, here under Next
+    steps, beside the export measured on this host, and never doubled onto What
     to do. The catalogue's own mention of the CA is the conditional `certificates`
     clause, which points at these steps rather than repeating them.
     """
