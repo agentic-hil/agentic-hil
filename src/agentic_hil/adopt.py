@@ -42,9 +42,9 @@ held, the validate-before-replace and the ``provenance`` record are all the ones
 that were already there. There is no second way to write this file. The plan is
 carried into that write as an expectation per key *and* as the description of the
 document it was decided against, so a placeholder somebody else filled while the
-probe was being read refuses the write instead of losing to it — and so does a
-change to something the plan depended on but cannot set, such as the entry's
-``type`` or the ``probe_id`` that decided which physical board was read.
+probe was being read refuses the write instead of losing to it, and so does a
+change to something the plan depended on but does not itself carry, such as the
+entry's ``type`` or the ``probe_id`` that decided which physical board was read.
 """
 
 from __future__ import annotations
@@ -427,10 +427,12 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
     )
 
     # The executable belongs to a backend, and `type` is deliberately not a key
-    # this door opens: it decides which program drives the board rather than what
-    # the board is. Writing an STM32CubeProgrammer path into an OpenOCD entry
-    # would produce a configuration that loads and then fails at the first call,
-    # so the mismatch is reported instead of carried.
+    # this door writes: a probe hands you an identity, never a choice of debug
+    # stack, and discovery having run on one backend is no statement that this
+    # entry ought to be that backend. Writing an STM32CubeProgrammer path into an
+    # OpenOCD entry would produce a configuration that loads and then fails at
+    # the first call, so the mismatch is reported instead of carried, and the
+    # report names the call that does change a backend (#343).
     backend = str(discovery.get("backend") or "")
     entry_type = str(debugger.get("type") or skeleton_placeholder("debuggers", "type") or "")
     if entry_type == backend:
@@ -451,10 +453,14 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
                 "discovered_value": discovery.get("executable"),
                 "reason": (
                     f"Discovery ran on the '{backend}' backend and this entry is type '{entry_type}', so the toolchain it "
-                    "found is not the one this entry drives. `type` is not a key this path can change — it decides which "
-                    "program reaches the board, not what the board is."
+                    "found is not the one this entry drives. `type` is not a key this path writes: a probe hands you an "
+                    "identity, not a choice of debug stack."
                 ),
-                "next_step": f"Set `debuggers.{debugger_name}.type` in the configuration file if this bench really is a '{backend}' bench, then run this again.",
+                "next_step": (
+                    f"If this bench really is a '{backend}' bench, switch it with `{PROJECT_CONFIG_SET}` "
+                    f"(`debuggers.{debugger_name}.type`, together with whatever that backend requires, in one call), then "
+                    "run this again."
+                ),
             }
         )
 
@@ -822,7 +828,7 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
         # it was already set decided which physical probe was read at all, `type`
         # decided whether the executable could be carried, and which entries
         # exist decided which entry receives any of it. None of those is a key
-        # this tool can set, so no per-key expectation can cover them — and a
+        # this tool carries, so no per-key expectation can cover them, and a
         # `probe_id` that moves from A to B inside the read window would
         # otherwise commit A's controller, executable and COM device into an
         # entry that now names B. That is precisely the mixed-board file this

@@ -98,6 +98,8 @@ from agentic_hil.knowledge import (
     CONFIG_SHAPE_URI,
     CONFIG_WIDENING_ERROR,
     CONFIG_WRITE_RIGHT,
+    DEBUGGER_BACKENDS_URI,
+    DEBUGGER_FIELD_MATRIX,
     PERMISSION_CHANGE_IN_OPEN_RUN,
     ResolvedConfigKey,
     config_key_schema,
@@ -712,6 +714,13 @@ def _project_config_set(
                 missing_keys=missing,
                 created_entries=sorted(created_entries),
             )
+        # 1c. And the one description key whose value decides what else the
+        #     entry needs. Read from the document the call would write rather
+        #     than from the request, so a switch completed by other keys in the
+        #     same call passes here whatever order they arrived in.
+        half_switched = _incomplete_backend_switch(updated, requested)
+        if half_switched is not None:
+            return half_switched
 
         # 2. The document, not the request. Whatever the keys were called, this
         #    compares what the file grants before against what it grants after,
@@ -838,11 +847,14 @@ def _document_changed_underneath(target_path: Path) -> JsonObject:
     """The plan was made against a description of the bench that has since moved.
 
     Broader than the per-key check on purpose, and not reducible to it: a plan
-    can be decided by values this tool cannot set — a debugger's ``type``, which
-    entries exist at all — and one of those moving invalidates the plan just as
-    completely as a carried key moving. Compared on the description, so a
-    concurrent permissions change, which no plan here reads, does not refuse a
-    write it has nothing to do with.
+    can be decided by values it does not itself carry (a debugger's ``type``,
+    which decides whether an executable belongs in that entry at all, and which
+    entries exist in the first place), and one of those moving invalidates the
+    plan just as completely as a carried key moving. Whether such a value is
+    settable through this tool is beside the point, and ``type`` now is: a
+    per-key expectation covers the keys a plan sends, and these are not among
+    them. Compared on the description, so a concurrent permissions change, which
+    no plan here reads, does not refuse a write it has nothing to do with.
     """
     return {
         "ok": False,
@@ -983,6 +995,96 @@ def _missing_required_fields(document: JsonObject, created_entries: list[str]) -
         entry = ((document.get(section) or {}).get(name)) or {}
         missing += [f"{created}.{field}" for field in node.get("required", []) if field not in entry]
     return sorted(missing)
+
+
+DEBUGGERS_SECTION = "debuggers"
+DEBUGGER_TYPE_FIELD = "type"
+
+
+def _backend_switches(requested: list[tuple[ResolvedConfigKey, Any]]) -> list[tuple[ResolvedConfigKey, str]]:
+    """The `debuggers.<name>.type` changes in this call, in the order they came."""
+    return [
+        (resolved, str(value))
+        for resolved, value in requested
+        if resolved.section == DEBUGGERS_SECTION and not resolved.under_permissions and resolved.field == DEBUGGER_TYPE_FIELD and isinstance(value, str)
+    ]
+
+
+def _entry_carries(entry: JsonObject, field: str) -> bool:
+    """Whether an entry actually names a field, as opposed to holding a hole.
+
+    ``null`` and the empty string are what a placeholder looks like in this file
+    and are what ``adopt-hardware`` treats as nothing there, so they are nothing
+    here either."""
+    value = entry.get(field)
+    return value is not None and value != ""
+
+
+def _incomplete_backend_switch(document: JsonObject, requested: list[tuple[ResolvedConfigKey, Any]]) -> JsonObject | None:
+    """Refuse a `type` that would leave the entry equipped for the old backend.
+
+    ``type`` is the one description key whose value decides which *other* fields
+    its entry needs, so it is the one that can be written on its own and still
+    produce a bench that is not a bench: an entry naming ``openocd`` with no
+    ``interface_cfg`` and no ``target_cfg`` loads, because both fields have
+    schema defaults, and then reaches the board with whatever those defaults
+    resolve to on this host. The refusal names the missing keys so the answer is
+    "send these in the same call" rather than a schema violation on a document
+    the caller never saw, which is the same reason ``_missing_required_fields``
+    above exists for a newly created entry.
+
+    Only fields *this surface can write* are demanded. ``interface`` on stlink
+    and ``target_type`` on pyocd are required by their backends too, and neither
+    is a key ``project_config_set`` sets, so demanding them would turn a switch
+    from atomic into impossible; both have a working unset behaviour that the
+    field matrix states, which is why they are the backends' own business.
+
+    The other half of a half-switch, a field the *new* backend refuses rather
+    than requires (``connect_mode: under_reset`` on openocd), is deliberately
+    not repeated here. The loader already refuses it, and validate-before-replace
+    below turns that refusal into the same "nothing was written" with the
+    per-backend rule stated in exactly one place.
+    """
+    switches = _backend_switches(requested)
+    if not switches:
+        return None
+    section = document.get(DEBUGGERS_SECTION)
+    if not isinstance(section, dict):  # pragma: no cover - _apply_change created or refused it
+        return None
+    settable = set(config_rule_fields(_rule_for(switches[0][0])))
+    incomplete: list[tuple[str, str, list[str]]] = []
+    for resolved, backend in switches:
+        entry = section.get(resolved.entry)
+        if not isinstance(entry, dict):  # pragma: no cover - _apply_change refuses a non-mapping entry
+            continue
+        required = sorted(
+            name
+            for name, node in (DEBUGGER_FIELD_MATRIX.get(backend) or {}).items()
+            if isinstance(node, dict) and node.get("status") == "required" and name != DEBUGGER_TYPE_FIELD and name in settable
+        )
+        absent = [name for name in required if not _entry_carries(entry, name)]
+        if absent:
+            incomplete.append((resolved.key, backend, [f"{DEBUGGERS_SECTION}.{resolved.entry}.{name}" for name in absent]))
+    if not incomplete:
+        return None
+    first_key, first_backend, first_missing = incomplete[0]
+    entry_path = first_key.rsplit(".", 1)[0]
+    missing = sorted({key for _, _, keys in incomplete for key in keys})
+    return _invalid(
+        missing[0],
+        f"`{first_key}` would put this entry on the {first_backend} backend, and the entry does not carry "
+        f"{', '.join('`' + key.rsplit('.', 1)[-1] + '`' for key in first_missing)}, which {first_backend} requires. A "
+        "backend switch lands whole or not at all: send the missing keys in the same call. Nothing was written.",
+        rejected_key=first_key,
+        debugger_type=first_backend,
+        missing_keys=missing,
+        next_step=(
+            f"Repeat the call with `{first_key}` and every key in `missing_keys` together. Send "
+            f"`{entry_path}.executable` in it as well, or `null` to have the new backend's binary discovered: an "
+            "executable already in the entry was chosen for the backend the entry is leaving. "
+            f"{DEBUGGER_BACKENDS_URI} says what each backend requires."
+        ),
+    )
 
 
 def _record_provenance(document: JsonObject, keys: list[str], timestamp: str, actor: str, via: str) -> None:

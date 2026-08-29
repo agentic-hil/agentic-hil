@@ -2291,7 +2291,7 @@ def attach_quarantine_guidance(result: JsonObject) -> JsonObject:
 DEBUGGER_FIELD_MATRIX: JsonObject = {
     "openocd": {
         "tool": "openocd",
-        "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant."},
+        "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant. Settable over MCP behind allow_config_description_write, and switching an entry to this backend has to carry interface_cfg and target_cfg in the same call, because OpenOCD reaches the board through no other route; an entry that does not name them is refused rather than left half switched. Send executable in that call too, or `null` to have OpenOCD discovered on PATH: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to `openocd` on PATH, except on the untouched starter entry, which stays inert until somebody names a toolchain in it. An absolute path or a value containing a separator is resolved against workspace_root and must exist."},
         "probe_id": {"status": "optional", "note": "Adapter serial number, passed as `adapter serial <probe_id>`. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "OpenOCD selects the target through target_cfg."},
@@ -2303,7 +2303,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
     },
     "stlink": {
         "tool": "STM32_Programmer_CLI (STM32CubeProgrammer)",
-        "type": {"status": "required", "value": "stlink"},
+        "type": {"status": "required", "value": "stlink", "note": "Settable over MCP behind allow_config_description_write. Switching an entry to this backend needs no other key of this surface: interface defaults to SWD, and interface_cfg and target_cfg are ignored here, so they may stay in the entry. Send executable in the same call, or `null` to have STM32_Programmer_CLI discovered: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to STM32_Programmer_CLI on PATH, then the standard STM32CubeProgrammer and STM32CubeIDE install locations."},
         "probe_id": {"status": "optional", "note": "ST-Link serial number, passed as `sn=<probe_id>`. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "STM32CubeProgrammer identifies the part itself."},
@@ -2315,7 +2315,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
     },
     "pyocd": {
         "tool": "pyocd",
-        "type": {"status": "required", "value": "pyocd"},
+        "type": {"status": "required", "value": "pyocd", "note": "Settable over MCP behind allow_config_description_write. Switching an entry to this backend needs no other key of this surface, because target_type is not one it writes and pyOCD guesses from the probe's board ID when it is unset; a bench that needs a specific part still has to have target_type in the file. Send executable in the same call, or `null` to have pyocd discovered: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to `pyocd` on PATH. Install with `pip install agentic-hil[pyocd]` or `pip install pyocd`."},
         "probe_id": {"status": "optional", "note": "Probe unique ID, passed as `--uid`. pyOCD matches it as a case-insensitive substring and strips a leading `<type>:`, so give the full ID. Required once more than one debugger is configured."},
         "target_type": {"status": "required", "note": "Passed as `--target`. Omitted entirely when unset, leaving pyOCD to guess from the probe's board ID. Most vendor parts resolve only after a CMSIS pack is installed."},
@@ -2600,11 +2600,34 @@ class ConfigKeyRule:
 CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # The description half. `target` and `can_buses` are whole sections in the
     # decision; `debuggers` and `com_ports` are the named subsets, because the
-    # rest of those entries (type, flash_address, resource_id, timeouts, buffer
-    # limits, DTR/RTS) changes what a call does to the board rather than what the
-    # board is, and none of it is what an attached probe hands you.
+    # rest of those entries stays locked on its own merits, each of them a
+    # setting that changes what a call does to the board while describing
+    # nothing about the board: `flash_address` decides where an image lands,
+    # `resource_id` renames the lock a run takes and can hand one probe's
+    # exclusivity to another entry, `timeout_s` decides when a call is abandoned
+    # mid-operation, and the COM buffer limits and DTR/RTS lines decide how much
+    # of a line is read and whether opening a port restarts the target. None of
+    # those is what an attached probe hands you either.
     ConfigKeyRule("target", named=False, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
-    # `connect_mode` joins the four above under the same right. It is not a
+    # `type` used to be on that locked list, and the reason given for it was the
+    # same sentence: it changes what a call does to the board. That reason does
+    # not survive next to the three fields standing beside it. `executable`,
+    # `interface_cfg` and `target_cfg` between them already decide which binary
+    # runs with which scripts, so an operator who grants description-write has
+    # handed over what reaches this board whichever way `type` reads; and which
+    # debug stack a bench runs is a description of that bench, learned the way
+    # every other description here is learned, from the hardware in front of
+    # somebody. Leaving it out cost exactly what the split exists to prevent: a
+    # bench that had to switch from CubeProgrammer to OpenOCD left MCP and
+    # edited its own configuration by hand (#343).
+    #
+    # What keeps the switch honest is validation rather than a lock. `type` is
+    # the one description key whose value decides which *other* fields the entry
+    # needs, so a change that names a backend the entry is not equipped for is
+    # refused naming exactly what is missing, and the call lands a whole entry
+    # or changes nothing.
+    #
+    # `connect_mode` joins them under the same right. It is not a
     # permission and it widens nothing: the two values it takes are both a flash
     # this configuration already allows, and the difference between them is
     # whether the target is held in reset while the probe attaches. What it
@@ -2614,7 +2637,7 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # the permissions grant it would sit with the keys that decide authority,
     # where nobody could set it without also being able to grant themselves
     # flashing.
-    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("probe_id", "executable", "interface_cfg", "target_cfg", "connect_mode")),
+    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("type", "probe_id", "executable", "interface_cfg", "target_cfg", "connect_mode")),
     # `serial_number` is in the description half for the same reason `probe_id`
     # is: it is what an attached board hands you, and it says which unit this
     # entry is rather than what may be done to it. `vid`/`pid` come off the same
@@ -2829,7 +2852,7 @@ _SECTION_PURPOSE: dict[str, str] = {
     "permissions": "What may be done to this project beside its hardware: to this file itself, and to a quarantine incident on this bench.",
     "provenance": "Who wrote this file and who last changed it. A note to a reader; nothing reads it as policy.",
     "target": f"What board this is. Names in reports; `controller` is what a human recognises. Which field actually selects a target per backend, and known-good values: {TARGET_SUPPORT_URI}.",
-    "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. Which of these fields each backend requires, discovers, ignores or refuses, `connect_mode` included: {DEBUGGER_BACKENDS_URI}.",
+    "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. `type` names the debug stack that drives the entry and is settable like the rest of the description, but only as a whole switch: a change to it has to arrive with whatever the backend it names requires, or it is refused naming what is missing. Which of these fields each backend requires, discovers, ignores or refuses, `type` and `connect_mode` included: {DEBUGGER_BACKENDS_URI}.",
     "debug": "Typed GDB session settings: which symbols may be read and how much.",
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
     "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. From `version: 3` on an entry must say which of them identifies it: a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else an explicit `identity_source` — `vid_pid` for an adapter publishing USB ids but no serial, `device` for one publishing neither. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
