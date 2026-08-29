@@ -9,10 +9,12 @@ from agentic_hil.backends.common import (
     FAILURE_WORDS,
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
+    CompletedCommand,
     command_for_log,
     contains_any,
     contains_failure_text,
     invocation,
+    programmer_output_fields,
     reports_reset_failure,
     spawn_command,
     which,
@@ -368,7 +370,7 @@ class OpenOCDBackend:
         if completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, rejected, init_reached=init_reached), audit_error)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, completed, rejected, init_reached=init_reached), audit_error)
             if success_marker is not None and success_marker not in output:
                 # Only the success marker decides this branch, so the init-stage
                 # marker may well be in the output beside it — a run that
@@ -386,6 +388,7 @@ class OpenOCDBackend:
                         elapsed_ms,
                         self._unconfirmed_backend_error_type(tool),
                         log_path,
+                        completed,
                         rejected,
                         init_reached=init_reached,
                         operation_result=self._marker_evidence(output, success_marker),
@@ -396,7 +399,7 @@ class OpenOCDBackend:
             if success_marker is not None:
                 result["success_confirmed"] = True
             return self._finish_log_audit(result, audit_error)
-        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path, rejected, init_reached=init_reached), audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path, completed, rejected, init_reached=init_reached), audit_error)
 
     # Failures whose classification already names the phase before the adapter
     # opens. Config scripts load at the configuration stage, and the adapter is
@@ -447,7 +450,7 @@ class OpenOCDBackend:
         expected = [OPENOCD_INIT_STAGE_MARKER, success_marker]
         return {"confirmed": False, "expected_success_text": expected, "matched_success_text": [marker for marker in expected if marker in output]}
 
-    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, rejected_commands: list[str] | None = None, *, init_reached: bool = True, operation_result: JsonObject | None = None) -> JsonObject:
+    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, completed: CompletedCommand, rejected_commands: list[str] | None = None, *, init_reached: bool = True, operation_result: JsonObject | None = None) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
         # next, scoped to this backend, because the checks differ per tool: an
         # OpenOCD target is selected by target_cfg, a pyOCD one by target_type.
@@ -455,7 +458,11 @@ class OpenOCDBackend:
         if rejected_commands:
             backend_error_type = "command_rejected_before_init"
         error_type = self._public_error_type(backend_error_type)
-        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
+        # `programmer_output` on every classified failure (#334). OpenOCD wrote a
+        # line about whatever this run stopped at, including the `invalid command
+        # name` its own interpreter answered with, and that line is what the
+        # classification, the summary and the causes were all read out of.
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path), **programmer_output_fields(completed)}
         if operation_result is not None:
             result["operation_result"] = operation_result
         if rejected_commands:

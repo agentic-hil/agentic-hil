@@ -19,6 +19,7 @@ from agentic_hil.backends.common import (
     contains_failure_text,
     find_stm32_programmer_cli,
     invocation,
+    programmer_output_fields,
     reports_reset_failure,
     reset_init_unsupported,
     spawn_command,
@@ -615,18 +616,28 @@ class STLinkBackend:
         # ST-Link transport is chosen with `interface`, an OpenOCD one with
         # interface_cfg. Same catalogue the MCP reference serves.
         error_type = self._public_error_type(backend_error_type)
-        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
+        # `programmer_output` on every classified failure, not only on the erase
+        # refusal that first carried it (#334). Whatever this run failed at, the
+        # CLI wrote a line about it, and that line is what the classification,
+        # the summary and the causes were all read out of.
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path), **programmer_output_fields(completed)}
         if operation_result is not None:
             result["operation_result"] = operation_result
         if backend_error_type == "flash_erase_failed":
-            evidence = erase_refusal_evidence(completed)
-            result.update(evidence)
+            # The one failure that reads its own transcript for more than the
+            # classification. `erase_abort_point` is carried for the operator and
+            # not to relax the quarantine: a refused erase leaves flash
+            # unconfirmed, so no reading attaches a `hardware_state`/`retry_safe`
+            # verdict and the coordination layer quarantines the incident as it
+            # does any other unconfirmed effect.
+            abort_point = erase_abort_point(f"{completed.stdout}{completed.stderr}")
+            result["erase_abort_point"] = abort_point
             # The generic `_summary_for_error` string cannot say more than "could
             # not erase", but the transcript reading can, and one of its readings
             # is a segment that was already written -- a summary that still said
             # "the firmware was not written" there would contradict the result's
             # own `flash_change_underway` evidence.
-            result["summary"] = self._erase_failure_summary(evidence["erase_abort_point"]["reading"])
+            result["summary"] = self._erase_failure_summary(abort_point["reading"])
         if self._proves_no_contact(tool, backend_error_type):
             # The ST-Link probe is the only transport STM32CubeProgrammer has
             # to the target, and "no ST-LINK detected" is its report that the
@@ -853,34 +864,6 @@ class STLinkBackend:
 
     def _likely_causes(self, error_type: str) -> list[str]:
         return {"target_not_detected": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"], "target_state_unconfirmed": ["STM32CubeProgrammer exited successfully without printing every line that confirms the operation; operation_result names which of them did print","debuggers.<name>.executable is a wrapper that discards the CLI's output", "this STM32CubeProgrammer version words its confirmation differently"], "adapter_not_found": ["debug probe is not connected", "debuggers.<name>.probe_id does not match a connected ST-Link serial number", "debug probe driver is missing", "debug probe is already in use"], "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"], "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"], "flash_erase_failed": ["the core was running from flash when the programmer connected under hot plug, so it defeated the erase; an immediate retry usually succeeds", "the sectors this image covers are protected (write protection, PCROP, or a read-out protection level that refuses the erase)", "an earlier flash operation had not finished and left the flash controller busy"], "reset_failed": ["reset line wiring issue", "target is not responding"], "memory_read_failed": ["STM32CubeProgrammer exited without printing 'Data read successfully', so the read is unconfirmed", "the symbol's address is not readable memory on this target", "debug probe or target stopped responding mid-read"], "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"], "debugger_not_found": ["debuggers.<name>.executable is not configured", "STM32CubeProgrammer is not installed", "STM32_Programmer_CLI executable is not in PATH"], "config_file_not_found": ["firmware artifact path is missing", "STM32CubeProgrammer CLI path is incomplete"]}.get(error_type, ["inspect the debugger log for details"])
-
-
-def erase_refusal_evidence(completed: CompletedCommand) -> JsonObject:
-    """The programmer's own words about an erase it would not carry out.
-
-    A failure carries its diagnosis, and for this one the diagnosis is a line
-    STM32CubeProgrammer wrote: `Error: failed to erase memory`. Until now the
-    only place those words survived was the log file the result names by path,
-    so an operator who read the result read `reset_failed`, "reset line wiring
-    issue", and nothing the programmer had actually said (#327).
-
-    Nested under `programmer_output` with the process's own return code, in the
-    shape `stdout`/`stderr` are captured everywhere else in this project, so the
-    human rendering prints them as literal blocks rather than as one flattened
-    row. Nothing is summarised away into a prose field: the whole captured
-    output travels, exactly as the log file holds it.
-
-    `erase_abort_point` reads that same transcript to say how far the failure can
-    be placed. It is carried for the operator, not to relax the quarantine: a
-    refused erase leaves flash unconfirmed, so no reading attaches a
-    `hardware_state`/`retry_safe` verdict and the coordination layer quarantines
-    the incident as it does any other unconfirmed effect.
-    """
-    abort_point = erase_abort_point(f"{completed.stdout}{completed.stderr}")
-    return {
-        "programmer_output": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr},
-        "erase_abort_point": abort_point,
-    }
 
 
 def erase_abort_point(output: str) -> JsonObject:

@@ -1364,9 +1364,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "OpenOCD wrote about the operation that stopped."
         ),
         remediation=(
-            "Read the erase line and the lines above it in the log the result names by `log_path`. `failed erasing "
-            "sectors <first> to <last>` names the sector range, which is what says whether the refusal covers the whole "
-            "image or starts partway into it.",
+            "Read `programmer_output.stdout` and `programmer_output.stderr` on the result before anything else. They "
+            "are OpenOCD's own account of what it opened, examined and tried to erase, and `failed erasing sectors "
+            "<first> to <last>` in them names the sector range, which is what says whether the refusal covers the "
+            "whole image or starts partway into it. The log the result names by `log_path` holds the same capture.",
             "Ask the device about protection rather than about wiring. Read the option bytes for read-out protection, "
             "write protection or PCROP over the sectors the range names, with a vendor tool or with OpenOCD's own "
             "`flash info <bank>`, and clear the protection deliberately if that is what it shows.",
@@ -1397,8 +1398,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "pyOCD wrote about the operation that stopped."
         ),
         remediation=(
-            "Read the erase line in the log the result names by `log_path`. `Failed to erase sector at <address>` names "
-            "the address the device refused, which is what places the failure inside the image.",
+            "Read `programmer_output.stdout` and `programmer_output.stderr` on the result before anything else. They "
+            "are pyOCD's own account of what it loaded and tried to erase, and `Failed to erase sector at <address>` "
+            "in them names the address the device refused, which is what places the failure inside the image. The log "
+            "the result names by `log_path` holds the same capture.",
             "Ask the device about protection rather than about wiring. Read the option bytes for read-out protection, "
             "write protection or PCROP over the sector that address falls in, with the vendor's own tool, and clear the "
             "protection deliberately if that is what it shows.",

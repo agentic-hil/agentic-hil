@@ -10,10 +10,12 @@ from agentic_hil.backends.common import (
     FAILURE_WORDS,
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
+    CompletedCommand,
     command_for_log,
     contains_any,
     contains_failure_text,
     invocation,
+    programmer_output_fields,
     reports_reset_failure,
     reset_init_unsupported,
     spawn_command,
@@ -450,9 +452,9 @@ class PyOCDBackend:
         if completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, completed), audit_error)
             return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
-        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._confirm_target_support(self._classify_output(output, tool)), log_path), audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._confirm_target_support(self._classify_output(output, tool)), log_path, completed), audit_error)
 
     def _connection_args(self) -> list[str]:
         args: list[str] = []
@@ -608,13 +610,17 @@ class PyOCDBackend:
             return True
         return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
 
-    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str) -> JsonObject:
+    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, completed: CompletedCommand) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
         # next, scoped to this backend. target_type_invalid is the case that
         # cost the most: without the fix in the result, the caller has to work
         # out from pyOCD's own sources that the value comes from a CMSIS pack.
         error_type = self._public_error_type(backend_error_type)
-        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
+        # `programmer_output` on every classified failure (#334). pyOCD logs what
+        # it was doing as it does it, so the line it stopped on arrives with the
+        # lines that led up to it, and that is what the classification, the
+        # summary and the causes were all read out of.
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path), **programmer_output_fields(completed)}
         target_type = self.config.debugger.target_type if self.config.debugger else None
         if error_type == "target_type_invalid" and target_type:
             # The refusal carries the command that fixes it, with the configured

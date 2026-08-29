@@ -202,6 +202,31 @@ def reports_reset_failure(output: str) -> bool:
     return any("reset" in line and contains_any(line, FAILURE_WORDS) for line in output.lower().splitlines())
 
 
+def programmer_output_fields(completed: CompletedCommand) -> JsonObject:
+    """The tool's own words about the run that failed, for the result to carry.
+
+    A failure carries its diagnosis, and for a debugger failure the diagnosis is
+    a line the tool wrote. Until #334 only the erase refusal carried one and
+    every other classified failure named a log file by path instead, so a result
+    relayed to a person held the classification, the summary and the likely
+    causes, and not the sentence all three were derived from.
+
+    Nested under `programmer_output` with the process's own return code, in the
+    shape `stdout` and `stderr` are captured everywhere else in this project
+    (#327). The human rendering prints a member under either of those names as a
+    literal block rather than as one flattened row (#314), and the stream
+    redaction covers them by key name at any depth (#317), so both surfaces come
+    for free at any nesting.
+
+    Nothing is summarised away and nothing is cut here. The machine document
+    carries the capture whole, exactly as the log file the same result names by
+    path holds it, and the renderer's caps decide how much of it a person reads;
+    truncating at capture time would put a shorter transcript in the report than
+    in the log, and leave nobody able to tell which one was short.
+    """
+    return {"programmer_output": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}}
+
+
 def find_stm32_programmer_cli() -> str | None:
     for candidate in ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"]:
         found = which(candidate)
