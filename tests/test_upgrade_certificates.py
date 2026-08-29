@@ -47,6 +47,7 @@ import pytest
 from test_server_upgrade import upgradable_config
 
 from agentic_hil import __version__
+from agentic_hil.cli import upgrade_installation
 from agentic_hil.humanize import render_result
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.upgrade import CLI_UPGRADE_TOOL, SERVER_UPGRADE, replace_installation
@@ -554,6 +555,39 @@ def test_both_attempts_stderr_sits_under_install_where_the_renderer_walks_for_it
 
     streams = captured_streams(install)
     assert sum("Caused by: invalid peer certificate: UnknownIssuer" in text for text in streams) == 2
+
+
+def test_the_command_line_rewrites_the_summary_and_keeps_the_certificate_sentence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`agentic-hil upgrade` writes its own summary too, and had been dropping this one.
+
+    The command line replaces the shared summary with the one about restarting
+    agent hosts, and refreshing the agent integrations may add a sentence to it
+    after that. Neither of them carried `certificates` over, so the operator on
+    the proxied bench read the persistent-export step in Next steps with nothing
+    on the screen saying why it was being offered: the upgrade had simply
+    succeeded, as far as the rendering was concerned. The MCP surface had already
+    been taught to carry it, which made the command line the half of the product
+    that knew less about the operator's own network.
+
+    Asserted through the rendering rather than through the field, because the
+    rendering is what somebody who typed the command and nothing else sees.
+    """
+    stub_manager(monkeypatch, answers=[UV_TRUST_FAILURE, MANAGER_INSTALLED])
+
+    result = upgrade_installation([])
+    rendered = render_result(result, "upgrade")
+
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    # The command's own sentence still comes first and is unchanged; the
+    # certificate clause is appended to it rather than replacing anything.
+    assert result["summary"].startswith(f"Agentic HIL upgraded from {__version__} to 9.9.9; restart agent hosts to load the new MCP server.")
+    assert result["summary"].endswith(result["certificates"])
+    # And it is on the screen, above the step that would otherwise be advice
+    # with no reason attached to it.
+    assert "certificate store" in rendered
+    assert "UV_SYSTEM_CERTS=1" in rendered
+    assert "Export UV_SYSTEM_CERTS=1" in rendered
 
 
 def test_the_mcp_surface_rewrites_the_summary_and_keeps_the_certificate_sentence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
