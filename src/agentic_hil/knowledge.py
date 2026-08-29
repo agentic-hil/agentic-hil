@@ -1457,9 +1457,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "a configuration change and not a different probe: the same ST-Link is a probe OpenOCD drives. Set "
             "`debuggers.<name>.type` to `openocd`, with `interface_cfg: interface/stlink.cfg` and the `target_cfg` for "
             "this part, `target/stm32f4x.cfg` for an STM32F4.",
-            "That edit belongs to the operator. `type` is not one of the keys `project_config_set` may write (those "
-            "are `probe_id`, `executable`, `interface_cfg`, `target_cfg` and `connect_mode`), so report the change and "
-            "ask, rather than attempting it. Afterwards the server adopts it through "
+            "The switch is one `project_config_set` call behind `allow_config_description_write`: send "
+            "`debuggers.<name>.type` together with the fields the new backend requires, and it lands whole or is "
+            "refused naming what is missing. Which debug stack a bench runs is the operator's decision, so report "
+            "the change and get their word before making it. Afterwards the server adopts it through "
             "`project_config_reload_description` or a restart.",
             "Say what the move costs before it is made, because parts of this bench change hands with it. OpenOCD has "
             "to be installed and reachable, by PATH or `debuggers.<name>.executable`. A typed debug session is GDB, so "
@@ -1503,9 +1504,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "is one OpenOCD drives too. Set `debuggers.<name>.type` to `openocd`, with the `interface_cfg` for the "
             "probe that is actually plugged in (`interface/stlink.cfg` for an ST-Link, `interface/cmsis-dap.cfg` for "
             "a CMSIS-DAP probe) and the `target_cfg` for this part.",
-            "That edit belongs to the operator. `type` is not one of the keys `project_config_set` may write (those "
-            "are `probe_id`, `executable`, `interface_cfg`, `target_cfg` and `connect_mode`), so report the change and "
-            "ask, rather than attempting it. Afterwards the server adopts it through "
+            "The switch is one `project_config_set` call behind `allow_config_description_write`: send "
+            "`debuggers.<name>.type` together with the fields the new backend requires, and it lands whole or is "
+            "refused naming what is missing. Which debug stack a bench runs is the operator's decision, so report "
+            "the change and get their word before making it. Afterwards the server adopts it through "
             "`project_config_reload_description` or a restart.",
             "Say what the move costs before it is made. OpenOCD has to be installed and reachable, by PATH or "
             "`debuggers.<name>.executable`, and `debug.gdb_executable` has to name a GDB that speaks this target, "
