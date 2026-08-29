@@ -1861,9 +1861,10 @@ def test_stlink_dump_does_not_open_the_typed_debug_session_family(tmp_path: Path
         assert "`debuggers.<name>.type`" in remediation, (tool, result)
         assert "debug.gdb_executable" in remediation, (tool, result)
         assert "connect_mode: under_reset" in remediation, (tool, result)
-        # `type` is not a key project_config_set may write, so an agent reading
-        # this must ask rather than try.
-        assert "belongs to the operator" in remediation, (tool, result)
+        # The switch is one project_config_set call since #343, and it is still
+        # the operator's decision: the entry says to get their word first.
+        assert "one `project_config_set` call" in remediation, (tool, result)
+        assert "operator's decision" in remediation, (tool, result)
         # Nothing was spawned, so nothing is owed a recovery step.
         assert result["target_contacted"] is False, (tool, result)
         assert result["side_effect_status"] == "not_started", (tool, result)
@@ -1919,7 +1920,7 @@ def test_pyocd_session_refusal_names_its_own_way_out(tmp_path: Path) -> None:
         assert result["target_contacted"] is False, result
         remediation = " ".join(result["remediation"])
         assert "`debuggers.<name>.type`" in remediation, result
-        assert "belongs to the operator" in remediation, result
+        assert "operator's decision" in remediation, result
     # The read half is refused here on purpose, and the reason is written down
     # in the catalogue rather than left to look like an oversight: pyOCD can
     # read memory, and what is missing is a bench measurement of which of its
