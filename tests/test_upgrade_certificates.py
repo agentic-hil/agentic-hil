@@ -279,14 +279,17 @@ def test_both_attempts_failing_is_a_refusal_that_carries_both_of_them(monkeypatc
     assert "invalid peer certificate: UnknownIssuer" in install["stderr"]
     assert install["stderr"] == UV_TRUST_FAILURE_AGAIN.stderr
     assert install["certificate_retry"]["first_attempt"]["stderr"] == UV_TRUST_FAILURE.stderr
-    # The cause, named, and the two things that actually fix it. Installing the
-    # CA is the same sentence for every bench that gets here, so it is the
-    # catalogue's; the export names the variable measured on this host, so it is
-    # this result's own.
+    # The cause, named, and the two things that actually fix it. Both are the
+    # measured next steps this run attached: installing the CA where this
+    # machine's store did not trust the proxy, and the export that spares the
+    # next upgrade a second attempt. The catalogue names the CA only through its
+    # conditional `certificates` clause, never as a bare imperative, so a failure
+    # that met no proxy is not told to touch a trust store.
     assert "TLS-intercepting proxy" in result["summary"]
     assert "the proxy's own CA is missing from this machine's store as well" in result["summary"]
-    assert any("Install the proxy's own CA" in step for step in result["remediation"])
+    assert any("Install the proxy's own CA" in step for step in result["next_steps"])
     assert any("Export UV_SYSTEM_CERTS=1" in step for step in result["next_steps"])
+    assert not any("Install the proxy's own CA" in step for step in result["remediation"])
     # Never a way to a switch that turns verification off, on any path here.
     assert "--allow-insecure-host" not in json.dumps(result)
     assert "--trusted-host" not in json.dumps(result)
@@ -497,11 +500,16 @@ def test_an_exported_uv_system_certs_is_not_overridden_and_earns_no_second_attem
     assert "a second one would only repeat it" in result["summary"]
     assert result["certificates"].startswith("Not retried, because UV_SYSTEM_CERTS is already set here")
     assert "certificate_retry" not in result["install"]
-    # What is left to do is the store itself, not another variable, and that is
-    # the same instruction every bench in this position gets: the catalogue says
-    # it, so this result attaches nothing case-specific of its own on top of it.
-    assert "next_steps" not in result
-    assert "Install the proxy's own CA certificate into this machine's certificate store. Until that is done there is nothing this command can be pointed at that trusts what the proxy presents, and no switch that turns verification off is a fallback. TROUBLESHOOTING.md section 1 is the rest of it." in result["remediation"]
+    # What is left to do is the store itself, not another variable. That is the
+    # proxy CA imperative, and it is a measured next step this run attached
+    # because the store is exactly what UV_SYSTEM_CERTS already pointed uv at and
+    # the CA it lacks. The catalogue names the CA only through its conditional
+    # `certificates` clause, never as a bare remediation item, so it does not
+    # reach a failure that met no proxy.
+    assert result["next_steps"] == [
+        "Install the proxy's own CA certificate into this machine's certificate store. Until that is done there is nothing this command can be pointed at that trusts what the proxy presents, and no switch that turns verification off is a fallback. TROUBLESHOOTING.md section 1 is the rest of it."
+    ]
+    assert not any("Install the proxy's own CA" in step for step in result["remediation"])
 
 
 def test_an_exported_pip_cert_keeps_the_bundle_the_operator_chose(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -721,6 +729,15 @@ def test_an_upgrade_failure_renders_the_standing_what_to_do_from_the_catalogue(m
     assert result["remediation"] and result["do_not"]
     assert any("install.stderr" in step for step in result["remediation"])
     assert any("install.sh" in step for step in result["remediation"])
+    # And a failure that met no proxy is never told to install one's CA. The
+    # imperative was an unconditional remediation item, so a resolver error with
+    # no `certificates` evidence still read "install the proxy's own CA
+    # certificate"; it is now attached only through the certificate note, which a
+    # non-proxy failure never carries. The conditional `certificates` clause is
+    # still in the catalogue, and it is self-gating.
+    assert "certificates" not in result
+    assert "Install the proxy's own CA certificate" not in json.dumps(result)
+    assert any("If this result carries `certificates`" in step for step in result["remediation"])
     # And on the screen, in the sections every other refusal type gets.
     assert "Refused: upgrade_failed" in rendered
     assert "What to do" in rendered
@@ -731,13 +748,12 @@ def test_an_upgrade_failure_renders_the_standing_what_to_do_from_the_catalogue(m
 def test_the_standing_proxy_remedy_is_said_once_and_the_measured_one_beside_it(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two attempts failed, and the operator is told to install the CA exactly once.
 
-    The certificate path attached the standing "install the proxy's CA" sentence
-    to `next_steps` because there was no catalogue entry to carry it. There is
-    one now, so it is the catalogue's, and a result that also attached it would
-    put the identical numbered sentence under What to do and under Next steps on
-    the same screen, which reads as two instructions rather than one. What stays
-    on the result is the part the catalogue cannot know: the variable and value
-    measured on this host.
+    The proxy CA imperative is a measured next step attached only when a run met
+    a proxy, not an unconditional catalogue item, so a failure that met none
+    never reads it (finding #2). When one did, it is said once — here under Next
+    steps, beside the export measured on this host — and never doubled onto What
+    to do. The catalogue's own mention of the CA is the conditional `certificates`
+    clause, which points at these steps rather than repeating them.
     """
     stub_manager(monkeypatch, answers=[UV_TRUST_FAILURE, UV_TRUST_FAILURE_AGAIN], version_after=__version__)
 
@@ -745,10 +761,12 @@ def test_the_standing_proxy_remedy_is_said_once_and_the_measured_one_beside_it(m
 
     assert result["error_type"] == "upgrade_failed"
     assert json.dumps(result).count("Install the proxy's own CA certificate") == 1
-    assert any("Install the proxy's own CA" in step for step in result["remediation"])
-    assert not any("Install the proxy's own CA" in step for step in result["next_steps"])
-    # The measured half is untouched, and it is the whole of what is left here.
-    assert result["next_steps"] == [step for step in result["next_steps"] if "Export UV_SYSTEM_CERTS=1" in step]
+    assert any("Install the proxy's own CA" in step for step in result["next_steps"])
+    assert not any("Install the proxy's own CA" in step for step in result["remediation"])
+    # The measured export stands beside it, and the two together are the whole of
+    # the steps this run attached.
+    assert any("Export UV_SYSTEM_CERTS=1" in step for step in result["next_steps"])
+    assert all(("Install the proxy's own CA" in step) or ("Export UV_SYSTEM_CERTS=1" in step) for step in result["next_steps"])
 
 
 def test_the_standing_remedy_survives_on_an_outcome_whose_own_entry_omits_it(monkeypatch: pytest.MonkeyPatch) -> None:

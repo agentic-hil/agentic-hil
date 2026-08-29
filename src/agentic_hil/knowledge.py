@@ -479,9 +479,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "that ran and refused.",
             "If this result carries `certificates`, the cause was a TLS-intercepting proxy and this command has "
             "already answered it once by itself: that clause says which store was tried and what came of it, and "
-            "`next_steps` names the one export or bundle that settles it for this machine, measured on this host "
-            "rather than described in general. Do that before anything else here.",
-            INSTALL_THE_PROXY_CA,
+            "`next_steps` names the one export or bundle that settles it for this machine — installing the proxy's own "
+            "CA where that machine reads it — measured on this host rather than described in general. Do that before "
+            "anything else here. A failure that carries no `certificates` met no proxy, so no trust store is the answer "
+            "to it.",
             "Otherwise deal with the reason `install.stderr` gives and run the upgrade again. Nothing was removed, so "
             "there is nothing to undo first and the second attempt starts exactly where the first one did.",
             "If it keeps failing, the one-line installer is the repair path, and on a machine that already has an "

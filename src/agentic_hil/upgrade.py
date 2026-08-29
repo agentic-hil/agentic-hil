@@ -924,14 +924,14 @@ def _with_certificate_note(outcome: JsonObject, note: _CertificateNote) -> JsonO
     or left an installation that will not load, and what happened belongs in the
     summary on every one of them, because that is the line a person reads first.
 
-    A step the outcome's own catalogue entry already carries is dropped here
-    rather than attached twice. `upgrade_failed` states the standing proxy remedy
-    as remediation, and the rendering prints remediation as What to do and
-    `next_steps` as Next steps, so the same numbered sentence would appear twice
-    on one screen and read as two instructions. Dropping it at the merge rather
-    than at the source is what keeps it on the outcomes whose catalogue entry does
-    not carry it: an installation left broken behind a proxy still needs the CA
-    named, and `installation_broken` does not say it.
+    The measured `next_steps` are where the proxy CA imperative lives, and they
+    are attached only on a run that met a proxy, so a failure that met none never
+    reads it: the `upgrade_failed` catalogue names the CA solely through its
+    conditional `certificates` clause and states no bare imperative anywhere. A
+    step an outcome's own remediation *does* already carry is still dropped here
+    rather than attached twice, so a sentence printed under What to do is never
+    repeated under Next steps on one screen; the guard costs nothing when there is
+    no overlap and keeps the note honest should a future entry grow one.
     """
     if not note.said:
         return outcome
