@@ -1006,3 +1006,125 @@ def test_a_takeable_lock_over_a_running_record_stays_the_dead_worker_answer(tmp_
     status = runlifecycle.run_status(config, handle)
 
     assert status["state"] == runlifecycle.RUN_WORKER_GONE, status
+
+
+# --- the start command, waiting on a record it may never be able to read -----
+#
+# The publish-wait loop has one question to answer while a worker comes up: has
+# it said what it is doing yet? "Not yet" is a reason to wait. "It said
+# something and that something will not read" is not, because the reader has
+# already waited every transient face of a publication out before it raises, and
+# what it raises is a state. The loop used to answer both with `record = None`,
+# spend the whole window on the second one and report `run_worker_unresponsive`,
+# which is a claim about a process from a fact about a file.
+#
+# The same scripted reads place it. A worker is never spawned: what is under test
+# is what the loop does with the reader's answer, and a real worker would supply
+# a readable record and nothing else.
+
+
+class DeadStillWorker:
+    """A spawned worker that has not exited, for a loop that never gets that far.
+
+    `start_detached_run` asks `poll()` once per turn to tell a worker that died
+    from one that is still coming up. These tests end on the first turn, so the
+    only thing it has to be is alive."""
+
+    def poll(self) -> None:
+        return None
+
+
+def start_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *answers: object):
+    """`torn_record_bench` with the worker spawn taken out.
+
+    The record script is the whole of the placement; the process behind the
+    handle is not what these tests are about and is not started, so a scripted
+    read is never racing a real one."""
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, _, reads = torn_record_bench(tmp_path, monkeypatch, *answers)
+    monkeypatch.setattr(runlifecycle, "spawn_run_worker", lambda *_, **__: DeadStillWorker())
+    return config, reads
+
+
+def test_a_record_that_will_not_read_stops_the_start_waiting_and_says_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The whole of #323. A record confirmed unreadable on six looks is a state,
+    # so there is nothing left to wait for: the start refuses at once, names the
+    # record it could not read, and carries the reason that decided it rather
+    # than burning the window and reporting a verdict on the worker's liveness.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, reads = start_bench(tmp_path, monkeypatch, '{"version": 1, "state": "run')
+
+    with pytest.raises(ConfigError) as caught:
+        runlifecycle.start_detached_run(config, ".agentic-hil/testconfig.yaml", wait_s=0.0)
+
+    refusal = caught.value.to_dict()
+    assert refusal["ok"] is False
+    assert refusal["error_type"] == "run_state_invalid"
+    assert refusal["summary"] == "The detached run published a record this bench cannot read, so the start command cannot say what the run is doing."
+    # It names the unreadable record, both by the handle the start minted and by
+    # the file an operator has to go and look at.
+    handle = refusal["run"]
+    assert handle.startswith("run-")
+    assert refusal["record_path"].endswith(f"{handle}.json")
+    # And it carries the read's own account: what the read decided, and the
+    # decisive complaint underneath it.
+    assert refusal["record_error"] == "Test run state is not valid JSON."
+    assert "Unterminated string" in str(refusal["backend_error"])
+    assert isinstance(caught.value.__cause__, ConfigError)
+    assert caught.value.__cause__.error_type == "run_state_invalid"
+    # The proof that the window was not burned: exactly one read of the record,
+    # which is the reader's own bounded looks and not one turn of the loop more.
+    assert reads.record_reads == runlifecycle._RECORD_READ_ATTEMPTS
+    # And the proof it is not the unresponsive path wearing a new message: that
+    # path plants a stop under the handle, and this one deliberately does not,
+    # because a record this reader cannot parse says nothing about whether the
+    # plan behind it is running perfectly well.
+    assert not runlifecycle.stop_path(config, handle).exists()
+
+
+def test_a_record_that_is_not_there_yet_still_leaves_the_start_waiting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The other way, and the half that must not regress: a handle with no record
+    # under it is a worker that has not published yet, which is exactly what the
+    # window exists for. The worker publishes on the next look and the start
+    # answers with the running launch it always did.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, reads = start_bench(
+        tmp_path,
+        monkeypatch,
+        FileNotFoundError("the worker has not published yet"),
+        whole_record("running", name="demo", started_at="t0"),
+    )
+
+    result = runlifecycle.start_detached_run(config, ".agentic-hil/testconfig.yaml", wait_s=0.0)
+
+    assert result["ok"] is True, result
+    assert result["state"] == "running"
+    assert result["detached"] is True
+    assert result["run"].startswith("run-")
+    # One look that found nothing, then the one that found the record: the
+    # absence was waited on and the publication ended the wait.
+    assert reads.record_reads == 2
+
+
+def test_a_record_from_another_version_refuses_the_start_with_its_own_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The read refusal that carries no backend error of its own: a whole document
+    # naming a version this code cannot read. The reason is the read's verdict
+    # itself, so the refusal has to carry that rather than leaving the details
+    # with nothing in them that says what went wrong.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, reads = start_bench(tmp_path, monkeypatch, json.dumps({"version": 999, "state": "running"}))
+
+    with pytest.raises(ConfigError) as caught:
+        runlifecycle.start_detached_run(config, ".agentic-hil/testconfig.yaml", wait_s=0.0)
+
+    assert caught.value.error_type == "run_state_invalid"
+    assert caught.value.details["record_error"] == "Test run state is not a record this version can read."
+    assert "backend_error" not in caught.value.details
+    assert isinstance(caught.value.__cause__, ConfigError)
+    # Another version's record is a state on the first look, so the start spends
+    # no more looks on it than the reader does.
+    assert reads.record_reads == 1

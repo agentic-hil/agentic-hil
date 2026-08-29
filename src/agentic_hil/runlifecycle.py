@@ -493,6 +493,13 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
     verdict, not as a successful launch: launch success is reserved for a running
     worker and for an already-finished run only when it passed.
 
+    What the wait is for is a record that is not there yet. A record that is
+    there and will not read is a different answer and gets one: the reader has
+    already waited out every transient face of a publication before it raises, so
+    the wait has nothing left to add, and the refusal names that record and its
+    reason rather than spending the window to conclude something about the
+    worker's liveness instead.
+
     The wait is validated here, before a worker is spawned. The worker refuses a
     bad wait too — it runs the same validator when it acquires its devices — but
     a non-finite wait handed to a detached process would strand it: a NaN deadline
@@ -512,11 +519,10 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
     deadline = time.monotonic() + worker_publish_window_s(wait_s)
     exited_at: float | None = None
     while True:
-        record = None
         try:
             record = read_run_record(config, handle)
-        except ConfigError:
-            record = None
+        except ConfigError as error:
+            raise _unreadable_record_refusal(config, handle, error) from error
         if record is not None and record.get("state") != RUN_STARTING:
             break
         if worker.poll() is not None and exited_at is None:
@@ -607,6 +613,40 @@ def _detached_terminal_result(handle: str, record: JsonObject, report: str) -> J
             if record.get(field) is not None:
                 result[field] = record.get(field)
     return result
+
+
+def _unreadable_record_refusal(config: AgenticHILConfig, handle: str, error: ConfigError) -> ConfigError:
+    """The start command's refusal for a record that will not read.
+
+    Since #312 the record reader absorbs every transient face of a publication
+    itself, so a `ConfigError` out of it is not a moment caught badly: it is a
+    record confirmed unreadable on six looks. Treating that as "not published
+    yet" cost the whole wait window and ended in `run_worker_unresponsive`, which
+    is a claim about a process, and nothing here has any evidence for it. The
+    worker may be running the plan exactly as asked while its record is truncated
+    by a full disk, mangled by something else on the machine, or written by a
+    version this code cannot read. So the refusal is the read's own: it names the
+    record that could not be read and carries the reason that decided it, in the
+    details and on the exception chain, instead of substituting a diagnosis.
+
+    No stop is planted under the handle either, and that is the same argument
+    from the other side. The unresponsive path plants one because nothing at all
+    was published and the worker's state is genuinely unknown; here the worker
+    did publish, and ending its run on the strength of this reader's failure to
+    parse what it published would be the liveness claim all over again, with a
+    live plan cut short by it. The handle is in the refusal, so a caller who
+    wants the run stopped can ask for it by name."""
+    details: JsonObject = {
+        **error.details,
+        "run": handle,
+        "record_path": display_path(config, str(record_path(config, handle))),
+        "record_error": error.summary,
+    }
+    return ConfigError(
+        "run_state_invalid",
+        "The detached run published a record this bench cannot read, so the start command cannot say what the run is doing.",
+        details,
+    )
 
 
 def _plant_stop_after_unresponsive(config: AgenticHILConfig, handle: str) -> None:
