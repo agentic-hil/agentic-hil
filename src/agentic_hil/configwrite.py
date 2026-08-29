@@ -1002,6 +1002,12 @@ def _missing_required_fields(document: JsonObject, created_entries: list[str]) -
 
 DEBUGGERS_SECTION = "debuggers"
 DEBUGGER_TYPE_FIELD = "type"
+# The backend an entry runs on when it names none. The loader reads the field as
+# `raw.get("type", "openocd")`, so an entry that omits it is already on openocd,
+# and the switch check has to be measured against that effective backend rather
+# than the raw value: writing `openocd` to an entry that never named a type is
+# the no-op it looks like, not a switch that re-demands the backend's fields.
+DEFAULT_DEBUGGER_TYPE = "openocd"
 
 
 def _backend_switches(requested: list[tuple[ResolvedConfigKey, Any]]) -> list[tuple[ResolvedConfigKey, str]]:
@@ -1023,6 +1029,19 @@ def _entry_carries(entry: JsonObject, field: str) -> bool:
     return value is not None and value != ""
 
 
+def _effective_debugger_type(entry: JsonObject) -> str:
+    """The backend an entry resolves to, with the loader's ``openocd`` default.
+
+    ``type`` is optional, and an omitted or placeholder value loads as
+    ``openocd`` because the loader reads it as ``raw.get("type", "openocd")``. A
+    switch is measured against this effective backend, not against the raw field,
+    so re-writing the backend an entry is already on — including ``openocd`` on an
+    entry that never named a type — is the no-op it looks like rather than a
+    switch that re-demands that backend's other fields."""
+    value = entry.get(DEBUGGER_TYPE_FIELD)
+    return value if isinstance(value, str) and value != "" else DEFAULT_DEBUGGER_TYPE
+
+
 def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[ResolvedConfigKey, Any]]) -> JsonObject | None:
     """Refuse a `type` switch the call does not re-equip the entry for.
 
@@ -1040,9 +1059,11 @@ def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[Resol
     entry carries an ``executable`` chosen for its old backend; reading the
     document would let any of those stand in for the values the new backend
     actually needs, and the switch would land equipped for the wrong one. So a
-    real switch — one whose ``type`` differs from the entry's current ``type`` —
-    has to carry, in the same call, every writable field the new backend requires
-    and a fresh ``executable`` (a path, or ``null`` to have the new backend's
+    real switch — one whose requested ``type`` differs from the entry's effective
+    backend, which is what its ``type`` field names or ``openocd`` when the
+    optional field is omitted — has to carry, in the same call, every writable
+    field the new backend requires and a fresh ``executable`` (a path, or ``null``
+    to have the new backend's
     binary discovered) whenever the entry it leaves named one. The refusal names
     the missing keys so the answer is "send these in the same call" rather than a
     schema violation on a document the caller never saw, which is the same reason
@@ -1076,10 +1097,11 @@ def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[Resol
     incomplete: list[tuple[str, str, list[str], bool]] = []
     for resolved, backend in switches:
         old_entry = original_section.get(resolved.entry)
-        old_type = old_entry.get(DEBUGGER_TYPE_FIELD) if isinstance(old_entry, dict) else None
+        old_type = _effective_debugger_type(old_entry) if isinstance(old_entry, dict) else None
         if old_type == backend:
-            # Not a switch: the entry already names this backend, so nothing it
-            # carries was chosen for a backend it is leaving.
+            # Not a switch: the entry already runs on this backend — its `type`
+            # names it, or it omits the optional field and defaults to openocd —
+            # so nothing it carries was chosen for a backend it is leaving.
             continue
         here = supplied.get(resolved.entry, set())
         required = sorted(

@@ -1208,6 +1208,39 @@ def test_writing_the_type_an_entry_already_has_is_not_a_switch_and_demands_nothi
     assert entry["executable"] == executable_before, "a no-op type write does not demand a fresh executable"
 
 
+def test_writing_openocd_to_an_entry_whose_type_is_omitted_is_a_no_op_not_a_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`type` is optional and defaults to openocd, so re-stating that default switches nothing.
+
+    An entry that omits `type` already loads on openocd — the loader reads the
+    field as `raw.get("type", "openocd")` — so writing `openocd` to it moves the
+    entry from openocd to openocd, which is no switch at all. Measured against the
+    raw field rather than the effective backend, the absent `type` reads as
+    nothing and the write looks like a switch onto openocd, and the entry is then
+    refused for the `executable`, `interface_cfg` and `target_cfg` a real switch
+    would demand — though it is leaving no backend that chose them, and the refusal
+    would name an executable belonging to a backend the entry is not leaving. The
+    comparison uses the loader's own default, so this lands on the description
+    grant and the entry keeps every field it already had."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    rewrite_debugger(path, drop=("type",))
+    entry_before = document_of(path)["debuggers"]["dut"]
+    assert "type" not in entry_before, "the optional field is genuinely absent"
+    assert entry_before["executable"] and entry_before["interface_cfg"] and entry_before["target_cfg"]
+    assert load_authoritative_config(workspace).debuggers["dut"].type == "openocd", "and it already loads on openocd"
+    tools = service(workspace)
+    try:
+        written = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.type", "openocd")))
+    finally:
+        tools.close()
+
+    assert written["ok"] is True, written
+    assert "missing_keys" not in written, "a no-op type write demands no other field"
+    entry_after = document_of(path)["debuggers"]["dut"]
+    assert entry_after["type"] == "openocd"
+    assert entry_after["executable"] == entry_before["executable"], "a no-op type write demands no fresh executable"
+    assert load_authoritative_config(workspace).debuggers["dut"].type == "openocd"
+
+
 def test_the_same_switch_lands_when_the_missing_keys_come_in_the_same_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Atomic, not blocked. The refusal above has to be an answer, not a wall.
 
