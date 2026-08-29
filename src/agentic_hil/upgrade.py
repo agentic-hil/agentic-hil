@@ -33,7 +33,10 @@ newest release:
 **Nothing is replaced that did not need replacing.** The resolver is asked what
 it would do, as the same install with `--dry-run`, before it is allowed to do
 anything. An installation that is already current answers `already_current` with
-`install_skipped`, and no command capable of removing a file has run.
+`install_skipped`, and no command capable of removing a file has run. That
+question reaches the index over the same network the install does, so it carries
+the same certificate retry below: a guard that could not be asked behind a proxy
+would fall through to the install it exists to prevent.
 
 **A failure leaves the previous installation working, or says that it did not.**
 Whether it did is measured, not assumed: after a manager stops, the same import
@@ -820,12 +823,21 @@ def _certificate_note(said: str, brief: str, next_steps: list[str]) -> _Certific
 def _manager_run(manager: str, command: list[str]) -> tuple[subprocess.CompletedProcess[str], JsonObject, _CertificateNote]:
     """The manager, run once, and run once more when its own words name the proxy.
 
-    Three values: the attempt whose outcome this upgrade reports, that attempt's
-    `install` payload, and the certificate fields the result carries, which are
-    empty whenever the manager said nothing about a certificate at all.
+    Both invocations an upgrade makes come through here, and the same retry is
+    the point of that: the mutating install, and the `--dry-run` question asked
+    before it. They reach the same index over the same network, so a proxy that
+    stops one stops the other, and a retry only the install had would leave the
+    guard answering "cannot tell" and falling through to the install it exists to
+    prevent.
+
+    Three values: the attempt whose outcome the caller reports, that attempt's
+    captured output, and the certificate fields the result carries, which are
+    empty whenever the manager said nothing about a certificate at all. Where the
+    output is recorded is the caller's: `install` for the upgrade itself,
+    `resolution` for the question.
 
     The retried attempt is the one reported, and the attempt it replaces is kept
-    under `install.certificate_retry.first_attempt` rather than dropped. A
+    under that payload's `certificate_retry.first_attempt` rather than dropped. A
     refusal after both attempts has to carry both managers' own words: the first
     is what names the proxy, and the second is what says this machine's store did
     not help either, and neither one alone is the diagnosis.
@@ -960,32 +972,45 @@ def _resolution_query(manager: str, command: list[str]) -> list[str] | None:
 _UV_PIP_NO_CHANGES = "would make no changes"
 
 
-def _would_install_nothing(manager: str, command: list[str]) -> tuple[bool, JsonObject | None]:
+def _would_install_nothing(manager: str, command: list[str]) -> tuple[bool, JsonObject | None, _CertificateNote]:
     """Whether this upgrade would install nothing, decided without installing anything.
 
-    The pair is (answer, what the manager said). A False answer means either
-    that there is something to install or that the question could not be put to
-    this manager at all, and the two are deliberately not distinguished: both
-    lead to the same place, which is running the upgrade as before.
+    The triple is (answer, what the manager said, what happened about
+    certificates). A False answer means either that there is something to
+    install or that the question could not be put to this manager at all, and
+    the two are deliberately not distinguished: both lead to the same place,
+    which is running the upgrade as before.
+
+    Asked through `_manager_run`, which is what gives this question the same
+    one-shot certificate retry the install has. Behind a TLS-intercepting proxy
+    every request to the index fails alike, and until this shared the retry the
+    guard was the one that failed first: the query came back unreadable, "cannot
+    tell" fell through to the mutating install, that install met the same proxy,
+    and #326's retry then made it succeed. The end state was right and the guard
+    had silently not guarded -- a machine that needed nothing had been
+    uninstalled and reinstalled to find that out. Sharing the runner rather than
+    copying it is also what keeps the signature list, the child-environment
+    variables and the rule that an operator's own exported variable is never
+    overridden identical on both, which is the only way the two can stay
+    answers to the same question about the same network.
     """
     query = _resolution_query(manager, command)
     if query is None:
-        return False, None
+        return False, None, _CertificateNote("", {})
     try:
-        answered = _run_upgrade_process(query)
+        answered, resolution, certificates = _manager_run(manager, query)
     except (OSError, subprocess.TimeoutExpired):
-        return False, None
-    resolution = _process_result(answered)
+        return False, None, _CertificateNote("", {})
     if answered.returncode != 0:
-        return False, resolution
+        return False, resolution, certificates
     if manager == "pip":
         try:
             report = json.loads(answered.stdout)
         except (json.JSONDecodeError, TypeError):
-            return False, resolution
+            return False, resolution, certificates
         planned = report.get("install") if isinstance(report, dict) else None
-        return isinstance(planned, list) and not planned, resolution
-    return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower(), resolution
+        return isinstance(planned, list) and not planned, resolution, certificates
+    return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower(), resolution, certificates
 
 
 def _nothing_to_install(
@@ -1272,9 +1297,15 @@ def replace_installation(*, tool: str) -> JsonObject:
     installed_extras = _installed_extras()
     reinstall_command = reinstall_command_with_extras(installed_extras)
 
-    skipped, resolution = _would_install_nothing(manager, command)
+    skipped, resolution, resolution_certificates = _would_install_nothing(manager, command)
     if skipped:
-        return _nothing_to_install(tool, manager, command, previous_version, resolution)
+        # The certificate note belongs on this outcome and on no other. Here the
+        # resolution query is the only thing that ran, so what it met is the
+        # whole of what this call knows about the proxy. On the fall-through the
+        # install runs next and meets the same network, and its own note is the
+        # one that reports it; carrying this one there as well would put two
+        # accounts of one proxy on a single result.
+        return _with_certificate_note(_nothing_to_install(tool, manager, command, previous_version, resolution), resolution_certificates)
 
     try:
         installed, install_result, certificates = _manager_run(manager, command)

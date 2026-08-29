@@ -55,8 +55,20 @@ from agentic_hil.upgrade import CLI_UPGRADE_TOOL, SERVER_UPGRADE, replace_instal
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 UV_TOOL_UPGRADE = ["uv.exe", "tool", "upgrade", "agentic-hil"]
+UV_PIP_UPGRADE = ["uv.exe", "pip", "install", "--python", sys.executable, "--upgrade", "agentic-hil"]
 PIP_UPGRADE = [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]
 PIP_WOULD_INSTALL_A_RELEASE = subprocess.CompletedProcess[str]([], 0, json.dumps({"version": "1", "install": [{"metadata": {"name": "agentic-hil", "version": "9.9.9"}}]}), "")
+# What `uv pip install --dry-run` prints on an environment that already
+# satisfies the requirement: the answer the #191 guard is waiting for.
+UV_PIP_WOULD_MAKE_NO_CHANGES = subprocess.CompletedProcess[str]([], 0, "", "Resolved 41 packages in 812ms\nAudited 41 packages in 0.19ms\nWould make no changes")
+# The same resolution query, met by the proxy. uv fails the question exactly as
+# it fails the install, because it is the same request to the same index.
+UV_PIP_RESOLUTION_TRUST_FAILURE = subprocess.CompletedProcess[str](
+    [],
+    2,
+    "",
+    "error: Failed to fetch: `https://pypi.org/simple/agentic-hil/`\n  Caused by: invalid peer certificate: UnknownIssuer",
+)
 
 # What the reporting bench's uv said on 2026-08-20, verbatim from #326. The
 # decisive line is the last one, and it is at the bottom of a stack of five
@@ -108,6 +120,22 @@ class Attempt:
         return {name: value for name, value in (self.env or {}).items() if name in {"UV_SYSTEM_CERTS", "PIP_CERT"}}
 
 
+class ManagerCalls(list[Attempt]):
+    """The calls that could replace this installation, with the questions beside them.
+
+    A plain list of the mutating attempts, because that is what nearly every test
+    here counts and it is how "nothing was installed" is asserted: an empty list.
+    `questions` is the `--dry-run` resolution query's own attempts, kept apart
+    because a question is not a call that can replace anything and counting the
+    two together would let a test that meant to prove no install happened pass on
+    a run that installed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.questions: list[Attempt] = []
+
+
 def stub_manager(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -116,7 +144,8 @@ def stub_manager(
     command: list[str] | None = None,
     version_after: str = "9.9.9",
     resolution: subprocess.CompletedProcess[str] = PIP_WOULD_INSTALL_A_RELEASE,
-) -> list[Attempt]:
+    resolutions: list[subprocess.CompletedProcess[str]] | None = None,
+) -> ManagerCalls:
     """A package manager with a queue of canned answers, recording every call.
 
     `answers` is consumed in order by the mutating invocations only, so a test
@@ -124,16 +153,27 @@ def stub_manager(
     than on an assertion at the end: running the manager twice when it was meant
     to run once is the defect, and it is caught where it happens.
 
-    The resolution query and the import check answer themselves. Neither is a
-    command that can replace an installation, and neither is what these tests are
-    about.
+    The resolution query answers with `resolution` however often it is asked,
+    which is what a test that is not about the query wants. A test that is about
+    it passes `resolutions` instead and gets a queue with the same property: one
+    answer per ask, and an ask too many fails where it happens rather than
+    silently receiving the previous answer again.
+
+    The import check answers itself. It is not a command that can replace an
+    installation, and it is not what these tests are about.
     """
-    attempts: list[Attempt] = []
+    attempts = ManagerCalls()
     queued = list(answers)
+    queued_questions = None if resolutions is None else list(resolutions)
 
     def run(invoked: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         if "--dry-run" in invoked:
-            return resolution
+            attempts.questions.append(Attempt(invoked, env))
+            if queued_questions is None:
+                return resolution
+            if not queued_questions:
+                pytest.fail(f"the upgrade asked the resolution query once more than it was given an answer for: {invoked}")
+            return queued_questions.pop(0)
         if invoked[-1] == "--version":
             return subprocess.CompletedProcess([], 0, f"{version_after}\n", "")
         attempts.append(Attempt(invoked, env))
@@ -305,6 +345,126 @@ def test_a_failure_that_names_no_certificate_is_never_retried(monkeypatch: pytes
     assert "certificates" not in result
     assert "certificate_retry" not in result["install"]
     assert "next_steps" not in result
+
+
+# ---------------------------------------------------------------------------
+# The guard that runs before anything can be replaced, behind the same proxy.
+
+
+def test_the_resolution_query_is_retried_and_the_already_current_guard_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The #191 guard, asked behind the proxy instead of falling through it.
+
+    The pip and `uv pip` routes ask the resolver what it would do before they let
+    it do anything. Behind a TLS-intercepting proxy that question failed like
+    every other request to the index, read as "cannot tell", and fell through to
+    the mutating install -- which met the same proxy, was retried against this
+    machine's own store, and succeeded. The end state was right and the guard had
+    silently not guarded: a machine that needed nothing was uninstalled and
+    reinstalled to establish that it needed nothing.
+
+    So the question gets the same one-shot retry, and the proof is that no
+    command capable of replacing this installation runs at all: the stub is given
+    no install answer, so reaching one fails the test where it happens.
+    """
+    attempts = stub_manager(
+        monkeypatch,
+        answers=[],
+        command=UV_PIP_UPGRADE,
+        resolutions=[UV_PIP_RESOLUTION_TRUST_FAILURE, UV_PIP_WOULD_MAKE_NO_CHANGES],
+        version_after=__version__,
+    )
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    # The guard's own answer, reached without a manager having run.
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["install_skipped"] is True
+    assert result["restart_required"] is False
+    assert list(attempts) == []
+    # Asked twice, the same question both times, and the second differing in
+    # exactly the one variable the install's retry would have added.
+    assert [question.command for question in attempts.questions] == [[*UV_PIP_UPGRADE, "--dry-run"]] * 2
+    assert attempts.questions[0].certificate_variables == {}
+    assert attempts.questions[1].certificate_variables == {"UV_SYSTEM_CERTS": "1"}
+    # And it says what it did, in the same two lengths the install path uses, so
+    # the operator learns about the proxy on the call that met it rather than on
+    # the next upgrade that has something to install.
+    assert "TLS-intercepting proxy" in result["summary"]
+    assert "second attempt is the one that succeeded" in result["summary"]
+    assert result["certificates"] == "Retried once against this machine's own certificate store with UV_SYSTEM_CERTS=1, and that is the attempt that succeeded."
+    assert any("Export UV_SYSTEM_CERTS=1" in step for step in result["next_steps"])
+    # Both attempts' own words survive under the field this outcome carries them
+    # in, the way the install path carries them under `install`.
+    resolution = result["resolution"]
+    assert "Would make no changes" in resolution["stderr"]
+    assert resolution["certificate_retry"]["first_attempt"]["stderr"] == UV_PIP_RESOLUTION_TRUST_FAILURE.stderr
+
+
+def test_a_resolution_failure_that_names_no_certificate_still_falls_through_to_the_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half, pinned: only a trust failure changed, everything else did not.
+
+    An older pip that rejects `--report`, an index that answered 500, a resolver
+    that could not solve: none of those is a certificate, none is retried, and
+    all of them still mean "cannot tell" and still run the upgrade exactly as it
+    ran before. A guard that started refusing to fall through would turn every
+    unreadable question into a machine that cannot be upgraded at all.
+    """
+    unreadable = subprocess.CompletedProcess[str]([], 2, "", "error: unrecognized subcommand `--report`")
+    attempts = stub_manager(
+        monkeypatch,
+        answers=[MANAGER_INSTALLED],
+        manager="pip",
+        command=PIP_UPGRADE,
+        resolutions=[unreadable],
+    )
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    # Asked once, never retried, and the install ran as it always did.
+    assert len(attempts.questions) == 1
+    assert attempts.questions[0].inherited
+    assert [attempt.command for attempt in attempts] == [PIP_UPGRADE]
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    # And no certificate diagnosis is put on a result that has nothing to do with
+    # one, on either the question or the install.
+    assert "certificates" not in result
+    assert "next_steps" not in result
+
+
+def test_an_exported_variable_earns_the_resolution_query_no_second_attempt_either(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The operator-respect rule is the install's, and it is the question's too.
+
+    A `PIP_CERT` the operator exported was in force for the question that just
+    failed, so asking again with the same value would repeat a run rather than
+    retry it, and overriding it would swap the bundle they chose for one this
+    module picked off a list. Neither happens here for the same reason neither
+    happens on the install, and the fall-through is what it has always been.
+    """
+    chosen = tmp_path / "corporate-roots.pem"
+    chosen.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+    monkeypatch.setenv("PIP_CERT", str(chosen))
+    attempts = stub_manager(
+        monkeypatch,
+        answers=[PIP_TRUST_FAILURE],
+        manager="pip",
+        command=PIP_UPGRADE,
+        resolutions=[PIP_TRUST_FAILURE],
+        version_after=__version__,
+    )
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    # One question, inheriting the environment whole, and nothing rewritten in it.
+    assert len(attempts.questions) == 1
+    assert attempts.questions[0].inherited
+    assert os.environ["PIP_CERT"] == str(chosen)
+    # It could not tell, so the install ran, and it is the install's own account
+    # of the same proxy that the result reports.
+    assert len(attempts) == 1
+    assert result["error_type"] == "upgrade_failed"
+    assert result["certificates"].startswith("Not retried, because PIP_CERT is already set here")
 
 
 # ---------------------------------------------------------------------------
