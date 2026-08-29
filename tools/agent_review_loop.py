@@ -27,7 +27,11 @@ Four further properties make it safe to run unattended:
   than counted, because under `--review-checkout none` the reviewer works in that
   same tree and its leavings would otherwise make every declined round a stall;
   `--no-stall-retry` reports such a round instead of handing it back, for a run
-  that cannot spare the second invocation.
+  that cannot spare the second invocation. That subtraction is by porcelain line,
+  which a round writing its whole output into a file the run already had dirty
+  leaves untouched, so the content those paths held when the round began is what
+  tells such a round from a declined one; it is reported and carried rather than
+  handed back, because the file it wrote into is one the operator also owns.
 * The verdict is parsed from a JSON schema Codex is required to satisfy, not from
   prose. Prose like "looks good apart from ..." has no stable meaning to a loop
   condition, and guessing at it is how a loop exits one round before the bug.
@@ -1187,6 +1191,15 @@ def newly_uncommitted(inherited: str, present: str) -> str:
     implementer that really did a round's work has to have touched something the
     reviewer had not.
 
+    "By itself" is the whole of it, and one case is decided elsewhere: a round that
+    committed nothing at all and edited nothing but inherited dirt has no other
+    work to be judged on, so those further edits are all there is, and the pre-round
+    content map is asked whether the bytes moved. This function is unchanged by
+    that and still answers only about porcelain lines -- a round that also commits,
+    or that also touches a path the reviewer had not, is decided here as before,
+    and the question is never put when this returns anything. See
+    `report_landed_stall`.
+
     Deciding is all this does. Once the loop does decide a round's work is in the
     tree, `salvage_commit` still commits the tree, leftovers included, exactly as
     an agent's own `git add -A` already would.
@@ -1591,6 +1604,13 @@ def changed_inherited_dirty(
     kept instead: the same conservative reading taken wherever an identity cannot be
     established, and safe because it fires only for a path that still holds an object
     (a symlink or a non-empty file), never the operator's own empty file or directory.
+
+    The same judgement answers a second caller a layer earlier, where nothing has
+    stalled yet: a round that produced no commit and wrote its whole output into a
+    file the run already had dirty. There is no relocation to back-stop there, only
+    the same question -- did this round put bytes in the operator's file -- and the
+    same answer, so the two share one comparison rather than each keeping its own
+    idea of what counts as untouched. See `report_landed_stall`.
     """
     still = present & inherited_dirty
     now = blob_ids(repo, still)
@@ -2362,7 +2382,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Keep looping when an implementation round produces no commit and leaves nothing new in the "
             "working tree, instead of stopping as stalled. A round that left uncommitted work behind is "
-            "recovered rather than reported as no commit, unless --no-stall-retry says otherwise."
+            "recovered rather than reported as no commit, unless --no-stall-retry says otherwise. Work "
+            "such a round wrote into a file the run already had dirty adds no line to leave behind, so it "
+            "is reported and carried instead of recovered, and no clean verdict ends the run while it is "
+            "outstanding."
         ),
     )
     parser.add_argument(
@@ -2562,6 +2585,41 @@ def report_stall(record: RoundRecord, number: int, leftover: str) -> None:
         print(f"  {line}")
     record.stalled = True
     record.uncommitted_paths = leftover.splitlines()
+
+
+def report_landed_stall(record: RoundRecord, number: int, landed: set[str]) -> None:
+    """Say that a round's work went into a file the run already had dirty, and record it.
+
+    The stall no porcelain line can show. `report_stall` names the lines a round
+    added to `git status`; a round that wrote its whole output into an
+    inherited-dirty file added none, because the line that file wears is the line
+    it wore before the round started. So the paths are named on their own, with no
+    status in front of them: the status is the operator's, and repeating it as this
+    round's news would be the wrong sentence for somebody reading `run.json` days
+    later. What is this round's news is that the bytes under those names are no
+    longer the bytes the round found there. `run.json` says `stalled` as it does
+    for the other kind, because that is what the round is.
+
+    Reported and carried, never handed back. `recover_stalled_round` shows an
+    implementer the lines it left and asks for the commit it never made; here there
+    are no such lines, and what it would be asked to commit is a file the operator
+    also owns, so a retry would push the operator's uncommitted work into history
+    to recover the round's. Naming the round a stall and keeping its paths
+    outstanding is what the run actually needs: the clean-exit guard then refuses
+    to end over work no review read, and the tree is left exactly as it is for
+    whoever can tell the two authors apart.
+    """
+    print(
+        f"\nround {number}: implementer stalled with its work inside {len(landed)} path(s) the run already "
+        "had dirty. It produced no commit and added no line to `git status`, and these hold content they "
+        "did not hold when the round began:"
+    )
+    for path in listed("\n".join(sorted(landed)), 20).splitlines():
+        print(f"  {path}")
+    print("not handing it back: the bytes sit in a file the operator also owns, and asking for a commit would")
+    print("commit their work to recover this round's. The work stays exactly where it is.")
+    record.stalled = True
+    record.uncommitted_paths = sorted(landed)
 
 
 def recover_stalled_round(
@@ -2987,10 +3045,18 @@ def main(argv: list[str] | None = None) -> int:
             # keeps every inherited-dirty path the round rewrote, since the stall's
             # edited work may be hiding in one and no proof taken at a pathname can
             # tell that tree from an operator editing their own file beside a
-            # committed stall. See `changed_inherited_dirty`. These are asked only
-            # while something is outstanding to recognise: otherwise there is nothing
-            # to compare against, and a dirty tree can be a large read.
-            inherited_blobs = {} if options.dry_run or not outstanding_paths else blob_ids(repo, inherited_dirty)
+            # committed stall. See `changed_inherited_dirty`.
+            #
+            # The content map is taken every round, not only while something is
+            # outstanding to recognise, because it answers the round with nothing
+            # outstanding behind it as well: one whose whole output lands in a file
+            # the run already had dirty leaves the porcelain line it started with,
+            # and only the bytes the round found there say the file is no longer the
+            # one the operator left. It costs nothing on a clean tree -- there is
+            # nothing to hash -- and a dirty tree is exactly where the question has
+            # an answer worth having. The filesystem identities stay tied to the
+            # outstanding paths, which are all an inode can name.
+            inherited_blobs = {} if options.dry_run else blob_ids(repo, inherited_dirty)
             stalled_blobs = {inherited_blobs[path] for path in outstanding_paths if path in inherited_blobs}
             outstanding_ids = {} if options.dry_run or not outstanding_paths else object_ids(repo, outstanding_paths)
             stalled_objects = set(outstanding_ids.values())
@@ -3066,6 +3132,17 @@ def main(argv: list[str] | None = None) -> int:
                 # under its new name, and carrying keeps it from slipping the guard.
                 vanished = followed - survived
                 carry_new = bool(kept_uncommitted) or bool(vanished)
+                # Which inherited-dirty paths this round rewrote: one question, asked
+                # once, read by the two guards below that both turn on it -- the move
+                # backstop when a followed name has vanished, and the first landing
+                # when the round committed nothing and added no line of its own. A
+                # round that is neither never pays for the answer.
+                first_landing = not new_commits and not left_behind
+                rewritten = (
+                    changed_inherited_dirty(repo, present_dirty, inherited_dirty, inherited_blobs)
+                    if vanished or first_landing
+                    else set()
+                )
                 outstanding_paths = survived
                 if carry_new:
                     outstanding_paths |= present_dirty - inherited_dirty
@@ -3107,9 +3184,28 @@ def main(argv: list[str] | None = None) -> int:
                     # identities above still carry every move they can name, so this
                     # retains only what they could not.
                     if vanished:
-                        outstanding_paths |= changed_inherited_dirty(
-                            repo, present_dirty, inherited_dirty, inherited_blobs
-                        )
+                        outstanding_paths |= rewritten
+                # A round can land its whole output on inherited dirt at the first
+                # attempt too, with no stall behind it to relocate. Writing into a
+                # file the run already had dirty leaves the porcelain line the round
+                # started with, so `newly_uncommitted` sees no news, the carry above
+                # is never asked for, and a round that produced no commit reads as
+                # one that looked at the findings and declined -- while the
+                # operator's file holds bytes they did not write, in no commit and
+                # in no reviewed range. Under --continue-on-no-commit that work goes
+                # on to meet the very clean exit the carry exists to prevent.
+                #
+                # The content the round found there is what porcelain cannot say. An
+                # inherited-dirty path still dirty whose bytes are no longer the
+                # bytes it began with is where this round's work went, and is news.
+                # Asked only of a round that committed nothing and added no line of
+                # its own, which is the whole of the gap; answered by the same
+                # comparison the move backstop uses, so the exclusion that protects
+                # the operator -- content unchanged since the round began is theirs
+                # -- protects them here unchanged. See `report_landed_stall`.
+                if first_landing and rewritten:
+                    report_landed_stall(record, number, rewritten)
+                    outstanding_paths |= rewritten
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
                 if not options.continue_on_no_commit:
