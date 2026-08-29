@@ -279,6 +279,32 @@ def write_run_record(config: AgenticHILConfig, handle: str, record: JsonObject) 
             time.sleep(RECORD_WRITE_BACKOFF_S)
 
 
+def _records_newest_first(directory: Path) -> list[Path]:
+    """Every run record in a directory, newest first, tolerating one that goes.
+
+    A listing is not a snapshot of a directory nothing else is using. Between the
+    glob that names the candidates and the stat that dates one of them a run can
+    finish and prune itself, or another process can clean up, and the name is
+    simply not there any more. Dating them inside the sort key made that one
+    absence fatal to the whole listing: the stat raised out of ``sorted``, the
+    caller's guard caught it, and a bench with fifty runs answered as though it
+    had none. One record that had gone hid every record that had not.
+
+    So each candidate is dated on its own, and one that is gone is left out of a
+    listing it is no longer a member of. Nothing else is left out. A stat refused
+    for permission, or failing on I/O, is not a member disappearing: it says this
+    bench cannot read its own coordination state, and it leaves here as the
+    ``OSError`` it is, for each caller to answer in the terms it answers in."""
+    dated: list[tuple[float, Path]] = []
+    for path in directory.glob("run-*.json"):
+        try:
+            dated.append((path.stat().st_mtime, path))
+        except FileNotFoundError:
+            continue
+    dated.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in dated]
+
+
 def prune_run_records(config: AgenticHILConfig) -> None:
     """Drop the oldest finished runs once there are more than a bench needs.
 
@@ -287,8 +313,13 @@ def prune_run_records(config: AgenticHILConfig) -> None:
     asking what a live run is doing."""
     directory = runs_directory(config)
     try:
-        records = sorted(directory.glob("run-*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        records = _records_newest_first(directory)
     except OSError:
+        # Not a refusal, and this is the one listing that must not become one:
+        # pruning is housekeeping, called from the middle of a run's
+        # registration, so a coordination directory this process cannot list is
+        # not a reason the run that asked for the prune fails. The listing a
+        # reader acts on is `known_runs`, and that one does say so.
         return
     for path in records[RUN_RECORDS_KEPT:]:
         handle = path.stem
@@ -783,11 +814,27 @@ def public_run_fields(record: JsonObject) -> JsonObject:
 
 
 def known_runs(config: AgenticHILConfig) -> JsonObject:
-    """Every run this bench still has a record of, newest first."""
+    """Every run this bench still has a record of, newest first.
+
+    A listing that could not be taken is refused rather than answered empty. The
+    two are one document to whoever reads it and they are opposite facts: a bench
+    with no runs and a bench whose runs this process is not allowed to see both
+    said "0 test run(s)", and the second one sends somebody away from a run that
+    was there the whole time. A record that vanished while the listing was being
+    taken is not that case and is simply left out, which is what a listing of a
+    directory other processes are still using owes its reader."""
     try:
-        paths = sorted(runs_directory(config).glob("run-*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
-    except OSError:
-        paths = []
+        paths = _records_newest_first(runs_directory(config))
+    except OSError as error:
+        return {
+            "ok": False,
+            "tool": "test_reactor_status",
+            "error_type": "run_state_invalid",
+            "summary": "This bench's run records could not be listed, so which runs it knows about is unknown.",
+            "backend_error": str(error),
+            "retry_safe": True,
+            "side_effect_committed": False,
+        }
     runs = []
     for path in paths:
         try:

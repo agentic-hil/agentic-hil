@@ -1128,3 +1128,127 @@ def test_a_record_from_another_version_refuses_the_start_with_its_own_reason(tmp
     # Another version's record is a state on the first look, so the start spends
     # no more looks on it than the reader does.
     assert reads.record_reads == 1
+
+
+# --- a listing taken while the directory it lists is still being used --------
+#
+# A record is written by the run it belongs to and removed by whoever prunes
+# next, so the set of them changes under a listing that is being taken. Between
+# the glob that names the candidates and the stat that dates one of them, a
+# record can simply go: a run finishing and pruning itself, another process
+# cleaning up. Dating them inside the sort key made that one absence fatal, and
+# the outer guard then answered as though the bench had no runs at all.
+#
+# Placed rather than raced, like the torn record above: the file is removed from
+# inside the stat that was about to date it, which is exactly the window, and
+# every other stat on the way through is the real one.
+
+
+def finished_records(config, *handles: str) -> None:
+    """Terminal records in the order given, newest first, with distinct times.
+
+    The listing is by modification time and the tests are about its order, so the
+    times are set rather than taken: three records written in one loop share a
+    clock tick on Windows and would leave the order to the sort's stability."""
+    import agentic_hil.runlifecycle as runlifecycle
+
+    runlifecycle.runs_directory(config).mkdir(parents=True, exist_ok=True)
+    for index, handle in enumerate(handles):
+        runlifecycle.write_run_record(config, handle, {"version": runlifecycle.RUN_RECORD_VERSION, "state": "finished", "run": handle, "run_ok": True})
+        modified = 1_700_000_000 - index
+        os.utime(runlifecycle.record_path(config, handle), (modified, modified))
+
+
+def stat_that_loses(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Remove one record from inside the stat that was about to date it.
+
+    The whole window, placed: the glob has already named the file and the listing
+    is about to ask how old it is. Every other path keeps the real stat, so what
+    the test changes is one moment and not the filesystem."""
+    real_stat = Path.stat
+
+    def losing_stat(self, *args: object, **kwargs: object):
+        if self.name == name:
+            with suppress(OSError):
+                os.unlink(self)
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", losing_stat)
+
+
+def test_a_record_that_vanishes_between_the_glob_and_the_stat_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The whole of #324 from the reader's side: a listing tolerates its members
+    # disappearing while it is being taken. One record going must cost the
+    # listing that record and nothing else.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    survivor, doomed = "run-000000000000aaaa", "run-000000000000bbbb"
+    finished_records(config, survivor, doomed)
+    stat_that_loses(monkeypatch, f"{doomed}.json")
+
+    listed = runlifecycle.known_runs(config)
+
+    assert listed["ok"] is True, listed
+    assert [item["run"] for item in listed["runs"]] == [survivor]
+    assert listed["summary"].startswith("This bench has records of 1 test run(s)")
+
+
+def test_pruning_skips_the_record_that_went_and_still_prunes_the_rest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The same listing, from the writer's side. A record vanishing used to
+    # abandon the prune, so a coordination directory that had passed its limit
+    # stayed over it for as long as anything kept vanishing, which on a busy
+    # bench is exactly when records vanish.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    kept, doomed, stale = "run-000000000000aaaa", "run-000000000000bbbb", "run-000000000000cccc"
+    finished_records(config, kept, doomed, stale)
+    monkeypatch.setattr(runlifecycle, "RUN_RECORDS_KEPT", 1)
+    stat_that_loses(monkeypatch, f"{doomed}.json")
+
+    runlifecycle.prune_run_records(config)
+
+    assert runlifecycle.record_path(config, kept).exists()
+    assert not runlifecycle.record_path(config, doomed).exists()
+    # The one the prune was for. It survived every round of this before the fix.
+    assert not runlifecycle.record_path(config, stale).exists()
+
+
+def test_a_listing_that_is_refused_is_refused_rather_than_answered_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The other half of the tolerance, and the half that keeps it honest. A stat
+    # refused for permission is not a member disappearing: it says this bench
+    # cannot read its own coordination state. Skipping it would answer "no runs"
+    # for a bench full of them, which is the masking one file further on, and
+    # answering an empty listing did the same thing without even a reason in it.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    handle = "run-000000000000aaaa"
+    finished_records(config, handle)
+    real_stat = Path.stat
+
+    def refused_stat(self, *args: object, **kwargs: object):
+        if self.name.startswith("run-") and self.name.endswith(".json"):
+            raise PermissionError("the coordination state is not readable here")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", refused_stat)
+
+    listed = runlifecycle.known_runs(config)
+
+    assert listed["ok"] is False, listed
+    assert listed["error_type"] == "run_state_invalid"
+    assert "not readable here" in listed["backend_error"]
+    assert listed["retry_safe"] is True
+    assert "runs" not in listed
+    # Pruning answers the same refusal by leaving the directory alone. It is
+    # housekeeping in the middle of a run's registration, so it owes the run it
+    # was called from a return and never an exception, even here where it is
+    # certain it pruned nothing.
+    monkeypatch.setattr(runlifecycle, "RUN_RECORDS_KEPT", 0)
+    runlifecycle.prune_run_records(config)
+    assert real_stat(runlifecycle.record_path(config, handle)).st_size > 0
