@@ -14,6 +14,7 @@ from agentic_hil.backends.common import (
     command_for_log,
     contains_any,
     contains_failure_text,
+    debug_session_unsupported,
     invocation,
     programmer_output_fields,
     reports_reset_failure,
@@ -279,7 +280,7 @@ class PyOCDBackend:
     def debug_get_stop_reason(self) -> JsonObject:
         return self._unsupported_debug_tool("debug_get_stop_reason")
 
-    def debug_symbol_info(self, symbol: str = "") -> JsonObject:
+    def debug_symbol_info(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
         return self._unsupported_debug_tool("debug_symbol_info")
 
     def debug_symbol_value(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
@@ -665,7 +666,7 @@ class PyOCDBackend:
         return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
 
     def _unsupported_debug_tool(self, tool: str) -> JsonObject:
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "not_supported", "summary": "Typed debug sessions require the OpenOCD backend."}
+        return debug_session_unsupported(self.backend_name, tool)
 
     def _classify_output(self, output: str, tool: str | None = None) -> str:
         lower = output.lower()

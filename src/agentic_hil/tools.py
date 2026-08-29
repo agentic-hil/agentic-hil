@@ -368,7 +368,12 @@ class AgenticHILToolService:
         symbol = (payload or {}).get("symbol")
         if not isinstance(symbol, str) or not symbol.strip():
             return tool_error("debug_symbol_info", "invalid_argument", "symbol must be a non-empty string.")
-        return self.backend.debug_symbol_info(symbol.strip())
+        # The same offer the two reads get, and this one needs it most: where a
+        # symbol lives is a property of the image, so a backend with no session
+        # to ask can answer it from the ELF a confirmed flash proved is on the
+        # target, without opening a probe at all. A backend that has a session
+        # ignores it.
+        return self.backend.debug_symbol_info(symbol.strip(), self._symbol_elf)
 
     def debug_symbol_value(self, payload: JsonObject | None = None) -> JsonObject:
         if self._dispatch_depth == 0:

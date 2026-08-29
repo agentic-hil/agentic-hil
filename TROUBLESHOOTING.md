@@ -269,6 +269,24 @@ On OpenOCD and pyOCD: the same `error_type` means the same thing, read off the t
 
 Do not grant `allow_mass_erase` to force it through. That permission makes this service refuse flashing outright, and a mass erase answers a protection refusal by erasing the whole device.
 
+## 10b. `not_supported`: A Debug Tool Is Refused On This Backend
+
+Symptom: a `debug_*` call comes back `ok: false` with `error_type: not_supported` and a summary that begins "Typed debug sessions require the OpenOCD backend".
+
+First, check which half you actually need. On `type: stlink` the three symbol tools work without a session: `debug_symbol_info` says where an allowed symbol is and how large it is (it opens no probe at all, resolving out of the ELF a confirmed `flash_firmware` put on the board), and `debug_symbol_value` and `debug_dump_symbol_ihex` read those bytes off the target with STM32CubeProgrammer's own memory read. If the step wanted a value out of RAM, a coverage buffer or a counter, that is the tool, and nothing about the bench has to change. Flash the ELF through `flash_firmware` first, and keep the symbol in `debug.allowed_symbols`.
+
+Those reads connect with `mode=HOTPLUG`, which attaches to the running core rather than resetting it: a read that reset the target would destroy the RAM it was asked for. `debuggers.<name>.connect_mode: under_reset` does not reach them, because that key belongs to the flash.
+
+What is genuinely refused is the session half: breakpoints, continue, halt, stop reasons, and the session lifecycle around them. Those are GDB operations, and neither STM32CubeProgrammer nor pyOCD is a GDB server this service drives as one. On `type: pyocd` the reads are refused too, deliberately: pyOCD can read memory, but which of its connects leaves a running core untouched has not been measured on a bench here, and a read that quietly resets the target is worse than a refusal.
+
+Fix, when a session is what the step needs: the probe is not the problem. The same ST-Link, or the same CMSIS-DAP probe, is one OpenOCD drives. Change `debuggers.<name>.type` to `openocd` and give it the interface script for that probe (`interface/stlink.cfg`, `interface/cmsis-dap.cfg`) and the `target_cfg` for the part, such as `target/stm32f4x.cfg`.
+
+That edit is yours to make in the file: `type` is not one of the keys `project_config_set` may write, which are `probe_id`, `executable`, `interface_cfg`, `target_cfg` and `connect_mode`. A running server picks the change up through `project_config_reload_description` or a restart.
+
+What the move costs, before you make it: OpenOCD has to be installed and reachable, by PATH or `debuggers.<name>.executable`. A typed debug session is GDB, so `debug.gdb_executable` has to name one that speaks this target, such as `arm-none-eabi-gdb`. A `connect_mode: under_reset` on that debugger has to go, because OpenOCD refuses the value at load with `config_invalid` and takes the same effect from a `reset_config` line in the scripts instead. And the part stops identifying itself: STM32CubeProgrammer reports the device name on every connect, while OpenOCD is told what the part is by `target_cfg`, so a wrong script fails to detect the target rather than adapting. On a bench moving off `type: pyocd`, `target_type` and its CMSIS pack stop being read for the same reason.
+
+Not this: swapping the probe, or reaching for `openocd`, `gdb`, `pyocd commander` or `st-util` directly to get a breakpoint anyway. The probe already on the bench is the one the way out uses, and a raw debugger command takes it out from under this service's coordination and leaves no record of what ran.
+
 ## 11. COM Port Does Not Work
 
 Symptom: COM tools cannot start a session, return permission errors, or read no expected serial text.

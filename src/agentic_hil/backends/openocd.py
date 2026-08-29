@@ -247,7 +247,9 @@ class OpenOCDBackend:
     def debug_get_stop_reason(self) -> JsonObject:
         return self._debug.get_stop_reason()
 
-    def debug_symbol_info(self, symbol: str) -> JsonObject:
+    def debug_symbol_info(self, symbol: str, symbol_elf: JsonObject | None = None) -> JsonObject:
+        # Ignored here for the reason the two reads below ignore it: the session
+        # loaded an image, and that image is the one the target is running.
         return self._debug.symbol_info(symbol)
 
     def debug_symbol_value(self, symbol: str, symbol_elf: JsonObject | None = None) -> JsonObject:

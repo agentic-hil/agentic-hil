@@ -1423,6 +1423,107 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "once `allow_mass_erase` is granted.",
         ),
     ),
+    # -- A capability this configuration does not have, and the way to one ------
+    # Scoped per backend, because "not supported" is only half an answer: the
+    # useful half is which configuration would support it, and that differs by
+    # what is plugged in. Both entries end at the same place (the probe on the
+    # bench is one OpenOCD drives), and both say what the move costs, because a
+    # way out whose price is discovered afterwards is a dead end with a delay.
+    "not_supported:stlink": ErrorRemedy(
+        meaning=(
+            "This bench runs `type: stlink`, which drives STM32CubeProgrammer's CLI. That CLI programs, resets and "
+            "reads memory; it is not a debug server, so there is no session on this backend to hold a breakpoint, "
+            "resume a core, or report why one stopped. `debug_start_session`, `debug_stop_session`, "
+            "`debug_get_session_status`, `debug_set_breakpoint`, `debug_list_breakpoints`, `debug_clear_breakpoints`, "
+            "`debug_continue`, `debug_halt` and `debug_get_stop_reason` are refused here for that reason, and so is "
+            "`reset_target` with mode `init`, whose reset-init event script is an OpenOCD thing.\n\n"
+            "What is *not* refused any more is the read half of the typed-debug family. `debug_symbol_info`, "
+            "`debug_symbol_value` and `debug_dump_symbol_ihex` are served on this backend with no session behind them: "
+            "the first resolves an address and a size out of the ELF `flash_firmware` put on the board and opens no "
+            "probe at all, and the other two read the target with STM32CubeProgrammer's own memory read. Refusing a "
+            "read this hardware can perform was the bug (#342): it sent a bench that wanted a RAM measurement away "
+            "from its own probe. The two reads that do reach the board also connect hot plug now, because the connect "
+            "they shipped with reset the target, and a read that resets destroys the RAM it was asked for.\n\n"
+            "Nothing was sent to the bench for this refusal. The target is exactly as the last call that did reach it "
+            "left it."
+        ),
+        remediation=(
+            "First check whether a read answers the question. If what is wanted is a value out of the target (a "
+            "counter, a coverage buffer, a status word, a structure), `debug_symbol_value` and "
+            "`debug_dump_symbol_ihex` do that here without a session, and `debug_symbol_info` answers where a symbol "
+            "lives without touching the board. They resolve against the ELF this service flashed, so flash the ELF "
+            "with `flash_firmware` first and keep the symbol in `debug.allowed_symbols`.",
+            "If the step genuinely needs a session (a breakpoint, a resume, a stop reason, stepping), the way out is "
+            "a configuration change and not a different probe: the same ST-Link is a probe OpenOCD drives. Set "
+            "`debuggers.<name>.type` to `openocd`, with `interface_cfg: interface/stlink.cfg` and the `target_cfg` for "
+            "this part, `target/stm32f4x.cfg` for an STM32F4.",
+            "That edit belongs to the operator. `type` is not one of the keys `project_config_set` may write (those "
+            "are `probe_id`, `executable`, `interface_cfg`, `target_cfg` and `connect_mode`), so report the change and "
+            "ask, rather than attempting it. Afterwards the server adopts it through "
+            "`project_config_reload_description` or a restart.",
+            "Say what the move costs before it is made, because parts of this bench change hands with it. OpenOCD has "
+            "to be installed and reachable, by PATH or `debuggers.<name>.executable`. A typed debug session is GDB, so "
+            "`debug.gdb_executable` has to name a GDB that speaks this target, such as `arm-none-eabi-gdb`. A "
+            "`connect_mode: under_reset` on that debugger has to go: OpenOCD refuses the value at load with "
+            "`config_invalid`, and connecting under reset becomes a `reset_config` decision inside the interface and "
+            "target scripts. And the part stops identifying itself: STM32CubeProgrammer reports the device name on "
+            "every connect, while OpenOCD is told what the part is by `target_cfg`, so a wrong script fails to detect "
+            "the target instead of adapting.",
+            "If the bench has to stay on STM32CubeProgrammer, report the step as unavailable on this configuration and "
+            "name which of the two halves was needed. A missing capability that is stated is a decision for the "
+            "operator; one that is worked around quietly is a plan that reports something it did not do.",
+        ),
+        do_not=(
+            "Do not read this as no debug on this bench. Three of the twelve typed-debug tools work here, and they are "
+            "the three that answer what is in memory.",
+            "Do not reach for `openocd`, `gdb`, `st-util` or a raw debugger command to get a breakpoint anyway. That "
+            "bypasses the policy this refusal comes from, takes the probe out from under the bench's own coordination, "
+            "and leaves the operator with no record of what ran.",
+            "Do not swap the probe. The ST-Link is not what refused; the backend the configuration names for it is, "
+            "and the same probe serves both.",
+        ),
+    ),
+    "not_supported:pyocd": ErrorRemedy(
+        meaning=(
+            "This bench runs `type: pyocd`, which this server drives through pyOCD's command-line tools for probing, "
+            "flashing and resetting. No typed-debug tool is served here: not the session family "
+            "(`debug_start_session` and its breakpoints, continue, halt and stop reason), and not the reads "
+            "(`debug_symbol_info`, `debug_symbol_value`, `debug_dump_symbol_ihex`). `reset_target` with mode `init` is "
+            "refused for the same reason: the reset-init event script belongs to OpenOCD.\n\n"
+            "The reads are the honest part of that to know about. pyOCD can read target memory, so this refusal is "
+            "wider than the hardware's own limits, in a way the ST-Link backend's no longer is (#342). What is missing "
+            "is not the command but the evidence: which pyOCD connect reaches a running core without halting or "
+            "resetting it has not been established on a bench here, and a read that silently resets the target "
+            "destroys the RAM it was asked for. Until that is measured, a refusal is the answer that does not lie.\n\n"
+            "Nothing was sent to the bench for this refusal. The target is exactly as the last call that did reach it "
+            "left it."
+        ),
+        remediation=(
+            "The way out is a configuration change rather than different hardware: the probe this backend is driving "
+            "is one OpenOCD drives too. Set `debuggers.<name>.type` to `openocd`, with the `interface_cfg` for the "
+            "probe that is actually plugged in (`interface/stlink.cfg` for an ST-Link, `interface/cmsis-dap.cfg` for "
+            "a CMSIS-DAP probe) and the `target_cfg` for this part.",
+            "That edit belongs to the operator. `type` is not one of the keys `project_config_set` may write (those "
+            "are `probe_id`, `executable`, `interface_cfg`, `target_cfg` and `connect_mode`), so report the change and "
+            "ask, rather than attempting it. Afterwards the server adopts it through "
+            "`project_config_reload_description` or a restart.",
+            "Say what the move costs before it is made. OpenOCD has to be installed and reachable, by PATH or "
+            "`debuggers.<name>.executable`, and `debug.gdb_executable` has to name a GDB that speaks this target, "
+            "because a typed debug session is GDB. `debuggers.<name>.target_type` stops being read: OpenOCD is told "
+            "what the part is by `target_cfg`, so the CMSIS device-family pack that made pyOCD resolve the part is no "
+            "longer what decides whether the bench works, and a wrong `target_cfg` fails to detect the target rather "
+            "than adapting.",
+            "If the bench has to stay on pyOCD, report the step as unavailable on this configuration and name what was "
+            "needed. A read that was refused here and would have worked under `openocd` is worth saying out loud, "
+            "because it is the difference between this bench and the same probe one line of configuration away.",
+        ),
+        do_not=(
+            "Do not reach for `pyocd commander`, `pyocd gdbserver`, `gdb` or a raw debugger command to get the value "
+            "anyway. That bypasses the policy this refusal comes from and takes the probe out from under the bench's "
+            "own coordination.",
+            "Do not swap the probe. The probe is not what refused; the backend the configuration names for it is.",
+        ),
+    ),
     # -- The one flag whose whole value is that it is never silently degraded ---
     CAN_INTERFACE_NOT_FOUND_ERROR: ErrorRemedy(
         meaning=(

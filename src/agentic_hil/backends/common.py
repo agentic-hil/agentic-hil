@@ -8,6 +8,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.process import (
     CHILD_REAP_TIMEOUT_S,
     spawn_managed_process,
@@ -38,6 +39,63 @@ NOT_CONTACTED: JsonObject = {
 # not for a flash or a reset, whose own command drives the target and can produce
 # the same words after it has.
 READ_ONLY_TOOLS = frozenset({"probe_target", "debugger_probes_list"})
+
+# What each backend without typed debug sessions would have to become to serve
+# one, in the words its own configuration uses. Both entries end in the same
+# place, because both probes are probes OpenOCD drives: the way out of this
+# refusal is a `debuggers.<name>.type` change and the two scripts that come with
+# it, not a different probe and not a different bench.
+DEBUG_SESSION_WAY_OUT: dict[str, str] = {
+    "stlink": (
+        "the same ST-Link runs under `type: openocd` with `interface_cfg: interface/stlink.cfg` and the "
+        "`target_cfg` for this part"
+    ),
+    "pyocd": (
+        "the same probe runs under `type: openocd` with the `interface_cfg` for it ("
+        "`interface/stlink.cfg` for an ST-Link, `interface/cmsis-dap.cfg` for a CMSIS-DAP probe) and the `target_cfg` "
+        "for this part"
+    ),
+}
+
+
+def debug_session_unsupported(backend_name: str, tool: str) -> JsonObject:
+    """Refuse a typed-debug session tool, and say what to change to get one.
+
+    Breakpoints, continue, halt-with-stop-reason and the session lifecycle are
+    GDB operations, and neither STM32CubeProgrammer's CLI nor pyOCD's commander
+    is a GDB server this project drives as one. That much was always true; what
+    was wrong with the refusal is that it named the backend the bench does not
+    run and stopped there (#342). A caller reading it learned that the capability
+    exists somewhere and nothing about how to reach it, so the reasonable next
+    move looked like buying a different probe, when the probe already plugged in
+    is one OpenOCD drives.
+
+    So the refusal names the configuration change instead: the same physical
+    probe under `type: openocd`, with the interface and target scripts that
+    backend reaches a target through. The catalogue entry behind
+    `not_supported:<backend>` carries the rest, including what the change costs,
+    because a way out that hides its price is a different kind of dead end.
+
+    `error_type` stays `not_supported`. It is the project's word for a capability
+    this configuration does not have, the service layer reads it as a refusal
+    that started nothing, and a new spelling would have moved this branch out of
+    those lists for no gain. NOT_CONTACTED for the same reason it is on the
+    reset-mode refusal: this returns before anything is spawned.
+    """
+    way_out = DEBUG_SESSION_WAY_OUT.get(backend_name)
+    reach = f" To run them on this bench, {way_out}." if way_out else ""
+    return {
+        "ok": False,
+        "tool": tool,
+        "backend": backend_name,
+        "error_type": "not_supported",
+        "summary": (
+            f"Typed debug sessions require the OpenOCD backend; the {backend_name} backend has no debug session to "
+            f"set breakpoints, continue, halt or report a stop reason through.{reach}"
+        ),
+        **remediation_fields("not_supported", backend_name),
+        **NOT_CONTACTED,
+    }
 
 
 def reset_init_unsupported(backend_name: str, missing: str) -> JsonObject:
