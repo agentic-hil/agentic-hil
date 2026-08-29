@@ -318,9 +318,18 @@ def test_a_retry_that_gets_past_the_trust_failure_is_not_reported_as_a_missing_c
     assert "the proxy's own CA is missing" not in result["summary"]
     assert "failed the same way" not in result["summary"]
     assert result["certificates"].endswith("failed for a different reason the manager records under install.")
-    # And so the CA install is not prescribed: the store just worked, and the new
-    # failure is not a certificate to install.
+    # And so the CA install is not prescribed anywhere in the result the caller
+    # acts out of. The store just worked and the new failure is not a certificate
+    # to install: neither the measured `next_steps` nor the standing `remediation`
+    # tells the operator to install a CA, and the catalogue's certificates clause
+    # is a pointer to this result's own diagnosis rather than a standing "install
+    # the proxy CA first" that would contradict the summary here (finding #2).
     assert not any("Install the proxy's own CA" in step for step in result["next_steps"])
+    assert not any("proxy's own CA" in step for step in result["remediation"])
+    assert any("If this result carries `certificates`" in step for step in result["remediation"])
+    assert "install the proxy's own ca" not in json.dumps(result).lower()
+    # And the rendering a person reads carries no CA imperative either.
+    assert "install the proxy's own ca" not in render_result(result, "upgrade").lower()
     # The new failure survives where the renderer walks for it, and the first
     # attempt's certificate error is still kept beside it under `install`.
     install = result["install"]

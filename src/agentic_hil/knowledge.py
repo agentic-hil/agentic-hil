@@ -307,11 +307,17 @@ def _substitutions() -> dict[str, str]:
 
 
 # The one thing that fixes a proxy neither the manager's roots nor this machine's
-# store trusts. Standing text, which is why it lives here: `upgrade_failed` says
-# it as a catalogue step on every refusal, and `upgrade.py` attaches it as a
-# case-specific `next_steps` entry on the outcomes whose own catalogue entry does
-# not carry it. One string for both, so the two can neither drift nor be printed
-# twice on one screen.
+# store trusts. Standing text, which is why it lives here rather than beside its
+# one caller: `upgrade.py` attaches it as a case-specific `next_steps` entry on the
+# runs whose own words name a trust failure this machine's store did not answer,
+# and the same string reaches `installation_broken` and
+# `installation_changed_after_failed_upgrade`, whose own catalogue entries say
+# nothing about certificates. It is deliberately not a standing `upgrade_failed`
+# remediation step: a run that got past the proxy and then failed for a reason of
+# its own carries `certificates` too, so an unconditional CA imperative would
+# contradict the very result that says the store already worked. The catalogue
+# points at these measured steps through its conditional `certificates` clause
+# instead.
 #
 # Named as a step and never performed: it writes to a trust store, which is the
 # operator's, and the alternative an impatient reader reaches for is a switch
@@ -479,10 +485,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "that ran and refused.",
             "If this result carries `certificates`, the cause was a TLS-intercepting proxy and this command has "
             "already answered it once by itself: that clause says which store was tried and what came of it, and "
-            "`next_steps` names the one export or bundle that settles it for this machine — installing the proxy's own "
-            "CA where that machine reads it — measured on this host rather than described in general. Do that before "
-            "anything else here. A failure that carries no `certificates` met no proxy, so no trust store is the answer "
-            "to it.",
+            "`next_steps` carries the one step measured for this machine. Read that clause and do what its `next_steps` "
+            "says before anything else here, which is not always to install a CA: a retry against this machine's own "
+            "store can get past the proxy and then fail for a reason of its own, and there the store already worked and "
+            "the step is to keep it rather than to change it. A failure that carries no `certificates` met no proxy, so "
+            "no trust store is the answer to it.",
             "Otherwise deal with the reason `install.stderr` gives and run the upgrade again. Nothing was removed, so "
             "there is nothing to undo first and the second attempt starts exactly where the first one did.",
             "If it keeps failing, the one-line installer is the repair path, and on a machine that already has an "
