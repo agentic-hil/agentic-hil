@@ -10,6 +10,7 @@ from typing import Literal
 
 from agentic_hil.artifacts import looks_like_intel_hex, sha256_file
 from agentic_hil.backends.common import (
+    FAILURE_WORDS,
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
     CompletedCommand,
@@ -18,6 +19,7 @@ from agentic_hil.backends.common import (
     contains_failure_text,
     find_stm32_programmer_cli,
     invocation,
+    reports_reset_failure,
     reset_init_unsupported,
     spawn_command,
     which,
@@ -806,14 +808,26 @@ class STLinkBackend:
             return "flash_erase_failed"
         if "verify" in lower and contains_any(lower, ["failed", "mismatch", "error"]):
             return "verify_failed"
-        if "reset" in lower and contains_any(lower, ["failed", "error"]):
-            return "reset_failed"
+        # Above the reset rule, where it used to sit below it. These phrases name
+        # the operation the programmer said failed; the reset rule below reads
+        # only the line that reports a failure, so the connect banner's `Reset
+        # mode  : Software reset` no longer answers for a failed download (#333).
         if tool == "flash_firmware" and contains_any(lower, ["download failed", "write failed", "failed to download"]):
             return "flash_failed"
+        if reports_reset_failure(output):
+            return "reset_failed"
         if contains_any(lower, ["can't find", "couldn't find", "couldn't open", "not found"]):
             return "config_file_not_found"
-        if tool == "flash_firmware" and contains_any(lower, ["failed", "error"]):
+        if tool == "flash_firmware" and contains_any(lower, FAILURE_WORDS):
             return "flash_failed"
+        # The twin of the flash bucket above, anchored on the operation rather
+        # than on a word: when the tool is `reset_target`, the operation that
+        # reported a failure is a reset, whatever words this CLI version used for
+        # it. That is what keeps a genuine reset failure classified without the
+        # rule above having to guess from a stray "reset" somewhere in a
+        # transcript, which is what it used to do (#333).
+        if tool == "reset_target" and contains_any(lower, FAILURE_WORDS):
+            return "reset_failed"
         return "unknown_debugger_error"
 
     def _public_error_type(self, backend_error_type: str) -> str:

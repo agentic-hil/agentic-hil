@@ -6,12 +6,14 @@ import time
 from pathlib import Path
 
 from agentic_hil.backends.common import (
+    FAILURE_WORDS,
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
     command_for_log,
     contains_any,
     contains_failure_text,
     invocation,
+    reports_reset_failure,
     spawn_command,
     which,
 )
@@ -58,6 +60,16 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "flash_unconfirmed": "flash_failed",
     "reset_unconfirmed": "reset_failed",
 }
+
+# OpenOCD's own words for an erase it could not carry out: `flash_erase_address`
+# and the `flash erase_sector` handler both end in
+# `failed erasing sectors %u to %u` (src/flash/nor/tcl.c), which is the phrase a
+# refused or failed erase prints whichever of them the `program` proc reached.
+# One measured phrase rather than a family of guessed ones, the way the ST-Link
+# backend's marker list is: a marker nobody has seen a tool print would classify
+# on a hope, and the broad flash bucket below is the honest answer until somebody
+# measures the next wording.
+OPENOCD_ERASE_FAILURE_MARKERS = ["failed erasing sectors"]
 
 OPENOCD_DISABLE_TCP_SERVER_COMMANDS = ["gdb_port disabled", "tcl_port disabled", "telnet_port disabled"]
 OPENOCD_SUCCESS_MARKERS = {
@@ -508,14 +520,30 @@ class OpenOCDBackend:
             return "adapter_not_found"
         if contains_any(lower, ["target not examined", "target not detected", "unable to connect", "failed to read"]):
             return "target_not_detected"
+        # Ahead of the verify and reset rules and of the broad flash bucket at the
+        # bottom, because it is more specific than any of them: this is the line
+        # OpenOCD wrote about the operation that actually stopped. Without it an
+        # erase OpenOCD refused was `flash_failed`, whose causes and remedy are
+        # about a wrong image or a wrong address, and one incidental reset word
+        # anywhere in the transcript turned it into `reset_failed` (#333).
+        if contains_any(lower, OPENOCD_ERASE_FAILURE_MARKERS):
+            return "flash_erase_failed"
         if "verify" in lower and contains_any(lower, ["failed", "mismatch", "error"]):
             return "verify_failed"
-        if "reset" in lower and contains_any(lower, ["failed", "error"]):
+        if reports_reset_failure(output):
             return "reset_failed"
         if contains_any(lower, ["can't find", "couldn't find", "couldn't open", "not found"]):
             return "config_file_not_found"
-        if tool == "flash_firmware" and contains_any(lower, ["failed", "error"]):
+        if tool == "flash_firmware" and contains_any(lower, FAILURE_WORDS):
             return "flash_failed"
+        # The twin of the flash bucket above, anchored on the operation rather
+        # than on a word: when the tool is `reset_target`, the operation that
+        # reported a failure is a reset, whatever OpenOCD wrote about it, and
+        # OpenOCD is the backend likeliest to report one across two lines with
+        # the reset named in a Jim traceback rather than in the error itself
+        # (#333).
+        if tool == "reset_target" and contains_any(lower, FAILURE_WORDS):
+            return "reset_failed"
         return "unknown_debugger_error"
 
     def _public_error_type(self, backend_error_type: str) -> str:
@@ -529,6 +557,7 @@ class OpenOCDBackend:
             "target_not_detected": "Debugger could not detect the target.",
             "target_state_unconfirmed": "OpenOCD exited without reporting the outcome, so the target's state is unknown.",
             "flash_failed": "Debugger failed to flash the firmware.",
+            "flash_erase_failed": "OpenOCD could not erase the flash sectors this image covers, so the flash contents are unconfirmed.",
             "verify_failed": "Debugger failed to verify the flashed firmware.",
             "reset_failed": "Debugger failed to reset the target.",
             "timeout": "Debugger command timed out.",
@@ -543,6 +572,13 @@ class OpenOCDBackend:
             "adapter_not_found": ["debug probe is not connected", "debug probe driver is missing", "debug probe is already in use", "Windows USB driver is not bound to the ST-Link adapter"],
             "verify_failed": ["flash write did not persist correctly", "wrong target configuration", "firmware image does not match target memory layout"],
             "flash_failed": ["target flash is locked", "wrong target configuration", "firmware image is invalid for this target"],
+            # The first two are the refused-erase causes #327 measured on the
+            # ST-Link path and they carry over unchanged, because they are
+            # properties of the device and not of the tool talking to it. The
+            # third is OpenOCD's own: the flash bank a target_cfg declares is
+            # what OpenOCD erases by, and a bank whose sectors do not describe
+            # this part fails at the erase rather than at the connect.
+            "flash_erase_failed": ["the sectors this image covers are protected (write protection, PCROP, or a read-out protection level that refuses the erase)", "the core was still executing from flash when the erase was issued", "the flash bank in debuggers.<name>.target_cfg does not match this device's sector layout"],
             "reset_failed": ["reset line wiring issue", "target is not responding", "wrong reset configuration"],
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
             "debugger_not_found": ["debuggers.<name>.executable is not configured", "debugger executable is not installed", "debugger executable is not in PATH"],

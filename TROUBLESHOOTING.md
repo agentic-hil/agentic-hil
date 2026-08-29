@@ -265,6 +265,8 @@ Workaround until the configuration change reaches the bench: flash again immedia
 
 Not this: raising `debuggers.<name>.timeout_s`, or a new artifact. A failure whose duration is the same every time is not a slow operation running out of time, and the identical image that failed goes on to flash successfully seconds later.
 
+On OpenOCD and pyOCD: the same `error_type` means the same thing, read off the tool's own words rather than off STM32CubeProgrammer's. OpenOCD reports `Error: failed erasing sectors <first> to <last>` and pyOCD `E Failed to erase sector at <address>`, and until those phrases were read the failure landed in the broad `flash_failed` bucket, or, when the transcript happened to carry an ordinary line about a reset that worked, was reported as a failed reset. The device-side reading above holds unchanged: the flash contents are unconfirmed, protection over the sectors is the cause worth checking, and the reset line is not. The remedy differs, and the shipped entry each result carries says how: neither backend has the hot-plug retry or `connect_mode`, which are ST-Link's, and each has a sector map of its own to check, OpenOCD's flash bank from the script named by `debuggers.<name>.target_cfg` and pyOCD's from the CMSIS pack behind `debuggers.<name>.target_type`, which `agentic-hil doctor` reports on.
+
 Do not grant `allow_mass_erase` to force it through. That permission makes this service refuse flashing outright, and a mass erase answers a protection refusal by erasing the whole device.
 
 ## 11. COM Port Does Not Work

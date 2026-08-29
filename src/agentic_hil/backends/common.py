@@ -172,6 +172,36 @@ def contains_failure_text(output: str) -> bool:
     return contains_any(output.lower(), ["error:", "failed", "failure", "mismatch"])
 
 
+# The words that make a line a report of a failure rather than a mention of one.
+# Deliberately the same two every backend's reset and flash rules already match
+# on, so anchoring changes where a rule looks and nothing about what it looks for.
+FAILURE_WORDS = ["failed", "error"]
+
+
+def reports_reset_failure(output: str) -> bool:
+    """Whether a line that reports a failure is a line that names a reset.
+
+    The rule this replaces asked whether the word "reset" and a failure word both
+    appeared *somewhere* in the transcript, which is true of nearly every failure
+    on a tool that mentions resets while it is working. STM32CubeProgrammer opens
+    every action with a banner carrying `Reset mode  : Software reset`, OpenOCD
+    warns on nearly every `reset halt` that it is only resetting the core, and
+    pyOCD logs `Resetting target` beside whatever it does next. Each of those is
+    a tool saying what it is doing, and none of them is a tool saying a reset
+    failed, so a failure reported lines away was answered with the reset line and
+    its wiring (#333, and #327 before it on one backend).
+
+    A reset failure is a reset named where the failure is reported: one line
+    carrying both. That keeps every genuine reset failure classified, because a
+    tool reporting a failed operation names the operation it failed at: `Error:
+    failed to reset the target`, `Error: Unable to reset target` and `E Error
+    attempting to reset target` all put the two words on one line. And it stops
+    an informational reset line elsewhere in the transcript from deciding what
+    the failing line meant.
+    """
+    return any("reset" in line and contains_any(line, FAILURE_WORDS) for line in output.lower().splitlines())
+
+
 def find_stm32_programmer_cli() -> str | None:
     for candidate in ["STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"]:
         found = which(candidate)

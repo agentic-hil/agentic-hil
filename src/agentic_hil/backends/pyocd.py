@@ -7,12 +7,14 @@ import time
 from pathlib import Path
 
 from agentic_hil.backends.common import (
+    FAILURE_WORDS,
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
     command_for_log,
     contains_any,
     contains_failure_text,
     invocation,
+    reports_reset_failure,
     reset_init_unsupported,
     spawn_command,
     which,
@@ -71,6 +73,14 @@ _TARGET_TYPE_NAME_CHARS = frozenset(string.ascii_letters + string.digits + "_")
 # either, because pyOCD says the same of an unknown board ID.
 TARGET_TYPE_INVALID_PHRASES = ("unknown target type", "no target type", "target type is not")
 TARGET_TYPE_INVALID_DOC = "target_support.html"
+
+# pyOCD's own words for an erase that did not take: the FlashEraseFailure its
+# flash sequencer raises reaches the log as `Failed to erase sector at 0x...`, with
+# the `[flash]` logger name after it. One measured phrase, for the same reason
+# the ST-Link and OpenOCD marker lists hold one each: pyOCD is the backend
+# likeliest to print `Resetting target` beside a flash failure, so the phrase has
+# to be the erase line itself and not a family somebody assumed.
+PYOCD_ERASE_FAILURE_MARKERS = ["failed to erase sector"]
 
 
 class PyOCDBackend:
@@ -661,12 +671,27 @@ class PyOCDBackend:
             return "target_type_invalid"
         if "target type" in lower and "not recognized" in lower:
             return "target_type_invalid"
+        # Ahead of the verify and reset rules and of the broad flash bucket, for
+        # the reason #327 put the ST-Link erase rule there: this is the line
+        # pyOCD wrote about the operation that stopped, and it used to be read
+        # either as a generic flash failure or, whenever pyOCD had logged
+        # `Resetting target` first, as a failed reset (#333).
+        if contains_any(lower, PYOCD_ERASE_FAILURE_MARKERS):
+            return "flash_erase_failed"
         if "verify" in lower and contains_any(lower, ["failed", "mismatch", "error"]):
             return "verify_failed"
-        if "reset" in lower and contains_any(lower, ["failed", "error"]):
+        if reports_reset_failure(output):
             return "reset_failed"
-        if tool == "flash_firmware" and contains_any(lower, ["failed", "error"]):
+        if tool == "flash_firmware" and contains_any(lower, FAILURE_WORDS):
             return "flash_failed"
+        # The twin of the flash bucket above, anchored on the operation rather
+        # than on a word: when the tool is `reset_target`, the operation that
+        # reported a failure is a reset, whatever pyOCD's commander wrote about
+        # it. That is what keeps a genuine reset failure classified without the
+        # rule above having to guess from a stray "reset" somewhere in a
+        # transcript, which is what it used to do (#333).
+        if tool == "reset_target" and contains_any(lower, FAILURE_WORDS):
+            return "reset_failed"
         return "unknown_debugger_error"
 
     def _public_error_type(self, backend_error_type: str) -> str:
@@ -679,6 +704,7 @@ class PyOCDBackend:
             "target_not_detected": "Debugger could not detect the target.",
             "target_type_invalid": "pyOCD does not know the configured debuggers.<name>.target_type.",
             "flash_failed": "Debugger failed to flash the firmware.",
+            "flash_erase_failed": "pyOCD could not erase a flash sector this image covers, so the flash contents are unconfirmed.",
             "verify_failed": "Debugger failed to verify the flashed firmware.",
             "reset_failed": "Debugger failed to reset the target.",
             "timeout": "Debugger command timed out.",
@@ -692,6 +718,12 @@ class PyOCDBackend:
             "target_type_invalid": ["debuggers.<name>.target_type is misspelled", "the target requires a CMSIS pack (pyocd pack install <type>)"],
             "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"],
             "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"],
+            # The device-side causes #327 measured carry over unchanged; the
+            # third is pyOCD's own, because the sector map pyOCD erases by comes
+            # from the CMSIS pack behind debuggers.<name>.target_type, and a pack
+            # for a near neighbour of this part erases at addresses the device
+            # refuses.
+            "flash_erase_failed": ["the sectors this image covers are protected (write protection, PCROP, or a read-out protection level that refuses the erase)", "the core was still executing from flash when the erase was issued", "debuggers.<name>.target_type resolves to a device whose flash sector map is not this device's"],
             "reset_failed": ["reset line wiring issue", "target is not responding"],
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
             "debugger_not_found": ["debuggers.<name>.executable is not configured", "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)", "pyocd is not in PATH"],

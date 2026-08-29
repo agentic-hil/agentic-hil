@@ -1352,6 +1352,74 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "protection refusal by destroying more than the failed operation ever asked for.",
         ),
     ),
+    "flash_erase_failed:openocd": ErrorRemedy(
+        meaning=(
+            "OpenOCD could not erase the flash sectors the image covers, and said so in its own words: `failed erasing "
+            "sectors <first> to <last>`. Nothing was written and nothing was verified, and the flash contents are "
+            "unconfirmed rather than known-unchanged: the sectors named before the failing one may already be erased.\n\n"
+            "This used to be reported as a plain `flash_failed`, whose causes are about a wrong image or a wrong "
+            "address and say nothing about an erase. Worse, whenever the transcript carried an unrelated reset line, "
+            "and OpenOCD warns on nearly every `reset halt` that it is only resetting the core, the classification "
+            "became `reset_failed` and sent the operator to the reset line instead. The rule now reads the line "
+            "OpenOCD wrote about the operation that stopped."
+        ),
+        remediation=(
+            "Read the erase line and the lines above it in the log the result names by `log_path`. `failed erasing "
+            "sectors <first> to <last>` names the sector range, which is what says whether the refusal covers the whole "
+            "image or starts partway into it.",
+            "Ask the device about protection rather than about wiring. Read the option bytes for read-out protection, "
+            "write protection or PCROP over the sectors the range names, with a vendor tool or with OpenOCD's own "
+            "`flash info <bank>`, and clear the protection deliberately if that is what it shows.",
+            "Check that the flash bank OpenOCD erases by is this device's. It comes from "
+            "`debuggers.<name>.target_cfg`, and a configuration written for a near neighbour of this part declares "
+            "sector sizes the device refuses at the erase while the connect and the identification both succeeded.",
+            "Treat the board as holding an indeterminate image until a flash programs and verifies. A refused erase "
+            "does not prove the flash is unchanged, which is why the result says the contents are unconfirmed, and "
+            "reflashing is the way through it rather than a retry taken as proof the erase never happened.",
+        ),
+        do_not=(
+            "Do not read this as a reset problem. No reset failed, and re-seating the reset line or changing "
+            "`debuggers.<name>.interface_cfg` on that theory changes nothing about a refused erase.",
+            "Do not reach for a device unlock command such as `stm32f2x unlock` to force the erase through. Those "
+            "answer a protection refusal with a mass erase of the whole part, which destroys more than the failed "
+            "operation ever asked for; the same reasoning is why this service refuses to flash at all once "
+            "`allow_mass_erase` is granted.",
+        ),
+    ),
+    "flash_erase_failed:pyocd": ErrorRemedy(
+        meaning=(
+            "pyOCD could not erase a flash sector the image covers, and said so in its own words: `Failed to erase "
+            "sector at <address>`. Nothing was written and nothing was verified, and the flash contents are unconfirmed "
+            "rather than known-unchanged: the sectors before the failing address may already be erased.\n\n"
+            "This used to be reported as a plain `flash_failed`, and pyOCD logs `Resetting target` as a matter of "
+            "course beside what it is doing, so the same failure with that line in the transcript came back as "
+            "`reset_failed`: the failure of an operation that had in fact succeeded. The rule now reads the line "
+            "pyOCD wrote about the operation that stopped."
+        ),
+        remediation=(
+            "Read the erase line in the log the result names by `log_path`. `Failed to erase sector at <address>` names "
+            "the address the device refused, which is what places the failure inside the image.",
+            "Ask the device about protection rather than about wiring. Read the option bytes for read-out protection, "
+            "write protection or PCROP over the sector that address falls in, with the vendor's own tool, and clear the "
+            "protection deliberately if that is what it shows.",
+            "Check that the sector map pyOCD erases by is this device's. It comes from the CMSIS pack behind "
+            "`debuggers.<name>.target_type`, so a target type that resolves to a near neighbour of this part erases at "
+            "addresses the device refuses while the connect and the identification both succeeded. "
+            "`agentic-hil doctor` reports what the configured value resolves to, in "
+            "`debuggers.<name>.target_support`.",
+            "Treat the board as holding an indeterminate image until a flash programs and verifies. A refused erase "
+            "does not prove the flash is unchanged, which is why the result says the contents are unconfirmed, and "
+            "reflashing is the way through it rather than a retry taken as proof the erase never happened.",
+        ),
+        do_not=(
+            "Do not read this as a reset problem. No reset failed, and re-seating the reset line or power-cycling on "
+            "that theory changes nothing about a refused erase.",
+            "Do not answer it with a chip erase (`pyocd erase --chip` or a `--erase chip` flash). That erases the whole "
+            "device rather than the sectors the image covers, and it answers a protection refusal by destroying more "
+            "than the failed operation ever asked for; the same reasoning is why this service refuses to flash at all "
+            "once `allow_mass_erase` is granted.",
+        ),
+    ),
     # -- The one flag whose whole value is that it is never silently degraded ---
     CAN_INTERFACE_NOT_FOUND_ERROR: ErrorRemedy(
         meaning=(
