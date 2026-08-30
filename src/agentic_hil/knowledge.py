@@ -235,6 +235,11 @@ def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | 
 # `project_config_create` answers, from "the configuration this running server
 # loaded is gone from disk", which it must not.
 CONFIG_RUNNING_SERVER_SCOPE = "running_server"
+# The scope that separates the two states a missing GDB can be in, because they
+# are not one question and do not have one answer. A bench that never named a
+# GDB and had none to find is scoped here; a `debug.gdb_executable` somebody
+# wrote that no longer resolves keeps the unscoped entry.
+GDB_NOT_CONFIGURED_SCOPE = "not_configured"
 # Said by `doctor`, which parses the file at the moment it is asked and is
 # therefore always current — which is exactly why it cannot speak for a server
 # that has been running since before the last edit. It names both ways across,
@@ -1556,6 +1561,64 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "breakpoint anyway. That bypasses the policy this refusal comes from and takes the probe out from under "
             "the bench's own coordination.",
             "Do not swap the probe. The probe is not what refused; the backend the configuration names for it is.",
+        ),
+    ),
+    # -- The debugger that is not a probe, in the two states it goes missing in --
+    "gdb_not_found": ErrorRemedy(
+        meaning=(
+            "The GDB this bench names could not be run. `debug.gdb_executable` holds a path or a program name, and "
+            "what it names is not there: no file at that path, or no such program on PATH. A typed debug session is "
+            "GDB, and so is the offline symbol read the ST-Link and pyOCD backends answer out of the flashed ELF, so "
+            "both refuse here. This is resolved before a debug server is started, so nothing was spawned and nothing "
+            "was said to the target: the board is exactly as the last call that did reach it left it."
+        ),
+        remediation=(
+            "Read the value this is about. `project_config_describe` names the authoritative file and reports "
+            "`debug.gdb_executable` as it stands; a toolchain that was upgraded, moved or uninstalled is the usual "
+            "cause, and the file is still naming where it used to be.",
+            "Correct it with one `project_config_set` call behind `allow_config_description_write`. "
+            "`debug.gdb_executable` takes an absolute path to a GDB that speaks this target (`arm-none-eabi-gdb` for a "
+            "Cortex-M part, `gdb-multiarch` otherwise), or the bare program name when it is on PATH. Which GDB a bench "
+            "runs is the operator's, so report the change and get their word before making it.",
+            "Restart the MCP server afterwards. The GDB in force was resolved and validated when the server loaded its "
+            "configuration, and `debug` is not one of the sections `project_config_reload_description` re-reads, so "
+            "the running server keeps the value it started with until it starts again.",
+        ),
+        do_not=(
+            "Do not run `gdb`, `arm-none-eabi-gdb` or `gdb-multiarch` yourself to get the answer anyway. That bypasses "
+            "the policy this refusal comes from, takes the probe out from under this bench's coordination, and leaves "
+            "the operator with no record of what ran.",
+            "Do not point the key at a GDB inside the workspace. A configured executable has to live outside it, so a "
+            "path within it is refused when the configuration loads and the bench stops starting at all.",
+        ),
+    ),
+    f"gdb_not_found:{GDB_NOT_CONFIGURED_SCOPE}": ErrorRemedy(
+        meaning=(
+            "This bench has no GDB at all. The authoritative configuration leaves `debug.gdb_executable` unset, and "
+            "none of `arm-none-eabi-gdb`, `gdb-multiarch` or `gdb` was on PATH when this server started, so the load "
+            "recorded that there is none rather than refusing to start over a toolchain a project may not need. "
+            "Nothing here is misconfigured and no path is wrong: there is nothing to run. A typed debug session is "
+            "GDB, and so is the offline symbol read the ST-Link and pyOCD backends answer out of the flashed ELF, so "
+            "both refuse until one exists. Nothing was spawned and nothing was said to the target."
+        ),
+        remediation=(
+            "Install a GDB that speaks this target: `arm-none-eabi-gdb` for a Cortex-M part, `gdb-multiarch` "
+            "otherwise. Either is found on PATH without the file naming it.",
+            "If one is installed already but not on PATH, name it. `debug.gdb_executable` takes an absolute path and "
+            "is one `project_config_set` call behind `allow_config_description_write`. Which GDB a bench runs is the "
+            "operator's, so report what is missing and get their word before writing it.",
+            "Restart the MCP server either way. The GDB a server uses is resolved and validated once, when it loads "
+            "its configuration, and `debug` is not one of the sections `project_config_reload_description` re-reads, "
+            "so a GDB installed or named under a running server reaches it at its next start.",
+        ),
+        do_not=(
+            "Do not go hunting for a wrong path in the configuration. `debug.gdb_executable` names nothing here, and "
+            "what the running server carries in its place is the record of that, not a path anybody wrote.",
+            "Do not run `gdb`, `arm-none-eabi-gdb` or `gdb-multiarch` yourself to get the answer anyway. That bypasses "
+            "the policy this refusal comes from and leaves the operator with no record of what ran.",
+            "Do not report the bench as unusable. A probe with no GDB behind it still flashes, resets and probes; what "
+            "stops here is the typed debug session and the symbol reads, and saying which of them was needed is what "
+            "lets the operator decide whether installing one is worth it.",
         ),
     ),
     # -- The one flag whose whole value is that it is never silently degraded ---
