@@ -4041,11 +4041,16 @@ def test_a_read_step_is_still_held_to_the_symbol_allowlist_without_a_session(tmp
     assert service.calls == []
 
 
-def test_a_read_step_on_a_backend_that_serves_it_neither_way_is_refused_by_name(tmp_path: Path) -> None:
-    # The still-unsupported combination, and the refusal the issue asked for: it
-    # names the backend, the step and its number, says which reads this backend
-    # does serve standalone (none), and ends at the configuration change that
-    # would run it. Not a generic schema error and not a bare type mismatch.
+def test_a_read_step_on_a_backend_that_serves_it_neither_way_is_refused_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The refusal for a backend that serves the read neither way: it names the
+    # backend, the step and its number, says which reads it does serve
+    # standalone (none), and ends at the configuration change that would run
+    # it. Every shipped backend now serves the reads one way or the other, so
+    # the shape is pinned through a pyocd stripped of the ability, which is
+    # also what a future partial backend looks like.
+    from agentic_hil.backends.pyocd import PyOCDBackend
+
+    monkeypatch.setattr(PyOCDBackend, "sessionless_debug_tools", lambda self: frozenset())
     path = write_test_config(tmp_path, SESSIONLESS_READ_PLAN)
     service = SessionlessReadService((42).to_bytes(4, "little"))
 

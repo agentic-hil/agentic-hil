@@ -3117,7 +3117,7 @@ def test_which_reads_run_without_a_session_is_the_backends_own_answer(tmp_path: 
 
     assert configured_sessionless_debug_reads(stlink) == {"debug_symbol_value", "debug_dump_symbol_ihex"}
     assert configured_sessionless_debug_reads(openocd) == frozenset()
-    assert configured_sessionless_debug_reads(pyocd) == frozenset()
+    assert configured_sessionless_debug_reads(pyocd) == {"debug_symbol_value", "debug_dump_symbol_ihex"}
 
 
 def test_a_backend_claiming_more_than_the_reads_is_narrowed_to_them() -> None:
