@@ -2684,6 +2684,23 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # version 3 requires the file to state it.
     ConfigKeyRule("com_ports", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("device", "baudrate", "serial_number", "vid", "pid", "identity_source")),
     ConfigKeyRule("can_buses", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
+    # And the one description key the `debug` section carries. Which GDB reads
+    # this bench's images is the same class of fact as
+    # `debuggers.<name>.executable`: a toolchain on this host, named in the file
+    # because only this host knows where it is. It grants nothing, every tool
+    # that reads it is gated by the debug permissions beside it, and a bench
+    # whose GDB lives off PATH had no sanctioned way to say so: generation
+    # writes `null` whenever the generating shell had none, adoption carried
+    # probe identity only, and this surface refused the key. What was left was
+    # hand-editing the authoritative file, the move the doctrine tells agents
+    # never to make and tells operators they should not need (#355).
+    #
+    # `debug` is therefore the one section with a key on each side of the split,
+    # which is why both of its rules name their fields explicitly: a dotted key
+    # resolves against the rule whose fields contain it, so `gdb_executable`
+    # lands on the description right and `allow_all_symbols` on the permissions
+    # right, out of one model rather than two.
+    ConfigKeyRule("debug", named=False, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("gdb_executable",)),
     # The permissions half, every block of it.
     ConfigKeyRule("permissions", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT),
     ConfigKeyRule("debuggers", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
@@ -2887,7 +2904,11 @@ _SECTION_PURPOSE: dict[str, str] = {
     "provenance": "Who wrote this file and who last changed it. A note to a reader; nothing reads it as policy.",
     "target": f"What board this is. Names in reports; `controller` is what a human recognises. Which field actually selects a target per backend, and known-good values: {TARGET_SUPPORT_URI}.",
     "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. `type` names the debug stack that drives the entry and is settable like the rest of the description, but only as a whole switch: a change to it has to arrive with whatever the backend it names requires, or it is refused naming what is missing. Which of these fields each backend requires, discovers, ignores or refuses, `type` and `connect_mode` included: {DEBUGGER_BACKENDS_URI}.",
-    "debug": "Typed GDB session settings: which symbols may be read and how much.",
+    "debug": (
+        "Typed GDB session settings: which GDB reads this bench's images, which symbols may be read and how much. "
+        "`gdb_executable` is the description half of this section and is settable behind "
+        f"`{CONFIG_DESCRIPTION_RIGHT}`; `allow_all_symbols` is a grant and belongs to the other right."
+    ),
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
     "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. From `version: 3` on an entry must say which of them identifies it: a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else an explicit `identity_source` — `vid_pid` for an adapter publishing USB ids but no serial, `device` for one publishing neither. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
     "can_buses": (

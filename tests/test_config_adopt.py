@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 import yaml
-from conftest import FAKE_STLINK, write_authoritative_config
+from conftest import FAKE_GDB, FAKE_STLINK, write_authoritative_config
 
 from agentic_hil.adopt import (
     PROJECT_CONFIG_ADOPT,
@@ -694,6 +694,121 @@ def test_a_toolchain_from_another_backend_is_reported_and_not_written(tmp_path: 
     assert after["debuggers"]["dut"]["type"] == "openocd", "adoption never changes which program drives the board"
     # The probe serial is not a backend question and still lands.
     assert after["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
+
+
+# ---------------------------------------------------------------------------
+# The other toolchain: which GDB reads this bench's images.
+
+
+def test_the_gdb_this_host_answers_with_is_carried_into_a_bench_that_names_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The key generation leaves null on a machine that had no GDB yet.
+
+    Install the tool, plug the board in, install the toolchain: three moments in
+    any order, and the file written in the first of them cannot know the third.
+    This is the way back into it, and it is the same way back the probe serial
+    takes, so nobody opens the YAML for a path either.
+
+    Unlike the backend's executable it is proposed whatever `type` the entry
+    carries: GDB is not a backend's binary, and the stlink entry here resolves
+    its symbols with one offline before it reads a byte of target memory."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    attached(monkeypatch, gdb_executable=FAKE_GDB.as_posix())
+    assert document_of(path)["debug"]["gdb_executable"] is None
+
+    tools = service(workspace)
+    try:
+        planned = tools.call(PROJECT_CONFIG_ADOPT)
+        applied = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+    finally:
+        tools.close()
+
+    carried = {item["key"]: item for item in planned["carried"]}
+    assert carried["debug.gdb_executable"]["value"] == FAKE_GDB.as_posix()
+    assert carried["debug.gdb_executable"]["previous_value"] is None
+    assert applied["ok"] is True, applied
+    assert document_of(path)["debug"]["gdb_executable"] == FAKE_GDB.as_posix()
+    assert load_authoritative_config(workspace).debug.gdb_executable == str(FAKE_GDB)
+    # It is a description key, so this path still names no permission at all.
+    assert applied["permissions_changed"] == []
+
+
+def test_a_gdb_somebody_chose_is_reported_and_never_replaced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Which GDB reads these images is a choice, and adoption overrules none.
+
+    A bench with two toolchains installed is the ordinary case, and the one this
+    project's images need is not always the one that comes first on PATH. So a
+    key that already names a GDB comes back under `kept` with both values, the
+    same as a controller a person set."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    document = document_of(path)
+    document["debug"]["gdb_executable"] = FAKE_GDB.as_posix()
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    other = tmp_path / "other-toolchain" / "gdb-multiarch"
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text("#!/bin/sh\n", encoding="utf-8")
+    attached(monkeypatch, gdb_executable=other.as_posix())
+
+    tools = service(workspace)
+    try:
+        applied = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+    finally:
+        tools.close()
+
+    assert applied["ok"] is True, applied
+    kept = {item["key"]: item for item in applied["kept"]}
+    assert kept["debug.gdb_executable"]["configured_value"] == FAKE_GDB.as_posix()
+    assert kept["debug.gdb_executable"]["discovered_value"] == other.as_posix()
+    assert [item["key"] for item in applied["carried"] if item["key"] == "debug.gdb_executable"] == []
+    assert document_of(path)["debug"]["gdb_executable"] == FAKE_GDB.as_posix()
+
+
+def test_no_gdb_on_this_host_is_nothing_to_carry_rather_than_a_null_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host with no GDB installed says nothing about the key.
+
+    Discovery reports what it found, and it found none, so the plan is silent
+    about it in all four lists: the bench goes on autodetecting at runtime, which
+    is what a null already means, and adoption has not turned "not installed"
+    into a claim about the file.
+
+    True before this key was adoptable and true after it, deliberately: it is the
+    behaviour the new proposal must not have changed, so it is the one test here
+    that passes on both sides."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    attached(monkeypatch, gdb_executable=None)
+
+    tools = service(workspace)
+    try:
+        applied = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+    finally:
+        tools.close()
+
+    assert applied["ok"] is True, applied
+    reported = [item["key"] for group in ("carried", "already_current", "kept", "unavailable") for item in applied[group]]
+    assert "debug.gdb_executable" not in reported
+    assert document_of(path)["debug"]["gdb_executable"] is None
+
+
+def test_the_gdb_the_file_already_names_is_current_rather_than_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Running it twice reports agreement, not a disagreement with itself.
+
+    The second run finds the value the first one wrote, which is the same value
+    this host answers with, so it belongs under `already_current` and there is
+    nothing to write. A key that came back under `kept` here would have an
+    operator looking for a conflict that does not exist."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    attached(monkeypatch, gdb_executable=FAKE_GDB.as_posix())
+
+    tools = service(workspace)
+    try:
+        first = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+        second = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+    finally:
+        tools.close()
+
+    assert first["ok"] is True and second["ok"] is True
+    assert "debug.gdb_executable" in {item["key"] for item in first["carried"]}
+    assert "debug.gdb_executable" in {item["key"] for item in second["already_current"]}
+    assert "debug.gdb_executable" not in {item["key"] for item in second["carried"]}
 
 
 # ---------------------------------------------------------------------------

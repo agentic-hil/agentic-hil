@@ -61,6 +61,11 @@ debuggers:
       allow_flash: false     # this board is read-only for now
 
 debug:
+  # Which GDB reads this bench's images. Null autodetects one on the server's
+  # PATH (arm-none-eabi-gdb, gdb-multiarch, gdb, in that order); name it when
+  # the GDB that speaks this target is not on that PATH. `adopt-hardware`
+  # fills it in, and so does `project_config_set` behind the description grant.
+  gdb_executable: null
   allowed_symbols: ["main", "sensor_state", "capture_done", "capture_buffer"]
   allow_all_symbols: false
 
@@ -162,7 +167,7 @@ permissions:
   allow_upgrade: true                       # lift this installation to the newest release
 ```
 
-`allow_config_description_write` opens `target.*`, `debuggers.<name>.type` / `probe_id` / `executable` / `interface_cfg` / `target_cfg` / `connect_mode`, `com_ports.<name>.device` / `baudrate` / `serial_number`, and every `can_buses.<name>` field except its permissions. `allow_config_permissions_write` opens every permission key in the file: each `permissions:` block, and the two grants that sit directly on a section rather than inside one, `artifacts.allow_upload` and `debug.allow_all_symbols`. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would in the same motion have handed over the permissions block.
+`allow_config_description_write` opens `target.*`, `debuggers.<name>.type` / `probe_id` / `executable` / `interface_cfg` / `target_cfg` / `connect_mode`, `com_ports.<name>.device` / `baudrate` / `serial_number`, every `can_buses.<name>` field except its permissions, and `debug.gdb_executable`. `allow_config_permissions_write` opens every permission key in the file: each `permissions:` block, and the two grants that sit directly on a section rather than inside one, `artifacts.allow_upload` and `debug.allow_all_symbols`. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would in the same motion have handed over the permissions block.
 
 `allow_upgrade` is the one that is not about this file. It opens `server_upgrade`, which replaces the installed package with the newest release, because on an MCP host without a shell there is otherwise no way for the main surface to perform the basic maintenance of its own server. It takes no version, so it cannot be used to install a release that reads the rest of this block differently, and it is subject to the same ratchet as everything else here: an agent can set it false and never true.
 
@@ -202,6 +207,20 @@ Three notes on that call:
 - **A field the new backend refuses is caught by the loader.** Nothing on this surface knows what OpenOCD can carry out; what it knows is that the changed file has to load as authoritative before it may replace the one that did. So switching an entry that carries `connect_mode: under_reset` to `openocd` is refused as `config_invalid` naming `debuggers.<name>.connect_mode`, and the file that was there stands untouched. Send `connect_mode: hotplug` in the same call to make that switch land.
 
 A changed `type` is a device description like any other, so the running server keeps answering out of the configuration it loaded until `project_config_reload_description` or a restart.
+
+### Naming the GDB this bench reads with
+
+`debug.gdb_executable` says which GDB reads this bench's images: the typed debug session's server, and the offline symbol resolution the stlink and pyocd memory reads run against the flashed ELF before they touch the target. It is in the description half beside `debuggers.<name>.executable`, for the same reason: it is a toolchain on this host, at a location only this host can state, and it grants nothing that the debug permissions beside it do not already decide.
+
+Left `null` it is not a hole. Every caller that needs GDB then resolves one on the PATH the server was started with, trying `arm-none-eabi-gdb`, `gdb-multiarch` and `gdb` in that order, which is what a generated configuration relies on, because generation writes `null` whenever the generating shell had no GDB on its own PATH. Name it when that fallback cannot answer or answers with the wrong one:
+
+```json
+{"changes": [{"key": "debug.gdb_executable", "value": "C:/ST/STM32CubeCLT/GNU-tools-for-STM32/bin/arm-none-eabi-gdb.exe"}]}
+```
+
+The value is held to the rule every configured executable is held to, and it is the loader that holds it: an absolute path (or a bare name this host resolves on PATH) to an existing single-link file, stored outside `workspace_root`. A value that is none of those is refused as `config_invalid` naming `debug.gdb_executable` in the loader's own words, and the file that was there stands untouched, because the changed document has to load as authoritative before it may replace the one that did.
+
+`agentic-hil adopt-hardware` fills the key in too, from the same three candidates in the same order, so a bench set up with the toolchain installed says which GDB it uses without anybody typing a path. A key that already names one comes back under `kept`: which GDB reads these images is a choice, and adoption does not overrule one.
 
 ### Permissions move one way
 
@@ -255,7 +274,7 @@ Named keys with scalar values, each checked against the shipped schema. No docum
 agentic-hil adopt-hardware          # --dry-run to see the plan first
 ```
 
-It reads the attached probe and fills in what is still unset: the probe serial, the backend's executable, the detected controller, and the COM device the probe itself exposes. Nothing else: it supplies no value of its own, and its arguments only select (`--probe-id` among several attached boards, `--debugger` and `--com-port` among configured entries). A key that already holds a value nobody generated is reported as a disagreement and left alone, so a bench somebody set up is never repointed because something else happens to be plugged in; and an entry that already names a probe with a *different* probe attached is refused whole rather than partly carried, because the identity keys describe one board between them. A `com_ports` entry it creates arrives with every permission `false`, written by the server: a generation grants, a write only ever takes away, and adding an entry is a write. `agentic-hil init --force` is what opens a new entry.
+It reads the attached probe and fills in what is still unset: the probe serial, the backend's executable, the GDB this host answers with (`debug.gdb_executable`), the detected controller, and the COM device the probe itself exposes. Nothing else: it supplies no value of its own, and its arguments only select (`--probe-id` among several attached boards, `--debugger` and `--com-port` among configured entries). A key that already holds a value nobody generated is reported as a disagreement and left alone, so a bench somebody set up is never repointed because something else happens to be plugged in; and an entry that already names a probe with a *different* probe attached is refused whole rather than partly carried, because the identity keys describe one board between them. A `com_ports` entry it creates arrives with every permission `false`, written by the server: a generation grants, a write only ever takes away, and adding an entry is a write. `agentic-hil init --force` is what opens a new entry.
 
 Reading a probe is a hardware call like any other here: it takes the same machine-wide lock, so a board another MCP server, test-reactor run or terminal is holding answers `device_busy` instead of being connected to behind its owner's back, and the read is written into the same audit trail. On a configuration written before `version: 2`, where reading still needs `allow_probe`, an entry that denies it denies this too.
 

@@ -306,7 +306,8 @@
             "string",
             "null"
           ],
-          "default": null
+          "default": null,
+          "description": "Which GDB reads this bench's images: the typed debug session's server, and the offline symbol resolution the stlink and pyocd memory reads run against the flashed ELF. It is part of the bench description and is settable behind allow_config_description_write, beside debuggers.<name>.executable, and it is held to the same rule as every other configured executable: an absolute path (or a bare name this host resolves on PATH) to an existing single-link file stored outside workspace_root. Null is not a gap: every caller that needs GDB then autodetects one on the server's PATH, trying arm-none-eabi-gdb, gdb-multiarch and gdb in that order, and adopt-hardware writes the first of those it finds into this key. Name it here when the GDB that speaks this target is not on the PATH the server was started with, or when several are installed and which one reads these images matters."
         },
         "allowed_symbols": {
           "type": "array",

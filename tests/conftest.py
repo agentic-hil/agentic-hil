@@ -257,6 +257,20 @@ def _no_host_stm32_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_host_gdb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bootstrap discovery finds no GDB unless a test hands it one.
+
+    The same rule as the toolchain above, for the same reason: discovery now
+    reports the GDB this host answers with, and generation and `adopt-hardware`
+    both write it. Left alone, every assertion about what a generated file
+    contains or what adoption has left to carry would depend on whether the
+    machine running the suite happens to have `arm-none-eabi-gdb` installed,
+    which is true on a firmware developer's bench and false in a CI container. A
+    test that wants a GDB patches this name itself."""
+    monkeypatch.setattr("agentic_hil.bootstrap.autodetected_gdb", lambda: None)
+
+
 def write_config(
     directory: Path,
     *,
