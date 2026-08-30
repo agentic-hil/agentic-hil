@@ -2094,7 +2094,7 @@ class DebuggerRunner(StepDevice):
             return None
         if without_session and not config.probe_allowed(debugger):
             # A sessionless read still opens a probe onto a live core, so it
-            # needs the same allow_probe a debug_start does — and preflight is
+            # needs the same allow_probe a debug_start does, and preflight is
             # where that has to be caught. The backend refuses an ungranted read
             # on its own, but only when the read's own turn comes: a plan that
             # flashes and then reads would already have flashed before the read's

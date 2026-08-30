@@ -867,7 +867,7 @@ class PyOCDBackend:
             return True
         # SESSIONLESS_DEBUG_READS beside the older READ_ONLY_TOOLS: a `savemem`
         # read drives nothing of its own either, so pyOCD reporting it never
-        # connected — no ACK, not responding, unable to connect — is the same
+        # connected, no ACK, not responding, unable to connect, is the same
         # proof of no contact it is for a probe listing. Without them here a
         # sessionless read that failed before `savemem` keeps no NOT_CONTACTED
         # fields, and `_finish_symbol_read` turns a provably untouched bench

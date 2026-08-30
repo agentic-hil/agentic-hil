@@ -2,8 +2,8 @@
 """A pyOCD that flashes but finds no target when a read tries to connect.
 
 fake_pyocd.py answers `savemem` with the bytes the address describes. This twin
-flashes the same way — a sessionless symbol read resolves its symbol against the
-ELF a confirmed flash put on the board, so the read needs one to have happened —
+flashes the same way, a sessionless symbol read resolves its symbol against the
+ELF a confirmed flash put on the board, so the read needs one to have happened,
 but its `commander savemem` connect sequence fails before it reads anything, in
 pyOCD's own words.
 
@@ -11,7 +11,7 @@ Every classified pyOCD failure is derived from pyOCD's own output, so a
 `target_not_detected` that came out of `_classify_output` needs a process that
 actually says it. "unable to connect to the target" is that line, and a read
 whose command drives nothing of its own reporting it is the proof of no contact
-that `_proves_no_contact` turns into the NOT_CONTACTED fields — so this fixture
+that `_proves_no_contact` turns into the NOT_CONTACTED fields, so this fixture
 is what pins that a read which reached no core is released as a retry-safe
 refusal rather than quarantined as an unknown effect.
 

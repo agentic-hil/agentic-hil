@@ -2266,7 +2266,7 @@ def test_pyocd_symbol_value_that_reaches_no_core_is_released_not_quarantined(tmp
     ahead of it left it: the one-shot lease goes back and no incident is filed.
     Until the read was counted read-only for this, the same connect failure was
     turned into `side_effect_status: unknown` and a cleanup-required lease over a
-    board it provably never touched — a physical `recover` for a read that never
+    board it provably never touched, a physical `recover` for a read that never
     happened.
     """
     service = pyocd_read_service(tmp_path, debugger_executable=FAKE_PYOCD_NO_TARGET)

@@ -4223,7 +4223,7 @@ def test_a_read_step_is_judged_by_the_backend_of_the_probe_it_names(tmp_path: Pa
 # allow_probe, so the whole plan is rejected before it touches the board. A
 # sessionless read still opens a probe onto a live core and needs the same
 # grant, and until it was checked here the reactor admitted the plan and let the
-# backend refuse the read at its own turn — after any earlier effectful step had
+# backend refuse the read at its own turn, after any earlier effectful step had
 # already run. The gate is `probe_allowed()`, so a read-free (version 2) bench,
 # which grants reads by exclusivity and carries no allow_probe to set, is still
 # admitted.
@@ -4233,7 +4233,7 @@ def test_a_sessionless_read_after_flash_is_refused_before_the_flash_runs(tmp_pat
     # A flash ahead of a read the config plainly forbids: the permission is known
     # before the run, so the whole plan is refused at preflight and the flash
     # never lands. Were the read admitted, the flash would have mutated the board
-    # before the read's own permission_denied arrived — the hardware-touching a
+    # before the read's own permission_denied arrived, the hardware-touching a
     # refusable plan must never reach.
     path = write_test_config(
         tmp_path,
@@ -4301,7 +4301,7 @@ steps:
 
 def test_a_read_free_bench_admits_a_sessionless_read_with_no_allow_probe(tmp_path: Path) -> None:
     # The other side of the gate: a version-2 bench grants reads by exclusivity
-    # and never names allow_probe, so `probe_allowed()` — not the raw flag — is
+    # and never names allow_probe, so `probe_allowed()`, not the raw flag, is
     # what keeps the read admitted here.
     path = write_test_config(
         tmp_path,
