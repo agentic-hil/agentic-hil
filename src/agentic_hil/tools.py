@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2673,9 +2674,12 @@ def discover_for_generation(
 
     The third value is why the read went without a lease and an audit record,
     when it did, for the caller to publish. It is filled in for the one case this
-    function decides on its own: a configuration that loads and cannot have
-    anything written under its `state_root`. A caller that handed None already
-    knows why it did and gets None back rather than a reason invented here.
+    function decides on its own: a configuration that loads and names a
+    `state_root` the enforcer refuses, which a regeneration will replace with a
+    usable one — `generation_audit_barrier` is where that case is told apart from
+    a corrupt report state or any other audit failure a regeneration does not
+    repair, which stay refused. A caller that handed None already knows why it did
+    and gets None back rather than a reason invented here.
     """
     if current is None:
         # No third answer here: the caller handed the None and already holds a
@@ -2683,20 +2687,31 @@ def discover_for_generation(
         return (*_discover_without_policy(tool=tool, frontend=frontend), None)
     unusable = generation_audit_barrier(current)
     if unusable is not None:
-        # The configuration loads and its `state_root` is the broken thing, so
-        # the machinery this read would go through does not exist any more than
-        # it does before the first `init`: no report can be written under that
-        # root, and no lease recorded. Gating generation on it made the broken
-        # root guard the one call that replaces it, and letting the read go
-        # through the leased path instead would touch the board and then
-        # quarantine the bench on the audit record it cannot write, which is the
-        # same dead end with a probe read spent on it (#353).
+        # The configuration loads and its `state_root` is the broken thing that a
+        # regeneration replaces, so the machinery this read would go through does
+        # not exist any more than it does before the first `init`: no report can
+        # be written under that root, and no lease recorded. Gating generation on
+        # it made the broken root guard the one call that replaces it, and letting
+        # the read go through the leased path instead would touch the board and
+        # then quarantine the bench on the audit record it cannot write, which is
+        # the same dead end with a probe read spent on it (#353). The barrier
+        # returns only for that one repairable case — see `generation_audit_barrier`
+        # — so a corrupt report state or any other audit failure a regeneration
+        # does not repair reaches the leased path below and its `audit_unavailable`
+        # refusal, rather than being read around here (review round 0, finding 1).
         #
-        # So this takes the route the first `init` takes: the host-wide
-        # enumeration lock and `probe:<serial>` are still held, so no board
-        # another owner is on is connected to, and the caller is told the read
-        # went unaudited rather than being left to infer it.
-        return (*_discover_without_policy(tool=tool, frontend=frontend), unusable.error_type if isinstance(unusable, ConfigError) else type(unusable).__name__)
+        # So this takes the route the first `init` takes, with one lock the first
+        # `init` has no way to hold: a first init has no configuration and so no
+        # aliases, but this bench does, and a board another owner holds through a
+        # configured `resource_id` must not be read out from under it just because
+        # the `state_root` that would record the read is broken. The same
+        # configured device locks the leased path acquires are taken here beside
+        # the host-wide enumeration lock and `probe:<serial>`, and a foreign holder
+        # on any of them comes back `device_busy` with nothing said to the board
+        # (review round 0, finding 2). The caller is told the read went unaudited
+        # rather than being left to infer it.
+        aliases = [key for name in current.debuggers for key in configured_probe_resource(current, name)]
+        return (*_discover_without_policy(tool=tool, frontend=frontend, resources=aliases), unusable.error_type)
     if coordinator is None:
         owned = HardwareCoordinator(current, frontend=frontend)
         try:
@@ -2715,35 +2730,85 @@ def discover_for_generation(
     return (*_discover_under_lease(current, coordinator, tool=tool, reason_prefix=reason_prefix), None)
 
 
-def generation_audit_barrier(current: AgenticHILConfig) -> ConfigError | OSError | None:
-    """Why this configuration's audit trail cannot be written, or None.
+def generation_audit_barrier(current: AgenticHILConfig) -> ConfigError | None:
+    """The `state_root` path failure a regeneration repairs, or None.
 
-    The same question `ensure_audit_ready` answers, asked without the answer
-    being a refusal. Generation is the repair path for a `state_root` the
-    enforcer will not accept, so what stops every other hardware call has to
-    become a fact this one reports rather than the wall it hits.
+    `ensure_audit_ready` refuses for two unrelated reasons, and only one of them
+    is this call's to route around. `unsafe_configured_path` is the `state_root`
+    spelling itself being one the enforcer will not accept — it resolves
+    elsewhere, leaves the workspace, or cannot be written — and that is exactly
+    what a regeneration replaces, because `provisionable_state_root` chooses a
+    root that passes the same check. Every other failure is about content under a
+    `state_root` that is otherwise fine: a corrupt `report-state.json` is
+    `config_invalid`, a full disk or a vanished mount is an `OSError`. A
+    regeneration does not touch those, so reading the board around them would
+    bypass the audit gate for a failure it does not repair and then report a
+    repair that never happened — the next hardware call would meet the very same
+    wall (review round 0, finding 1).
+
+    So only the path refusal returns here, and only when the root this workspace
+    would regenerate onto is a real one and a *different* one. A regeneration that
+    lands back on the same broken spelling repairs nothing, and is left to the
+    ordinary `audit_unavailable` refusal — the same answer every other unrepaired
+    audit failure gets.
     """
     try:
         ensure_audit_ready(current)
-    except (ConfigError, OSError) as error:
-        return error
+    except OSError:
+        return None
+    except ConfigError as error:
+        if error.error_type != "unsafe_configured_path":
+            return None
+        return error if _regeneration_moves_state_root(current) else None
     return None
 
 
-def _discover_without_policy(*, tool: str, frontend: str) -> tuple[JsonObject, JsonObject | None]:
+def _regeneration_moves_state_root(current: AgenticHILConfig) -> bool:
+    """Whether regenerating this workspace names a usable, different `state_root`.
+
+    `provisionable_state_root` returns the exact root a regeneration writes,
+    chosen to pass every check a later write applies, so a value it returns is
+    usable by construction. The one thing left to establish is that it *moves*: a
+    broken `state_root` whose replacement is the same spelling — a compromised
+    subtree under a root that itself resolves cleanly, for one — is not repaired
+    by writing the file to name it again, and reading the board around that would
+    claim a repair that never lands. When nothing is provisionable at all a
+    regeneration repairs nothing either, so that is False too, and the read is
+    refused rather than spent.
+    """
+    try:
+        replacement = provisionable_state_root(Path(current.workspace_root))
+    except (ConfigError, OSError):
+        return False
+    return os.path.normcase(str(replacement)) != os.path.normcase(str(current.state_root))
+
+
+def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] | None = None) -> tuple[JsonObject, JsonObject | None]:
     """Bootstrap discovery with machine-wide physical exclusion but no lease.
 
-    The one caller is a workspace with no loadable configuration — the first
-    `init` or `project_config_create` — so there is no `state_root` to record a
-    lease under and no policy to audit against. What is *not* absent is the risk
-    the mutex exists for: the enumeration and the HOTPLUG connect are the same
+    Two callers, and both read the board with no `state_root` to record a lease
+    under and no policy to audit against: the first `init`/`project_config_create`
+    of a workspace, which has no configuration at all, and a regeneration whose
+    configuration loads but names a `state_root` the enforcer refuses, which has
+    the same absence of a place to write. What is *not* absent is the risk the
+    mutex exists for: the enumeration and the HOTPLUG connect are the same
     hardware read they are under a lease, and the same ST-Link can be held by
-    another workspace on this machine. So the two device locks are taken directly
+    another workspace on this machine. So the device locks are taken directly
     through `BenchMutex` — the host-wide enumeration pseudo-resource around the
     whole read, and `probe:<serial>` in `before_connect`, which is the last point
     before anything is said to the selected board — and a board another owner is
     holding comes back `device_busy` here exactly as it would through
     `discover_under_hardware_lease`, with nothing said to it.
+
+    ``resources`` are the configured lock aliases the caller wants held for the
+    read, and they are the whole of what the regeneration caller adds over a first
+    `init`. A first init knows no alias, but a configured bench does, and a run
+    another owner holds through a debugger's `resource_id` locks
+    ``physical:<resource_id>`` — a key no enumeration derives, so the
+    `probe:<serial>` locks alone would read the board out from under it. Acquired
+    up front beside the enumeration lock and released with everything else, so the
+    regeneration honours the same aliases the leased path does even though it has
+    no `state_root` under which to record a lease (review round 0, finding 2).
 
     Returns the discovery and, when a lock refused, the refusal that is the whole
     answer. A refusal from `before_connect` is surfaced as that refusal rather
@@ -2755,6 +2820,8 @@ def _discover_without_policy(*, tool: str, frontend: str) -> tuple[JsonObject, J
     try:
         try:
             bench.acquire_named(DEBUGGER_DISCOVERY_RESOURCE)
+            if resources:
+                bench.acquire(resources)
         except DeviceBusyError as busy:
             return {}, _bootstrap_device_busy(busy.result, tool)
 

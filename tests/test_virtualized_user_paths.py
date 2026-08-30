@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agentic_hil.bench import BenchMutex
 from agentic_hil.cli import _configuration_the_projects_walk_finds, _visible_project_configurations
 from agentic_hil.config import (
     ConfigError,
@@ -43,6 +44,7 @@ from agentic_hil.config import (
     safe_writable_directory,
     user_state_root,
 )
+from agentic_hil.report import report_state_path
 from agentic_hil.tools import (
     PROJECT_CONFIG_CREATE,
     AgenticHILToolService,
@@ -50,6 +52,7 @@ from agentic_hil.tools import (
     audit_gated_tools,
     audited_hardware_tools,
 )
+from agentic_hil.types import fold_hardware_id
 from tests.test_agent_provisioning import attached_hardware, bench, written_document
 
 
@@ -260,6 +263,117 @@ def test_every_other_audited_tool_still_proves_its_audit_trail(tmp_path: Path, m
     """The exemption is one call wide, and it is named rather than inferred."""
     assert audited_hardware_tools() - audit_gated_tools() == {PROJECT_CONFIG_CREATE}
     assert PROJECT_CONFIG_CREATE in audited_hardware_tools(), "still blocked while the bench is quarantined"
+
+
+# ---------------------------------------------------------------------------
+# Review round 0: the exemption is for a broken `state_root`, and only that. It
+# does not become a way around the audit gate for a failure a regeneration will
+# not repair, and it does not drop the configured device locks the leased path
+# holds.
+
+
+def test_a_corrupt_report_state_is_not_read_around_by_regeneration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The audit gate holds for an integrity failure a regeneration cannot repair.
+
+    `ensure_audit_ready` refuses two ways and only one — the `state_root` spelling
+    the enforcer will not accept — is the one a regeneration replaces. A corrupt
+    `report-state.json` under a `state_root` that resolves cleanly is the other:
+    `config_invalid`, which the same regeneration leaves exactly in place, because
+    it selects the same healthy root and rewrites nothing under it. Reading the
+    board around it would bypass the gate for an integrity failure and report a
+    repair that never lands — the next `probe_target` would meet the same wall.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    provisioner = UnprovisionedToolService(workspace)
+    try:
+        created = provisioner.call(PROJECT_CONFIG_CREATE)
+    finally:
+        provisioner.close()
+    assert created["ok"] is True, created
+
+    # A healthy state_root with corrupt content under it: the file is there and it
+    # is not JSON, so `ensure_audit_ready` refuses with `config_invalid`, not with
+    # the `unsafe_configured_path` the repair path is for.
+    config = load_authoritative_config(workspace)
+    Path(report_state_path(config)).write_text("{ this is not report state", encoding="utf-8")
+
+    service = AgenticHILToolService(config, frontend="mcp")
+    try:
+        refused = service.call("probe_target")
+        regenerated = service.call(PROJECT_CONFIG_CREATE)
+        still_refused = service.call("probe_target")
+    finally:
+        service.close()
+
+    # The ordinary hardware call is refused, correctly, and names the integrity
+    # failure underneath the audit gate.
+    assert refused["error_type"] == "audit_unavailable", refused
+    assert refused["audit_error"]["error_type"] == "config_invalid"
+    # And so is the regeneration: it is not read around, and it does not claim to
+    # have repaired anything. No unaudited-read note is attached, because no
+    # unaudited read happened.
+    assert regenerated["ok"] is False, regenerated
+    assert regenerated["error_type"] == "audit_unavailable", regenerated
+    assert regenerated["audit_error"]["error_type"] == "config_invalid"
+    assert "hardware_read_unaudited_reason" not in regenerated
+    assert "hardware_read_audited" not in regenerated
+    # The gate is still shut afterwards, which is the whole proof: a regeneration
+    # that had read the board and reported success would have left it open.
+    assert still_refused["error_type"] == "audit_unavailable", still_refused
+
+
+def test_the_audit_repair_read_still_holds_the_configured_resource_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broken `state_root` does not license reading past a board's alias lock.
+
+    `resource_id` is the canonical alias a run holds a board through, and a
+    debugger can carry it with `probe_id` still null — so the enumerated
+    `probe:<serial>` lock the read takes never covers `physical:<resource_id>`.
+    The leased path acquires that alias in its own right; the audit-repair read
+    has no `state_root` to lease under but must acquire it just the same, or it
+    reads a board another owner is holding and rewrites the configuration under
+    the live owner (review round 0, finding 2).
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    provisioner = UnprovisionedToolService(workspace)
+    try:
+        created = provisioner.call(PROJECT_CONFIG_CREATE)
+    finally:
+        provisioner.close()
+    assert created["ok"] is True, created
+
+    # The alias set the reviewer's reproduction used: `resource_id` present,
+    # `probe_id` cleared, so the only lock that protects this board is the one the
+    # enumeration cannot derive.
+    path = Path(created["path"])
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["debuggers"]["dut"]["resource_id"] = "bench-a"
+    document["debuggers"]["dut"].pop("probe_id", None)
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    # Break the state_root so the read takes the audit-repair branch, and hold the
+    # board's alias from another session before it does.
+    state_root = Path(created["state_root"])
+    virtualize(monkeypatch, state_root, tmp_path / "package-local-cache")
+    before = path.read_bytes()
+
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire([f"physical:{fold_hardware_id('bench-a')}"])
+    service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        refused = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+        stranger.release_all()
+
+    # The repair read is refused exactly as the leased path refuses it, names the
+    # holder, and writes nothing over the board another owner is on.
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "device_busy", refused
+    assert refused["holder"]["label"] == "other-bench-session"
+    assert refused["side_effect_committed"] is False
+    assert path.read_bytes() == before
 
 
 # ---------------------------------------------------------------------------
