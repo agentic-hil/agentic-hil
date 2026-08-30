@@ -3965,3 +3965,351 @@ steps:
     assert result["ok"] is True, result
     assert result["steps"][1]["result"]["iterations_run"] == 2
     assert [record["action"] for record in result["cleanup"]] == ["uart_close"]
+
+
+# --- a plan carries the reads where the backend serves them with no session ---
+#
+# The reads are `dump_memory` and `read_symbol`, and on a backend that answers
+# them standalone (ST-Link since #342) a plan needs no `debug_start` before
+# them: there is no session on that bench for the step to be inside. Which
+# backends those are is never a list here; it is what the backend implements,
+# read through `configured_sessionless_debug_reads`. Inside a session nothing
+# below changes, and the tests that pin that say so.
+
+
+SESSIONLESS_READ_PLAN = """version: 5
+name: read-without-a-session
+steps:
+  - {device: dut, action: read_symbol, symbol: boot_counter, size_bytes: 4, comparator: {equals: 42}}
+  - {device: dut, action: dump_memory, symbol: CTC_array, output_path: build/memory.hex}
+"""
+
+
+class SessionlessReadService(SymbolService):
+    """A bench whose two symbol reads both answer, with nothing opened first.
+
+    The dump answers `ok` here where `RecordingService` fails it, because this
+    double stands in for a backend that serves the read standalone: a plan that
+    was admitted and then failed on the double's own refusal would prove nothing
+    about the gate under test."""
+
+    def call(self, name: str, arguments: dict | None = None) -> dict:
+        result = super().call(name, arguments)
+        if name == "debug_dump_symbol_ihex":
+            return {
+                "ok": True,
+                "tool": name,
+                "symbol": str((arguments or {}).get("symbol")),
+                "size_bytes": len(self.data),
+                "output": {"path": str((arguments or {}).get("output_path"))},
+                "summary": "Symbol memory dumped as Intel HEX.",
+            }
+        return result
+
+
+def test_a_plan_reads_without_a_debug_start_where_the_backend_serves_it(tmp_path: Path) -> None:
+    # The workflow #342 opened and #345 finishes: dump a RAM-resident
+    # measurement on an ST-Link bench, as a plan step rather than only by hand.
+    # There is no `debug_start` in the plan and none is inserted; both steps go
+    # straight to the reads, which is what the backend serves.
+    path = write_test_config(tmp_path, SESSIONLESS_READ_PLAN)
+    service = SessionlessReadService((42).to_bytes(4, "little"))
+
+    result = run_symbol_plan(tmp_path, path, service, debugger_type="stlink")
+
+    assert result["ok"] is True, result
+    assert [step["action"] for step in result["steps"]] == ["read_symbol", "dump_memory"]
+    assert [name for name, _ in service.calls] == ["debug_symbol_value", "debug_dump_symbol_ihex"]
+    assert result["steps"][0]["result"]["summary"] == "The symbol held the expected value."
+    assert result["steps"][0]["result"]["captured_value"] == 42
+    # Nothing was opened, so there is nothing for cleanup to close.
+    assert result["cleanup"] == []
+
+
+def test_a_read_step_is_still_held_to_the_symbol_allowlist_without_a_session(tmp_path: Path) -> None:
+    # The operator's statement about what may be read off this bench does not
+    # depend on how the read reaches the board. Refused before the run, so the
+    # probe is never opened.
+    path = write_test_config(tmp_path, SESSIONLESS_READ_PLAN)
+    service = SessionlessReadService((42).to_bytes(4, "little"))
+
+    result = run_symbol_plan(tmp_path, path, service, debugger_type="stlink", allowed_symbols=["CTC_array"])
+
+    assert result["ok"] is False
+    assert result["validation_error"]["field"] == "steps[0].symbol"
+    assert result["validation_error"]["summary"] == "Symbol is not allowed by the authoritative debug config."
+    assert service.calls == []
+
+
+def test_a_read_step_on_a_backend_that_serves_it_neither_way_is_refused_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The refusal for a backend that serves the read neither way: it names the
+    # backend, the step and its number, says which reads it does serve
+    # standalone (none), and ends at the configuration change that would run
+    # it. Every shipped backend now serves the reads one way or the other, so
+    # the shape is pinned through a pyocd stripped of the ability, which is
+    # also what a future partial backend looks like.
+    from agentic_hil.backends.pyocd import PyOCDBackend
+
+    monkeypatch.setattr(PyOCDBackend, "sessionless_debug_tools", lambda self: frozenset())
+    path = write_test_config(tmp_path, SESSIONLESS_READ_PLAN)
+    service = SessionlessReadService((42).to_bytes(4, "little"))
+
+    result = run_symbol_plan(tmp_path, path, service, debugger_type="pyocd")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_config_invalid"
+    refusal = result["validation_error"]
+    assert refusal["step"] == 1
+    assert refusal["field"] == "steps[0].action"
+    assert refusal["action"] == "read_symbol"
+    assert refusal["debugger"] == "dut"
+    assert refusal["debugger_type"] == "pyocd"
+    assert refusal["sessionless_debug_reads"] == []
+    assert refusal["summary"] == (
+        "Step 1's 'read_symbol' reads target memory, and the 'pyocd' backend on debugger 'dut' serves that read "
+        "neither without a debug session nor inside one. To run it on this bench, the same probe runs under "
+        "`type: openocd` with the `interface_cfg` for it (`interface/stlink.cfg` for an ST-Link, "
+        "`interface/cmsis-dap.cfg` for a CMSIS-DAP probe) and the `target_cfg` for this part."
+    )
+    assert service.calls == []
+
+
+def test_a_session_step_on_a_backend_that_opens_none_is_refused_by_name(tmp_path: Path) -> None:
+    # The other half of the same gate, on the same bench that now runs reads: a
+    # session is what ST-Link has not got, and the refusal says so about the
+    # session rather than about "typed debug actions", which no longer names one
+    # thing.
+    path = write_test_config(
+        tmp_path,
+        "version: 5\nsteps:\n  - {device: dut, action: debug_start, image_path: build/app.elf}\n",
+    )
+    (tmp_path / "build").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "build" / "app.elf").write_bytes(b"\x7fELF" + b"\x00" * 12)
+    service = SessionlessReadService(b"\x00\x00\x00\x00")
+
+    result = run_symbol_plan(tmp_path, path, service, debugger_type="stlink")
+
+    assert result["ok"] is False
+    refusal = result["validation_error"]
+    assert refusal["action"] == "debug_start"
+    assert refusal["debugger_type"] == "stlink"
+    # The reads this backend does serve are named beside the refusal, because a
+    # plan author reading it is one step away from a plan that runs here.
+    assert refusal["sessionless_debug_reads"] == ["debug_dump_symbol_ihex", "debug_symbol_value"]
+    assert refusal["summary"].startswith(
+        "Step 1's 'debug_start' needs a typed debug session, and debugger 'dut' runs the 'stlink' backend, "
+        "which opens none."
+    )
+    assert service.calls == []
+
+
+def test_the_in_session_openocd_path_is_unchanged_by_the_sessionless_route(tmp_path: Path) -> None:
+    # The pin: on the backend that has a session, both reads still run inside the
+    # one the plan opened, in the order the plan wrote them, on that session's
+    # lease. Nothing about the sessionless route reaches this bench.
+    path = write_test_config(
+        tmp_path,
+        """version: 5
+steps:
+  - {device: dut, action: debug_start, image_path: build/app.elf}
+  - {device: dut, action: read_symbol, symbol: boot_counter, size_bytes: 4, comparator: {equals: 42}}
+  - {device: dut, action: dump_memory, symbol: CTC_array, output_path: build/memory.hex}
+  - {device: dut, action: debug_stop}
+""",
+    )
+    (tmp_path / "build").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "build" / "app.elf").write_bytes(b"\x7fELF" + b"\x00" * 12)
+    service = SessionlessReadService((42).to_bytes(4, "little"))
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    assert result["ok"] is True, result
+    assert [name for name, _ in service.calls] == [
+        "debug_start_session",
+        "debug_symbol_value",
+        "debug_dump_symbol_ihex",
+        "debug_stop_session",
+    ]
+
+
+def test_a_dump_memory_step_without_a_session_on_openocd_is_still_refused(tmp_path: Path) -> None:
+    # The lifecycle rule for the backend that has a session is untouched: a read
+    # outside one is refused before the run, with the sentence it has always
+    # been refused with, because there `debug_start` is what would fix it.
+    path = write_test_config(
+        tmp_path,
+        "version: 5\nsteps:\n  - {device: dut, action: dump_memory, symbol: CTC_array, output_path: build/memory.hex}\n",
+    )
+    service = SessionlessReadService(b"\x00\x00\x00\x00")
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    assert result["ok"] is False
+    assert result["validation_error"]["summary"] == "A debug session must be started before this action."
+    assert service.calls == []
+
+
+def test_a_backend_that_gains_sessionless_reads_admits_the_plan_with_no_reactor_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The point of deriving the capability instead of listing types: this is the
+    # OpenOCD bench of the test above, whose backend now names the two reads as
+    # ones it serves standalone. The same plan that is refused there is admitted
+    # here, and nothing in the reactor was told about it.
+    from agentic_hil.backends.openocd import OpenOCDBackend
+
+    monkeypatch.setattr(
+        OpenOCDBackend,
+        "sessionless_debug_tools",
+        lambda self: frozenset({"debug_symbol_value", "debug_dump_symbol_ihex"}),
+    )
+    path = write_test_config(
+        tmp_path,
+        "version: 5\nsteps:\n  - {device: dut, action: dump_memory, symbol: CTC_array, output_path: build/memory.hex}\n",
+    )
+    service = SessionlessReadService(b"\x00\x00\x00\x00")
+
+    result = run_symbol_plan(tmp_path, path, service)
+
+    assert result["ok"] is True, result
+    assert [name for name, _ in service.calls] == ["debug_dump_symbol_ihex"]
+
+
+def test_a_read_step_is_judged_by_the_backend_of_the_probe_it_names(tmp_path: Path) -> None:
+    # Multi-probe benches ask the same question per probe: the bound probe is
+    # OpenOCD, which would need a session for this read, and the probe the step
+    # names is an ST-Link, which does not. The step names it, so the ST-Link's
+    # answer is the one that decides, and the read runs on that probe's own
+    # service.
+    config = load_config(
+        str(
+            write_config(
+                tmp_path,
+                debuggers_yaml="debuggers:\n  probe_b:\n    type: stlink\n    resource_id: rb\n",
+            )
+        )
+    )
+    path = write_test_config(
+        tmp_path,
+        "version: 5\nsteps:\n  - {device: probe_b, action: read_symbol, symbol: boot_counter}\n",
+    )
+
+    class ClosableService(SessionlessReadService):
+        def close(self) -> None:
+            pass
+
+    base = SessionlessReadService((42).to_bytes(4, "little"))
+    built: list[ClosableService] = []
+
+    def factory(bound_config) -> ClosableService:
+        service = ClosableService((42).to_bytes(4, "little"))
+        built.append(service)
+        return service
+
+    reactor = TestReactor(config, base, service_factory=factory)  # type: ignore[arg-type]
+    try:
+        result = reactor.run(load_test_config(str(path), str(tmp_path)))
+    finally:
+        reactor.close()
+
+    assert result["ok"] is True, result
+    assert base.calls == []
+    assert [name for name, _ in built[0].calls] == ["debug_symbol_value"]
+
+
+# --- a sessionless read needs its allow_probe checked at preflight, like a session --
+#
+# `debug_start` is refused before the run on a version-1 bench that withholds
+# allow_probe, so the whole plan is rejected before it touches the board. A
+# sessionless read still opens a probe onto a live core and needs the same
+# grant, and until it was checked here the reactor admitted the plan and let the
+# backend refuse the read at its own turn, after any earlier effectful step had
+# already run. The gate is `probe_allowed()`, so a read-free (version 2) bench,
+# which grants reads by exclusivity and carries no allow_probe to set, is still
+# admitted.
+
+
+def test_a_sessionless_read_after_flash_is_refused_before_the_flash_runs(tmp_path: Path) -> None:
+    # A flash ahead of a read the config plainly forbids: the permission is known
+    # before the run, so the whole plan is refused at preflight and the flash
+    # never lands. Were the read admitted, the flash would have mutated the board
+    # before the read's own permission_denied arrived, the hardware-touching a
+    # refusable plan must never reach.
+    path = write_test_config(
+        tmp_path,
+        """version: 5
+steps:
+  - {device: dut, action: flash, image_path: build/app.elf}
+  - {device: dut, action: read_symbol, symbol: boot_counter}
+""",
+    )
+    service = SessionlessReadService((42).to_bytes(4, "little"))
+
+    result = run_symbol_plan(
+        tmp_path,
+        path,
+        service,
+        debugger_type="stlink",
+        permissions={**DEFAULT_TEST_PERMISSIONS, "allow_probe": False},
+    )
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_config_invalid"
+    assert result["failed_step"] == 2
+    refusal = result["validation_error"]
+    assert refusal["field"] == "steps[1].action"
+    assert refusal["action"] == "read_symbol"
+    assert refusal["summary"] == "Reading target memory requires allow_probe on this debugger."
+    assert refusal["permission"] == "allow_probe"
+    # No step ran: the flash the plan led with never reached the service.
+    assert result["steps"] == []
+    assert service.calls == []
+
+
+def test_a_sessionless_dump_after_flash_is_refused_before_the_flash_runs(tmp_path: Path) -> None:
+    # The dump half of the same gate. It is refused ahead of the output-path
+    # validation the dump would otherwise run, so a denied plan makes no service
+    # call of any kind.
+    path = write_test_config(
+        tmp_path,
+        """version: 5
+steps:
+  - {device: dut, action: flash, image_path: build/app.elf}
+  - {device: dut, action: dump_memory, symbol: CTC_array, output_path: build/memory.hex}
+""",
+    )
+    service = SessionlessReadService(b"\x00" * 8)
+
+    result = run_symbol_plan(
+        tmp_path,
+        path,
+        service,
+        debugger_type="stlink",
+        permissions={**DEFAULT_TEST_PERMISSIONS, "allow_probe": False},
+    )
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 2
+    refusal = result["validation_error"]
+    assert refusal["field"] == "steps[1].action"
+    assert refusal["action"] == "dump_memory"
+    assert refusal["summary"] == "Reading target memory requires allow_probe on this debugger."
+    assert refusal["permission"] == "allow_probe"
+    assert result["steps"] == []
+    assert service.calls == []
+
+
+def test_a_read_free_bench_admits_a_sessionless_read_with_no_allow_probe(tmp_path: Path) -> None:
+    # The other side of the gate: a version-2 bench grants reads by exclusivity
+    # and never names allow_probe, so `probe_allowed()`, not the raw flag, is
+    # what keeps the read admitted here.
+    path = write_test_config(
+        tmp_path,
+        "version: 5\nsteps:\n  - {device: dut, action: read_symbol, symbol: boot_counter, size_bytes: 4, comparator: {equals: 42}}\n",
+    )
+    service = SessionlessReadService((42).to_bytes(4, "little"))
+
+    result = run_symbol_plan(tmp_path, path, service, debugger_type="stlink", config_version=2)
+
+    assert result["ok"] is True, result
+    assert [name for name, _ in service.calls] == ["debug_symbol_value"]

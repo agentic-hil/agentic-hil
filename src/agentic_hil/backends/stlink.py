@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from agentic_hil.artifacts import looks_like_intel_hex, sha256_file
+from agentic_hil.artifacts import looks_like_intel_hex
 from agentic_hil.backends.common import (
     FAILURE_WORDS,
     NOT_CONTACTED,
@@ -27,10 +27,10 @@ from agentic_hil.backends.common import (
     which,
 )
 from agentic_hil.backends.gdbdebug import (
-    DEBUG_SYMBOL_PATTERN,
     decode_symbol_value,
-    image_byte_order,
-    resolve_gdb_executable,
+    offline_symbol_info,
+    resolve_symbol_offline,
+    validate_debug_symbol,
 )
 from agentic_hil.config import (
     ConfigError,
@@ -39,7 +39,6 @@ from agentic_hil.config import (
     safe_configured_directory,
     safe_write_text,
 )
-from agentic_hil.elfsymbols import read_elf_symbol
 from agentic_hil.gdbmi import read_intel_hex_file
 from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
 from agentic_hil.report import (
@@ -180,15 +179,6 @@ STLINK_CONNECT_MODES: dict[str, str] = {"hotplug": "HOTPLUG", "under_reset": "UR
 # it belongs to the operator and to issue #342. Nothing in a result claims that
 # proof: what a result carries is the log, and the log carries this argv.
 STLINK_READ_CONNECT_MODE: Literal["HOTPLUG"] = "HOTPLUG"
-# What the offline symbol query prints, and what is read back out of it. Named
-# markers rather than GDB's own `$1 = ...` value history: a command that failed
-# prints an error and no marker at all, so a missing answer can never be
-# mistaken for a parsed one, and the reply survives GDB versions that number or
-# decorate the echo differently.
-GDB_SYMBOL_ADDRESS_MARKER = "AGENTIC_HIL_SYMBOL_ADDRESS="
-GDB_SYMBOL_SIZE_MARKER = "AGENTIC_HIL_SYMBOL_SIZE="
-GDB_SYMBOL_QUERY_TIMEOUT_S = 30.0
-GDB_SYMBOL_MISSING_MARKERS = ["no symbol", "not defined"]
 
 STLINK_SERIAL_PATTERN = re.compile(r"^\s*ST-?LINK\s+SN\s*:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
 STLINK_DEVICE_PATTERN = re.compile(r"^\s*Device\s+name\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
@@ -390,49 +380,19 @@ class STLinkBackend:
         return self._unsupported_debug_tool("debug_get_stop_reason")
 
     def debug_symbol_info(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
-        """Where an allowed symbol lives and how large it is, from the ELF alone.
+        """The shared offline resolution, and nothing of this backend's own.
 
         The third read this backend serves, and the one that never opens a probe
         at all: an address and a size are properties of the image, and the image
-        is on disk. It refused until now only because it was filed with the
-        session family (#342), which made a bench with an ST-Link ask the
-        hardware for a fact the hardware was never going to be asked for.
+        is on disk. It refused until #342 only because it was filed with the
+        session family, which made a bench with an ST-Link ask the hardware for a
+        fact the hardware was never going to be asked for.
 
-        The same offline resolution the two memory reads run before they connect,
-        and nothing after it. A caller sees the OpenOCD path's fields and summary,
-        plus the `symbol_source` that says which flashed image answered: the
-        provenance a session gets for free by having loaded the image, and that
-        this backend has to state.
-
-        Because no probe is opened, `allow_probe` does not gate it and no lease
-        is taken: the coordination layer leases the reads that reach the board
-        (`sessionless_debug_tools`), and this is not one of them. What does gate
-        it is `debug.allowed_symbols`, which is a statement about what may leave
-        this bench at all and applies to an address as much as to bytes.
+        Delegated whole because there is nothing here for STM32CubeProgrammer to
+        do: `offline_symbol_info` runs a GDB against the flashed ELF, and the
+        pyOCD backend answers the same question through the same call (#344).
         """
-        tool = "debug_symbol_info"
-        validated = self._validate_symbol(tool, symbol)
-        if not validated["ok"]:
-            return validated
-        resolved = self._resolve_symbol_offline(tool, symbol, symbol_elf)
-        if not resolved["ok"]:
-            return resolved
-        return {
-            "ok": True,
-            "tool": tool,
-            "backend": self.backend_name,
-            "symbol": symbol,
-            "address": resolved["address"],
-            "size_bytes": int(resolved["size_bytes"]),
-            "resolved_from": resolved["resolved_from"],
-            "symbol_source": resolved["symbol_source"],
-            "summary": "Symbol resolved.",
-            # Nothing was driven, so this says so in the same words every other
-            # refusal-before-contact on this backend uses. A resolution that
-            # never opened a probe must not read as a hardware interaction to
-            # whatever downstream is deciding what may be retried.
-            **NOT_CONTACTED,
-        }
+        return offline_symbol_info(self.config, self.backend_name, symbol, symbol_elf)
 
     def debug_symbol_value(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
         """One allowed symbol's bytes, read the only way this backend reads memory.
@@ -462,10 +422,10 @@ class STLinkBackend:
         tool = "debug_symbol_value"
         if not self.config.probe_allowed():
             return self._permission_denied(tool, "Symbol reads require allow_probe in the authoritative config.")
-        validated = self._validate_symbol(tool, symbol)
+        validated = validate_debug_symbol(self.config, self.backend_name, tool, symbol)
         if not validated["ok"]:
             return validated
-        resolved = self._resolve_symbol_offline(tool, symbol, symbol_elf)
+        resolved = resolve_symbol_offline(self.config, self.backend_name, tool, symbol, symbol_elf)
         if not resolved["ok"]:
             return resolved
         size_bytes = int(resolved["size_bytes"])
@@ -526,10 +486,10 @@ class STLinkBackend:
         tool = "debug_dump_symbol_ihex"
         if not self.config.probe_allowed():
             return self._permission_denied(tool, "Symbol dumps require allow_probe in the authoritative config.")
-        validated = self._validate_symbol(tool, symbol)
+        validated = validate_debug_symbol(self.config, self.backend_name, tool, symbol)
         if not validated["ok"]:
             return validated
-        resolved = self._resolve_symbol_offline(tool, symbol, symbol_elf)
+        resolved = resolve_symbol_offline(self.config, self.backend_name, tool, symbol, symbol_elf)
         if not resolved["ok"]:
             return resolved
         size_bytes = int(resolved["size_bytes"])
@@ -697,7 +657,14 @@ class STLinkBackend:
     def _proves_no_contact(self, tool: str, backend_error_type: str) -> bool:
         if backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS:
             return True
-        return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
+        # SESSIONLESS_DEBUG_READS beside the older READ_ONLY_TOOLS, for the
+        # reason the pyOCD backend carries them: a `-r` read drives nothing of
+        # its own, so "No STM32 target found" behind an opened probe is its
+        # report that the transport reached no core, exactly as it is for a
+        # probe listing. Without them here a read that connected to nothing
+        # would be quarantined as an unknown effect rather than released as the
+        # retry-safe refusal the CLI's own words prove it is.
+        return tool in (READ_ONLY_TOOLS | SESSIONLESS_DEBUG_READS) and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, completed: CompletedCommand, operation_result: JsonObject | None = None) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
@@ -780,116 +747,6 @@ class STLinkBackend:
 
     def _unsupported_debug_tool(self, tool: str) -> JsonObject:
         return debug_session_unsupported(self.backend_name, tool)
-
-    def _validate_symbol(self, tool: str, symbol: str) -> JsonObject:
-        """The OpenOCD path's two refusals, word for word.
-
-        Copied deliberately rather than approximated: `debug.allowed_symbols` is
-        the operator's statement about what may leave this bench at all, and a
-        caller that reads the refusal must not be able to tell which backend
-        wrote it, or the allowlist would look like a property of the debugger
-        instead of a property of the project.
-        """
-        if not isinstance(symbol, str) or DEBUG_SYMBOL_PATTERN.match(symbol) is None:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "invalid_argument", "summary": "symbol must be a valid C/C++ identifier."}
-        if not self.config.debug.allow_all_symbols and symbol not in self.config.debug.allowed_symbols:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": "Symbol is not allowed by debug.allowed_symbols.", "symbol": symbol}
-        return {"ok": True}
-
-    def _resolve_symbol_offline(self, tool: str, symbol: str, symbol_elf: JsonObject | None) -> JsonObject:
-        """Address and size for one symbol, from an ELF and nothing else.
-
-        A debug session resolves a symbol by asking the GDB that already has the
-        image loaded and the target attached. There is no session here, so the
-        same GDB is asked in batch mode against the ELF alone: no `target`
-        command is issued, nothing is attached, and the probe is not opened
-        until the read itself. That keeps the query harmless on a running board
-        and means a bad symbol name costs a refusal rather than a hardware
-        contact.
-
-        The ELF is the one this service flashed, so the symbol table provably
-        describes what is on the target — the guarantee a session gets from
-        having loaded the image. Nothing else is accepted: resolving against
-        some other build would answer with an address that is right about the
-        file and wrong about the board.
-
-        The image's byte order travels back with the address, for the caller
-        that turns the bytes into a number. Read here rather than by that caller
-        because here is where the trustworthy copy exists: the private staged
-        file is deleted on the way out, and reading EI_DATA off the caller's
-        path afterwards would be reading a file a rebuild is free to have
-        replaced, which is the exact race the copy was made to close.
-        """
-        if symbol_elf is None:
-            return {
-                "ok": False,
-                "tool": tool,
-                "backend": self.backend_name,
-                "error_type": "symbol_source_not_available",
-                "summary": "No ELF with debug symbols has been flashed through this service, so no symbol table describes what is on the target. Flash the ELF with flash_firmware first.",
-                "symbol": symbol,
-                "likely_causes": ["no flash_firmware call has succeeded in this session", "the firmware that was flashed was a .hex or .bin, which carries no symbols", "the firmware on the target was flashed outside Agentic HIL"],
-                **NOT_CONTACTED,
-            }
-        # The remembered path is the caller's own workspace file, which a
-        # rebuild is free to overwrite at any moment — including in the window
-        # between hashing it and handing the same path to a separately spawned
-        # GDB. A replacement landing there makes GDB answer from bytes the digest
-        # never covered while the result still carries the flashed image's digest,
-        # so an address that is right about the new build and wrong about the
-        # board would travel out wearing the old image's provenance. So the bytes
-        # are copied into a private file first; the digest that gates the query
-        # and the bytes GDB reads are then the same immutable file, and a later
-        # replacement of the caller's path cannot reach it. A copy whose digest no
-        # longer matches the flashed image is refused, exactly as a changed source
-        # on the original path was.
-        elf_path = str(symbol_elf["resolved_path"])
-        recorded_digest = symbol_elf.get("integrity_sha256") or symbol_elf.get("sha256")
-        staging_dir: Path | None = None
-        try:
-            try:
-                staging_dir = Path(tempfile.mkdtemp(prefix="agentic-hil-symbols-"))
-                staged_elf = staging_dir / Path(elf_path).name
-                shutil.copyfile(elf_path, staged_elf)
-                staged_digest = sha256_file(staged_elf)
-            except OSError as error:
-                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "symbol_source_changed", "summary": "The ELF flashed through this service can no longer be read, so no symbol table is proven to describe what is on the target. Flash it again with flash_firmware.", "symbol": symbol, "backend_error": str(error), **NOT_CONTACTED}
-            if not isinstance(recorded_digest, str) or staged_digest != recorded_digest:
-                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "symbol_source_changed", "summary": "The ELF on disk no longer matches the image flashed through this service, so its symbol table is not proven to describe what is on the target. Flash the current build with flash_firmware first.", "symbol": symbol, "likely_causes": ["the ELF was rebuilt or replaced after it was flashed", "a different file now occupies the flashed artifact's path"], **NOT_CONTACTED}
-            gdb = resolve_gdb_executable(self.config, self.backend_name)
-            if not gdb["ok"]:
-                return {**gdb, "tool": tool, "symbol": symbol}
-            args = gdb_symbol_query_args(str(gdb["executable"]), str(staged_elf), symbol)
-            completed = spawn_command(args, str(staging_dir), min(self.config.debugger.timeout_s, GDB_SYMBOL_QUERY_TIMEOUT_S))
-            if completed.not_found:
-                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "gdb_not_found", "summary": "Configured debug.gdb_executable could not be found.", "likely_causes": ["debug.gdb_executable points to a missing file", "GDB is not installed"], "symbol": symbol, **NOT_CONTACTED}
-            if completed.timed_out:
-                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Symbol resolution timed out.", "symbol": symbol, **NOT_CONTACTED}
-            output = f"{completed.stdout}{completed.stderr}"
-            address_value = gdb_symbol_marker_value(output, GDB_SYMBOL_ADDRESS_MARKER)
-            size_value = gdb_symbol_marker_value(output, GDB_SYMBOL_SIZE_MARKER)
-            source = {"path": symbol_elf.get("path"), "sha256": symbol_elf.get("sha256")}
-            order = image_byte_order(staged_elf)
-            if address_value is not None and size_value is not None:
-                return {"ok": True, "symbol": symbol, "address": hex(address_value), "address_value": address_value, "size_bytes": size_value, "resolved_from": "debug_info", "symbol_source": source, "image_byte_order": order}
-            # Both markers come from expressions that need a typed symbol, and an
-            # assembly-defined object carries no type for them, while its
-            # address and size sit in the symbol table of this same staged ELF,
-            # which is the digest-verified copy of the image on the board (#187).
-            # Read from that copy rather than from the caller's path, so the
-            # fallback answers out of exactly the bytes the flashed digest
-            # covers, as the marker query does.
-            table = read_elf_symbol(staged_elf, symbol)
-            if table["ok"]:
-                address = int(table["address"])
-                return {"ok": True, "symbol": symbol, "address": hex(address), "address_value": address, "size_bytes": int(table["size_bytes"]), "resolved_from": "elf_symbol_table", "symbol_source": source, "image_byte_order": order}
-            lower = output.lower()
-            error_type = "symbol_not_found" if contains_any(lower, GDB_SYMBOL_MISSING_MARKERS) else "symbol_resolution_failed"
-            summary = "Symbol was not found in the flashed ELF." if error_type == "symbol_not_found" else "GDB returned no usable symbol address or size for the flashed ELF."
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "summary": summary, "symbol": symbol, "symbol_table_lookup": table["reason"], **NOT_CONTACTED}
-        finally:
-            if staging_dir is not None:
-                shutil.rmtree(staging_dir, ignore_errors=True)
 
     def _classify_output(self, output: str, tool: str | None = None) -> str:
         lower = output.lower()
@@ -1009,42 +866,6 @@ def erase_abort_point(output: str) -> JsonObject:
         "evidence_line": refusal,
         "evidence_rule": "The erase was refused and no line reports a write phase completing, but the transcript does not establish that no sector was erased before the refusal, so the flash contents are unconfirmed and the quarantine stands.",
     }
-
-
-def gdb_symbol_query_args(gdb_executable: str, elf_path: str, symbol: str) -> list[str]:
-    """A GDB that reads one symbol out of an ELF and attaches to nothing.
-
-    `--batch` runs the two commands and exits; `-nx` keeps a developer's
-    `.gdbinit` — which can define, alias or hook anything — out of a bench
-    answer; `-q` drops the banner. No `target`, `attach` or `monitor` command
-    appears, and none can: this is the whole command line, so the query cannot
-    reach a probe even if one is connected.
-
-    `printf` rather than `print` because it emits exactly the marker line and
-    nothing on failure. The casts to `unsigned long` are what make the two
-    values plain decimal integers regardless of the symbol's own type.
-    """
-    return [
-        *invocation(gdb_executable),
-        "--batch",
-        "-nx",
-        "-q",
-        "-ex",
-        f'printf "{GDB_SYMBOL_ADDRESS_MARKER}%lu\\n", (unsigned long)&{symbol}',
-        "-ex",
-        f'printf "{GDB_SYMBOL_SIZE_MARKER}%lu\\n", (unsigned long)sizeof({symbol})',
-        elf_path,
-    ]
-
-
-def gdb_symbol_marker_value(output: str, marker: str) -> int | None:
-    for line in output.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(marker):
-            digits = stripped[len(marker) :].strip()
-            if digits.isdigit():
-                return int(digits)
-    return None
 
 
 def version_line(output: str) -> str:

@@ -10,6 +10,7 @@ from typing import Any, ClassVar
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
 
+from agentic_hil.backends.common import DEBUG_SESSION_WAY_OUT
 from agentic_hil.backends.gdbdebug import INTEGER_VALUE_WIDTHS
 from agentic_hil.can import parse_can_id, parse_hex_bytes
 from agentic_hil.comports import data_result, decode_bytes
@@ -39,7 +40,11 @@ from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR, plan_schema_document
 from agentic_hil.knowledge import PLAN_FEATURE_VERSION_KEY as PLAN_FEATURE_VERSION_KEY
 from agentic_hil.knowledge import TEST_CONFIG_SCHEMA_RESOURCE as TEST_CONFIG_SCHEMA_RESOURCE
 from agentic_hil.report import audit_errors, overall_success
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import (
+    AgenticHILToolService,
+    configured_sessionless_debug_reads,
+    sessionless_capable_debug_tools,
+)
 from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
 
 # The default plan path, the packaged schema and the marker its version gate
@@ -1828,9 +1833,11 @@ class DebuggerRunner(StepDevice):
     unknown_name_summary: ClassVar[str] = "Test step references a debugger that is not in the authoritative config."
     # A debug session closes before any serial line or CAN bus this plan opened.
     cleanup_order: ClassVar[int] = 0
-    # This kind's own actions that require a live debug session, and therefore a
-    # typed-debug backend. Internal to the class that serves them, not a second
-    # answer to "which device kind runs this action".
+    # This kind's own typed-debug actions: the session's lifecycle, the two reads
+    # and the breakpoint run. Internal to the class that serves them, not a second
+    # answer to "which device kind runs this action". Which of them a given plan
+    # step actually needs a live session for is not decided here, because it is
+    # not the same on every bench: see `_runs_without_a_session`.
     debug_session_actions: ClassVar[frozenset[str]] = frozenset({"debug_start", "run_until_breakpoint", "dump_memory", "read_symbol", "debug_stop"})
 
     def __init__(self, config_id: str, device: Device, service: AgenticHILToolService, **kwargs: Any):
@@ -1874,11 +1881,12 @@ class DebuggerRunner(StepDevice):
         The read is `debug_symbol_value` and nothing more: the same allowlist,
         the same `debug.max_dump_size_bytes` ceiling on the resolved size, the
         same resolution (the image's debug information first, the ELF's own
-        symbol table where there is no type to work with), all of it inside the
-        debug session this plan already opened. A plan therefore reads exactly
-        what an agent calling the tool by hand reads, and a refusal the tool
-        gives is the step's result unchanged rather than a sentence written here
-        about somebody else's rule.
+        symbol table where there is no type to work with), through whichever of
+        the two this bench has: the debug session the plan opened, or the
+        standalone read a backend that needs none serves. A plan therefore reads
+        exactly what an agent calling the tool by hand reads, and a refusal the
+        tool gives is the step's result unchanged rather than a sentence written
+        here about somebody else's rule.
 
         The step's own arguments are not the tool's, which is why it does not
         forward them: `size_bytes` is a claim about the symbol and `comparator:`
@@ -2048,14 +2056,12 @@ class DebuggerRunner(StepDevice):
                 return preflight_error(location, step, "action", "Target reset is disabled for this debugger by the authoritative config.")
             return None
 
-        if step.action in cls.debug_session_actions and debugger.type != "openocd":
-            return preflight_error(
-                location,
-                step,
-                "action",
-                "Typed debug actions currently require a debugger of type 'openocd'.",
-                {"debugger_type": debugger.type},
-            )
+        # Whether this step is one the probe it names answers with no debug
+        # session behind it. Asked before the gate below, because it is what
+        # decides whether there is anything for the gate to be about.
+        without_session = cls._runs_without_a_session(config, step, state, debugger_id)
+        if step.action in cls.debug_session_actions and not without_session and debugger.type != "openocd":
+            return cls._backend_debug_refusal(location, step, debugger, debugger_id, config)
         if step.action == "debug_start":
             if state.debug_session is not None:
                 return preflight_error(location, step, "action", "A debug session is already active in this test plan.", {"debug_session_debugger": state.debug_session})
@@ -2086,10 +2092,22 @@ class DebuggerRunner(StepDevice):
                 return preflight_error(location, step, "debugger", "A debug session may only be stopped on the debugger that started it.", {"debug_session_debugger": state.debug_session})
             state.debug_session = None
             return None
-        if state.debug_session is None:
-            return preflight_error(location, step, "action", "A debug session must be started before this action.")
-        if state.debug_session != debugger_id:
-            return preflight_error(location, step, "debugger", "This action must run on the debugger that started the debug session.", {"debug_session_debugger": state.debug_session})
+        if without_session and not config.probe_allowed(debugger):
+            # A sessionless read still opens a probe onto a live core, so it
+            # needs the same allow_probe a debug_start does, and preflight is
+            # where that has to be caught. The backend refuses an ungranted read
+            # on its own, but only when the read's own turn comes: a plan that
+            # flashes and then reads would already have flashed before the read's
+            # permission_denied arrived, mutating a board a plan that could never
+            # run should never have reached. probe_allowed(), not the raw flag,
+            # so a read-free (version 2) bench that grants reads by exclusivity
+            # still admits the step.
+            return preflight_error(location, step, "action", "Reading target memory requires allow_probe on this debugger.", {"permission": "allow_probe"})
+        if not without_session:
+            if state.debug_session is None:
+                return preflight_error(location, step, "action", "A debug session must be started before this action.")
+            if state.debug_session != debugger_id:
+                return preflight_error(location, step, "debugger", "This action must run on the debugger that started the debug session.", {"debug_session_debugger": state.debug_session})
         if step.action == "run_until_breakpoint" and not permissions.allow_debug_execution:
             # `_run_until_breakpoint` always calls `debug_continue` once its
             # breakpoint is set, whatever this step's own `timeout_s` says, so
@@ -2118,6 +2136,73 @@ class DebuggerRunner(StepDevice):
                     {"validation": output},
                 )
         return None
+
+    @classmethod
+    def _runs_without_a_session(cls, config: AgenticHILConfig, step: TestStep, state: PlanState, debugger_id: str) -> bool:
+        """Whether this step is one the probe it names answers with no debug
+        session open, so the plan needs no `debug_start` before it.
+
+        The question goes to the backend, never to a list of backend types kept
+        here: `configured_sessionless_debug_reads` is the one place that answers
+        it, and it answers from what the backend implements. A backend that gains
+        the ability later therefore starts admitting these plans with nothing in
+        the reactor to change, which is the whole reason the answer is not a
+        second copy of it.
+
+        What is asked about is the step's own declared tool, not a second list of
+        actions: an action is servable without a session exactly when the tool it
+        calls is one the backend serves that way. So `run_until_breakpoint`, which
+        declares no single tool, is never one of them, and neither is a session's
+        own lifecycle.
+
+        A session this plan opened on this same probe wins over all of it. Inside
+        one, every typed debug step runs exactly as it always has, on that
+        session's lease, whatever else the backend can also do standalone."""
+        if step.action not in cls.debug_session_actions or state.debug_session == debugger_id:
+            return False
+        tool = cls.step_action_specs[step.action].tool
+        return tool is not None and tool in configured_sessionless_debug_reads(config, debugger_id)
+
+    @classmethod
+    def _backend_debug_refusal(cls, location: StepLocation, step: TestStep, debugger: DebuggerConfig, debugger_id: str, config: AgenticHILConfig) -> JsonObject:
+        """Refuse a typed debug step the probe it names cannot serve either way,
+        and say what would make it run.
+
+        Named rather than generic, because the two ways a step gets here are two
+        different facts about the bench and lead to two different next moves. A
+        memory read is refused only where the backend serves it neither standalone
+        nor through a session it could open, which is a capability this
+        configuration does not have; the session lifecycle and a breakpoint are
+        refused wherever the backend opens no session at all. Both name the
+        backend, the step and the step number, and both end at the configuration
+        change that would work, taken from the same table the tools' own
+        `not_supported` refusals quote so a plan author and a tool caller are
+        never sent two different ways out."""
+        way_out = DEBUG_SESSION_WAY_OUT.get(debugger.type)
+        reach = f" To run it on this bench, {way_out}." if way_out else ""
+        served = sorted(configured_sessionless_debug_reads(config, debugger_id))
+        if cls.step_action_specs[step.action].tool in sessionless_capable_debug_tools():
+            summary = (
+                f"Step {location.step}'s '{step.action}' reads target memory, and the '{debugger.type}' backend on "
+                f"debugger '{debugger_id}' serves that read neither without a debug session nor inside one."
+            )
+        else:
+            summary = (
+                f"Step {location.step}'s '{step.action}' needs a typed debug session, and debugger '{debugger_id}' "
+                f"runs the '{debugger.type}' backend, which opens none."
+            )
+        return preflight_error(
+            location,
+            step,
+            "action",
+            f"{summary}{reach}",
+            {
+                "debugger": debugger_id,
+                "debugger_type": debugger.type,
+                "sessionless_debug_reads": served,
+                **({"way_out": way_out} if way_out else {}),
+            },
+        )
 
     @classmethod
     def _declared_width_refusal(cls, config: AgenticHILConfig, location: StepLocation, step: TestStep) -> JsonObject | None:

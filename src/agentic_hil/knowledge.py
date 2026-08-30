@@ -1494,21 +1494,33 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "not_supported:pyocd": ErrorRemedy(
         meaning=(
-            "This bench runs `type: pyocd`, which this server drives through pyOCD's command-line tools for probing, "
-            "flashing and resetting. No typed-debug tool is served here: not the session family "
-            "(`debug_start_session` and its breakpoints, continue, halt and stop reason), and not the reads "
-            "(`debug_symbol_info`, `debug_symbol_value`, `debug_dump_symbol_ihex`). `reset_target` with mode `init` is "
-            "refused for the same reason: the reset-init event script belongs to OpenOCD.\n\n"
-            "The reads are the honest part of that to know about. pyOCD can read target memory, so this refusal is "
-            "wider than the hardware's own limits, in a way the ST-Link backend's no longer is (#342). What is missing "
-            "is not the command but the evidence: which pyOCD connect reaches a running core without halting or "
-            "resetting it has not been established on a bench here, and a read that silently resets the target "
-            "destroys the RAM it was asked for. Until that is measured, a refusal is the answer that does not lie.\n\n"
+            "This bench runs `type: pyocd`, which this server drives through pyOCD's command-line tools. pyOCD is not "
+            "a debug server this server drives as one, so there is no session here to hold a breakpoint, resume a "
+            "core, or report why one stopped. `debug_start_session`, `debug_stop_session`, `debug_get_session_status`, "
+            "`debug_set_breakpoint`, `debug_list_breakpoints`, `debug_clear_breakpoints`, `debug_continue`, "
+            "`debug_halt` and `debug_get_stop_reason` are refused for that reason, and so is `reset_target` with mode "
+            "`init`, whose reset-init event script is an OpenOCD thing.\n\n"
+            "What is *not* refused any more is the read half of the typed-debug family. `debug_symbol_info`, "
+            "`debug_symbol_value` and `debug_dump_symbol_ihex` are served here with no session behind them: the first "
+            "resolves an address and a size out of the ELF `flash_firmware` put on the board and opens no probe at "
+            "all, and the other two read the target with pyOCD's own `savemem`. Refusing a read this tool can perform "
+            "was wider than the hardware's own limits (#344), the same gap #342 closed on the ST-Link backend. Those "
+            "two reads connect with `--connect attach`, which is the one of pyOCD's four connect modes its own "
+            "documentation describes as connecting to a running target without halting cores; the other three halt, "
+            "reset before connecting, or hold reset asserted, and a read taken under any of them would report a "
+            "disturbed board's bytes as a measurement.\n\n"
             "Nothing was sent to the bench for this refusal. The target is exactly as the last call that did reach it "
             "left it."
         ),
         remediation=(
-            "The way out is a configuration change rather than different hardware: the probe this backend is driving "
+            "First check whether a read answers the question. If what is wanted is a value out of the target (a "
+            "counter, a coverage buffer, a status word, a structure), `debug_symbol_value` and "
+            "`debug_dump_symbol_ihex` do that here without a session, and `debug_symbol_info` answers where a symbol "
+            "lives without touching the board. They resolve against the ELF this service flashed, so flash the ELF "
+            "with `flash_firmware` first, keep the symbol in `debug.allowed_symbols`, and have "
+            "`debug.gdb_executable` name a GDB that reads that image.",
+            "If the step genuinely needs a session (a breakpoint, a resume, a stop reason, stepping), the way out is "
+            "a configuration change rather than different hardware: the probe this backend is driving "
             "is one OpenOCD drives too. Set `debuggers.<name>.type` to `openocd`, with the `interface_cfg` for the "
             "probe that is actually plugged in (`interface/stlink.cfg` for an ST-Link, `interface/cmsis-dap.cfg` for "
             "a CMSIS-DAP probe) and the `target_cfg` for this part.",
@@ -1523,14 +1535,16 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "what the part is by `target_cfg`, so the CMSIS device-family pack that made pyOCD resolve the part is no "
             "longer what decides whether the bench works, and a wrong `target_cfg` fails to detect the target rather "
             "than adapting.",
-            "If the bench has to stay on pyOCD, report the step as unavailable on this configuration and name what was "
-            "needed. A read that was refused here and would have worked under `openocd` is worth saying out loud, "
-            "because it is the difference between this bench and the same probe one line of configuration away.",
+            "If the bench has to stay on pyOCD, report the step as unavailable on this configuration and name which of "
+            "the two halves was needed. A missing capability that is stated is a decision for the operator; one that "
+            "is worked around quietly is a plan that reports something it did not do.",
         ),
         do_not=(
-            "Do not reach for `pyocd commander`, `pyocd gdbserver`, `gdb` or a raw debugger command to get the value "
-            "anyway. That bypasses the policy this refusal comes from and takes the probe out from under the bench's "
-            "own coordination.",
+            "Do not read this as no debug on this bench. Three of the twelve typed-debug tools work here, and they are "
+            "the three that answer what is in memory.",
+            "Do not reach for `pyocd commander`, `pyocd gdbserver`, `gdb` or a raw debugger command to get a "
+            "breakpoint anyway. That bypasses the policy this refusal comes from and takes the probe out from under "
+            "the bench's own coordination.",
             "Do not swap the probe. The probe is not what refused; the backend the configuration names for it is.",
         ),
     ),
@@ -2332,7 +2346,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
         "interface": {"status": "ignored"},
         "interface_cfg": {"status": "ignored"},
         "target_cfg": {"status": "ignored"},
-        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "This server passes no connect-mode option to pyOCD, so `under_reset` is refused at load rather than accepted and ignored. A bench that needs the flash to connect under reset runs it on `type: stlink`."},
+        "connect_mode": {"status": "refused", "default": "hotplug", "enum": ["hotplug"], "note": "Nothing this key could say reaches pyOCD, so `under_reset` is refused at load rather than accepted and ignored. A bench that needs the flash to connect under reset runs it on `type: stlink`. The one connect option this server does pass to pyOCD is not this key's: the typed-debug memory reads send `--connect attach`, fixed, because it is the only mode pyOCD documents as reaching a running core without halting or resetting it."},
         "flash_address": {"status": "conditional", "note": "Required to flash a .bin, which carries no load address; passed as `--base-address`. Not read for .elf or .hex."},
     },
 }

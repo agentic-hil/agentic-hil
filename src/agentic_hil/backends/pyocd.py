@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import difflib
 import json
+import shutil
 import string
+import tempfile
 import time
 from pathlib import Path
 
@@ -22,7 +24,21 @@ from agentic_hil.backends.common import (
     spawn_command,
     which,
 )
-from agentic_hil.config import ConfigError, display_path, probe_selector_key, resolve_work_path, safe_write_text
+from agentic_hil.backends.gdbdebug import (
+    decode_symbol_value,
+    offline_symbol_info,
+    resolve_symbol_offline,
+    validate_debug_symbol,
+)
+from agentic_hil.config import (
+    ConfigError,
+    display_path,
+    probe_selector_key,
+    resolve_work_path,
+    safe_configured_directory,
+    safe_write_text,
+)
+from agentic_hil.gdbmi import write_intel_hex_file
 from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
 from agentic_hil.report import (
     classify_failure_report,
@@ -84,6 +100,69 @@ TARGET_TYPE_INVALID_DOC = "target_support.html"
 # likeliest to print `Resetting target` beside a flash failure, so the phrase has
 # to be the erase line itself and not a family somebody assumed.
 PYOCD_ERASE_FAILURE_MARKERS = ["failed to erase sector"]
+
+# The connect the typed-debug reads use, and the whole reason they are allowed to
+# exist on this backend (#344). pyOCD reads target memory, so refusing the read
+# half outright was wider than this hardware's own limits; what stood in the way
+# was that pyOCD has four connect modes and three of them touch the core, so a
+# read taken under the wrong one would answer with a halted or freshly reset
+# board's bytes and call it a measurement.
+#
+# pyOCD documents the four and what each does. Its command line lists them
+# (`pyocd/subcommands/base.py`, 0.45.1):
+#
+#     -M MODE, --connect MODE
+#                           Select connect mode from one of (halt, pre-reset, under-reset, attach).
+#
+# its session option carries the same list with the default that makes the
+# choice matter (`pyocd/core/options.py`, 0.45.1):
+#
+#     OptionInfo('connect_mode', str, "halt",
+#         "One of 'halt', 'pre-reset', 'under-reset', 'attach'. Default is 'halt'."),
+#
+# and its user documentation (`docs/options.md`, published as
+# <https://pyocd.io/docs/options.html>) says what each one does to the target:
+#
+#     'halt': immediately halt all accessible cores upon connect.
+#     'pre-reset': perform a hardware reset prior to connect and halt.
+#     'under-reset': assert hardware reset during the connect sequence, then deassert after the cores are halted.
+#     'attach': connect to a running target without halting cores.
+#
+# `attach` is therefore the only one of the four whose documented behaviour is
+# neither a halt nor a reset, and pyOCD's own connect sequence says the same in
+# code (`pyocd/coresight/coresight_target.py`, 0.45.1): `pre_connect` acts only
+# for `pre-reset` and `under-reset`, `perform_halt_on_connect` opens with
+# `if mode != 'attach':` before it halts anything, and `post_connect` deasserts
+# reset only for `under-reset`. Under `attach` all three are no-ops.
+#
+# It is sent explicitly rather than left to the commander's default, even though
+# `pyocd/commands/commander.py` picks the same value when nothing else is given
+# ("Otherwise default to attach"). A default is a decision somebody else may
+# change: `--halt`, a `connect_mode` in a project's own `pyocd.yaml`, or a later
+# release choosing differently would all reach this read silently, and the
+# argument on the command line is what the log can be read back for. It is the
+# same reason the ST-Link reads stopped riding on `mode=NORMAL` (#342), where
+# the default was the connect that reset.
+#
+# Nothing that resets or halts travels with it: no `--halt`, no `-O
+# connect_mode=`, no `reset` command in the commander line. `debuggers.<name>.
+# connect_mode` does not reach it either, and could not: this backend refuses
+# `under_reset` at load, because holding a target in reset and then reading its
+# RAM measures nothing the firmware did.
+#
+# What is documented is not what is measured. This encodes the least intrusive
+# connect pyOCD documents; the proof that a read leaves a running core untouched
+# is a bench measurement (the #348 SysTick double-read pattern, run against this
+# backend), it belongs to the operator, and it belongs in issue #344. Nothing in
+# a result claims that proof: what a result carries is the log, and the log
+# carries this argv.
+PYOCD_READ_CONNECT_MODE = "attach"
+PYOCD_READ_CONNECT_ARGS = ["--connect", PYOCD_READ_CONNECT_MODE]
+# The typed-debug reads this backend answers with no session behind them, and so
+# the ones the coordination layer must lease as one-shots rather than run on a
+# session lease that does not exist here. `debug_symbol_info` is deliberately not
+# among them: it opens no probe at all.
+SESSIONLESS_DEBUG_READS = frozenset({"debug_dump_symbol_ihex", "debug_symbol_value"})
 
 
 class PyOCDBackend:
@@ -281,21 +360,109 @@ class PyOCDBackend:
         return self._unsupported_debug_tool("debug_get_stop_reason")
 
     def debug_symbol_info(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_symbol_info")
+        """The shared offline resolution, and nothing of this backend's own.
+
+        Where a symbol lives and how large it is are properties of the image, and
+        the image is on disk, so this answer never needed pyOCD at all. It
+        refused here only because it was filed with the session family, which is
+        the same mistake #342 found on the ST-Link backend and left standing on
+        this one (#344).
+
+        The same call that backend makes, so the two answer identically: a GDB
+        run in batch mode against the ELF a confirmed `flash_firmware` put on the
+        board, with no probe opened, no lease taken and no programmer log
+        written. `debug.gdb_executable` is what it needs, and `gdb_not_found`
+        names that field when the bench has not set one.
+        """
+        return offline_symbol_info(self.config, self.backend_name, symbol, symbol_elf)
 
     def debug_symbol_value(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_symbol_value")
+        """One allowed symbol's bytes, read through pyOCD's own memory read.
+
+        The OpenOCD path's result, from a backend with no session: same
+        allowlist refusal word for word, same `debug.max_dump_size_bytes` cap on
+        the resolved size before a probe is opened, same `hex` and integer
+        readings and summary, plus the `symbol_source` naming the flashed ELF
+        the symbol was resolved against, because there is no session that loaded
+        it.
+
+        `pyocd commander --command "savemem ADDR LEN FILE"` is what does the
+        reading: pyOCD's own documentation of it is "Save a range of memory to a
+        binary file", it is served with no gdbserver in the picture, and it
+        connects with `--connect attach`, the one mode pyOCD documents as
+        leaving a running core alone. The file it writes is this call's own
+        business, created in a private directory, read back and deleted before
+        the result is built, and named nowhere in it.
+
+        The bytes are held to exactly what was asked for: `savemem` writes the
+        window it read and nothing else, so a file that is not `size_bytes` long
+        is a failed read rather than a short answer.
+        """
+        tool = "debug_symbol_value"
+        prepared = self._prepare_symbol_read(tool, symbol, symbol_elf)
+        if not prepared["ok"]:
+            return prepared["result"]
+        resolved = prepared["resolved"]
+        read = self._read_target_memory(tool, int(resolved["address_value"]), int(resolved["size_bytes"]))
+        result = self._finish_symbol_read(read, symbol, resolved)
+        if result.get("ok"):
+            result.update(decode_symbol_value(read["data"], resolved["image_byte_order"]))
+            result["summary"] = "Symbol value read from target memory."
+        return self._write_action_report(result)
 
     def debug_dump_symbol_ihex(self, symbol: str = "", output: JsonObject | None = None, symbol_elf: JsonObject | None = None) -> JsonObject:
-        return self._unsupported_debug_tool("debug_dump_symbol_ihex")
+        """Read one allowed symbol out of target memory and write Intel HEX.
+
+        The same `savemem` read as the value tool, ending differently, and the
+        ending is where this backend differs from the ST-Link one: pyOCD's
+        memory read writes a raw binary file, so the Intel HEX a caller was
+        promised is written here, by the same `write_intel_hex_file` the OpenOCD
+        path uses on the bytes its session read. The caller's path is therefore
+        never handed to pyOCD, and the file that appears at it is written through
+        the workspace-guarded writer or not at all.
+        """
+        tool = "debug_dump_symbol_ihex"
+        prepared = self._prepare_symbol_read(tool, symbol, symbol_elf)
+        if not prepared["ok"]:
+            return prepared["result"]
+        if output is None:
+            # The service validates the output path before it gets here, so this
+            # is unreachable through a tool call. It is a refusal rather than an
+            # assert because an assert is stripped under `python -O`, and what
+            # would follow it is a probe opened for a read with nowhere to put
+            # what it read.
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "invalid_argument", "summary": "output_path must be a non-empty string.", **NOT_CONTACTED}
+        resolved = prepared["resolved"]
+        address_value = int(resolved["address_value"])
+        read = self._read_target_memory(tool, address_value, int(resolved["size_bytes"]))
+        result = self._finish_symbol_read(read, symbol, resolved)
+        result["output"] = output
+        if result.get("ok"):
+            try:
+                # The writer will not create a missing parent, so the directory
+                # is made through the same guarded helper the OpenOCD path uses,
+                # and a dump cannot mkdir its way out of the workspace.
+                safe_configured_directory(self.config, str(Path(str(output["resolved_path"])).parent), f"{tool}.output_path")
+                write_intel_hex_file(Path(str(output["resolved_path"])), address_value, read["data"], workspace=self.config.work_dir)
+            except (ConfigError, OSError) as error:
+                # The bytes did leave the target, so this failure is about the
+                # file and says so: the read itself is not in doubt and the
+                # contact is not either.
+                result.update({"ok": False, "error_type": "output_write_failed", "summary": "Intel HEX output file could not be written.", "backend_error": str(error), "target_contacted": True})
+                return self._write_action_report(result)
+            result["summary"] = "Symbol memory dumped as Intel HEX."
+        return self._write_action_report(result)
 
     def sessionless_debug_tools(self) -> frozenset[str]:
-        """None: this backend serves no typed-debug read, one-shot or otherwise.
+        """The two reads this backend serves with no debug session behind them.
 
-        Every debug tool here refuses with `not_supported`, so classifying any of
-        them as a standalone one-shot would take a probe lease around a refusal
-        that never touches the board."""
-        return frozenset()
+        `savemem` attaches to a live core the same way a reset does, so a symbol
+        read here is a standalone hardware interaction rather than a call inside
+        a session that already holds the lease. The coordination layer takes a
+        one-shot debugger lease for exactly these: machine-wide ownership, run
+        declaration and the incident path for an unconfirmed read, which a
+        session backend's own lease would carry instead."""
+        return SESSIONLESS_DEBUG_READS
 
     def target_support(self) -> JsonObject:
         """Whether this pyOCD resolves the configured target_type, before anything is driven.
@@ -457,6 +624,95 @@ class PyOCDBackend:
             return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
         return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._confirm_target_support(self._classify_output(output, tool)), log_path, completed), audit_error)
 
+    def _prepare_symbol_read(self, tool: str, symbol: str, symbol_elf: JsonObject | None) -> JsonObject:
+        """Everything both memory reads settle before a probe is opened.
+
+        In the order the OpenOCD and ST-Link paths settle it, because the order
+        is part of the answer: the permission first, then the allowlist, then the
+        offline resolution, then the size cap against the size that resolution
+        returned. A symbol nobody allowed must not leak an address, and a read
+        larger than `debug.max_dump_size_bytes` must be refused before pyOCD is
+        spawned rather than after it has read the bytes.
+        """
+        if not self.config.probe_allowed():
+            return {"ok": False, "result": self._permission_denied(tool, "Symbol reads require allow_probe in the authoritative config.")}
+        validated = validate_debug_symbol(self.config, self.backend_name, tool, symbol)
+        if not validated["ok"]:
+            return {"ok": False, "result": validated}
+        resolved = resolve_symbol_offline(self.config, self.backend_name, tool, symbol, symbol_elf)
+        if not resolved["ok"]:
+            return {"ok": False, "result": resolved}
+        size_bytes = int(resolved["size_bytes"])
+        if size_bytes > self.config.debug.max_dump_size_bytes:
+            noun = "read" if tool == "debug_symbol_value" else "dump"
+            return {"ok": False, "result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": f"Symbol {noun} exceeds debug.max_dump_size_bytes.", "symbol": symbol, "size_bytes": size_bytes, "max_dump_size_bytes": self.config.debug.max_dump_size_bytes}}
+        selected = self._resolve_probe_selector(tool)
+        if not selected["ok"]:
+            return {"ok": False, "result": selected}
+        return {"ok": True, "resolved": resolved}
+
+    def _read_target_memory(self, tool: str, address_value: int, size_bytes: int) -> JsonObject:
+        """`savemem` into a private file, and the bytes it left there.
+
+        The file is private and outside the workspace on purpose, for both
+        reads: the value tool's caller asked for bytes and named no path, and the
+        dump's caller named a path for Intel HEX, which is not what pyOCD writes.
+        So neither caller's workspace is where this lands, and the file is gone
+        before the result is built.
+
+        `data` is the bytes only when the run succeeded and the file holds
+        exactly the window that was asked for. Anything else is `None`, and the
+        caller reports a failed read rather than a short answer, because half of
+        a status word is a different number rather than a smaller one.
+        """
+        try:
+            staging_dir = Path(tempfile.mkdtemp(prefix="agentic-hil-pyocd-read-"))
+        except OSError as error:
+            return {"result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs could not be created.", "backend_error": str(error), **NOT_CONTACTED}, "data": None}
+        try:
+            memory_path = staging_dir / "symbol-memory.bin"
+            argument = pyocd_command_path(memory_path)
+            if argument is None:
+                # Refused rather than sent, because pyOCD would read a different
+                # path than the one meant: its command tokenizer treats an
+                # unquoted backslash as an escape and ends a single-quoted word
+                # at the next quote, so a path it cannot carry has to stop the
+                # read instead of silently redirecting it.
+                return {"result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs cannot be named on pyOCD's command line.", "backend_error": f"temporary directory path contains a quote character: {memory_path}", **NOT_CONTACTED}, "data": None}
+            result = self._run_pyocd(tool, ["commander", *PYOCD_READ_CONNECT_ARGS, "--command", f"savemem {hex(address_value)} {size_bytes} {argument}", *self._connection_args()])
+            data: bytes | None = None
+            if result.get("ok"):
+                try:
+                    data = memory_path.read_bytes()
+                except OSError:
+                    data = None
+                if data is not None and len(data) != size_bytes:
+                    data = None
+            return {"result": result, "data": data}
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def _finish_symbol_read(self, read: JsonObject, symbol: str, resolved: JsonObject) -> JsonObject:
+        """The fields both reads add, and the two verdicts neither may skip.
+
+        A failure that did not prove where it stopped is unconfirmed rather than
+        harmless: a read writes nothing, but it was a probe attached to a live
+        core, and a pyOCD that stopped part-way through leaves no evidence of
+        what it did to it. Branches that did prove their abort point, such as a
+        probe pyOCD never found, arrive carrying `not_started` and keep it.
+
+        A run that succeeded and left no usable file is a failed read that did
+        reach the target, which is the one case the exit code alone would report
+        as success.
+        """
+        result = read["result"]
+        result.update({"symbol": symbol, "address": resolved["address"], "size_bytes": int(resolved["size_bytes"]), "resolved_from": resolved["resolved_from"], "symbol_source": resolved["symbol_source"]})
+        if not result.get("ok") and "side_effect_status" not in result:
+            result.update({"side_effect_status": "unknown", "retry_safe": False})
+        if result.get("ok") and read["data"] is None:
+            result.update({"ok": False, "error_type": "memory_read_failed", "summary": "pyOCD reported a completed run but left no file holding the requested bytes.", "target_contacted": True})
+        return result
+
     def _connection_args(self) -> list[str]:
         args: list[str] = []
         # The canonical full UID when one was resolved, so pyOCD's substring
@@ -609,7 +865,14 @@ class PyOCDBackend:
     def _proves_no_contact(self, tool: str, backend_error_type: str) -> bool:
         if backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS:
             return True
-        return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
+        # SESSIONLESS_DEBUG_READS beside the older READ_ONLY_TOOLS: a `savemem`
+        # read drives nothing of its own either, so pyOCD reporting it never
+        # connected, no ACK, not responding, unable to connect, is the same
+        # proof of no contact it is for a probe listing. Without them here a
+        # sessionless read that failed before `savemem` keeps no NOT_CONTACTED
+        # fields, and `_finish_symbol_read` turns a provably untouched bench
+        # into `side_effect_status: unknown` and a cleanup-required lease.
+        return tool in (READ_ONLY_TOOLS | SESSIONLESS_DEBUG_READS) and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, completed: CompletedCommand) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
@@ -699,6 +962,14 @@ class PyOCDBackend:
         # transcript, which is what it used to do (#333).
         if tool == "reset_target" and contains_any(lower, FAILURE_WORDS):
             return "reset_failed"
+        # The same rule once more, anchored on the operation rather than on a
+        # word: when the tool is one of the memory reads, the operation that
+        # reported a failure is a read, whatever pyOCD's commander wrote about
+        # it. Without it a `savemem` that could not reach the address would land
+        # in the unknown bucket and answer "Debugger failed with an unknown
+        # error", which tells a caller nothing about what was being attempted.
+        if tool in SESSIONLESS_DEBUG_READS and contains_any(lower, FAILURE_WORDS):
+            return "memory_read_failed"
         return "unknown_debugger_error"
 
     def _public_error_type(self, backend_error_type: str) -> str:
@@ -714,6 +985,7 @@ class PyOCDBackend:
             "flash_erase_failed": "pyOCD could not erase a flash sector this image covers, so the flash contents are unconfirmed.",
             "verify_failed": "Debugger failed to verify the flashed firmware.",
             "reset_failed": "Debugger failed to reset the target.",
+            "memory_read_failed": "Debugger failed to read the requested target memory.",
             "timeout": "Debugger command timed out.",
             "unknown_debugger_error": "Debugger failed with an unknown error.",
         }.get(error_type, "Debugger failed with an unknown error.")
@@ -732,6 +1004,11 @@ class PyOCDBackend:
             # refuses.
             "flash_erase_failed": ["the sectors this image covers are protected (write protection, PCROP, or a read-out protection level that refuses the erase)", "the core was still executing from flash when the erase was issued", "debuggers.<name>.target_type resolves to a device whose flash sector map is not this device's"],
             "reset_failed": ["reset line wiring issue", "target is not responding"],
+            # The address is the first suspect and the pack is the second: pyOCD
+            # reads memory through the map its CMSIS pack describes, so a symbol
+            # that resolved out of the ELF can still sit outside every region
+            # this target_type declares.
+            "memory_read_failed": ["the symbol's address is outside a memory region this target_type describes", "the core faulted or lost debug access while the read was running", "debuggers.<name>.target_type resolves to a device whose memory map is not this device's"],
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
             "debugger_not_found": ["debuggers.<name>.executable is not configured", "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)", "pyocd is not in PATH"],
         }.get(error_type, ["inspect the debugger log for details"])
@@ -756,6 +1033,32 @@ def normalise_target_type(value: str) -> str:
             result.append("_")
             in_replace = True
     return "".join(result)
+
+
+def pyocd_command_path(path: Path) -> str | None:
+    """A file path pyOCD's commander will read back as the path that was meant.
+
+    `--command` is one string that pyOCD re-splits with its own tokenizer
+    (`pyocd.utility.cmdline.split_command`, 0.45.1), not the shell's and not
+    argparse's, and that tokenizer has two habits a Windows path walks straight
+    into: an unquoted backslash escapes the next character, so `C:\\Users\\bench`
+    arrives as `C:Usersbench`, and an unquoted space ends the word. Single
+    quotes fix both, and are the right quote of the two the tokenizer accepts:
+    inside double quotes it still honours backslash escapes, inside single
+    quotes it does not.
+
+    Forward slashes as well as the quotes, because they cost nothing and read
+    back the same on both platforms.
+
+    `None` when the path itself carries a single quote, which would end the
+    quoted word early and point pyOCD at some other file. The caller refuses the
+    read rather than sending it: a read that quietly wrote somewhere else would
+    fail as an empty file at best and as somebody else's bytes at worst.
+    """
+    text = path.as_posix()
+    if "'" in text:
+        return None
+    return f"'{text}'"
 
 
 def pack_install_commands(target_type: str) -> list[str]:
