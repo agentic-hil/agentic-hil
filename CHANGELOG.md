@@ -4,7 +4,7 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
-## [Unreleased]
+## [0.20.0] - 2026-08-30
 
 ### Added
 
