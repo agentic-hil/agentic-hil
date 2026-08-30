@@ -3,7 +3,7 @@ name: agentic-hil
 description: Use when a request operates this project's connected target board through the configured bench (flashing, resetting, probing, debugging, UART and CAN stimulus and feedback, firmware artifacts, test reports) or configures Agentic HIL, the safe local MCP bridge that performs them. Use it instead of invoking a debugger, serial device, or CAN adapter directly. Not for designing hardware (PCB layout, schematic capture, EDA, mechanical design), and not for firmware authoring that never touches a board.
 metadata:
   origin: Agentic HIL
-  agentic_hil_version: "0.18.0"
+  agentic_hil_version: "0.19.0"
 ---
 
 # Agentic HIL
@@ -404,11 +404,11 @@ user-local executable, so it registers no MCP server command. Install the
 package version matching this plugin first:
 
 ```bash
-uv tool install --upgrade "agentic-hil==0.18.0"
+uv tool install --upgrade "agentic-hil==0.19.0"
 agentic-hil --version
 ```
 
-The version check must report exactly `0.18.0`. If `uv` is unavailable or a
+The version check must report exactly `0.19.0`. If `uv` is unavailable or a
 different `agentic-hil` resolves on `PATH`, stop and ask the operator to
 establish the trusted user-local prerequisite; do not substitute `uvx`, a
 workspace virtual environment, or an unversioned package. `invalid peer

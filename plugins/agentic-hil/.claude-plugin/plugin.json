@@ -1,7 +1,7 @@
 {
   "name": "agentic-hil",
   "displayName": "Agentic Hardware-in-the-Loop",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
   "author": { "name": "Hannes Pauli" },
   "repository": "https://github.com/agentic-hil/agentic-hil",
