@@ -2981,6 +2981,264 @@ def test_the_operators_own_dirty_file_left_untouched_is_not_read_as_the_rounds_w
     assert "the run already had dirty" not in f"{captured.out}{captured.err}"
 
 
+# --- the inverse: an inherited-dirty path leaving the dirty set with its content ---
+
+# The one kind of round that empties `git status` instead of adding to it. The
+# operator's file is put back to exactly what HEAD holds, and the round commits its own
+# work elsewhere, so by every other measure the round was a productive one.
+_REVERTS_THE_OPERATORS_FILE = (
+    f"pathlib.Path('notes.py').write_text({_NOTES_AT_HEAD!r}, encoding='utf-8')\n"
+    f"pathlib.Path('fix.py').write_text({FIX!r}, encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: the work of the round itself'], check=True)\n"
+    "sys.stdout.write('reverted notes.py to HEAD and committed my own work\\n')\n"
+)
+_REVERTS_THE_OPERATORS_FILE_AND_COMMITS_NOTHING = (
+    f"pathlib.Path('notes.py').write_text({_NOTES_AT_HEAD!r}, encoding='utf-8')\n"
+    "sys.stdout.write('reverted notes.py to HEAD and committed nothing at all\\n')\n"
+)
+# The legitimate shrink, by the operator's own hand while the round runs: their work in
+# progress committed as it stands. The dirty set loses the very same path, and their
+# pre-round bytes are now the committed ones.
+_OPERATOR_COMMITS_THEIR_OWN_FILE = (
+    "subprocess.run(['git', 'add', 'notes.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'wip: the operator commits their notes'], check=True)\n"
+    f"pathlib.Path('fix.py').write_text({FIX!r}, encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'fix.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: the work of the round itself'], check=True)\n"
+)
+
+
+def test_a_round_reverting_the_operators_dirty_file_stops_the_run_and_names_the_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The boundary #325 named and left open: the guards all read the dirty set, and this leaves it.
+
+    Under `--allow-dirty` the operator's `notes.py` is modified before the run. Round 1
+    writes the committed content back into it and commits its own work elsewhere. That
+    takes the path out of the dirty set altogether: `git status` is empty, so
+    `newly_uncommitted` has nothing to subtract, `changed_inherited_dirty` looks only at
+    paths that are still dirty and cannot look at this one, nothing is outstanding, and
+    the clean verdict ended the run at exit 0 with the operator's uncommitted work gone
+    off the disk and into no commit. The pre-round content map is what still holds it:
+    the bytes that file had at round start are in no git object at all, so the loss is
+    real and unrecoverable, and the run stops on it while the round that did it is still
+    the last thing that happened.
+    """
+    repository = _with_operator_dirt(tmp_path)
+    # What the operator had, as git would name it. Captured now because after the round
+    # there is nowhere left to read it from, which is the whole of the report below.
+    identity = agent_review_loop.blob_id(repository, "notes.py")
+    assert identity is not None
+    wip_blob = identity.split(":", 1)[-1]
+    agent = _agent(tmp_path, "reverts_operator_dirt", _REVERTS_THE_OPERATORS_FILE)
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _clean_verdict)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "1", "--heartbeat", "0"] + ["--allow-dirty"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    # The round committed, and committed something real, so no other guard here had
+    # anything to say about it: this is not a stall, a decline, or a move.
+    assert _attempts(tmp_path, "reverts_operator_dirt") == 1
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: the work of the round itself"
+    # And the tree it left is spotless, which is exactly why the loss was invisible.
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    # The operator's work in progress is not on the disk and not in history.
+    assert (repository / "notes.py").read_text(encoding="utf-8") == _NOTES_AT_HEAD
+    assert _in(repository, "show", "HEAD:notes.py") == _NOTES_AT_HEAD
+    # Nor anywhere else git could be asked: no commit, no index, no stash holds it.
+    held = subprocess.run(["git", "-C", str(repository), "cat-file", "-e", wip_blob], capture_output=True)
+    assert held.returncode != 0
+    captured = capsys.readouterr()
+    assert "round 1: this round removed the operator's uncommitted content from 1 path(s)" in captured.out
+    assert "  notes.py" in captured.out
+    assert "git never saw it" in captured.out
+    assert "unrecoverable" in captured.err
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["destroyed_paths"]) == (True, ["notes.py"])
+    # Not filed as work left in the tree: there is nothing there to commit, and the
+    # round never reached a review, so no verdict stands behind it either.
+    assert (record["uncommitted_paths"], record["status"]) == ([], None)
+
+
+def test_a_revert_is_named_even_when_the_no_commit_rule_would_have_ended_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The run stops either way here, and only one of the two stops says what happened.
+
+    A round that reverts the operator's file and commits nothing at all is already ended
+    by the no-commit rule, so nothing is lost by the exit code; what was lost is the
+    sentence. The console said only that no commit was produced and `run.json` recorded a
+    round that declined, while the file the operator had been editing was quietly back at
+    its committed content. The two stops carry the same exit code, so the specific one is
+    allowed to be the last thing read: the round is named, the path is named, and the
+    no-commit line stands aside rather than ending the run over an empty round while the
+    file it emptied goes unmentioned.
+    """
+    repository = _with_operator_dirt(tmp_path)
+    head = _in(repository, "rev-parse", "HEAD")
+    agent = _agent(tmp_path, "reverts_and_commits_nothing", _REVERTS_THE_OPERATORS_FILE_AND_COMMITS_NOTHING)
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _clean_verdict)
+    exit_code = agent_review_loop.main(
+        # No --continue-on-no-commit: the no-commit rule ends this run before any review.
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "1", "--heartbeat", "0"] + ["--allow-dirty"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    # Invoked once. There is no line to hand back, so `--stall-retry` never fires.
+    assert _attempts(tmp_path, "reverts_and_commits_nothing") == 1
+    assert _in(repository, "rev-parse", "HEAD") == head
+    out = capsys.readouterr().out
+    assert "round 1: Claude Code produced no commit." in out
+    assert "round 1: this round removed the operator's uncommitted content from 1 path(s)" in out
+    assert "  notes.py" in out
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["destroyed_paths"]) == (True, ["notes.py"])
+
+
+def test_the_operator_committing_their_own_dirty_file_mid_round_is_not_a_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Holds both ways, and is the cost the guard above must not have.
+
+    The dirty set shrinks by exactly the same path, in exactly the same way, when the
+    operator commits their own work in progress while a round runs. Nothing is lost
+    there: the bytes that file held at round start are the bytes now in the commit, so
+    git can still be asked for them. Reachable against gone is settled in the object
+    database rather than at a pathname for this reason, and a guard that stopped the run
+    every time an operator committed would be turned off within a night.
+    """
+    repository = _with_operator_dirt(tmp_path)
+    identity = agent_review_loop.blob_id(repository, "notes.py")
+    assert identity is not None
+    wip_blob = identity.split(":", 1)[-1]
+    agent = _agent(tmp_path, "operator_commits_their_own", _OPERATOR_COMMITS_THEIR_OWN_FILE)
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _clean_verdict)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "1", "--heartbeat", "0"] + ["--allow-dirty"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_CLEAN
+    # notes.py left the dirty set just as it does above, and the tree is just as clean.
+    assert _in(repository, "status", "--porcelain").strip() == ""
+    # The difference is the only one that matters: git holds what the file used to hold.
+    assert _in(repository, "show", "HEAD:notes.py") == _OPERATOR_WIP
+    held = subprocess.run(["git", "-C", str(repository), "cat-file", "-e", wip_blob], capture_output=True)
+    assert held.returncode == 0
+    captured = capsys.readouterr()
+    assert "removed the operator's uncommitted content" not in f"{captured.out}{captured.err}"
+    record = _round_records(repository)[0]
+    # Absent on a build without the guard and empty on one with it, which is one answer.
+    assert (record["stalled"], record.get("destroyed_paths", [])) == (False, [])
+
+
+def test_a_path_leaving_the_dirty_set_is_a_loss_only_when_the_bytes_are_nowhere(tmp_path: Path) -> None:
+    """The seven states a round can leave a dirty path in, and the two that are a loss.
+
+    Six paths the operator had dirty when the run started, and one a previous round left.
+    `reverted.py` is put back to what HEAD holds and its content is then in no git object
+    and under no name, which is the loss this exists for. `rewritten.py` is the same loss
+    by the other route: the round edited it and committed the result, so the commit holds
+    the round's version and the operator's own bytes are gone all the same, which is
+    reported rather than excused, since nobody reading that commit can tell which lines
+    were theirs. `committed.py` leaves the dirty set too, and its pre-round bytes are the
+    committed bytes, so git can hand them back. `kept.py` is still dirty and so is not
+    this question at all. `moved.py` is renamed on the disk, which git records nothing
+    of, so its name is gone while its content is not: followed by content rather than by
+    name, it is no loss. `empty.py` had no content at round start for anything to lose.
+    And `leftover.py` loses its content exactly as `reverted.py` does but was never the
+    operator's, so it belongs to the guards that follow a round's own work, not to this
+    one.
+    """
+    repository = _repository(tmp_path)
+    for name in ("reverted.py", "rewritten.py", "committed.py", "kept.py"):
+        (repository / name).write_text("what HEAD holds\n", encoding="utf-8")
+    _in(repository, "add", "reverted.py", "rewritten.py", "committed.py", "kept.py")
+    _in(repository, "commit", "-q", "-m", "chore: what HEAD holds")
+    # What the operator leaves in the tree before the run: four tracked files modified,
+    # one untracked file of their own, and one empty file.
+    (repository / "reverted.py").write_text("work in progress they are about to lose\n", encoding="utf-8")
+    (repository / "rewritten.py").write_text("work in progress the round writes over\n", encoding="utf-8")
+    (repository / "committed.py").write_text("work in progress they commit themselves\n", encoding="utf-8")
+    (repository / "kept.py").write_text("work in progress they are still editing\n", encoding="utf-8")
+    (repository / "moved.py").write_text("an untracked file of theirs\n", encoding="utf-8")
+    (repository / "empty.py").write_text("", encoding="utf-8")
+    operator_dirt = agent_review_loop.dirty_paths(repository)
+    assert operator_dirt == {"reverted.py", "rewritten.py", "committed.py", "kept.py", "moved.py", "empty.py"}
+    # An earlier round then leaves work of its own behind. It is inherited dirt to the
+    # round below and has a pre-round content of its own, but it is not the operator's.
+    (repository / "leftover.py").write_text("what a previous round left uncommitted\n", encoding="utf-8")
+    inherited_blobs = agent_review_loop.blob_ids(repository, agent_review_loop.dirty_paths(repository))
+    # An empty file's content is every other empty file's, so it identifies nothing and
+    # is never a candidate: reporting it would be a loss invented out of an empty file.
+    assert set(inherited_blobs) == (operator_dirt | {"leftover.py"}) - {"empty.py"}
+
+    (repository / "reverted.py").write_text("what HEAD holds\n", encoding="utf-8")
+    (repository / "rewritten.py").write_text("what the round wrote over it\n", encoding="utf-8")
+    _in(repository, "add", "committed.py", "rewritten.py")
+    _in(repository, "commit", "-q", "-m", "wip: the operator commits one, the round commits over another")
+    (repository / "moved.py").rename(repository / "elsewhere.py")
+    (repository / "empty.py").unlink()
+    (repository / "leftover.py").unlink()
+    present_dirty = agent_review_loop.dirty_paths(repository)
+    assert present_dirty == {"kept.py", "elsewhere.py"}
+
+    destroyed = agent_review_loop.destroyed_inherited_dirty(
+        repository, present_dirty, operator_dirt, inherited_blobs
+    )
+
+    assert destroyed == {"reverted.py", "rewritten.py"}
+
+
+def test_reachable_content_is_asked_of_the_object_database_not_of_a_pathname(tmp_path: Path) -> None:
+    """Whether the operator's bytes survived is a question about git's objects, not about HEAD:path.
+
+    A pathname comparison gets it wrong in both directions, and both are here. History
+    that moved on past the operator's commit leaves `HEAD:notes.py` holding other bytes
+    while theirs sit safe in the commit they made, so a pathname would invent a loss.
+    And content they stashed rather than committed is under no pathname at all while git
+    holds it perfectly well, so a pathname would miss the recovery. Asked of the object
+    database, both are one answer, and only bytes git has never held come back missing.
+    """
+    repository = _repository(tmp_path)
+    (repository / "notes.py").write_text("the first thing they committed\n", encoding="utf-8")
+    _in(repository, "add", "notes.py")
+    _in(repository, "commit", "-q", "-m", "wip: the first")
+    first = agent_review_loop.blob_id(repository, "notes.py")
+    (repository / "notes.py").write_text("the second thing they committed\n", encoding="utf-8")
+    _in(repository, "add", "notes.py")
+    _in(repository, "commit", "-q", "-m", "wip: the second")
+    second = agent_review_loop.blob_id(repository, "notes.py")
+    (repository / "notes.py").write_text("the third thing, never committed\n", encoding="utf-8")
+    third = agent_review_loop.blob_id(repository, "notes.py")
+    assert first is not None and second is not None and third is not None
+    asked = {identity.split(":", 1)[-1] for identity in (first, second, third)}
+
+    held = agent_review_loop.in_object_store(repository, asked)
+
+    # An earlier commit counts as much as the tip: history is where content survives.
+    assert held == {first.split(":", 1)[-1], second.split(":", 1)[-1]}
+    # A pathname would say otherwise about the first, and git plainly holds it.
+    assert _in(repository, "show", "HEAD:notes.py") == "the second thing they committed\n"
+    # Stashed rather than committed is still content git can be asked for, and after the
+    # stash no pathname in the tree holds it at all.
+    _in(repository, "stash", "push", "-q", "-m", "the operator stashes the third")
+    assert (repository / "notes.py").read_text(encoding="utf-8") == "the second thing they committed\n"
+    assert agent_review_loop.in_object_store(repository, asked) == asked
+    # Nothing at all is asked of git for an empty set, and nothing comes back.
+    assert agent_review_loop.in_object_store(repository, set()) == set()
+
+
 def test_content_identity_is_only_asked_of_a_path_that_has_content(tmp_path: Path) -> None:
     """A directory, a path that is gone and an empty file identify nothing.
 

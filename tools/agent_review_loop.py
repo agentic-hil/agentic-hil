@@ -31,7 +31,13 @@ Four further properties make it safe to run unattended:
   which a round writing its whole output into a file the run already had dirty
   leaves untouched, so the content those paths held when the round began is what
   tells such a round from a declined one; it is reported and carried rather than
-  handed back, because the file it wrote into is one the operator also owns.
+  handed back, because the file it wrote into is one the operator also owns. The
+  same content answers the opposite event, which no reading of the dirty set can
+  reach because the whole of that event is a path leaving the set: a round that
+  puts an inherited-dirty file back to its committed content takes the operator's
+  uncommitted work off the disk without adding or keeping a line anywhere. Git
+  either holds those bytes or it does not, and where it does not the path is named
+  and the run stops on it, since no later round can recover what git never saw.
 * The verdict is parsed from a JSON schema Codex is required to satisfy, not from
   prose. Prose like "looks good apart from ..." has no stable meaning to a loop
   condition, and guessing at it is how a loop exits one round before the bug.
@@ -204,6 +210,12 @@ class RoundRecord:
     # because the reader deciding whether the recovery caught the whole round is
     # usually reading run.json days later.
     uncommitted_paths: list[str] = field(default_factory=list)
+    # What it took away. Paths the run inherited dirty that the round left holding
+    # content nobody can recover: kept apart from `uncommitted_paths`, which names
+    # work still sitting in the tree for somebody to commit, because there is
+    # nothing left here to commit and the two rounds read very differently to
+    # whoever opens run.json afterwards.
+    destroyed_paths: list[str] = field(default_factory=list)
     # Set when that work was handed back to the implementer to finish.
     retried: bool = False
 
@@ -1490,6 +1502,54 @@ def _hash_object(repo: Path, names: list[str]) -> list[str] | None:
     return ids if len(ids) == len(names) else None
 
 
+def in_object_store(repo: Path, blobs: set[str]) -> set[str]:
+    """Which of `blobs` the repository itself holds, asked in one `git cat-file` pass.
+
+    "Still reachable" against "gone" is the one distinction the revert guard turns on,
+    and the object database is where it is settled rather than at a pathname. An id git
+    can name is content that can still be got back -- `git cat-file -p` prints it,
+    whoever wrote it, under whatever name, from a commit or a stash or an index entry a
+    later `git add` left behind. An id git has never heard of only ever existed in the
+    work tree, so the round that overwrote that file destroyed the last copy of it.
+    `--batch-check` answers the whole set through one child, `<oid> missing` for the ids
+    it does not hold.
+
+    Asking a pathname instead -- is this still what `HEAD:path` holds -- would be a
+    narrower question, and wrong in both directions. An operator who commits their file
+    and a round that then renames it, or commits over it again, leave `HEAD:path` holding
+    other bytes while the operator's own sit safe in the commit they made, so a path
+    comparison invents a loss. And content the operator stashed rather than committed is
+    recoverable while no path in the tree holds it at all, so a path comparison misses
+    the recovery. Put to the object database, every one of those is a single answer.
+
+    Ids arrive mode-tagged from `blob_ids` and are asked bare: the tag is this file's own
+    way of telling a symlink from a regular file of the same bytes, and no id git stores
+    carries one. A git that will not answer proves nothing held, and that is returned as
+    exactly that -- an empty set, so the caller reads its candidates as unproven and
+    reports them. Loud on an unanswerable question is the same reading
+    `changed_inherited_dirty` takes, and a repository whose object database cannot be
+    read has a larger problem than this report.
+    """
+    if not blobs:
+        return set()
+    result = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "--batch-check"],
+        input="".join(f"{blob}\n" for blob in sorted(blobs)),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        return set()
+    held = set()
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] != "missing":
+            held.add(fields[0])
+    return held
+
+
 def object_id(path: Path) -> tuple[int, int] | None:
     """`path`'s filesystem identity -- device and inode -- or None when it has none.
 
@@ -1619,6 +1679,84 @@ def changed_inherited_dirty(
         path for path in still if path not in now and (has_content(repo / path) or (repo / path).is_symlink())
     }
     return changed | unrecomputed
+
+
+def destroyed_inherited_dirty(
+    repo: Path,
+    present: set[str],
+    operator_dirt: set[str],
+    inherited_blobs: dict[str, str],
+) -> set[str]:
+    """The operator's dirty paths that left the dirty set, taking content nothing holds any more.
+
+    The inverse of every guard above, and invisible to all of them, because the whole
+    event is a path leaving the dirty set rather than joining it. A round that writes the
+    committed content back into a file the operator had dirty -- a revert, a checkout of
+    that path, a regenerated file -- takes the porcelain line away entirely: `git status`
+    says nothing, `newly_uncommitted` sees nothing, `changed_inherited_dirty` looks only at
+    paths that are `still` dirty and so cannot look at this one, and the run goes on with
+    the operator's uncommitted work gone. Deleting an inherited-dirty untracked file is the
+    same event and is caught the same way.
+
+    `operator_dirt` is the tree the run started with, not the tree this round started
+    with. By round two the second set also holds what the rounds before left lying about,
+    and that work belongs to the guards above: they follow it by inode and by content
+    across a move, an edit and an atomic save, and a round that carries its predecessor's
+    stall onto another name has destroyed nothing. Only content that was in the tree
+    before any round ran is the operator's for this to speak for. What the operator
+    dirties later, while the run is going, cannot be told from a round's own leavings by
+    anything here, and is left to the guards that follow the rounds.
+
+    `inherited_blobs` is the pre-round content map #325 already takes every round, and it
+    is the only record of what those files held when this round began. A path is a
+    candidate when it is the operator's, is not dirty now, and has an entry there. No
+    entry means it was an empty file, a directory or unreadable when the round began:
+    nothing this can name as lost, and inventing a loss out of the operator's own empty
+    file would be the noise that gets a guard turned off. Being the pre-round content
+    rather than the pre-run content, it is also the right thing to compare: where an
+    earlier round wrote into the operator's file, what this round took away is what was
+    in it when this round started.
+
+    Two questions then separate reachable from gone, in that order because the first is one
+    cheap child and settles nearly every candidate:
+
+    * Does git hold the bytes? `in_object_store` asks the object database for the pre-round
+      id itself. An operator who commits their own file mid-round is exactly this: the
+      dirty set shrinks, and their pre-round bytes are the committed bytes, so git names
+      them and nothing is reported. So is a `git stash`, a `git add` whose index entry
+      outlived the file, and a loop `salvage_commit` that swept the operator's file in
+      untouched. What is asked about is the content, never a pathname: it does not matter
+      which commit holds those bytes or what name they wear in it.
+    * Does the tree still hold them? A round that moves an untracked file leaves git no
+      rename to record, so the old name drops out of the dirty set while the content lives
+      on under a new one, and git never having seen those bytes is then true and beside the
+      point. Their pre-round id against the content of every path dirty now says so. Only
+      the paths that failed the first question are worth this second one, and a path not
+      dirty now holds what `HEAD` holds, which git holds by definition.
+
+    Content is followed here, never a name. A porcelain rename would be the tempting
+    shortcut, and it is the wrong one in the direction that costs: a round that renames the
+    operator's file and then overwrites the destination has a rename to show for itself and
+    has still destroyed the content, while a rename that kept the content is cleared by the
+    comparison above anyway. A round that wrote over the operator's file and then committed
+    the result is not excused either, though `--allow-dirty` does promise their changes will
+    be swept into agent commits: what that commit holds is the round's version, their own
+    bytes are in no object, and nobody reading the commit afterwards can say which lines
+    were theirs. Only bytes git can still be asked for are a sweep rather than a loss.
+
+    What is left is content that was in the work tree when the round began, is in no commit,
+    no index and no stash, and is nowhere in the tree now. The loop cannot restore it: it
+    never reached git, so there is nothing to restore it from. See `report_destroyed_dirty`.
+    """
+    left = {path for path in inherited_blobs if path in operator_dirt and path not in present}
+    if not left:
+        return set()
+    held = in_object_store(repo, {inherited_blobs[path].split(":", 1)[-1] for path in left})
+    unheld = {path for path in left if inherited_blobs[path].split(":", 1)[-1] not in held}
+    if not unheld:
+        return set()
+    elsewhere = set(blob_ids(repo, present).values())
+    return {path for path in unheld if inherited_blobs[path] not in elsewhere}
 
 
 def listed(entries: str, limit: int) -> str:
@@ -2374,7 +2512,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--allow-dirty",
         action="store_true",
-        help="Start even if the working tree has uncommitted changes; they will be swept into agent commits.",
+        help=(
+            "Start even if the working tree has uncommitted changes; they will be swept into agent commits. A "
+            "round that instead takes such a change back off the disk, leaving content git holds nowhere, is "
+            "reported by path and stops the run, because nothing later can recover it."
+        ),
     )
     parser.add_argument(
         "--continue-on-no-commit",
@@ -2620,6 +2762,43 @@ def report_landed_stall(record: RoundRecord, number: int, landed: set[str]) -> N
     print("commit their work to recover this round's. The work stays exactly where it is.")
     record.stalled = True
     record.uncommitted_paths = sorted(landed)
+
+
+def report_destroyed_dirty(record: RoundRecord, number: int, destroyed: set[str]) -> None:
+    """Say that a round took the operator's uncommitted content off the disk, and record it.
+
+    The loudest report the loop makes, because it is the only one about work that
+    cannot be got back. The two stalls above name work that is still in the tree and
+    is merely unreviewed, and both leave the operator something to commit; this names
+    content that was in the tree when the round began, reached no commit, no index and
+    no stash, and is not under any name now. The loop cannot restore it, and saying so
+    in the same sentence as the path is the whole point: an operator told only that a
+    file changed would go looking for a copy that does not exist.
+
+    Named on its own field in `run.json` rather than folded into `uncommitted_paths`,
+    which is what a stall left behind for somebody to commit. There is nothing left to
+    commit here, and a reader days later has to be able to tell the round that mislaid
+    work from the round that destroyed it. `stalled` is set for both, because a round
+    that did this is not one that ran clean.
+
+    The run stops on it, which is the report's other half. Every other guard here can
+    afford to carry its finding forward, because the thing it protects is still on the
+    disk to be found later; this one cannot, because a later round only buries the
+    round that did it further up the log. Stopping puts the report at the end of the
+    console, the destroying round at the end of `run.json`, and the tree in front of an
+    operator who still remembers what they had been editing.
+    """
+    print(
+        f"\nround {number}: this round removed the operator's uncommitted content from {len(destroyed)} "
+        "path(s). Each was dirty when the round began and is not dirty now, and the bytes it held then are "
+        "in no commit, no index and no stash, and under no name in the tree:"
+    )
+    for path in listed("\n".join(sorted(destroyed)), 20).splitlines():
+        print(f"  {path}")
+    print("the loop cannot hand that content back: git never saw it, so there is nothing to restore it from.")
+    print("nothing else was touched, and the run stops here so the round that did it is still the last event.")
+    record.stalled = True
+    record.destroyed_paths = sorted(destroyed)
 
 
 def recover_stalled_round(
@@ -2924,6 +3103,14 @@ def main(argv: list[str] | None = None) -> int:
     # question this run asks about the working tree, and every commit it makes of
     # one, leaves them out: a review of a round is not part of that round.
     paperwork = (review_root, log_root, checkout_dir)
+    # The tree the run itself starts with, which under --allow-dirty is the
+    # operator's own uncommitted work and nobody else's. Distinct from a round's
+    # `inherited_dirty`: that one holds, by round two, whatever the rounds before it
+    # left lying about as well, which is the right set for asking what a round wrote
+    # into and the wrong one for asking whose content has just disappeared. Read
+    # before any round runs, through the same helper and with the same paperwork left
+    # out, so the two sets are comparable. See `destroyed_inherited_dirty`.
+    operator_dirt = set() if options.dry_run else dirty_paths(repo, paperwork)
     has_network = reviewer_network(options.codex_sandbox, options.codex_arg)
 
     print(f"repository : {repo}")
@@ -3083,6 +3270,10 @@ def main(argv: list[str] | None = None) -> int:
             # range -- and in the default separate checkout these files do not
             # exist at all -- so no round's clean verdict ever inspects it.
             kept_uncommitted = ""
+            # Inherited-dirty paths this round emptied of content nobody can get back.
+            # Filled in by the reconciliation below and read after the commit list, so
+            # the report that names them is the last thing on the console.
+            destroyed: set[str] = set()
             if left_behind and options.stall_retry:
                 try:
                     recover_stalled_round(setup, record, number, task, branch, previous_review, paperwork, inherited)
@@ -3206,15 +3397,51 @@ def main(argv: list[str] | None = None) -> int:
                 if first_landing and rewritten:
                     report_landed_stall(record, number, rewritten)
                     outstanding_paths |= rewritten
+                # The same tree read the other way round. Everything above is about
+                # work that arrived: a path that joined the dirty set, or one already
+                # in it that this round wrote into. The event no such reading can
+                # reach is a path *leaving* the set -- the operator's dirty file put
+                # back to its committed content -- because there is then no line, no
+                # new dirt and no still-dirty path to compare, and every guard here
+                # goes quiet at once while the operator's work is gone off the disk.
+                # It is asked of every round, not only one that committed nothing:
+                # a round that commits elsewhere and reverts this file destroys just
+                # as much. It costs nothing until a path actually leaves the dirty
+                # set, which on a clean tree never happens. And it is asked only of
+                # the tree the run started with, not of everything dirty when this
+                # round began: a previous round's leftovers are also inherited dirt
+                # by round two, they belong to the guards above that follow them by
+                # inode and by content, and a round moving its predecessor's work
+                # about is what those exist to permit. See
+                # `destroyed_inherited_dirty`.
+                destroyed = destroyed_inherited_dirty(repo, present_dirty, operator_dirt, inherited_blobs)
             if not new_commits and not options.dry_run:
                 print(f"\nround {number}: Claude Code produced no commit.")
-                if not options.continue_on_no_commit:
+                # `destroyed` has a stop of its own, a few lines down and for the same
+                # exit code. It is the more specific one and has to be the last thing
+                # read, so this one stands aside rather than ending the run over a
+                # round that declined while a file it emptied goes unnamed.
+                if not options.continue_on_no_commit and not destroyed:
                     print("stopping as stalled; pass --continue-on-no-commit to keep going.", file=sys.stderr)
                     exit_code = EXIT_STALLED
                     break
             else:
                 for line in new_commits:
                     print(f"  commit {line}")
+            if destroyed:
+                report_destroyed_dirty(record, number, destroyed)
+                # The report is the part to be read, so it leaves first. Piped to a
+                # file, which is how an overnight run is read afterwards, stdout is
+                # block buffered while stderr is not, and the one-line stop would
+                # otherwise arrive ahead of the paths it is about.
+                sys.stdout.flush()
+                print(
+                    f"stopping as stalled: round {number} left {len(destroyed)} path(s) of the operator's "
+                    "uncommitted work unrecoverable, and no later round can put that right.",
+                    file=sys.stderr,
+                )
+                exit_code = EXIT_STALLED
+                break
 
             diff_range = f"{last_head}..{head}" if head != last_head else f"{baseline}..{head}"
             last_head = head
