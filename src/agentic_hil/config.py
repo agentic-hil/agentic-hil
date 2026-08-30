@@ -557,12 +557,58 @@ def project_config_directory() -> Path:
     return (config_root / "agentic-hil" / "projects").resolve()
 
 
-def project_config_path(workspace: str | Path) -> Path:
+def project_config_directories() -> tuple[Path, ...]:
+    """Every root a per-workspace configuration may live under, best first.
+
+    The platform default, then ``~/.agentic-hil/projects``, which is the same
+    pair and the same order ``provisionable_state_root`` walks and the location
+    every path refusal already names as a safe answer. It grew the second entry
+    for the reason `state_root` grew one: inside an MSIX AppContainer the
+    platform default is virtualized, and the lock write under it is refused by
+    the enforcer's resolve-identity check, so a stock installation dead-ended on
+    ``agentic-hil init`` with ``AGENTIC_HIL_CONFIG`` as the only manual lever
+    (#354).
+
+    Naming only. Nothing here is created, opened or validated, because half the
+    callers are asking which configurations exist rather than where to write one.
+    ``authoritative_config_target`` is what picks a usable root out of these.
+    """
+    default = project_config_directory()
+    fallback = absolute_without_symlinks(Path(safe_user_root()) / "projects")
+    if os.path.normcase(str(default)) == os.path.normcase(str(fallback)):
+        return (default,)
+    return (default, fallback)
+
+
+def project_config_leaf(workspace: str | Path) -> str:
+    """The per-workspace directory name, which no root changes."""
     resolved = Path(workspace).resolve()
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", resolved.name).strip(".-") or "workspace"
     identity = os.path.normcase(str(resolved))
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
-    return project_config_directory() / f"{safe_name}-{digest}" / PROJECT_CONFIG_FILENAME
+    return f"{safe_name}-{digest}"
+
+
+def project_config_candidates(workspace: str | Path) -> tuple[Path, ...]:
+    leaf = project_config_leaf(workspace)
+    return tuple(root / leaf / PROJECT_CONFIG_FILENAME for root in project_config_directories())
+
+
+def project_config_path(workspace: str | Path) -> Path:
+    """Where this workspace's configuration is, or where it would go.
+
+    An existing file wins over the preference order, so a bench that had to be
+    generated under the fallback root is found again by every later load; where
+    none exists the answer is the platform default, exactly as before. Two files
+    is a deterministic preference rather than an ambiguity: the default one is
+    canonical and the other is not, and `load_authoritative_config` says so.
+    """
+    candidates = project_config_candidates(workspace)
+    for candidate in candidates:
+        with suppress(OSError):
+            if candidate.is_file():
+                return candidate
+    return candidates[0]
 
 
 def tool_owned_user_roots() -> tuple[Path, ...]:
@@ -1182,6 +1228,45 @@ def safe_writable_directory(directory: str | Path, *, field: str, config_path: s
     return path
 
 
+def resolve_stable_directory(directory: Path, *, field: str, config_path: str | None = None) -> Path:
+    """``directory``, proven to be the spelling every later write will accept.
+
+    ``safe_file_path`` refuses any file whose parent does not resolve to itself,
+    and that is the enforcer every write in this package passes through. A
+    directory can pass ``safe_writable_directory`` and still fail it: an MSIX
+    AppContainer virtualizes ``%APPDATA%``/``%LOCALAPPDATA%``, so
+    ``C:\\Users\\<u>\\AppData\\Local\\agentic-hil`` opens, creates and writes
+    exactly as it reads while resolving onto the package's ``LocalCache`` tree.
+    Nothing in the chain looks unusual on the way past: no reparse point, no
+    symlink, link count one, and ``samestat`` holds, because the indirection
+    lives in name resolution alone.
+
+    The directory itself is what is asked, not each descendant, because
+    redirection is a property of the tree: a root that resolves to itself is
+    outside a redirected one, and a root that does not takes every path under it
+    with it.
+
+    The refusal carries ``resolved_parent`` beside ``path`` because those two
+    spellings are the whole finding, and the resolved one is the answer: it is
+    the spelling that works.
+    """
+    try:
+        resolved = directory.resolve()
+    except OSError as error:
+        raise ConfigError(
+            "unsafe_configured_path",
+            "Configured directory could not be resolved to a real location.",
+            {"field": field, "path": str(directory), "backend_error": str(error), **({"config_path": config_path} if config_path else {})},
+        ) from error
+    if resolved != directory:
+        raise ConfigError(
+            "unsafe_configured_path",
+            "Configured directory resolves to a different location, so every write under it would be refused.",
+            {"field": field, "path": str(directory), "resolved_parent": str(resolved), **({"config_path": config_path} if config_path else {})},
+        )
+    return directory
+
+
 def secure_optional_read_bytes(file_path: str | Path) -> bytes | None:
     """Read a user file as bytes, or return None when it is absent.
 
@@ -1584,17 +1669,50 @@ def authoritative_config_target(workspace: Path) -> Path:
     """Where this workspace's authoritative configuration belongs.
 
     The operator's ``AGENTIC_HIL_CONFIG`` wins when it is set, because that is
-    the one location a running server actually reads; otherwise the canonical
-    per-workspace path. Never inside the workspace, where repository content
-    could rewrite policy."""
+    the one location a running server actually reads. Otherwise the first
+    candidate root that can actually hold the file: the platform default, and
+    then ``~/.agentic-hil/projects``, on the same terms and in the same order
+    ``provisionable_state_root`` walks its own. A root that already holds this
+    workspace's configuration is taken before either, so a regeneration lands
+    where the file already is.
+
+    Applied here rather than in ``project_config_path`` because this is the
+    creating caller and the only one entitled to make a directory: the tests are
+    that the per-workspace directory can be created, can be written, and is the
+    spelling it resolves to, which is what the lock and the file write will each
+    ask for in turn. Never inside the workspace, where repository content could
+    rewrite policy."""
     configured = os.environ.get(CONFIG_ENV)
     if configured:
         requested = Path(configured).expanduser()
         if not requested.is_absolute():
             raise ConfigError("config_invalid", f"{CONFIG_ENV} must contain an absolute path.", {"path": configured, "environment_variable": CONFIG_ENV})
-        target = absolute_without_symlinks(requested)
-    else:
-        target = project_config_path(workspace)
+        return _config_target_outside_workspace(absolute_without_symlinks(requested), workspace)
+    candidates = [_config_target_outside_workspace(candidate, workspace) for candidate in project_config_candidates(workspace)]
+    # Two passes, and the order between them is the whole of it. An existing file
+    # wins over every candidate root, including one earlier in the preference
+    # order that could be created now: a configuration already written under the
+    # fallback is this workspace's authoritative file, and answering with a path
+    # beside it would have `project_config_set` refuse every write as "not this
+    # workspace's authoritative file" and `init --force` generate a second one
+    # somewhere else. Interleaving the two questions per candidate is exactly
+    # that bug, which is why they are separated here.
+    for target in candidates:
+        with suppress(OSError):
+            if target.is_file():
+                return target
+    failure: ConfigError | None = None
+    for target in candidates:
+        try:
+            resolve_stable_directory(safe_writable_directory(target.parent, field="config_path"), field="config_path")
+        except ConfigError as error:
+            failure = error
+            continue
+        return target
+    raise failure or ConfigError("unsafe_configured_path", "No trusted configuration location is available on this profile.", {"field": "config_path"})
+
+
+def _config_target_outside_workspace(target: Path, workspace: Path) -> Path:
     if is_path_within_frozen(target, workspace):
         raise ConfigError("config_invalid", "The authoritative config must be stored outside the workspace.", {"path": str(target), "workspace_root": str(workspace)})
     return target
@@ -1605,10 +1723,12 @@ def provisionable_state_root(workspace: Path) -> Path:
 
     The documented default lands under ``%LOCALAPPDATA%``/``$XDG_STATE_HOME``,
     and on a stock Windows 11 profile that inherits AppData's app-capability ACE
-    and is rejected. A generated configuration that named it would be
-    written and then refused on load, so the trusted fallback under
-    ``~/.agentic-hil`` — the same location every refusal already recommends — is
-    tried next. When neither passes, the caller gets the same
+    and is rejected. Inside an MSIX AppContainer the same default is writable and
+    resolves onto the package's private tree, which the enforcer refuses just as
+    firmly and far later. A generated configuration that named either would be
+    written and then refused, so the trusted fallback under ``~/.agentic-hil``,
+    the same location every refusal already recommends, is tried next. When
+    neither passes, the caller gets the same
     ``unsafe_configured_path`` refusal, carrying the same remediation, that the
     CLI returns."""
     candidates: list[Path] = []
@@ -1629,11 +1749,16 @@ def provisionable_state_root(workspace: Path) -> Path:
             )
             continue
         try:
-            # The same test `validated_state_root` will apply when the generated
-            # file is loaded, writability included. Selecting on the weaker one
-            # is what this function exists to stop: a candidate that opens and
-            # cannot be written would be written down and then refused on load.
-            return safe_writable_directory(candidate, field="state_root")
+            # Every test a later write will apply, applied here. That is
+            # `validated_state_root`'s, writability included, and it is also
+            # `safe_file_path`'s resolve-identity check, which is the enforcer
+            # each report, log and lease under this root actually meets.
+            # Selecting on any weaker test is what this function exists to stop:
+            # a candidate that opens and cannot be written, or one that resolves
+            # somewhere else, would be written down and then refused, and the
+            # second of those refuses the whole bench with `audit_unavailable`
+            # on a `state_root` nothing in the generated file can repair (#353).
+            return resolve_stable_directory(safe_writable_directory(candidate, field="state_root"), field="state_root")
         except ConfigError as error:
             failure = error
     raise failure or ConfigError("unsafe_configured_path", "No trusted state_root location is available on this profile.", {"field": "state_root"})
@@ -1935,7 +2060,22 @@ def safe_file_path(file_path: str | Path, workspace: str | Path | None = None) -
         existing = os.lstat(path)
     except FileNotFoundError:
         existing = None
-    if path.parent.resolve() != path.parent or (existing is not None and (not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1)):
+    # Split from the object check below, because the two refusals ask a caller to
+    # look at completely different things and one sentence covering both sent an
+    # operator down a chain that had nothing wrong with it. This one is about the
+    # parent naming a different place than it resolves to, which is what a
+    # symlinked component does and equally what an MSIX AppContainer's
+    # virtualized %APPDATA% does with no symlink anywhere on the chain. So it
+    # carries `resolved_parent`, the spelling it compared against and the one
+    # that works, instead of asserting a symlink that may not exist (#354).
+    resolved_parent = path.parent.resolve()
+    if resolved_parent != path.parent:
+        raise ConfigError(
+            "unsafe_configured_path",
+            "Output file's parent directory resolves to a different location than it names.",
+            {"path": str(path), "resolved_parent": str(resolved_parent)},
+        )
+    if existing is not None and (not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1):
         raise ConfigError(
             "unsafe_configured_path",
             "Output file must be a single-link regular file without symlinked parents.",

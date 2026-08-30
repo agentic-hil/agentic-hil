@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 import yaml
-from conftest import FAKE_OPENOCD, FAKE_STLINK, write_authoritative_config
+from conftest import FAKE_GDB, FAKE_OPENOCD, FAKE_STLINK, write_authoritative_config
 
 from agentic_hil.config import SURVIVING_SECTION_KEYS, config_schema, load_authoritative_config
 from agentic_hil.configwrite import (
@@ -1365,6 +1365,141 @@ def test_a_switch_the_new_backend_refuses_a_field_of_puts_the_previous_file_back
     assert refused["allowed_values"] == ["hotplug"]
     assert settled["ok"] is True, settled
     assert load_authoritative_config(workspace).debuggers["dut"].type == "openocd"
+
+
+# ---------------------------------------------------------------------------
+# `debug.gdb_executable`, the one description key of a section whose other
+# settable key is a grant.
+
+
+def test_the_gdb_this_bench_reads_with_is_opened_by_the_description_grant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The key an operator whose GDB lives off PATH had no way to set.
+
+    Nobody could: this surface refused it, `adopt-hardware` carried probe
+    identity only, and no grant applied, so the whole of what was left was
+    opening the YAML by hand. Which GDB reads this bench's images is the same
+    class of fact as `debuggers.<name>.executable`, so the description grant
+    alone has to be enough, and the value has to arrive in the file and in the
+    configuration the next load enforces."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    tools = service(workspace)
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE, {})
+        writable = {entry["key"]: entry for entry in described["writable_keys"]}
+        written = tools.call(PROJECT_CONFIG_SET, changes(("debug.gdb_executable", FAKE_GDB.as_posix())))
+    finally:
+        tools.close()
+
+    assert "debug.gdb_executable" in writable
+    assert writable["debug.gdb_executable"]["right"] == CONFIG_DESCRIPTION_RIGHT
+    assert writable["debug.gdb_executable"]["current_value"] is None
+    # What the key is for, and that leaving it null is a working state rather
+    # than a hole, come out of the shipped schema like every other value shape.
+    description = writable["debug.gdb_executable"]["value_schema"]["description"]
+    assert "GDB" in description
+    assert "autodetect" in description
+    assert "arm-none-eabi-gdb, gdb-multiarch and gdb" in description
+    assert written["ok"] is True, written
+    assert written["permissions_changed"] == [], "which GDB reads an image grants nothing"
+    assert document_of(path)["debug"]["gdb_executable"] == FAKE_GDB.as_posix()
+    assert load_authoritative_config(workspace).debug.gdb_executable == str(FAKE_GDB)
+
+
+def test_the_gdb_key_stays_shut_without_the_description_grant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opened by one grant means locked without it, like every description key."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE, {})
+        locked = {entry["key"]: entry for entry in described["locked_keys"]}
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debug.gdb_executable", FAKE_GDB.as_posix())))
+    finally:
+        tools.close()
+
+    assert locked["debug.gdb_executable"]["right"] == CONFIG_DESCRIPTION_RIGHT
+    assert refused["error_type"] == "permission_denied"
+    assert refused["permission"] == CONFIG_DESCRIPTION_RIGHT
+    assert refused["denied_keys"] == ["debug.gdb_executable"]
+    assert path.read_bytes() == before, "nothing changed"
+
+
+def test_the_debug_section_is_split_across_both_rights(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`debug` is the one section with a key on each side of the split.
+
+    `allow_all_symbols` is a grant and `gdb_executable` describes the bench, and
+    they sit directly on the same section rather than one of them being inside a
+    `permissions:` block. So the two have to answer to different grants out of
+    one key model: a bench that handed over the permissions half and not the
+    description half can still take `allow_all_symbols` away and still cannot
+    name a GDB."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True})
+    tools = service(workspace)
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE, {})
+        writable = {entry["key"]: entry for entry in described["writable_keys"]}
+        locked = {entry["key"]: entry for entry in described["locked_keys"]}
+        narrowed = tools.call(PROJECT_CONFIG_SET, changes(("debug.allow_all_symbols", False)))
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debug.gdb_executable", FAKE_GDB.as_posix())))
+    finally:
+        tools.close()
+
+    assert writable["debug.allow_all_symbols"]["right"] == CONFIG_PERMISSIONS_RIGHT
+    assert locked["debug.gdb_executable"]["right"] == CONFIG_DESCRIPTION_RIGHT
+    assert narrowed["ok"] is True, narrowed
+    assert refused["error_type"] == "permission_denied"
+    assert refused["permission"] == CONFIG_DESCRIPTION_RIGHT
+    assert document_of(path)["debug"]["gdb_executable"] is None
+
+
+def test_a_gdb_that_is_not_there_is_refused_in_the_loaders_own_words(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The value shape is the schema's; what a path has to *be* is the loader's.
+
+    A string is a string to the schema, so nothing before the write can tell a
+    GDB from a typo. What can is the rule already standing over every configured
+    executable, and it is applied the way `connect_mode`'s per-backend rule is:
+    the changed document has to load as authoritative before it may replace the
+    one that did. So the refusal is the loader's own, naming this field, and the
+    bench keeps the file it had."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_bytes()
+    missing = (tmp_path / "toolchain" / "arm-none-eabi-gdb").resolve()
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debug.gdb_executable", missing.as_posix())))
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "config_invalid"
+    assert refused["field"] == "debug.gdb_executable"
+    assert refused["summary"].startswith("Configured executable must be an existing single-link regular file."), refused["summary"]
+    assert "the previous file was restored" in refused["summary"]
+    assert path.read_bytes() == before, "nothing changed"
+
+
+def test_a_gdb_inside_the_workspace_is_refused_like_every_other_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The containment rule travels with the key, unchanged and unrestated.
+
+    A toolchain the repository can rewrite is a toolchain an agent can rewrite,
+    which is why no configured executable may live under `workspace_root`. This
+    key is held to it because it is the loader that holds every one of them, so
+    opening the key added no second copy of the rule to keep in step."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_bytes()
+    inside = workspace / "tools" / "arm-none-eabi-gdb"
+    inside.parent.mkdir(parents=True, exist_ok=True)
+    inside.write_text("#!/bin/sh\n", encoding="utf-8")
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debug.gdb_executable", inside.as_posix())))
+    finally:
+        tools.close()
+
+    assert refused["error_type"] == "config_invalid"
+    assert refused["field"] == "debug.gdb_executable"
+    assert refused["summary"].startswith("Configured executables must be stored outside the workspace."), refused["summary"]
+    assert path.read_bytes() == before, "nothing changed"
 
 
 def test_the_server_says_before_the_first_call_that_this_is_the_way_to_change_a_config() -> None:

@@ -45,6 +45,7 @@ from agentic_hil.config import (
     load_config,
     openocd_script_kind,
     permission_summary,
+    project_config_directories,
     project_config_directory,
     project_config_path,
     safe_directory,
@@ -1609,21 +1610,26 @@ def _project_written_deny_rules() -> set[str]:
 
 
 def _visible_project_configurations() -> list[tuple[Path, Path | None]]:
-    """Every project configuration under the config root, with the state root it names.
+    """Every project configuration under a config root, with the state root it names.
 
     `None` for one that cannot be read. A configuration bound by
     `AGENTIC_HIL_CONFIG` lives wherever the operator put it and this walk never
     comes across it; `_recorded_external_configurations` is what says where those
     are, and every caller that has to know the whole set reads both.
+
+    Every root generation may have written under, not only the platform default,
+    or a profile where the default is unusable would have its projects generated
+    into the fallback root and then found by nothing: not `projects`, not the
+    agent rules, not `uninstall` (#354).
     """
     found: list[tuple[Path, Path | None]] = []
-    directory = project_config_directory()
-    with suppress(OSError):
-        if directory.is_dir():
-            for entry in sorted(directory.iterdir()):
-                candidate = entry / PROJECT_CONFIG_FILENAME
-                if candidate.is_file():
-                    found.append((candidate, _configured_state_root(candidate)))
+    for directory in project_config_directories():
+        with suppress(OSError):
+            if directory.is_dir():
+                for entry in sorted(directory.iterdir()):
+                    candidate = entry / PROJECT_CONFIG_FILENAME
+                    if candidate.is_file():
+                        found.append((candidate, _configured_state_root(candidate)))
     return found
 
 
@@ -1647,13 +1653,26 @@ def _uninstall_kept_trees(external_configurations: list[Path] | None) -> list[Js
     """
     configurations = _visible_project_configurations()
     external = external_configurations or []
+    # One entry per root the walk covers, counted separately, because a count
+    # that summed both roots under the name of one would misreport exactly the
+    # profile the second root exists for. The platform default is always named,
+    # being the canonical location; the fallback root only where it holds
+    # something, so an ordinary profile's report does not grow an empty line.
+    roots = project_config_directories()
+    counts = {os.path.normcase(str(root)): 0 for root in roots}
+    for config_path, _state_root in configurations:
+        key = os.path.normcase(str(config_path.parent.parent))
+        if key in counts:
+            counts[key] += 1
     kept: list[JsonObject] = [
         {
             "what": "project configurations",
-            "path": str(project_config_directory()),
-            "count": len(configurations),
+            "path": str(root),
+            "count": counts[os.path.normcase(str(root))],
             "reason": _KEPT_CONFIGURATION,
         }
+        for index, root in enumerate(roots)
+        if index == 0 or counts[os.path.normcase(str(root))]
     ]
     kept.extend(
         {"what": "externally bound project configuration", "path": str(config_path), "reason": _KEPT_CONFIGURATION}
@@ -2034,14 +2053,18 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
         holds = bench_open_holds(current)
         if holds is not None:
             return {}, _init_open_run_refusal(current, holds), unleased
-    discovery, refusal = discover_for_generation(
+    discovery, refusal, unaudited = discover_for_generation(
         current,
         None,
         tool=CLI_INIT,
         reason_prefix=CLI_INIT,
         frontend="operator-cli",
     )
-    return discovery, refusal, unleased
+    # `unleased` is this function's own answer and is the more specific of the
+    # two: it names why the file could not be loaded at all. `unaudited` is the
+    # case where it loaded and nothing can be written under the `state_root` it
+    # names, which is the other way a generation reads a board with no lease.
+    return discovery, refusal, unleased or unaudited
 
 
 def _init_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObject:
@@ -2095,9 +2118,10 @@ def _init_lease_note(unleased: str | None) -> JsonObject:
         "leased": False,
         "reason": unleased,
         "summary": (
-            "This workspace had no loadable configuration to lease or audit against, so the attached probe was read "
-            "directly. That is the one case where nothing on this machine can be holding a board on this project's "
-            "behalf; every read after this one goes through the lease."
+            "This workspace had nothing to lease or audit against, so the attached probe was read directly: either no "
+            "configuration loaded, or the one that loaded named a state_root nothing can be written under, which is "
+            "the condition this command repairs. The machine-wide device locks were held for the read either way. "
+            "Every read after this one goes through the lease."
         ),
     }
 
@@ -2836,8 +2860,9 @@ def _protected_trees_still_wanted(config_path: Path, state_root: Path) -> set[st
     could only make the refresh depend on a read the run does not need.
     """
     wanted = {config_path.parent, state_root}
-    directory = project_config_directory()
-    if directory.is_dir():
+    for directory in project_config_directories():
+        if not directory.is_dir():
+            continue
         try:
             entries = list(directory.iterdir())
         except OSError:
@@ -2891,7 +2916,8 @@ def _configuration_the_projects_walk_finds(config_path: Path) -> bool:
     candidate = absolute_without_symlinks(config_path)
     if candidate.name != PROJECT_CONFIG_FILENAME:
         return False
-    return os.path.normcase(str(candidate.parent.parent)) == os.path.normcase(str(project_config_directory()))
+    roots = {os.path.normcase(str(root)) for root in project_config_directories()}
+    return os.path.normcase(str(candidate.parent.parent)) in roots
 
 
 def _recorded_external_configurations() -> list[Path] | None:

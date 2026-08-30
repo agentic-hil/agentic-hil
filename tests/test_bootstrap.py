@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import FAKE_STLINK, write_config
+from conftest import FAKE_GDB, FAKE_STLINK, write_config
 
 import agentic_hil.cli
 import agentic_hil.tools
@@ -19,12 +19,14 @@ from agentic_hil.bootstrap import (
     PROFILE_KEYS_READ,
     PROJECT_PROFILE,
     apply_discovery_to_template,
+    autodetected_gdb,
     correlate_com_port,
     discover_attached_hardware,
     select_probe_id,
 )
 from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, adopt_hardware, init_config
 from agentic_hil.config import (
+    GDB_AUTODETECT_CANDIDATES,
     ConfigError,
     debugger_drives_hardware,
     debugger_is_placeholder,
@@ -705,6 +707,72 @@ def test_a_configuration_init_wrote_leaves_adopt_hardware_nothing_to_carry(tmp_p
 
 
 # ---------------------------------------------------------------------------
+# The GDB this host answers with, which both paths read the same way.
+
+
+def test_discovery_reports_the_first_gdb_the_loader_would_have_picked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One list, one order, read from the loader rather than repeated here.
+
+    A discovery that offered a different GDB from the one the runtime fallback
+    resolves would be recommending a change of behaviour while claiming to write
+    down the current one. So the candidates and their order are the loader's, and
+    `arm-none-eabi-gdb` wins over a plain `gdb` that is also installed."""
+    monkeypatch.setattr("agentic_hil.bootstrap.shutil.which", lambda name: f"/opt/{name}" if name in {"gdb-multiarch", "gdb"} else None)
+    assert autodetected_gdb() == "/opt/gdb-multiarch"
+
+    monkeypatch.setattr("agentic_hil.bootstrap.shutil.which", lambda name: f"/opt/{name}")
+    assert autodetected_gdb() == f"/opt/{GDB_AUTODETECT_CANDIDATES[0]}"
+
+    monkeypatch.setattr("agentic_hil.bootstrap.shutil.which", lambda name: None)
+    assert autodetected_gdb() is None
+
+
+def test_a_generated_configuration_names_the_gdb_this_host_answers_with(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`init` writes the toolchain it found, and adoption is left nothing.
+
+    The same invariant as the test above, extended to the key that made it
+    breakable: adoption now fills `debug.gdb_executable`, so a generation that
+    left it null would have `adopt-hardware` repairing a file `init` had written
+    a second earlier, on a machine where both read the same PATH. Writing it
+    changes what the file *says* and not what it resolves to, because with the
+    key null the loader runs this very lookup at every load."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _one_attached_stlink(monkeypatch)
+    monkeypatch.setattr("agentic_hil.bootstrap.autodetected_gdb", lambda: FAKE_GDB.as_posix())
+
+    result = init_config()
+    assert result["ok"] is True, result
+    written = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
+    assert written["debug"]["gdb_executable"] == FAKE_GDB.as_posix()
+    assert load_authoritative_config(workspace).debug.gdb_executable == str(FAKE_GDB)
+
+    plan = adopt_hardware(dry_run=True)
+    assert plan["ok"] is True, plan
+    assert plan["carried"] == []
+    assert "debug.gdb_executable" in {item["key"] for item in plan["already_current"]}
+
+
+def test_a_host_with_no_gdb_generates_the_null_that_autodetects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing found is written as nothing, which is a working configuration.
+
+    This is the state the report came from: the tool installed before the
+    toolchain, so generation had no GDB to name. The file has to stay loadable
+    and the key has to stay the one the runtime fallback reads, so that plugging
+    the toolchain in later and running `adopt-hardware` is the whole repair."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _one_attached_stlink(monkeypatch)
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    assert yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))["debug"]["gdb_executable"] is None
+
+
+# ---------------------------------------------------------------------------
 # `init --force` is the reset, and it names what the reset cost.
 
 # The sentences that had to go. Every one was true of
@@ -1335,7 +1403,10 @@ def test_the_first_init_of_a_workspace_reads_directly_and_says_so(tmp_path: Path
         "reason": "config_file_not_found",
         "summary": first["hardware_lease"]["summary"],
     }
-    assert "no loadable configuration" in first["hardware_lease"]["summary"]
+    # The `reason` is what says which of the two unleased cases this is; the
+    # summary names both, because the other one, a configuration that loads and
+    # whose state_root nothing can be written under, reaches the same note.
+    assert "no configuration loaded" in first["hardware_lease"]["summary"]
     # And the very next one is leased, because by then there is something to
     # lease against. The unleased read is the first and only the first.
     assert init_config(force=True)["hardware_lease"] == {

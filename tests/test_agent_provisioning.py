@@ -37,6 +37,9 @@ from agentic_hil.bench import BenchMutex
 from agentic_hil.config import (
     config_schema,
     load_authoritative_config,
+    project_config_directories,
+    project_config_directory,
+    project_config_leaf,
     project_config_path,
     provisionable_state_root,
     user_state_root,
@@ -45,7 +48,7 @@ from agentic_hil.configreload import PROJECT_CONFIG_RELOAD
 from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET
 from agentic_hil.contracts import MCP_TOOL_NAMES, MCP_TOOLS, TOOL_SCHEMAS
 from agentic_hil.coordination import HardwareLease
-from agentic_hil.knowledge import CONFIG_SHAPE_URI, EXCLUSIVE_FLASH_PERMISSIONS, read_resource
+from agentic_hil.knowledge import CONFIG_SHAPE_URI, EXCLUSIVE_FLASH_PERMISSIONS, read_resource, safe_user_root
 from agentic_hil.mcp import SERVER_INSTRUCTIONS, handle_mcp_message
 from agentic_hil.report import read_last_report
 from agentic_hil.tools import (
@@ -677,18 +680,49 @@ def test_a_refused_state_root_falls_back_to_a_location_that_passes(tmp_path: Pat
     assert written_document(result)["state_root"] == str(fallback)
 
 
-def test_a_refused_config_location_returns_the_actionable_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Where no location can be picked, the refusal has to carry the way out.
+def _block_config_directory(root: Path, workspace: Path) -> Path:
+    """Put a file where this workspace's configuration directory belongs."""
+    blocked = root / project_config_leaf(workspace)
+    blocked.parent.mkdir(parents=True, exist_ok=True)
+    blocked.write_text("a file where the configuration directory belongs", encoding="utf-8")
+    return blocked
 
-    The configuration's own location is fixed by discovery rules, so unlike
-    state_root there is nothing to fall back to. What the caller gets is the
-    error type and the remediation the CLI returns for the same wall.
+
+def test_a_refused_config_location_falls_through_to_the_trusted_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The configuration's own location has the walk `state_root` has (#354).
+
+    It did not, and a stock installation inside an MSIX-packaged host therefore
+    dead-ended on a refusal whose own remediation named `~/.agentic-hil` as a safe
+    answer that no code path took.
     """
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
-    target = project_config_path(workspace)
-    target.parent.parent.mkdir(parents=True, exist_ok=True)
-    target.parent.write_text("a file where the configuration directory belongs", encoding="utf-8")
+    _block_config_directory(project_config_directory(), workspace)
+    service = UnprovisionedToolService(workspace)
+    try:
+        created = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+
+    assert created["ok"] is True, created
+    assert Path(created["path"]).parent.parent == Path(safe_user_root()) / "projects"
+    # And it is found again from there, or the fall-through would have written a
+    # file nothing can load.
+    assert project_config_path(workspace) == Path(created["path"])
+    assert load_authoritative_config(workspace).config_path == created["path"]
+
+
+def test_a_refused_config_location_returns_the_actionable_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where no location can be picked, the refusal has to carry the way out.
+
+    The fall-through is a fallback and not a promise that one always exists, so
+    with both candidate roots blocked what the caller gets is the error type and
+    the remediation the CLI returns for the same wall.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    for root in project_config_directories():
+        _block_config_directory(root, workspace)
     service = UnprovisionedToolService(workspace)
     try:
         refused = service.call(PROJECT_CONFIG_CREATE)

@@ -944,9 +944,15 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "unsafe_configured_path": ErrorRemedy(
         meaning=(
             "A configured path is not the kind of object it has to be: a component of it is a symlink, or is a file "
-            "where a directory was needed, or the final object is not a single-link regular file. The path was refused "
+            "where a directory was needed, or the final object is not a single-link regular file, or its parent names "
+            "one place and resolves to another. The path was refused "
             "before anything was read from it or written to it, because following it would act on an object other than "
             "the one the configuration names. "
+            "The last of those has no symlink in it at all and is what a packaged agent host does to this profile: an "
+            "MSIX AppContainer virtualizes %APPDATA% and %LOCALAPPDATA%, so a path under either creates, opens and "
+            "writes exactly as it reads while resolving onto the package's private LocalCache tree. Walking such a "
+            "chain finds nothing: no reparse point, no symlink, link count 1, and samestat holds, because the "
+            "indirection lives in name resolution alone. "
             "This is about what the path *is*, not about who else on the machine holds rights on it. That second "
             "question used to be asked — a Windows ACL walk and a POSIX mode/sticky-bit walk over every ancestor — and "
             "it was removed in 0.8.0: it could only ever defend against a different account on the same "
@@ -954,11 +960,15 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "processes, which own these objects and can rewrite them regardless of any ACL."
         ),
         remediation=(
-            "Read `path`, and `component` when the refusal carries one: that is the part of the chain that stopped the "
-            "walk. Replace the symlink with a real directory, or point the setting at a path that does not go through "
-            "it.",
+            "Read `resolved_parent` first when the refusal carries one: the parent of `path` resolves to that other "
+            "spelling, and the resolved spelling is the one that works. Point the setting at it, or at a location "
+            "outside the redirected tree. Do not go looking for a symlink; on this profile there is none to find.",
+            "Read `component` when the refusal carries one: that is the part of the chain that stopped the walk, and "
+            "there the object really is a symlink or a file where a directory was needed. Replace it with a real "
+            "directory, or point the setting at a path that does not go through it.",
             "{safe_user_root} is a location this tool creates for itself and is a safe answer when the discovered "
-            "default cannot be used.",
+            "default cannot be used. `agentic-hil init` and `project_config_create` fall back to it on their own for "
+            "both the configuration and the state_root, so re-running either is usually the whole fix.",
             "Re-run the command that failed. Nothing else has to change.",
             "Where each file may live: MCP resource " + PLATFORM_PATHS_URI + ".",
         ),
@@ -2674,6 +2684,23 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # version 3 requires the file to state it.
     ConfigKeyRule("com_ports", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("device", "baudrate", "serial_number", "vid", "pid", "identity_source")),
     ConfigKeyRule("can_buses", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
+    # And the one description key the `debug` section carries. Which GDB reads
+    # this bench's images is the same class of fact as
+    # `debuggers.<name>.executable`: a toolchain on this host, named in the file
+    # because only this host knows where it is. It grants nothing, every tool
+    # that reads it is gated by the debug permissions beside it, and a bench
+    # whose GDB lives off PATH had no sanctioned way to say so: generation
+    # writes `null` whenever the generating shell had none, adoption carried
+    # probe identity only, and this surface refused the key. What was left was
+    # hand-editing the authoritative file, the move the doctrine tells agents
+    # never to make and tells operators they should not need (#355).
+    #
+    # `debug` is therefore the one section with a key on each side of the split,
+    # which is why both of its rules name their fields explicitly: a dotted key
+    # resolves against the rule whose fields contain it, so `gdb_executable`
+    # lands on the description right and `allow_all_symbols` on the permissions
+    # right, out of one model rather than two.
+    ConfigKeyRule("debug", named=False, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("gdb_executable",)),
     # The permissions half, every block of it.
     ConfigKeyRule("permissions", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT),
     ConfigKeyRule("debuggers", named=True, under_permissions=True, right=CONFIG_PERMISSIONS_RIGHT),
@@ -2877,7 +2904,11 @@ _SECTION_PURPOSE: dict[str, str] = {
     "provenance": "Who wrote this file and who last changed it. A note to a reader; nothing reads it as policy.",
     "target": f"What board this is. Names in reports; `controller` is what a human recognises. Which field actually selects a target per backend, and known-good values: {TARGET_SUPPORT_URI}.",
     "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. `type` names the debug stack that drives the entry and is settable like the rest of the description, but only as a whole switch: a change to it has to arrive with whatever the backend it names requires, or it is refused naming what is missing. Which of these fields each backend requires, discovers, ignores or refuses, `type` and `connect_mode` included: {DEBUGGER_BACKENDS_URI}.",
-    "debug": "Typed GDB session settings: which symbols may be read and how much.",
+    "debug": (
+        "Typed GDB session settings: which GDB reads this bench's images, which symbols may be read and how much. "
+        "`gdb_executable` is the description half of this section and is settable behind "
+        f"`{CONFIG_DESCRIPTION_RIGHT}`; `allow_all_symbols` is a grant and belongs to the other right."
+    ),
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
     "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. From `version: 3` on an entry must say which of them identifies it: a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else an explicit `identity_source` — `vid_pid` for an adapter publishing USB ids but no serial, `device` for one publishing neither. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
     "can_buses": (

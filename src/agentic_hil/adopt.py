@@ -9,11 +9,12 @@ one value nobody can guess and nobody transcribes correctly twice.
 
 This is the way back, and it is narrow on purpose:
 
-**It carries identity, and only identity.** ``probe_id``, ``executable``,
-``target.controller`` and a COM device — precisely what an attached probe hands
-you and what the file cannot know without it. Every one of them falls in the
-description half of the configuration write, so this path cannot reach a
-``permissions:`` block at all.
+**It carries what this machine knows, and only that.** ``probe_id``,
+``executable``, ``debug.gdb_executable``, ``target.controller`` and a COM
+device: precisely what an attached probe and the host it hangs off hand you, and
+what a file written on another machine, or before the toolchain was installed,
+cannot state. Every one of them falls in the description half of the
+configuration write, so this path cannot reach a ``permissions:`` block at all.
 
 **It takes no values from its caller.** Arguments *select* — which probe of
 several, which entry receives them — and never supply. The values come from
@@ -463,6 +464,25 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
                 ),
             }
         )
+
+    # The other toolchain a bench names, and the one nothing else could fill in.
+    # `debug.gdb_executable` is not a backend's binary, so it is proposed
+    # whatever `type` the entry carries: the typed session drives GDB on the
+    # OpenOCD backend, and the stlink and pyocd memory reads resolve their
+    # symbols with it offline, so every backend here has a use for it. Sorted by
+    # the same three-way rule as everything above, which is what makes a GDB an
+    # operator chose come back under `kept` rather than being replaced by
+    # whichever one happens to be first on this host's PATH.
+    _propose(
+        carried,
+        already,
+        kept,
+        key="debug.gdb_executable",
+        section="debug",
+        field="gdb_executable",
+        current=_mapping(document, "debug").get("gdb_executable"),
+        value=discovery.get("gdb_executable"),
+    )
 
     detected = discovery.get("target")
     controller = str(detected.get("controller") or "").lower() if isinstance(detected, dict) else ""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import yaml
 from agentic_hil.backends.common import find_stm32_programmer_cli, invocation, spawn_command
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids, stlink_target_info
 from agentic_hil.comports import list_available_com_ports
-from agentic_hil.config import ConfigError, generated_permissions
+from agentic_hil.config import GDB_AUTODETECT_CANDIDATES, ConfigError, generated_permissions
 from agentic_hil.types import JsonObject, fold_hardware_id
 
 PROJECT_PROFILE = "agentic-hil.config.example.yaml"
@@ -206,6 +207,7 @@ def discover_attached_hardware(
         "tool": "bootstrap_hardware_discovery",
         "backend": BOOTSTRAP_BACKEND,
         "executable": executable,
+        "gdb_executable": autodetected_gdb(),
         "probe_id": probe_id,
         "target": target,
         "com_port": matched_port,
@@ -216,6 +218,28 @@ def discover_attached_hardware(
         "cleanup_required": False,
         "summary": "One attached STM32 target was identified through ST-Link HOTPLUG discovery.",
     }
+
+
+def autodetected_gdb() -> str | None:
+    """The GDB this host answers with when a configuration names none, or None.
+
+    Reported beside the programmer binary because it is the same kind of fact:
+    a toolchain that lives on this host, at a location only this host can state,
+    which is exactly what a configuration written on another machine or before
+    the toolchain was installed cannot know. Nothing is said to a board for it.
+
+    The candidates and their order come from the loader rather than from a
+    second list here, so what discovery offers to write into
+    `debug.gdb_executable` is the very GDB the runtime fallback would have
+    picked while the key stayed null. Pinning it is still worth doing: the
+    fallback is resolved against whatever PATH the server happens to be started
+    with, and the file is the only place that survives a different one.
+    """
+    for candidate in GDB_AUTODETECT_CANDIDATES:
+        found = shutil.which(candidate)
+        if found is not None:
+            return found
+    return None
 
 
 def select_probe_id(requested: str, enumerated: list[str]) -> str | None:
@@ -368,6 +392,19 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             "permissions": {flag: bool(requested_permissions.get(flag, default)) for flag, default in generated_permissions("debuggers").items()},
         }
     }
+
+    # The GDB this host answers with, written down rather than left to be
+    # resolved again on whatever PATH the server is next started with. It costs
+    # nothing to state: with the key null the loader runs this very lookup at
+    # every load and holds the result to the same file checks, so naming it
+    # changes what the file *says* and not what it resolves to. What it buys is
+    # that a bench generated with the toolchain installed keeps naming that GDB
+    # when the server is started from a shell that has lost it, and that
+    # `adopt-hardware` on a freshly generated file has nothing left to carry:
+    # both paths read this machine through this one function.
+    gdb_executable = discovery.get("gdb_executable")
+    if isinstance(gdb_executable, str) and gdb_executable:
+        template["debug"] = {**template.get("debug", {}), "gdb_executable": gdb_executable}
 
     profile_artifacts = profile.get("artifacts")
     if isinstance(profile_artifacts, dict):

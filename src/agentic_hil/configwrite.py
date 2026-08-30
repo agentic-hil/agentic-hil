@@ -917,9 +917,26 @@ def _parse_changes(changes: object) -> list[tuple[ResolvedConfigKey, Any]] | Jso
 
 
 def _rule_for(resolved: ResolvedConfigKey) -> Any:
-    for rule in CONFIG_KEY_RULES:
-        if rule.section == resolved.section and rule.under_permissions == resolved.under_permissions:
+    """The rule a resolved key came out of.
+
+    The section and the depth used to be the whole answer, and stopped being it
+    when `debug` grew a key on each side of the split: `gdb_executable`
+    describes the bench, `allow_all_symbols` grants something, and both sit
+    directly on the same section. So the field decides between two otherwise
+    identical rules, exactly as it does in `resolve_config_key`, rather than the
+    order the rules happen to be written in.
+
+    The claimed *right* deliberately does not decide it. A key model that
+    mislabels a permission as description is the case the boundary is defended
+    against, and this reader has to hand that key back to the layers that catch
+    it rather than fail to find a rule at all. Which is why the section-and-depth
+    match is still the fallback."""
+    covering = [rule for rule in CONFIG_KEY_RULES if rule.section == resolved.section and rule.under_permissions == resolved.under_permissions]
+    for rule in covering:
+        if resolved.field in config_rule_fields(rule):
             return rule
+    if covering:  # pragma: no cover - only a hand-forged key names a field no rule covers
+        return covering[0]
     raise ConfigError("config_invalid", "No key rule covers a key that resolved.", {"field": resolved.key})  # pragma: no cover - resolution comes from the rules
 
 
@@ -1173,10 +1190,20 @@ def _record_provenance(document: JsonObject, keys: list[str], timestamp: str, ac
 
 
 def _rolled_back(target_path: Path, previous_text: str, error: ConfigError) -> JsonObject:
+    """The write the loader refused, with the loader's own sentence kept.
+
+    What this layer knows is that the changed document did not load and the
+    previous file is back. *Why* it did not load is known only where the check
+    lives, and for a key whose whole validation is the loader's (an executable
+    that has to exist, be a single-link file and sit outside the workspace) that
+    sentence is the entire answer. Replacing it left a caller with a field name
+    and no reason: "debug.gdb_executable" says which key, never whether the path
+    was missing, a hard link or inside the workspace. So the loader speaks first
+    and this layer adds what it alone can say."""
     result: JsonObject = {
         "tool": PROJECT_CONFIG_SET,
         **error.to_dict(),
-        "summary": "The changed configuration did not load as authoritative and the previous file was restored. Nothing changed.",
+        "summary": f"{error.summary} The changed configuration did not load as authoritative and the previous file was restored. Nothing changed.",
         "path": str(target_path),
         **NOT_STARTED,
     }
