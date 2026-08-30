@@ -2034,14 +2034,18 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
         holds = bench_open_holds(current)
         if holds is not None:
             return {}, _init_open_run_refusal(current, holds), unleased
-    discovery, refusal = discover_for_generation(
+    discovery, refusal, unaudited = discover_for_generation(
         current,
         None,
         tool=CLI_INIT,
         reason_prefix=CLI_INIT,
         frontend="operator-cli",
     )
-    return discovery, refusal, unleased
+    # `unleased` is this function's own answer and is the more specific of the
+    # two: it names why the file could not be loaded at all. `unaudited` is the
+    # case where it loaded and nothing can be written under the `state_root` it
+    # names, which is the other way a generation reads a board with no lease.
+    return discovery, refusal, unleased or unaudited
 
 
 def _init_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObject:
@@ -2095,9 +2099,10 @@ def _init_lease_note(unleased: str | None) -> JsonObject:
         "leased": False,
         "reason": unleased,
         "summary": (
-            "This workspace had no loadable configuration to lease or audit against, so the attached probe was read "
-            "directly. That is the one case where nothing on this machine can be holding a board on this project's "
-            "behalf; every read after this one goes through the lease."
+            "This workspace had nothing to lease or audit against, so the attached probe was read directly: either no "
+            "configuration loaded, or the one that loaded named a state_root nothing can be written under, which is "
+            "the condition this command repairs. The machine-wide device locks were held for the read either way. "
+            "Every read after this one goes through the lease."
         ),
     }
 

@@ -1182,6 +1182,45 @@ def safe_writable_directory(directory: str | Path, *, field: str, config_path: s
     return path
 
 
+def resolve_stable_directory(directory: Path, *, field: str, config_path: str | None = None) -> Path:
+    """``directory``, proven to be the spelling every later write will accept.
+
+    ``safe_file_path`` refuses any file whose parent does not resolve to itself,
+    and that is the enforcer every write in this package passes through. A
+    directory can pass ``safe_writable_directory`` and still fail it: an MSIX
+    AppContainer virtualizes ``%APPDATA%``/``%LOCALAPPDATA%``, so
+    ``C:\\Users\\<u>\\AppData\\Local\\agentic-hil`` opens, creates and writes
+    exactly as it reads while resolving onto the package's ``LocalCache`` tree.
+    Nothing in the chain looks unusual on the way past: no reparse point, no
+    symlink, link count one, and ``samestat`` holds, because the indirection
+    lives in name resolution alone.
+
+    The directory itself is what is asked, not each descendant, because
+    redirection is a property of the tree: a root that resolves to itself is
+    outside a redirected one, and a root that does not takes every path under it
+    with it.
+
+    The refusal carries ``resolved_parent`` beside ``path`` because those two
+    spellings are the whole finding, and the resolved one is the answer: it is
+    the spelling that works.
+    """
+    try:
+        resolved = directory.resolve()
+    except OSError as error:
+        raise ConfigError(
+            "unsafe_configured_path",
+            "Configured directory could not be resolved to a real location.",
+            {"field": field, "path": str(directory), "backend_error": str(error), **({"config_path": config_path} if config_path else {})},
+        ) from error
+    if resolved != directory:
+        raise ConfigError(
+            "unsafe_configured_path",
+            "Configured directory resolves to a different location, so every write under it would be refused.",
+            {"field": field, "path": str(directory), "resolved_parent": str(resolved), **({"config_path": config_path} if config_path else {})},
+        )
+    return directory
+
+
 def secure_optional_read_bytes(file_path: str | Path) -> bytes | None:
     """Read a user file as bytes, or return None when it is absent.
 
@@ -1605,10 +1644,12 @@ def provisionable_state_root(workspace: Path) -> Path:
 
     The documented default lands under ``%LOCALAPPDATA%``/``$XDG_STATE_HOME``,
     and on a stock Windows 11 profile that inherits AppData's app-capability ACE
-    and is rejected. A generated configuration that named it would be
-    written and then refused on load, so the trusted fallback under
-    ``~/.agentic-hil`` — the same location every refusal already recommends — is
-    tried next. When neither passes, the caller gets the same
+    and is rejected. Inside an MSIX AppContainer the same default is writable and
+    resolves onto the package's private tree, which the enforcer refuses just as
+    firmly and far later. A generated configuration that named either would be
+    written and then refused, so the trusted fallback under ``~/.agentic-hil``,
+    the same location every refusal already recommends, is tried next. When
+    neither passes, the caller gets the same
     ``unsafe_configured_path`` refusal, carrying the same remediation, that the
     CLI returns."""
     candidates: list[Path] = []
@@ -1629,11 +1670,16 @@ def provisionable_state_root(workspace: Path) -> Path:
             )
             continue
         try:
-            # The same test `validated_state_root` will apply when the generated
-            # file is loaded, writability included. Selecting on the weaker one
-            # is what this function exists to stop: a candidate that opens and
-            # cannot be written would be written down and then refused on load.
-            return safe_writable_directory(candidate, field="state_root")
+            # Every test a later write will apply, applied here. That is
+            # `validated_state_root`'s, writability included, and it is also
+            # `safe_file_path`'s resolve-identity check, which is the enforcer
+            # each report, log and lease under this root actually meets.
+            # Selecting on any weaker test is what this function exists to stop:
+            # a candidate that opens and cannot be written, or one that resolves
+            # somewhere else, would be written down and then refused, and the
+            # second of those refuses the whole bench with `audit_unavailable`
+            # on a `state_root` nothing in the generated file can repair (#353).
+            return resolve_stable_directory(safe_writable_directory(candidate, field="state_root"), field="state_root")
         except ConfigError as error:
             failure = error
     raise failure or ConfigError("unsafe_configured_path", "No trusted state_root location is available on this profile.", {"field": "state_root"})

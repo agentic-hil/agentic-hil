@@ -1335,7 +1335,10 @@ def test_the_first_init_of_a_workspace_reads_directly_and_says_so(tmp_path: Path
         "reason": "config_file_not_found",
         "summary": first["hardware_lease"]["summary"],
     }
-    assert "no loadable configuration" in first["hardware_lease"]["summary"]
+    # The `reason` is what says which of the two unleased cases this is; the
+    # summary names both, because the other one, a configuration that loads and
+    # whose state_root nothing can be written under, reaches the same note.
+    assert "no configuration loaded" in first["hardware_lease"]["summary"]
     # And the very next one is leased, because by then there is something to
     # lease against. The unleased read is the first and only the first.
     assert init_config(force=True)["hardware_lease"] == {
