@@ -28,11 +28,18 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agentic_hil.cli import _configuration_the_projects_walk_finds, _visible_project_configurations
 from agentic_hil.config import (
     ConfigError,
+    authoritative_config_target,
     load_authoritative_config,
+    project_config_directories,
+    project_config_directory,
+    project_config_leaf,
+    project_config_path,
     provisionable_state_root,
     resolve_stable_directory,
+    safe_file_path,
     safe_writable_directory,
     user_state_root,
 )
@@ -55,6 +62,14 @@ def virtualize(monkeypatch: pytest.MonkeyPatch, source: Path, destination: Path)
     spelling that was opened, and every other tree on the machine resolves as it
     did. ``destination`` need not exist; the container's backing tree is created
     on first write and the checks under test never look inside it.
+
+    Only a path that *exists* moves, which is the detail the whole profile turns
+    on. The redirect is what the package's writes land in, so a directory that
+    has not been created yet still resolves to the spelling it was named by, and
+    the same directory one ``mkdir`` later resolves into the private tree. That
+    is why a check computing a path before creating it agrees with itself and the
+    write that follows does not, and modelling it any other way makes the two
+    agree and reproduces nothing.
     """
     real = Path.resolve
     prefix = os.path.normcase(str(source))
@@ -62,6 +77,8 @@ def virtualize(monkeypatch: pytest.MonkeyPatch, source: Path, destination: Path)
     def resolve(self: Path, strict: bool = False) -> Path:
         resolved = real(self, strict=strict)
         text = os.path.normcase(str(resolved))
+        if not os.path.lexists(resolved):
+            return resolved
         if text == prefix or text.startswith(prefix + os.sep):
             return Path(str(destination) + str(resolved)[len(str(source)) :])
         return resolved
@@ -243,3 +260,207 @@ def test_every_other_audited_tool_still_proves_its_audit_trail(tmp_path: Path, m
     """The exemption is one call wide, and it is named rather than inferred."""
     assert audited_hardware_tools() - audit_gated_tools() == {PROJECT_CONFIG_CREATE}
     assert PROJECT_CONFIG_CREATE in audited_hardware_tools(), "still blocked while the bench is quarantined"
+
+
+# ---------------------------------------------------------------------------
+# #354: the configuration's own location has the candidate walk too.
+
+
+def virtualized_user_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point this profile's config root at a tree the container redirects."""
+    virtual = tmp_path / "virtual-appdata"
+    virtual.mkdir()
+    monkeypatch.setenv("APPDATA", str(virtual))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(virtual))
+    return virtual
+
+
+def fallback_config_root() -> Path:
+    return Path.home() / ".agentic-hil" / "projects"
+
+
+def test_generation_falls_through_a_virtualized_config_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`state_root` learned this and the configuration's own path had not.
+
+    So a stock installation inside any MSIX-packaged host dead-ended: nothing
+    could be generated at all, and `AGENTIC_HIL_CONFIG` was the only lever, which
+    is a lever a stranger does not find.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+    attached_hardware(monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        created = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+
+    assert created["ok"] is True, created
+    assert Path(created["path"]).parent.parent == fallback_config_root()
+    # The default was tried first and on merit: the walk got as far as creating
+    # the per-workspace directory under the virtualized root, then found it
+    # resolving into the package tree and moved on without writing a file into
+    # it. That directory being there and empty is the evidence.
+    attempted = virtual / "agentic-hil" / "projects" / project_config_leaf(workspace)
+    assert attempted.is_dir()
+    assert not (attempted / "config.yaml").exists()
+
+
+def test_a_configuration_under_the_fallback_root_is_found_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file nothing can load again would be worse than the dead end it fixes.
+
+    So discovery has the same candidate list the creation does, and a bench
+    generated under the fallback root loads, binds and reaches hardware from a
+    fresh server exactly as one under the platform default does.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+    attached_hardware(monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        created = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+
+    assert project_config_path(workspace) == Path(created["path"])
+    loaded = load_authoritative_config(workspace)
+    assert loaded.config_path == created["path"]
+    assert Path(loaded.config_path).parent.parent == fallback_config_root()
+
+
+def test_the_default_config_root_is_still_preferred_when_it_works(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fallback is a fallback, not a relocation of every profile's config."""
+    workspace = bench(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        created = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+
+    assert Path(created["path"]).parent.parent == project_config_directory()
+    assert project_config_directories()[0] == project_config_directory()
+    assert not fallback_config_root().exists()
+
+
+def test_the_projects_walk_finds_what_the_fallback_root_holds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A configuration nothing on disk can find is what #246 was about.
+
+    A second root would have reintroduced exactly that, so the walk every
+    listing, agent-rule refresh and uninstall reads covers both.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+    attached_hardware(monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        created = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+
+    found = [path for path, _state_root in _visible_project_configurations()]
+
+    assert Path(created["path"]) in found
+    assert _configuration_the_projects_walk_finds(Path(created["path"])) is True
+
+
+# ---------------------------------------------------------------------------
+# #354: the refusal names both spellings and stops sending people after symlinks.
+
+
+def test_the_refusal_carries_the_resolved_spelling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One line instead of an hour of archaeology.
+
+    The chain shows no symlink, no reparse point, nlink 1 everywhere, and
+    samestat holds. Whoever debugs that walks it, finds it clean and is stuck, so
+    the refusal has to hand over the spelling it compared against.
+    """
+    virtual = tmp_path / "virtual-appdata"
+    virtual.mkdir()
+    backing = tmp_path / "package-roaming-cache"
+    target = virtual / "agentic-hil" / "projects" / "config.yaml"
+    target.parent.mkdir(parents=True)
+    virtualize(monkeypatch, virtual, backing)
+
+    with pytest.raises(ConfigError) as refusal:
+        safe_file_path(target)
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["path"] == str(target)
+    assert refusal.value.details["resolved_parent"] == str(backing / "agentic-hil" / "projects")
+    # And it no longer asserts a symlink at a chain that has none.
+    assert "symlink" not in refusal.value.summary
+    remediation = " ".join(refusal.value.to_dict()["remediation"])
+    assert "resolved_parent" in remediation
+    assert str(Path.home() / ".agentic-hil") in remediation
+
+
+def test_a_genuine_symlinked_parent_is_still_covered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The symlink framing stays where a symlink is what is actually there.
+
+    Same error type, same refusal, and `resolved_parent` now names where the link
+    goes, which was the one thing the old message asked the reader to work out.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "linked"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform does not let this process create a symlink")
+
+    with pytest.raises(ConfigError) as refusal:
+        safe_file_path(link / "config.yaml")
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["resolved_parent"] == str(real)
+
+
+def test_the_single_link_regular_file_refusal_is_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Splitting the two conditions must not drop either of them."""
+    directory = tmp_path / "holder"
+    directory.mkdir()
+    not_a_file = directory / "config.yaml"
+    not_a_file.mkdir()
+
+    with pytest.raises(ConfigError) as refusal:
+        safe_file_path(not_a_file)
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert "single-link regular file" in refusal.value.summary
+    assert "resolved_parent" not in refusal.value.details
+
+
+def test_a_configuration_in_the_fallback_root_stays_the_authoritative_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An existing file outranks a candidate root that could be created now.
+
+    The virtualization is what put this bench's configuration under the fallback
+    root, and a host outside the container asks the same question with the
+    platform default perfectly usable. Answering with the default there would
+    have `project_config_set` refuse every write as not this workspace's
+    authoritative file, and `init --force` generate a second configuration beside
+    the one in force.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    attached_hardware(monkeypatch)
+    # Only the redirection is scoped, so leaving the block is the host reading
+    # the same profile from outside the container. Everything else about the
+    # environment, the config root included, stays exactly as it was.
+    with pytest.MonkeyPatch.context() as container:
+        virtualize(container, virtual, tmp_path / "package-roaming-cache")
+        service = UnprovisionedToolService(workspace)
+        try:
+            created = service.call(PROJECT_CONFIG_CREATE)
+        finally:
+            service.close()
+    assert Path(created["path"]).parent.parent == fallback_config_root()
+
+    # The default root is reachable and resolve-stable again, and the file that
+    # is in force has not moved.
+    assert project_config_directory().is_dir(), "the default root is usable here"
+    assert authoritative_config_target(workspace) == Path(created["path"])
+    assert project_config_path(workspace) == Path(created["path"])

@@ -944,9 +944,15 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "unsafe_configured_path": ErrorRemedy(
         meaning=(
             "A configured path is not the kind of object it has to be: a component of it is a symlink, or is a file "
-            "where a directory was needed, or the final object is not a single-link regular file. The path was refused "
+            "where a directory was needed, or the final object is not a single-link regular file, or its parent names "
+            "one place and resolves to another. The path was refused "
             "before anything was read from it or written to it, because following it would act on an object other than "
             "the one the configuration names. "
+            "The last of those has no symlink in it at all and is what a packaged agent host does to this profile: an "
+            "MSIX AppContainer virtualizes %APPDATA% and %LOCALAPPDATA%, so a path under either creates, opens and "
+            "writes exactly as it reads while resolving onto the package's private LocalCache tree. Walking such a "
+            "chain finds nothing: no reparse point, no symlink, link count 1, and samestat holds, because the "
+            "indirection lives in name resolution alone. "
             "This is about what the path *is*, not about who else on the machine holds rights on it. That second "
             "question used to be asked — a Windows ACL walk and a POSIX mode/sticky-bit walk over every ancestor — and "
             "it was removed in 0.8.0: it could only ever defend against a different account on the same "
@@ -954,11 +960,15 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "processes, which own these objects and can rewrite them regardless of any ACL."
         ),
         remediation=(
-            "Read `path`, and `component` when the refusal carries one: that is the part of the chain that stopped the "
-            "walk. Replace the symlink with a real directory, or point the setting at a path that does not go through "
-            "it.",
+            "Read `resolved_parent` first when the refusal carries one: the parent of `path` resolves to that other "
+            "spelling, and the resolved spelling is the one that works. Point the setting at it, or at a location "
+            "outside the redirected tree. Do not go looking for a symlink; on this profile there is none to find.",
+            "Read `component` when the refusal carries one: that is the part of the chain that stopped the walk, and "
+            "there the object really is a symlink or a file where a directory was needed. Replace it with a real "
+            "directory, or point the setting at a path that does not go through it.",
             "{safe_user_root} is a location this tool creates for itself and is a safe answer when the discovered "
-            "default cannot be used.",
+            "default cannot be used. `agentic-hil init` and `project_config_create` fall back to it on their own for "
+            "both the configuration and the state_root, so re-running either is usually the whole fix.",
             "Re-run the command that failed. Nothing else has to change.",
             "Where each file may live: MCP resource " + PLATFORM_PATHS_URI + ".",
         ),
