@@ -567,6 +567,17 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
         # command maintains for somebody else's program, and each entry carries
         # the one line that finishes it by hand.
         summary += f" The agent integration could not be refreshed for {_named_agents(failed)}; `refreshed` names the command that does it."
+    # The summary above replaces the one `replace_installation` wrote, so
+    # anything that lived only in that sentence has to be carried over by name.
+    # `certificates` is the one: an upgrade that succeeded only because it was
+    # retried against this machine's own certificate store says so there, and
+    # without it the operator reads the persistent-export step in Next steps
+    # with nothing on the screen that explains why it is being offered. Appended
+    # last and in the same place `server_upgrade` appends it, so the two front
+    # ends tell one story about the proxy rather than two.
+    certificates = result.get("certificates")
+    if isinstance(certificates, str) and certificates:
+        summary += f" {certificates}"
     return {
         **result,
         **({"extras_warning": extras_warning} if extras_warning is not None else {}),

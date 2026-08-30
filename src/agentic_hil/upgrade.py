@@ -33,7 +33,10 @@ newest release:
 **Nothing is replaced that did not need replacing.** The resolver is asked what
 it would do, as the same install with `--dry-run`, before it is allowed to do
 anything. An installation that is already current answers `already_current` with
-`install_skipped`, and no command capable of removing a file has run.
+`install_skipped`, and no command capable of removing a file has run. That
+question reaches the index over the same network the install does, so it carries
+the same certificate retry below: a guard that could not be asked behind a proxy
+would fall through to the install it exists to prevent.
 
 **A failure leaves the previous installation working, or says that it did not.**
 Whether it did is measured, not assumed: after a manager stops, the same import
@@ -67,7 +70,7 @@ from typing import NamedTuple
 from agentic_hil import __version__
 from agentic_hil.config import ConfigError
 from agentic_hil.configwrite import NOT_STARTED
-from agentic_hil.knowledge import remediation_fields
+from agentic_hil.knowledge import INSTALL_THE_PROXY_CA, remediation_fields
 from agentic_hil.process import ProcessImage, snapshot_process_images
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -644,14 +647,13 @@ _SYSTEM_CERT_BUNDLES = (
 _UV_SYSTEM_CERTS_DISABLED_VALUES = frozenset({"0", "false", "no", "off", "n", "f"})
 
 # The one thing that fixes a proxy neither the manager's roots nor this machine's
-# store trusts. Named as a step and never performed: it writes to a trust store,
-# which is the operator's, and the alternative an impatient reader reaches for is
-# a switch that turns verification off, which this project offers nowhere.
-_INSTALL_THE_PROXY_CA = (
-    "Install the proxy's own CA certificate into this machine's certificate store. Until that is done there is "
-    "nothing this command can be pointed at that trusts what the proxy presents, and no switch that turns "
-    "verification off is a fallback. TROUBLESHOOTING.md section 1 is the rest of it."
-)
+# store trusts, taken from the catalogue rather than written again here. It is
+# standing text, so `upgrade_failed` states it as a catalogue step on every
+# refusal of that type; attaching it as a step as well is what keeps the outcomes
+# with a catalogue entry of their own -- `installation_broken` and
+# `installation_changed_after_failed_upgrade` -- from losing it. Where both would
+# say it, `_with_certificate_note` drops the copy.
+_INSTALL_THE_PROXY_CA = INSTALL_THE_PROXY_CA
 
 
 class _SystemStoreAttempt(NamedTuple):
@@ -820,12 +822,21 @@ def _certificate_note(said: str, brief: str, next_steps: list[str]) -> _Certific
 def _manager_run(manager: str, command: list[str]) -> tuple[subprocess.CompletedProcess[str], JsonObject, _CertificateNote]:
     """The manager, run once, and run once more when its own words name the proxy.
 
-    Three values: the attempt whose outcome this upgrade reports, that attempt's
-    `install` payload, and the certificate fields the result carries, which are
-    empty whenever the manager said nothing about a certificate at all.
+    Both invocations an upgrade makes come through here, and the same retry is
+    the point of that: the mutating install, and the `--dry-run` question asked
+    before it. They reach the same index over the same network, so a proxy that
+    stops one stops the other, and a retry only the install had would leave the
+    guard answering "cannot tell" and falling through to the install it exists to
+    prevent.
+
+    Three values: the attempt whose outcome the caller reports, that attempt's
+    captured output, and the certificate fields the result carries, which are
+    empty whenever the manager said nothing about a certificate at all. Where the
+    output is recorded is the caller's: `install` for the upgrade itself,
+    `resolution` for the question.
 
     The retried attempt is the one reported, and the attempt it replaces is kept
-    under `install.certificate_retry.first_attempt` rather than dropped. A
+    under that payload's `certificate_retry.first_attempt` rather than dropped. A
     refusal after both attempts has to carry both managers' own words: the first
     is what names the proxy, and the second is what says this machine's store did
     not help either, and neither one alone is the diagnosis.
@@ -912,11 +923,27 @@ def _with_certificate_note(outcome: JsonObject, note: _CertificateNote) -> JsonO
     the retry then upgraded the machine, found nothing left to do, failed again
     or left an installation that will not load, and what happened belongs in the
     summary on every one of them, because that is the line a person reads first.
+
+    The measured `next_steps` are where the proxy CA imperative lives, and they
+    are attached only on a run that met a proxy, so a failure that met none never
+    reads it: the `upgrade_failed` catalogue names the CA solely through its
+    conditional `certificates` clause and states no bare imperative anywhere. A
+    step an outcome's own remediation *does* already carry is still dropped here
+    rather than attached twice, so a sentence printed under What to do is never
+    repeated under Next steps on one screen; the guard costs nothing when there is
+    no overlap and keeps the note honest should a future entry grow one.
     """
     if not note.said:
         return outcome
     summary = str(outcome.get("summary", "")).strip()
-    return {**outcome, **note.fields, "summary": f"{summary} {note.said}".strip()}
+    standing = {step for step in outcome.get("remediation") or [] if isinstance(step, str)}
+    fields = dict(note.fields)
+    steps = [step for step in fields.get("next_steps") or [] if step not in standing]
+    if steps:
+        fields["next_steps"] = steps
+    else:
+        fields.pop("next_steps", None)
+    return {**outcome, **fields, "summary": f"{summary} {note.said}".strip()}
 
 
 # ---------------------------------------------------------------------------
@@ -960,32 +987,45 @@ def _resolution_query(manager: str, command: list[str]) -> list[str] | None:
 _UV_PIP_NO_CHANGES = "would make no changes"
 
 
-def _would_install_nothing(manager: str, command: list[str]) -> tuple[bool, JsonObject | None]:
+def _would_install_nothing(manager: str, command: list[str]) -> tuple[bool, JsonObject | None, _CertificateNote]:
     """Whether this upgrade would install nothing, decided without installing anything.
 
-    The pair is (answer, what the manager said). A False answer means either
-    that there is something to install or that the question could not be put to
-    this manager at all, and the two are deliberately not distinguished: both
-    lead to the same place, which is running the upgrade as before.
+    The triple is (answer, what the manager said, what happened about
+    certificates). A False answer means either that there is something to
+    install or that the question could not be put to this manager at all, and
+    the two are deliberately not distinguished: both lead to the same place,
+    which is running the upgrade as before.
+
+    Asked through `_manager_run`, which is what gives this question the same
+    one-shot certificate retry the install has. Behind a TLS-intercepting proxy
+    every request to the index fails alike, and until this shared the retry the
+    guard was the one that failed first: the query came back unreadable, "cannot
+    tell" fell through to the mutating install, that install met the same proxy,
+    and #326's retry then made it succeed. The end state was right and the guard
+    had silently not guarded -- a machine that needed nothing had been
+    uninstalled and reinstalled to find that out. Sharing the runner rather than
+    copying it is also what keeps the signature list, the child-environment
+    variables and the rule that an operator's own exported variable is never
+    overridden identical on both, which is the only way the two can stay
+    answers to the same question about the same network.
     """
     query = _resolution_query(manager, command)
     if query is None:
-        return False, None
+        return False, None, _CertificateNote("", {})
     try:
-        answered = _run_upgrade_process(query)
+        answered, resolution, certificates = _manager_run(manager, query)
     except (OSError, subprocess.TimeoutExpired):
-        return False, None
-    resolution = _process_result(answered)
+        return False, None, _CertificateNote("", {})
     if answered.returncode != 0:
-        return False, resolution
+        return False, resolution, certificates
     if manager == "pip":
         try:
             report = json.loads(answered.stdout)
         except (json.JSONDecodeError, TypeError):
-            return False, resolution
+            return False, resolution, certificates
         planned = report.get("install") if isinstance(report, dict) else None
-        return isinstance(planned, list) and not planned, resolution
-    return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower(), resolution
+        return isinstance(planned, list) and not planned, resolution, certificates
+    return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower(), resolution, certificates
 
 
 def _nothing_to_install(
@@ -1089,6 +1129,12 @@ def _failed_upgrade(
             "version": loaded,
             "restart_required": False,
             "verification": verification,
+            # The standing text, from the same catalogue its two siblings below
+            # read: what the manager's own words are worth, what a `certificates`
+            # clause means, and the one-line installer as the repair path. It is
+            # on the document and not only in the rendering, because the MCP
+            # caller reads the document and acts out of `remediation`.
+            **remediation_fields("upgrade_failed"),
         }
     if loaded is not None:
         return _upgrade_changed_on_disk(base, previous_version, loaded, installed_extras, reinstall_command, verification, summary)
@@ -1272,9 +1318,15 @@ def replace_installation(*, tool: str) -> JsonObject:
     installed_extras = _installed_extras()
     reinstall_command = reinstall_command_with_extras(installed_extras)
 
-    skipped, resolution = _would_install_nothing(manager, command)
+    skipped, resolution, resolution_certificates = _would_install_nothing(manager, command)
     if skipped:
-        return _nothing_to_install(tool, manager, command, previous_version, resolution)
+        # The certificate note belongs on this outcome and on no other. Here the
+        # resolution query is the only thing that ran, so what it met is the
+        # whole of what this call knows about the proxy. On the fall-through the
+        # install runs next and meets the same network, and its own note is the
+        # one that reports it; carrying this one there as well would put two
+        # accounts of one proxy on a single result.
+        return _with_certificate_note(_nothing_to_install(tool, manager, command, previous_version, resolution), resolution_certificates)
 
     try:
         installed, install_result, certificates = _manager_run(manager, command)

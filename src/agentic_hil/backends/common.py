@@ -8,6 +8,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.process import (
     CHILD_REAP_TIMEOUT_S,
     spawn_managed_process,
@@ -38,6 +39,63 @@ NOT_CONTACTED: JsonObject = {
 # not for a flash or a reset, whose own command drives the target and can produce
 # the same words after it has.
 READ_ONLY_TOOLS = frozenset({"probe_target", "debugger_probes_list"})
+
+# What each backend without typed debug sessions would have to become to serve
+# one, in the words its own configuration uses. Both entries end in the same
+# place, because both probes are probes OpenOCD drives: the way out of this
+# refusal is a `debuggers.<name>.type` change and the two scripts that come with
+# it, not a different probe and not a different bench.
+DEBUG_SESSION_WAY_OUT: dict[str, str] = {
+    "stlink": (
+        "the same ST-Link runs under `type: openocd` with `interface_cfg: interface/stlink.cfg` and the "
+        "`target_cfg` for this part"
+    ),
+    "pyocd": (
+        "the same probe runs under `type: openocd` with the `interface_cfg` for it ("
+        "`interface/stlink.cfg` for an ST-Link, `interface/cmsis-dap.cfg` for a CMSIS-DAP probe) and the `target_cfg` "
+        "for this part"
+    ),
+}
+
+
+def debug_session_unsupported(backend_name: str, tool: str) -> JsonObject:
+    """Refuse a typed-debug session tool, and say what to change to get one.
+
+    Breakpoints, continue, halt-with-stop-reason and the session lifecycle are
+    GDB operations, and neither STM32CubeProgrammer's CLI nor pyOCD's commander
+    is a GDB server this project drives as one. That much was always true; what
+    was wrong with the refusal is that it named the backend the bench does not
+    run and stopped there (#342). A caller reading it learned that the capability
+    exists somewhere and nothing about how to reach it, so the reasonable next
+    move looked like buying a different probe, when the probe already plugged in
+    is one OpenOCD drives.
+
+    So the refusal names the configuration change instead: the same physical
+    probe under `type: openocd`, with the interface and target scripts that
+    backend reaches a target through. The catalogue entry behind
+    `not_supported:<backend>` carries the rest, including what the change costs,
+    because a way out that hides its price is a different kind of dead end.
+
+    `error_type` stays `not_supported`. It is the project's word for a capability
+    this configuration does not have, the service layer reads it as a refusal
+    that started nothing, and a new spelling would have moved this branch out of
+    those lists for no gain. NOT_CONTACTED for the same reason it is on the
+    reset-mode refusal: this returns before anything is spawned.
+    """
+    way_out = DEBUG_SESSION_WAY_OUT.get(backend_name)
+    reach = f" To run them on this bench, {way_out}." if way_out else ""
+    return {
+        "ok": False,
+        "tool": tool,
+        "backend": backend_name,
+        "error_type": "not_supported",
+        "summary": (
+            f"Typed debug sessions require the OpenOCD backend; the {backend_name} backend has no debug session to "
+            f"set breakpoints, continue, halt or report a stop reason through.{reach}"
+        ),
+        **remediation_fields("not_supported", backend_name),
+        **NOT_CONTACTED,
+    }
 
 
 def reset_init_unsupported(backend_name: str, missing: str) -> JsonObject:
@@ -170,6 +228,61 @@ def contains_any(value: str, needles: list[str]) -> bool:
 
 def contains_failure_text(output: str) -> bool:
     return contains_any(output.lower(), ["error:", "failed", "failure", "mismatch"])
+
+
+# The words that make a line a report of a failure rather than a mention of one.
+# Deliberately the same two every backend's reset and flash rules already match
+# on, so anchoring changes where a rule looks and nothing about what it looks for.
+FAILURE_WORDS = ["failed", "error"]
+
+
+def reports_reset_failure(output: str) -> bool:
+    """Whether a line that reports a failure is a line that names a reset.
+
+    The rule this replaces asked whether the word "reset" and a failure word both
+    appeared *somewhere* in the transcript, which is true of nearly every failure
+    on a tool that mentions resets while it is working. STM32CubeProgrammer opens
+    every action with a banner carrying `Reset mode  : Software reset`, OpenOCD
+    warns on nearly every `reset halt` that it is only resetting the core, and
+    pyOCD logs `Resetting target` beside whatever it does next. Each of those is
+    a tool saying what it is doing, and none of them is a tool saying a reset
+    failed, so a failure reported lines away was answered with the reset line and
+    its wiring (#333, and #327 before it on one backend).
+
+    A reset failure is a reset named where the failure is reported: one line
+    carrying both. That keeps every genuine reset failure classified, because a
+    tool reporting a failed operation names the operation it failed at: `Error:
+    failed to reset the target`, `Error: Unable to reset target` and `E Error
+    attempting to reset target` all put the two words on one line. And it stops
+    an informational reset line elsewhere in the transcript from deciding what
+    the failing line meant.
+    """
+    return any("reset" in line and contains_any(line, FAILURE_WORDS) for line in output.lower().splitlines())
+
+
+def programmer_output_fields(completed: CompletedCommand) -> JsonObject:
+    """The tool's own words about the run that failed, for the result to carry.
+
+    A failure carries its diagnosis, and for a debugger failure the diagnosis is
+    a line the tool wrote. Until #334 only the erase refusal carried one and
+    every other classified failure named a log file by path instead, so a result
+    relayed to a person held the classification, the summary and the likely
+    causes, and not the sentence all three were derived from.
+
+    Nested under `programmer_output` with the process's own return code, in the
+    shape `stdout` and `stderr` are captured everywhere else in this project
+    (#327). The human rendering prints a member under either of those names as a
+    literal block rather than as one flattened row (#314), and the stream
+    redaction covers them by key name at any depth (#317), so both surfaces come
+    for free at any nesting.
+
+    Nothing is summarised away and nothing is cut here. The machine document
+    carries the capture whole, exactly as the log file the same result names by
+    path holds it, and the renderer's caps decide how much of it a person reads;
+    truncating at capture time would put a shorter transcript in the report than
+    in the log, and leave nobody able to tell which one was short.
+    """
+    return {"programmer_output": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}}
 
 
 def find_stm32_programmer_cli() -> str | None:

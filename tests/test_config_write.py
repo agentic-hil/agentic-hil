@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 import yaml
-from conftest import write_authoritative_config
+from conftest import FAKE_OPENOCD, FAKE_STLINK, write_authoritative_config
 
 from agentic_hil.config import SURVIVING_SECTION_KEYS, config_schema, load_authoritative_config
 from agentic_hil.configwrite import (
@@ -42,6 +42,7 @@ from agentic_hil.knowledge import (
     CONFIG_PERMISSIONS_RIGHT,
     CONFIG_SHAPE_URI,
     CONFIG_WRITE_RIGHT,
+    DEBUGGER_FIELD_MATRIX,
     ErrorRemedy,
     ResolvedConfigKey,
     config_key_catalogue,
@@ -1041,6 +1042,329 @@ def test_a_connect_mode_the_backend_cannot_carry_out_rolls_the_file_back(tmp_pat
     assert refused["field"] == "debuggers.dut.connect_mode"
     assert refused["allowed_values"] == ["hotplug"]
     assert path.read_bytes() == before, "nothing changed"
+
+
+# ---------------------------------------------------------------------------
+# `debuggers.<name>.type`, the one description key checked as a whole.
+
+
+def rewrite_debugger(path: Path, *, drop: tuple[str, ...] = (), **fields: Any) -> None:
+    """The bench's own entry as a person would have left it, minus or plus keys.
+
+    Written back through the same header the fixture uses, so the file that
+    reaches the write path is one this project would have produced."""
+    document = document_of(path)
+    entry = document["debuggers"]["dut"]
+    for field in drop:
+        entry.pop(field, None)
+    entry.update(fields)
+    path.write_text("# A person wrote this bench.\n" + yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+
+def test_the_debug_stack_is_opened_by_the_description_grant_and_reaches_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The key a bench needs to move from one debug stack to another.
+
+    It was kept out of this surface on the grounds that it changes what a call
+    does to the board, and that reason does not survive next to `executable`,
+    `interface_cfg` and `target_cfg`: those three already decide which binary
+    runs with which scripts, and they are open. Which stack this bench runs is a
+    description of this bench, so the description grant alone has to be enough,
+    and the value has to arrive in the file rather than in a refusal.
+
+    The switch onto openocd carries the two scripts openocd requires as well as
+    the executable, because a real switch re-equips the entry from the request
+    rather than inheriting the scripts the stlink entry happened to carry."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    tools = service(workspace)
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE, {})
+        writable = {entry["key"]: entry for entry in described["writable_keys"]}
+        written = tools.call(
+            PROJECT_CONFIG_SET,
+            changes(
+                ("debuggers.dut.type", "openocd"),
+                ("debuggers.dut.executable", FAKE_OPENOCD.as_posix()),
+                ("debuggers.dut.interface_cfg", "interface/stlink.cfg"),
+                ("debuggers.dut.target_cfg", "target/stm32f4x.cfg"),
+            ),
+        )
+    finally:
+        tools.close()
+
+    assert "debuggers.dut.type" in writable
+    assert writable["debuggers.dut.type"]["right"] == CONFIG_DESCRIPTION_RIGHT
+    assert writable["debuggers.dut.type"]["value_schema"]["enum"] == ["openocd", "stlink", "pyocd"]
+    assert writable["debuggers.dut.type"]["current_value"] == "stlink"
+    assert written["ok"] is True, written
+    assert written["permissions_changed"] == [], "a debug stack grants nothing"
+    assert document_of(path)["debuggers"]["dut"]["type"] == "openocd"
+    assert load_authoritative_config(workspace).debuggers["dut"].type == "openocd"
+
+
+def test_the_debug_stack_stays_shut_without_the_description_grant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opened by one grant means locked without it, like its four siblings."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink")
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        described = tools.call(PROJECT_CONFIG_DESCRIBE, {})
+        locked = {entry["key"]: entry for entry in described["locked_keys"]}
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.type", "openocd")))
+    finally:
+        tools.close()
+
+    assert locked["debuggers.dut.type"]["right"] == CONFIG_DESCRIPTION_RIGHT
+    assert refused["error_type"] == "permission_denied"
+    assert refused["permission"] == CONFIG_DESCRIPTION_RIGHT
+    assert refused["denied_keys"] == ["debuggers.dut.type"]
+    assert path.read_bytes() == before, "nothing changed"
+
+
+def test_a_backend_switch_the_entry_is_not_equipped_for_is_refused_naming_what_is_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The half-switched entry, refused before it can be written.
+
+    An ST-Link entry has no reason to carry OpenOCD's two scripts, and both
+    fields have a schema default, so a `type` written on its own would load and
+    then reach the board through whatever `interface/stlink.cfg` and
+    `target/stm32f4x.cfg` resolve to on this host. That is a bench described as
+    something it is not, and it fails at the first call rather than at the write
+    that caused it. So the switch is refused, and the refusal names the two keys
+    instead of leaving the caller to guess which of the entry it has to fill.
+
+    The entry still carries the ST-Link binary it was flashing with, and that is
+    named too: a real switch replaces it, so `executable` is one of the keys the
+    same call has to carry, as a path or as `null`."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    rewrite_debugger(path, drop=("interface_cfg", "target_cfg"))
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.type", "openocd")))
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "invalid_argument"
+    assert refused["field"] == "debuggers.dut.interface_cfg"
+    assert refused["missing_keys"] == ["debuggers.dut.executable", "debuggers.dut.interface_cfg", "debuggers.dut.target_cfg"]
+    assert refused["debugger_type"] == "openocd"
+    assert refused["rejected_key"] == "debuggers.dut.type"
+    assert "interface_cfg" in refused["summary"] and "target_cfg" in refused["summary"]
+    assert "executable" in refused["summary"], "the stale one belongs to the backend the entry is leaving"
+    assert "executable" in refused["next_step"]
+    assert path.read_bytes() == before, "nothing was written"
+
+
+def test_a_type_only_switch_is_refused_even_when_the_entry_already_carries_the_new_backends_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trap the request-side check exists to close, on an untouched entry.
+
+    A generated ST-Link entry carries `interface_cfg`, `target_cfg` and an
+    `executable`: the two scripts because generation writes them whatever the
+    backend, ignored by stlink, and the binary because stlink was flashing with
+    one. Reading the post-change document would find all three present and let a
+    `type`-only switch to openocd through, leaving the entry on openocd with the
+    scripts generation happened to write and the ST-Link binary run as if it were
+    openocd. Nothing here was dropped to force the refusal, the entry is exactly
+    what this project produces, and the switch is refused all the same, because
+    the *request* carried none of the fields the switch across needs. The refusal
+    names every one of them so one more call lands the whole entry."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    entry = document_of(path)["debuggers"]["dut"]
+    assert entry["interface_cfg"] and entry["target_cfg"] and entry["executable"], "the stale-but-present fields the check must not credit"
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.type", "openocd")))
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "invalid_argument"
+    assert refused["debugger_type"] == "openocd"
+    assert refused["missing_keys"] == ["debuggers.dut.executable", "debuggers.dut.interface_cfg", "debuggers.dut.target_cfg"]
+    assert path.read_bytes() == before, "nothing was written"
+
+
+def test_writing_the_type_an_entry_already_has_is_not_a_switch_and_demands_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rule compares the old `type` against the new one, not the mere presence of `type` in the call.
+
+    Re-sending the backend an entry already names moves nothing across, so the
+    entry carries none of its fields for a backend it is leaving: the executable
+    it holds was chosen for this same backend, and nothing has to be resent to
+    keep the entry honest. The switch contract is for a real switch, so a `type`
+    written to its own value lands on the description grant like any other key
+    rather than being refused for an executable it need not replace."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    executable_before = document_of(path)["debuggers"]["dut"]["executable"]
+    tools = service(workspace)
+    try:
+        written = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.type", "stlink")))
+    finally:
+        tools.close()
+
+    assert written["ok"] is True, written
+    entry = document_of(path)["debuggers"]["dut"]
+    assert entry["type"] == "stlink"
+    assert entry["executable"] == executable_before, "a no-op type write does not demand a fresh executable"
+
+
+def test_writing_openocd_to_an_entry_whose_type_is_omitted_is_a_no_op_not_a_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`type` is optional and defaults to openocd, so re-stating that default switches nothing.
+
+    An entry that omits `type` already loads on openocd, the loader reads the
+    field as `raw.get("type", "openocd")`, so writing `openocd` to it moves the
+    entry from openocd to openocd, which is no switch at all. Measured against the
+    raw field rather than the effective backend, the absent `type` reads as
+    nothing and the write looks like a switch onto openocd, and the entry is then
+    refused for the `executable`, `interface_cfg` and `target_cfg` a real switch
+    would demand, though it is leaving no backend that chose them, and the refusal
+    would name an executable belonging to a backend the entry is not leaving. The
+    comparison uses the loader's own default, so this lands on the description
+    grant and the entry keeps every field it already had."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    rewrite_debugger(path, drop=("type",))
+    entry_before = document_of(path)["debuggers"]["dut"]
+    assert "type" not in entry_before, "the optional field is genuinely absent"
+    assert entry_before["executable"] and entry_before["interface_cfg"] and entry_before["target_cfg"]
+    assert load_authoritative_config(workspace).debuggers["dut"].type == "openocd", "and it already loads on openocd"
+    tools = service(workspace)
+    try:
+        written = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.type", "openocd")))
+    finally:
+        tools.close()
+
+    assert written["ok"] is True, written
+    assert "missing_keys" not in written, "a no-op type write demands no other field"
+    entry_after = document_of(path)["debuggers"]["dut"]
+    assert entry_after["type"] == "openocd"
+    assert entry_after["executable"] == entry_before["executable"], "a no-op type write demands no fresh executable"
+    assert load_authoritative_config(workspace).debuggers["dut"].type == "openocd"
+
+
+def test_the_same_switch_lands_when_the_missing_keys_come_in_the_same_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Atomic, not blocked. The refusal above has to be an answer, not a wall.
+
+    One call carries the whole entry across, and what comes out of it is a
+    configuration that loads as authoritative on the new backend."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    rewrite_debugger(path, drop=("interface_cfg", "target_cfg"))
+    tools = service(workspace)
+    try:
+        written = tools.call(
+            PROJECT_CONFIG_SET,
+            changes(
+                ("debuggers.dut.type", "openocd"),
+                ("debuggers.dut.executable", FAKE_OPENOCD.as_posix()),
+                ("debuggers.dut.interface_cfg", "interface/stlink.cfg"),
+                ("debuggers.dut.target_cfg", "target/stm32f4x.cfg"),
+            ),
+        )
+    finally:
+        tools.close()
+
+    assert written["ok"] is True, written
+    entry = document_of(path)["debuggers"]["dut"]
+    assert (entry["type"], entry["interface_cfg"], entry["target_cfg"]) == ("openocd", "interface/stlink.cfg", "target/stm32f4x.cfg")
+    reloaded = load_authoritative_config(workspace).debuggers["dut"]
+    assert reloaded.type == "openocd"
+    assert Path(reloaded.executable or "").resolve() == FAKE_OPENOCD.resolve()
+
+
+def test_a_switch_onto_a_backend_that_needs_nothing_this_surface_writes_is_not_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rule demands only what a call could actually have supplied.
+
+    `interface` on stlink and `target_type` on pyocd are required by those
+    backends and are not keys this surface sets, so demanding them would turn a
+    switch from atomic into impossible. Both have a working unset behaviour the
+    field matrix states, which is why they stay the backends' own business."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    rewrite_debugger(path, drop=("interface", "interface_cfg", "target_cfg", "target_type"))
+    tools = service(workspace)
+    try:
+        written = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.type", "stlink"), ("debuggers.dut.executable", FAKE_STLINK.as_posix())))
+    finally:
+        tools.close()
+
+    assert written["ok"] is True, written
+    assert document_of(path)["debuggers"]["dut"]["type"] == "stlink"
+    assert "interface" not in document_of(path)["debuggers"]["dut"], "and it still works without one"
+    assert load_authoritative_config(workspace).debuggers["dut"].interface == "SWD"
+
+
+def test_the_switch_demands_only_the_fields_this_surface_could_have_supplied() -> None:
+    """Why the demanded set is narrower than "everything the backend requires".
+
+    The rule is read off the backend field matrix and intersected with the keys
+    `project_config_set` writes, and this is the statement that intersection is
+    doing real work: `interface` and `target_type` are required by their
+    backends and are out of reach here, so a rule that demanded them would have
+    made those two switches impossible rather than atomic. If either ever
+    becomes settable, this test is where that decision has to be taken again."""
+    settable = set(config_rule_fields(_rule("debuggers", under_permissions=False)))
+    required = {backend: {name for name, node in fields.items() if isinstance(node, dict) and node.get("status") == "required"} for backend, fields in DEBUGGER_FIELD_MATRIX.items()}
+
+    assert "type" in settable, "the key this whole group is about"
+    assert required["openocd"] & settable == {"interface_cfg", "target_cfg"}
+    assert required["stlink"] - settable == {"interface"}
+    assert required["pyocd"] - settable == {"target_type"}
+
+
+def test_a_debug_stack_the_schema_does_not_spell_never_reaches_the_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The enum half of the validation, and it is the schema's own.
+
+    Nothing about the set of backends is written down a second time here: the
+    value is checked against the node the loader validates against, before any
+    change is applied to anything."""
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.type", "jlink")))
+    finally:
+        tools.close()
+
+    assert refused["error_type"] == "invalid_argument"
+    assert refused["field"] == "changes.0.value"
+    assert refused["value_schema"]["enum"] == ["openocd", "stlink", "pyocd"]
+    assert path.read_bytes() == before, "nothing changed"
+
+
+def test_a_switch_the_new_backend_refuses_a_field_of_puts_the_previous_file_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of a half-switch, and it is the loader that catches it.
+
+    A field the new backend *requires* is checked before the write; a field it
+    *refuses* is not checked twice, because the per-backend rule lives in the
+    loader and validate-before-replace already turns it into the same "nothing
+    was written". The bench keeps the configuration it had, and the same switch
+    lands the moment the call settles the refused field too.
+
+    The switch carries the two scripts and the executable openocd needs, so it
+    is past the request-side check and it is the loader that catches the refused
+    `connect_mode`, which is the point this test pins."""
+    workspace, path = bench(tmp_path, monkeypatch, debugger_type="stlink", **{CONFIG_DESCRIPTION_RIGHT: True})
+    rewrite_debugger(path, connect_mode="under_reset")
+    before = path.read_bytes()
+    equipped = (
+        ("debuggers.dut.executable", FAKE_OPENOCD.as_posix()),
+        ("debuggers.dut.interface_cfg", "interface/stlink.cfg"),
+        ("debuggers.dut.target_cfg", "target/stm32f4x.cfg"),
+    )
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.type", "openocd"), *equipped))
+        assert path.read_bytes() == before, "the previous file came back"
+        settled = tools.call(
+            PROJECT_CONFIG_SET,
+            changes(("debuggers.dut.type", "openocd"), *equipped, ("debuggers.dut.connect_mode", "hotplug")),
+        )
+    finally:
+        tools.close()
+
+    assert refused["error_type"] == "config_invalid"
+    assert refused["field"] == "debuggers.dut.connect_mode"
+    assert refused["allowed_values"] == ["hotplug"]
+    assert settled["ok"] is True, settled
+    assert load_authoritative_config(workspace).debuggers["dut"].type == "openocd"
 
 
 def test_the_server_says_before_the_first_call_that_this_is_the_way_to_change_a_config() -> None:

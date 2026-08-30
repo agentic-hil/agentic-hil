@@ -2821,6 +2821,166 @@ def test_returning_a_hard_linked_alias_to_the_followed_name_does_not_clear_the_s
     assert "the review never saw" in f"{captured.out}{captured.err}"
 
 
+# --- the round earlier: work landing on inherited dirt with no stall behind it ---
+
+# What the operator has committed, and what they have not. The run starts with
+# ` M notes.py` -- one porcelain line the round it is about to run did not write.
+_NOTES_AT_HEAD = "# the operator's notes, as committed\n"
+_OPERATOR_WIP = _NOTES_AT_HEAD + _OPERATOR_DIRT
+# The whole of a round's output, written into that same file. `git status` says
+# exactly what it said before, so the round has added no line of its own.
+_WRITES_ITS_WHOLE_ROUND_INTO_INHERITED_DIRT = (
+    f"pathlib.Path('notes.py').write_text({_OPERATOR_WIP + FIX!r}, encoding='utf-8')\n"
+    "sys.stdout.write('wrote the whole fix into the inherited-dirty notes.py and never committed it\\n')\n"
+)
+_COMMITS_SOMETHING_UNRELATED = (
+    "pathlib.Path('other.py').write_text('# unrelated round 2 work\\n', encoding='utf-8')\n"
+    "subprocess.run(['git', 'add', 'other.py'], check=True)\n"
+    "subprocess.run(['git', 'commit', '-q', '-m', 'fix: an unrelated round 2 commit'], check=True)\n"
+)
+
+
+def _with_operator_dirt(tmp_path: Path) -> Path:
+    """A repository whose operator left a tracked file modified before the run started."""
+    repository = _repository(tmp_path)
+    (repository / "notes.py").write_text(_NOTES_AT_HEAD, encoding="utf-8")
+    _in(repository, "add", "notes.py")
+    _in(repository, "commit", "-q", "-m", "chore: the operator's notes")
+    (repository / "notes.py").write_text(_OPERATOR_WIP, encoding="utf-8")
+    # The one line the run inherits, and the line every round below still shows.
+    # Read by lines, not stripped: the leading space of a ` M` status is part of
+    # the line, and eating it is how the line stops being the one git reported.
+    assert _in(repository, "status", "--porcelain").splitlines() == [" M notes.py"]
+    return repository
+
+
+def test_a_round_landing_its_whole_output_on_inherited_dirt_does_not_slip_a_clean_run_past_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The layer before the moved stall: the work never had a name of its own to lose.
+
+    Under `--allow-dirty` the operator's `notes.py` is modified before the run. Round 1
+    writes its entire fix into that file and commits nothing, so the porcelain line it
+    leaves -- ` M notes.py` -- is the line it started with: `newly_uncommitted` sees no
+    news, `left_behind` is empty, and the round reads as one that looked at the findings
+    and declined. Nothing is carried, so round 2's unrelated commit reviews clean and the
+    run ended at exit 0 with the fix sitting in the operator's file, in no commit and in
+    no reviewed range. The pre-round content map is what says otherwise: `notes.py` is
+    still dirty and no longer holds the bytes the round found in it, so the round is a
+    stall, its path stays outstanding, and the clean verdict cannot end the run.
+    """
+    repository = _with_operator_dirt(tmp_path)
+    agent = _agent(
+        tmp_path,
+        "lands_on_inherited_dirt",
+        _WRITES_ITS_WHOLE_ROUND_INTO_INHERITED_DIRT,
+        _COMMITS_SOMETHING_UNRELATED,
+    )
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    # Two rounds and no third invocation: the stall is reported and carried, never
+    # handed back, because the file it sits in is one the operator also owns.
+    assert _attempts(tmp_path, "lands_on_inherited_dirt") == 2
+    # The committed work is round 2's unrelated file; notes.py reached no commit, so
+    # what history holds for it is still what the operator committed before the run.
+    assert _in(repository, "log", "-1", "--format=%s").strip() == "fix: an unrelated round 2 commit"
+    assert _in(repository, "show", "HEAD:notes.py") == _NOTES_AT_HEAD
+    # The fix is on disk, whole, in the operator's file -- behind the very same
+    # porcelain line the run inherited, which is why no line-keyed guard saw it.
+    assert (repository / "notes.py").read_text(encoding="utf-8") == _OPERATOR_WIP + FIX
+    assert _in(repository, "status", "--porcelain").splitlines() == [" M notes.py"]
+    captured = capsys.readouterr()
+    assert "the review never saw" in f"{captured.out}{captured.err}"
+    stalled = _round_records(repository)[0]
+    assert (stalled["stalled"], stalled["retried"], stalled["uncommitted_paths"]) == (True, False, ["notes.py"])
+
+
+def test_a_round_landing_its_whole_output_on_inherited_dirt_is_recorded_as_a_stall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other half: without --continue-on-no-commit the run stops either way, but not as the same round.
+
+    The no-commit rule already ends this run, so nothing is lost here; what was wrong is
+    the sentence. `run.json` recorded a round that wrote a whole fix into the operator's
+    file as declined, with no paths named, and the console said only that no commit was
+    produced -- so the operator reading it days later had nothing pointing at the file
+    holding work nobody committed. The round is named a stall now, on the console and in
+    the summary, with the path that holds it. The retry is left alone deliberately: the
+    default `--stall-retry` is in force and the implementer is still invoked exactly once,
+    because asking it to commit what it wrote would commit the operator's work with it.
+    """
+    repository = _with_operator_dirt(tmp_path)
+    head = _in(repository, "rev-parse", "HEAD")
+    agent = _agent(tmp_path, "lands_and_stops", _WRITES_ITS_WHOLE_ROUND_INTO_INHERITED_DIRT)
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _clean_verdict)
+    exit_code = agent_review_loop.main(
+        # No --continue-on-no-commit: the no-commit rule ends the run before any review.
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "1", "--heartbeat", "0"] + ["--allow-dirty"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_STALLED
+    assert _attempts(tmp_path, "lands_and_stops") == 1
+    assert not list((repository / ".agentic-loop" / "logs").rglob("*-finish.log"))
+    # Nothing committed on anyone's behalf, and nothing thrown away.
+    assert _in(repository, "rev-parse", "HEAD") == head
+    assert (repository / "notes.py").read_text(encoding="utf-8") == _OPERATOR_WIP + FIX
+    out = capsys.readouterr().out
+    assert "round 1: implementer stalled with its work inside 1 path(s) the run already had dirty" in out
+    assert "  notes.py" in out
+    assert "not handing it back" in out
+    record = _round_records(repository)[0]
+    assert (record["stalled"], record["retried"], record["salvaged"]) == (True, False, None)
+    assert record["uncommitted_paths"] == ["notes.py"]
+
+
+def test_the_operators_own_dirty_file_left_untouched_is_not_read_as_the_rounds_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The mirror of the exclusion #302 protects the operator with, and the case it must not cost.
+
+    `relocated_stall` will not read an inherited-dirty path as the stall arriving while
+    its content is what the round started with, because that content is the state the run
+    inherited and it is the operator's. The same fact decides this layer, pointed the
+    other way: a round is only read as having landed its work in the operator's file when
+    the bytes moved. Both rounds here decline and touch nothing, so `notes.py` still holds
+    exactly what the operator left in it, nothing is outstanding, and the clean verdict
+    ends the run clean. Without the exclusion every declined round under `--allow-dirty`
+    would stall on the operator's own work in progress, which is the whole cost this
+    guard has to avoid to be worth having.
+    """
+    repository = _with_operator_dirt(tmp_path)
+    agent = _agent(tmp_path, "declines_beside_operator_dirt", _DECLINES, _DECLINES)
+
+    monkeypatch.setattr(agent_review_loop, "resolve_executable", lambda name, _label: name)
+    monkeypatch.setattr(agent_review_loop, "claude_command", lambda _options: [sys.executable, str(agent)])
+    monkeypatch.setattr(agent_review_loop, "perform_review", _requested_then_clean)
+    exit_code = agent_review_loop.main(
+        ["--repo", str(repository), "--task", "x", "--max-rounds", "2", "--heartbeat", "0"]
+        + ["--allow-dirty", "--continue-on-no-commit"]
+    )
+
+    assert exit_code == agent_review_loop.EXIT_CLEAN
+    # Two declined rounds, no retry invocation and no round named a stall.
+    assert _attempts(tmp_path, "declines_beside_operator_dirt") == 2
+    assert [record["stalled"] for record in _round_records(repository)] == [False, False]
+    # The operator's work in progress is exactly as they left it, and still theirs.
+    assert (repository / "notes.py").read_text(encoding="utf-8") == _OPERATOR_WIP
+    assert _in(repository, "status", "--porcelain").splitlines() == [" M notes.py"]
+    captured = capsys.readouterr()
+    assert "the run already had dirty" not in f"{captured.out}{captured.err}"
+
+
 def test_content_identity_is_only_asked_of_a_path_that_has_content(tmp_path: Path) -> None:
     """A directory, a path that is gone and an empty file identify nothing.
 

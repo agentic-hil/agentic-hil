@@ -7,12 +7,17 @@ import time
 from pathlib import Path
 
 from agentic_hil.backends.common import (
+    FAILURE_WORDS,
     NOT_CONTACTED,
     READ_ONLY_TOOLS,
+    CompletedCommand,
     command_for_log,
     contains_any,
     contains_failure_text,
+    debug_session_unsupported,
     invocation,
+    programmer_output_fields,
+    reports_reset_failure,
     reset_init_unsupported,
     spawn_command,
     which,
@@ -71,6 +76,14 @@ _TARGET_TYPE_NAME_CHARS = frozenset(string.ascii_letters + string.digits + "_")
 # either, because pyOCD says the same of an unknown board ID.
 TARGET_TYPE_INVALID_PHRASES = ("unknown target type", "no target type", "target type is not")
 TARGET_TYPE_INVALID_DOC = "target_support.html"
+
+# pyOCD's own words for an erase that did not take: the FlashEraseFailure its
+# flash sequencer raises reaches the log as `Failed to erase sector at 0x...`, with
+# the `[flash]` logger name after it. One measured phrase, for the same reason
+# the ST-Link and OpenOCD marker lists hold one each: pyOCD is the backend
+# likeliest to print `Resetting target` beside a flash failure, so the phrase has
+# to be the erase line itself and not a family somebody assumed.
+PYOCD_ERASE_FAILURE_MARKERS = ["failed to erase sector"]
 
 
 class PyOCDBackend:
@@ -267,7 +280,7 @@ class PyOCDBackend:
     def debug_get_stop_reason(self) -> JsonObject:
         return self._unsupported_debug_tool("debug_get_stop_reason")
 
-    def debug_symbol_info(self, symbol: str = "") -> JsonObject:
+    def debug_symbol_info(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
         return self._unsupported_debug_tool("debug_symbol_info")
 
     def debug_symbol_value(self, symbol: str = "", symbol_elf: JsonObject | None = None) -> JsonObject:
@@ -440,9 +453,9 @@ class PyOCDBackend:
         if completed.returncode == 0:
             backend_error_type = self._backend_error_from_output(output, tool)
             if backend_error_type is not None:
-                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path), audit_error)
+                return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, completed), audit_error)
             return self._finish_log_audit({"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "pyOCD command completed successfully.", "log_path": display_path(self.config, log_path)}, audit_error)
-        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._confirm_target_support(self._classify_output(output, tool)), log_path), audit_error)
+        return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._confirm_target_support(self._classify_output(output, tool)), log_path, completed), audit_error)
 
     def _connection_args(self) -> list[str]:
         args: list[str] = []
@@ -598,13 +611,17 @@ class PyOCDBackend:
             return True
         return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
 
-    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str) -> JsonObject:
+    def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, completed: CompletedCommand) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
         # next, scoped to this backend. target_type_invalid is the case that
         # cost the most: without the fix in the result, the caller has to work
         # out from pyOCD's own sources that the value comes from a CMSIS pack.
         error_type = self._public_error_type(backend_error_type)
-        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path)}
+        # `programmer_output` on every classified failure (#334). pyOCD logs what
+        # it was doing as it does it, so the line it stopped on arrives with the
+        # lines that led up to it, and that is what the classification, the
+        # summary and the causes were all read out of.
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path), **programmer_output_fields(completed)}
         target_type = self.config.debugger.target_type if self.config.debugger else None
         if error_type == "target_type_invalid" and target_type:
             # The refusal carries the command that fixes it, with the configured
@@ -649,7 +666,7 @@ class PyOCDBackend:
         return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
 
     def _unsupported_debug_tool(self, tool: str) -> JsonObject:
-        return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "not_supported", "summary": "Typed debug sessions require the OpenOCD backend."}
+        return debug_session_unsupported(self.backend_name, tool)
 
     def _classify_output(self, output: str, tool: str | None = None) -> str:
         lower = output.lower()
@@ -661,12 +678,27 @@ class PyOCDBackend:
             return "target_type_invalid"
         if "target type" in lower and "not recognized" in lower:
             return "target_type_invalid"
+        # Ahead of the verify and reset rules and of the broad flash bucket, for
+        # the reason #327 put the ST-Link erase rule there: this is the line
+        # pyOCD wrote about the operation that stopped, and it used to be read
+        # either as a generic flash failure or, whenever pyOCD had logged
+        # `Resetting target` first, as a failed reset (#333).
+        if contains_any(lower, PYOCD_ERASE_FAILURE_MARKERS):
+            return "flash_erase_failed"
         if "verify" in lower and contains_any(lower, ["failed", "mismatch", "error"]):
             return "verify_failed"
-        if "reset" in lower and contains_any(lower, ["failed", "error"]):
+        if reports_reset_failure(output):
             return "reset_failed"
-        if tool == "flash_firmware" and contains_any(lower, ["failed", "error"]):
+        if tool == "flash_firmware" and contains_any(lower, FAILURE_WORDS):
             return "flash_failed"
+        # The twin of the flash bucket above, anchored on the operation rather
+        # than on a word: when the tool is `reset_target`, the operation that
+        # reported a failure is a reset, whatever pyOCD's commander wrote about
+        # it. That is what keeps a genuine reset failure classified without the
+        # rule above having to guess from a stray "reset" somewhere in a
+        # transcript, which is what it used to do (#333).
+        if tool == "reset_target" and contains_any(lower, FAILURE_WORDS):
+            return "reset_failed"
         return "unknown_debugger_error"
 
     def _public_error_type(self, backend_error_type: str) -> str:
@@ -679,6 +711,7 @@ class PyOCDBackend:
             "target_not_detected": "Debugger could not detect the target.",
             "target_type_invalid": "pyOCD does not know the configured debuggers.<name>.target_type.",
             "flash_failed": "Debugger failed to flash the firmware.",
+            "flash_erase_failed": "pyOCD could not erase a flash sector this image covers, so the flash contents are unconfirmed.",
             "verify_failed": "Debugger failed to verify the flashed firmware.",
             "reset_failed": "Debugger failed to reset the target.",
             "timeout": "Debugger command timed out.",
@@ -692,6 +725,12 @@ class PyOCDBackend:
             "target_type_invalid": ["debuggers.<name>.target_type is misspelled", "the target requires a CMSIS pack (pyocd pack install <type>)"],
             "verify_failed": ["flash write did not persist correctly", "firmware image does not match target memory layout"],
             "flash_failed": ["target flash is locked", "firmware image is invalid for this target", "debuggers.<name>.flash_address is wrong"],
+            # The device-side causes #327 measured carry over unchanged; the
+            # third is pyOCD's own, because the sector map pyOCD erases by comes
+            # from the CMSIS pack behind debuggers.<name>.target_type, and a pack
+            # for a near neighbour of this part erases at addresses the device
+            # refuses.
+            "flash_erase_failed": ["the sectors this image covers are protected (write protection, PCROP, or a read-out protection level that refuses the erase)", "the core was still executing from flash when the erase was issued", "debuggers.<name>.target_type resolves to a device whose flash sector map is not this device's"],
             "reset_failed": ["reset line wiring issue", "target is not responding"],
             "timeout": ["debugger stopped responding", "debug probe or target is stuck", "timeout_s is too low for this operation"],
             "debugger_not_found": ["debuggers.<name>.executable is not configured", "pyOCD is not installed (install agentic-hil[pyocd] or pip install pyocd)", "pyocd is not in PATH"],

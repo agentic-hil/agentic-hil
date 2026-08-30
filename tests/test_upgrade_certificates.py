@@ -47,6 +47,7 @@ import pytest
 from test_server_upgrade import upgradable_config
 
 from agentic_hil import __version__
+from agentic_hil.cli import upgrade_installation
 from agentic_hil.humanize import render_result
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.upgrade import CLI_UPGRADE_TOOL, SERVER_UPGRADE, replace_installation
@@ -54,8 +55,20 @@ from agentic_hil.upgrade import CLI_UPGRADE_TOOL, SERVER_UPGRADE, replace_instal
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 UV_TOOL_UPGRADE = ["uv.exe", "tool", "upgrade", "agentic-hil"]
+UV_PIP_UPGRADE = ["uv.exe", "pip", "install", "--python", sys.executable, "--upgrade", "agentic-hil"]
 PIP_UPGRADE = [sys.executable, "-m", "pip", "install", "--upgrade", "agentic-hil"]
 PIP_WOULD_INSTALL_A_RELEASE = subprocess.CompletedProcess[str]([], 0, json.dumps({"version": "1", "install": [{"metadata": {"name": "agentic-hil", "version": "9.9.9"}}]}), "")
+# What `uv pip install --dry-run` prints on an environment that already
+# satisfies the requirement: the answer the #191 guard is waiting for.
+UV_PIP_WOULD_MAKE_NO_CHANGES = subprocess.CompletedProcess[str]([], 0, "", "Resolved 41 packages in 812ms\nAudited 41 packages in 0.19ms\nWould make no changes")
+# The same resolution query, met by the proxy. uv fails the question exactly as
+# it fails the install, because it is the same request to the same index.
+UV_PIP_RESOLUTION_TRUST_FAILURE = subprocess.CompletedProcess[str](
+    [],
+    2,
+    "",
+    "error: Failed to fetch: `https://pypi.org/simple/agentic-hil/`\n  Caused by: invalid peer certificate: UnknownIssuer",
+)
 
 # What the reporting bench's uv said on 2026-08-20, verbatim from #326. The
 # decisive line is the last one, and it is at the bottom of a stack of five
@@ -107,6 +120,22 @@ class Attempt:
         return {name: value for name, value in (self.env or {}).items() if name in {"UV_SYSTEM_CERTS", "PIP_CERT"}}
 
 
+class ManagerCalls(list[Attempt]):
+    """The calls that could replace this installation, with the questions beside them.
+
+    A plain list of the mutating attempts, because that is what nearly every test
+    here counts and it is how "nothing was installed" is asserted: an empty list.
+    `questions` is the `--dry-run` resolution query's own attempts, kept apart
+    because a question is not a call that can replace anything and counting the
+    two together would let a test that meant to prove no install happened pass on
+    a run that installed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.questions: list[Attempt] = []
+
+
 def stub_manager(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -115,7 +144,8 @@ def stub_manager(
     command: list[str] | None = None,
     version_after: str = "9.9.9",
     resolution: subprocess.CompletedProcess[str] = PIP_WOULD_INSTALL_A_RELEASE,
-) -> list[Attempt]:
+    resolutions: list[subprocess.CompletedProcess[str]] | None = None,
+) -> ManagerCalls:
     """A package manager with a queue of canned answers, recording every call.
 
     `answers` is consumed in order by the mutating invocations only, so a test
@@ -123,16 +153,27 @@ def stub_manager(
     than on an assertion at the end: running the manager twice when it was meant
     to run once is the defect, and it is caught where it happens.
 
-    The resolution query and the import check answer themselves. Neither is a
-    command that can replace an installation, and neither is what these tests are
-    about.
+    The resolution query answers with `resolution` however often it is asked,
+    which is what a test that is not about the query wants. A test that is about
+    it passes `resolutions` instead and gets a queue with the same property: one
+    answer per ask, and an ask too many fails where it happens rather than
+    silently receiving the previous answer again.
+
+    The import check answers itself. It is not a command that can replace an
+    installation, and it is not what these tests are about.
     """
-    attempts: list[Attempt] = []
+    attempts = ManagerCalls()
     queued = list(answers)
+    queued_questions = None if resolutions is None else list(resolutions)
 
     def run(invoked: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         if "--dry-run" in invoked:
-            return resolution
+            attempts.questions.append(Attempt(invoked, env))
+            if queued_questions is None:
+                return resolution
+            if not queued_questions:
+                pytest.fail(f"the upgrade asked the resolution query once more than it was given an answer for: {invoked}")
+            return queued_questions.pop(0)
         if invoked[-1] == "--version":
             return subprocess.CompletedProcess([], 0, f"{version_after}\n", "")
         attempts.append(Attempt(invoked, env))
@@ -238,11 +279,17 @@ def test_both_attempts_failing_is_a_refusal_that_carries_both_of_them(monkeypatc
     assert "invalid peer certificate: UnknownIssuer" in install["stderr"]
     assert install["stderr"] == UV_TRUST_FAILURE_AGAIN.stderr
     assert install["certificate_retry"]["first_attempt"]["stderr"] == UV_TRUST_FAILURE.stderr
-    # The cause, named, and the two things that actually fix it.
+    # The cause, named, and the two things that actually fix it. Both are the
+    # measured next steps this run attached: installing the CA where this
+    # machine's store did not trust the proxy, and the export that spares the
+    # next upgrade a second attempt. The catalogue names the CA only through its
+    # conditional `certificates` clause, never as a bare imperative, so a failure
+    # that met no proxy is not told to touch a trust store.
     assert "TLS-intercepting proxy" in result["summary"]
     assert "the proxy's own CA is missing from this machine's store as well" in result["summary"]
     assert any("Install the proxy's own CA" in step for step in result["next_steps"])
     assert any("Export UV_SYSTEM_CERTS=1" in step for step in result["next_steps"])
+    assert not any("Install the proxy's own CA" in step for step in result["remediation"])
     # Never a way to a switch that turns verification off, on any path here.
     assert "--allow-insecure-host" not in json.dumps(result)
     assert "--trusted-host" not in json.dumps(result)
@@ -271,9 +318,18 @@ def test_a_retry_that_gets_past_the_trust_failure_is_not_reported_as_a_missing_c
     assert "the proxy's own CA is missing" not in result["summary"]
     assert "failed the same way" not in result["summary"]
     assert result["certificates"].endswith("failed for a different reason the manager records under install.")
-    # And so the CA install is not prescribed: the store just worked, and the new
-    # failure is not a certificate to install.
+    # And so the CA install is not prescribed anywhere in the result the caller
+    # acts out of. The store just worked and the new failure is not a certificate
+    # to install: neither the measured `next_steps` nor the standing `remediation`
+    # tells the operator to install a CA, and the catalogue's certificates clause
+    # is a pointer to this result's own diagnosis rather than a standing "install
+    # the proxy CA first" that would contradict the summary here (finding #2).
     assert not any("Install the proxy's own CA" in step for step in result["next_steps"])
+    assert not any("proxy's own CA" in step for step in result["remediation"])
+    assert any("If this result carries `certificates`" in step for step in result["remediation"])
+    assert "install the proxy's own ca" not in json.dumps(result).lower()
+    # And the rendering a person reads carries no CA imperative either.
+    assert "install the proxy's own ca" not in render_result(result, "upgrade").lower()
     # The new failure survives where the renderer walks for it, and the first
     # attempt's certificate error is still kept beside it under `install`.
     install = result["install"]
@@ -307,6 +363,126 @@ def test_a_failure_that_names_no_certificate_is_never_retried(monkeypatch: pytes
 
 
 # ---------------------------------------------------------------------------
+# The guard that runs before anything can be replaced, behind the same proxy.
+
+
+def test_the_resolution_query_is_retried_and_the_already_current_guard_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The #191 guard, asked behind the proxy instead of falling through it.
+
+    The pip and `uv pip` routes ask the resolver what it would do before they let
+    it do anything. Behind a TLS-intercepting proxy that question failed like
+    every other request to the index, read as "cannot tell", and fell through to
+    the mutating install -- which met the same proxy, was retried against this
+    machine's own store, and succeeded. The end state was right and the guard had
+    silently not guarded: a machine that needed nothing was uninstalled and
+    reinstalled to establish that it needed nothing.
+
+    So the question gets the same one-shot retry, and the proof is that no
+    command capable of replacing this installation runs at all: the stub is given
+    no install answer, so reaching one fails the test where it happens.
+    """
+    attempts = stub_manager(
+        monkeypatch,
+        answers=[],
+        command=UV_PIP_UPGRADE,
+        resolutions=[UV_PIP_RESOLUTION_TRUST_FAILURE, UV_PIP_WOULD_MAKE_NO_CHANGES],
+        version_after=__version__,
+    )
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    # The guard's own answer, reached without a manager having run.
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["install_skipped"] is True
+    assert result["restart_required"] is False
+    assert list(attempts) == []
+    # Asked twice, the same question both times, and the second differing in
+    # exactly the one variable the install's retry would have added.
+    assert [question.command for question in attempts.questions] == [[*UV_PIP_UPGRADE, "--dry-run"]] * 2
+    assert attempts.questions[0].certificate_variables == {}
+    assert attempts.questions[1].certificate_variables == {"UV_SYSTEM_CERTS": "1"}
+    # And it says what it did, in the same two lengths the install path uses, so
+    # the operator learns about the proxy on the call that met it rather than on
+    # the next upgrade that has something to install.
+    assert "TLS-intercepting proxy" in result["summary"]
+    assert "second attempt is the one that succeeded" in result["summary"]
+    assert result["certificates"] == "Retried once against this machine's own certificate store with UV_SYSTEM_CERTS=1, and that is the attempt that succeeded."
+    assert any("Export UV_SYSTEM_CERTS=1" in step for step in result["next_steps"])
+    # Both attempts' own words survive under the field this outcome carries them
+    # in, the way the install path carries them under `install`.
+    resolution = result["resolution"]
+    assert "Would make no changes" in resolution["stderr"]
+    assert resolution["certificate_retry"]["first_attempt"]["stderr"] == UV_PIP_RESOLUTION_TRUST_FAILURE.stderr
+
+
+def test_a_resolution_failure_that_names_no_certificate_still_falls_through_to_the_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half, pinned: only a trust failure changed, everything else did not.
+
+    An older pip that rejects `--report`, an index that answered 500, a resolver
+    that could not solve: none of those is a certificate, none is retried, and
+    all of them still mean "cannot tell" and still run the upgrade exactly as it
+    ran before. A guard that started refusing to fall through would turn every
+    unreadable question into a machine that cannot be upgraded at all.
+    """
+    unreadable = subprocess.CompletedProcess[str]([], 2, "", "error: unrecognized subcommand `--report`")
+    attempts = stub_manager(
+        monkeypatch,
+        answers=[MANAGER_INSTALLED],
+        manager="pip",
+        command=PIP_UPGRADE,
+        resolutions=[unreadable],
+    )
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    # Asked once, never retried, and the install ran as it always did.
+    assert len(attempts.questions) == 1
+    assert attempts.questions[0].inherited
+    assert [attempt.command for attempt in attempts] == [PIP_UPGRADE]
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    # And no certificate diagnosis is put on a result that has nothing to do with
+    # one, on either the question or the install.
+    assert "certificates" not in result
+    assert "next_steps" not in result
+
+
+def test_an_exported_variable_earns_the_resolution_query_no_second_attempt_either(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The operator-respect rule is the install's, and it is the question's too.
+
+    A `PIP_CERT` the operator exported was in force for the question that just
+    failed, so asking again with the same value would repeat a run rather than
+    retry it, and overriding it would swap the bundle they chose for one this
+    module picked off a list. Neither happens here for the same reason neither
+    happens on the install, and the fall-through is what it has always been.
+    """
+    chosen = tmp_path / "corporate-roots.pem"
+    chosen.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+    monkeypatch.setenv("PIP_CERT", str(chosen))
+    attempts = stub_manager(
+        monkeypatch,
+        answers=[PIP_TRUST_FAILURE],
+        manager="pip",
+        command=PIP_UPGRADE,
+        resolutions=[PIP_TRUST_FAILURE],
+        version_after=__version__,
+    )
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    # One question, inheriting the environment whole, and nothing rewritten in it.
+    assert len(attempts.questions) == 1
+    assert attempts.questions[0].inherited
+    assert os.environ["PIP_CERT"] == str(chosen)
+    # It could not tell, so the install ran, and it is the install's own account
+    # of the same proxy that the result reports.
+    assert len(attempts) == 1
+    assert result["error_type"] == "upgrade_failed"
+    assert result["certificates"].startswith("Not retried, because PIP_CERT is already set here")
+
+
+# ---------------------------------------------------------------------------
 # The operator's own environment, which is theirs.
 
 
@@ -333,8 +509,16 @@ def test_an_exported_uv_system_certs_is_not_overridden_and_earns_no_second_attem
     assert "a second one would only repeat it" in result["summary"]
     assert result["certificates"].startswith("Not retried, because UV_SYSTEM_CERTS is already set here")
     assert "certificate_retry" not in result["install"]
-    # What is left to do is the store itself, not another variable.
-    assert result["next_steps"] == ["Install the proxy's own CA certificate into this machine's certificate store. Until that is done there is nothing this command can be pointed at that trusts what the proxy presents, and no switch that turns verification off is a fallback. TROUBLESHOOTING.md section 1 is the rest of it."]
+    # What is left to do is the store itself, not another variable. That is the
+    # proxy CA imperative, and it is a measured next step this run attached
+    # because the store is exactly what UV_SYSTEM_CERTS already pointed uv at and
+    # the CA it lacks. The catalogue names the CA only through its conditional
+    # `certificates` clause, never as a bare remediation item, so it does not
+    # reach a failure that met no proxy.
+    assert result["next_steps"] == [
+        "Install the proxy's own CA certificate into this machine's certificate store. Until that is done there is nothing this command can be pointed at that trusts what the proxy presents, and no switch that turns verification off is a fallback. TROUBLESHOOTING.md section 1 is the rest of it."
+    ]
+    assert not any("Install the proxy's own CA" in step for step in result["remediation"])
 
 
 def test_an_exported_pip_cert_keeps_the_bundle_the_operator_chose(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -529,6 +713,92 @@ def test_the_rendered_refusal_names_the_proxy_without_the_json_flag(monkeypatch:
     assert "Export UV_SYSTEM_CERTS=1" in rendered
 
 
+def test_an_upgrade_failure_renders_the_standing_what_to_do_from_the_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every `upgrade_failed`, not only the one that met a proxy, now says what to do.
+
+    Until `upgrade_failed` had a catalogue entry, a refusal of this type rendered
+    Details and whatever `next_steps` the producing code had attached, and every
+    reason an upgrade fails except the certificate one attached nothing. So the
+    most ordinary failure there is, an index that could not be reached, went out
+    with no What-to-do section at all while `installation_broken` and
+    `upgrade_blocked_by_pin` beside it each carried one.
+
+    Deliberately a failure that names no certificate, so nothing but the
+    catalogue can be the source of what is on the screen.
+    """
+    stub_manager(monkeypatch, answers=[subprocess.CompletedProcess([], 1, "", "error: no solution found when resolving dependencies")], version_after=__version__)
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+    rendered = render_result(result, "upgrade")
+
+    assert result["error_type"] == "upgrade_failed"
+    assert "next_steps" not in result
+    # On the document, because an MCP caller acts out of `remediation` and never
+    # sees a rendering at all.
+    assert result["remediation"] and result["do_not"]
+    assert any("install.stderr" in step for step in result["remediation"])
+    assert any("install.sh" in step for step in result["remediation"])
+    # And a failure that met no proxy is never told to install one's CA. The
+    # imperative was an unconditional remediation item, so a resolver error with
+    # no `certificates` evidence still read "install the proxy's own CA
+    # certificate"; it is now attached only through the certificate note, which a
+    # non-proxy failure never carries. The conditional `certificates` clause is
+    # still in the catalogue, and it is self-gating.
+    assert "certificates" not in result
+    assert "Install the proxy's own CA certificate" not in json.dumps(result)
+    assert any("If this result carries `certificates`" in step for step in result["remediation"])
+    # And on the screen, in the sections every other refusal type gets.
+    assert "Refused: upgrade_failed" in rendered
+    assert "What to do" in rendered
+    assert "Do not" in rendered
+    assert "install.stderr" in rendered
+
+
+def test_the_standing_proxy_remedy_is_said_once_and_the_measured_one_beside_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two attempts failed, and the operator is told to install the CA exactly once.
+
+    The proxy CA imperative is a measured next step attached only when a run met
+    a proxy, not an unconditional catalogue item, so a failure that met none
+    never reads it (finding #2). When one did, it is said once, here under Next
+    steps, beside the export measured on this host, and never doubled onto What
+    to do. The catalogue's own mention of the CA is the conditional `certificates`
+    clause, which points at these steps rather than repeating them.
+    """
+    stub_manager(monkeypatch, answers=[UV_TRUST_FAILURE, UV_TRUST_FAILURE_AGAIN], version_after=__version__)
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    assert result["error_type"] == "upgrade_failed"
+    assert json.dumps(result).count("Install the proxy's own CA certificate") == 1
+    assert any("Install the proxy's own CA" in step for step in result["next_steps"])
+    assert not any("Install the proxy's own CA" in step for step in result["remediation"])
+    # The measured export stands beside it, and the two together are the whole of
+    # the steps this run attached.
+    assert any("Export UV_SYSTEM_CERTS=1" in step for step in result["next_steps"])
+    assert all(("Install the proxy's own CA" in step) or ("Export UV_SYSTEM_CERTS=1" in step) for step in result["next_steps"])
+
+
+def test_the_standing_remedy_survives_on_an_outcome_whose_own_entry_omits_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other direction, and the reason the de-duplication is done at the merge.
+
+    A manager that met the proxy and left nothing that loads answers
+    `installation_broken`, which has a catalogue entry of its own about the
+    reinstall and says nothing about certificates. Dropping the standing sentence
+    from the attached steps outright would take it off exactly the operator who
+    needs it most: their repair command goes back through the same proxy. So the
+    copy is dropped where the outcome's own remediation already says it, and
+    nowhere else.
+    """
+    stub_manager(monkeypatch, answers=[UV_TRUST_FAILURE, UV_TRUST_FAILURE_AGAIN], version_after="")
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    assert result["error_type"] == "installation_broken"
+    assert not any("Install the proxy's own CA" in step for step in result["remediation"])
+    assert any("Install the proxy's own CA" in step for step in result["next_steps"])
+    assert json.dumps(result).count("Install the proxy's own CA certificate") == 1
+
+
 def test_both_attempts_stderr_sits_under_install_where_the_renderer_walks_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
     """The shape #314 fixed the renderer to walk, pinned as a shape.
 
@@ -554,6 +824,39 @@ def test_both_attempts_stderr_sits_under_install_where_the_renderer_walks_for_it
 
     streams = captured_streams(install)
     assert sum("Caused by: invalid peer certificate: UnknownIssuer" in text for text in streams) == 2
+
+
+def test_the_command_line_rewrites_the_summary_and_keeps_the_certificate_sentence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`agentic-hil upgrade` writes its own summary too, and had been dropping this one.
+
+    The command line replaces the shared summary with the one about restarting
+    agent hosts, and refreshing the agent integrations may add a sentence to it
+    after that. Neither of them carried `certificates` over, so the operator on
+    the proxied bench read the persistent-export step in Next steps with nothing
+    on the screen saying why it was being offered: the upgrade had simply
+    succeeded, as far as the rendering was concerned. The MCP surface had already
+    been taught to carry it, which made the command line the half of the product
+    that knew less about the operator's own network.
+
+    Asserted through the rendering rather than through the field, because the
+    rendering is what somebody who typed the command and nothing else sees.
+    """
+    stub_manager(monkeypatch, answers=[UV_TRUST_FAILURE, MANAGER_INSTALLED])
+
+    result = upgrade_installation([])
+    rendered = render_result(result, "upgrade")
+
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    # The command's own sentence still comes first and is unchanged; the
+    # certificate clause is appended to it rather than replacing anything.
+    assert result["summary"].startswith(f"Agentic HIL upgraded from {__version__} to 9.9.9; restart agent hosts to load the new MCP server.")
+    assert result["summary"].endswith(result["certificates"])
+    # And it is on the screen, above the step that would otherwise be advice
+    # with no reason attached to it.
+    assert "certificate store" in rendered
+    assert "UV_SYSTEM_CERTS=1" in rendered
+    assert "Export UV_SYSTEM_CERTS=1" in rendered
 
 
 def test_the_mcp_surface_rewrites_the_summary_and_keeps_the_certificate_sentence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

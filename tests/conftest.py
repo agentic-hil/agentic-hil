@@ -173,6 +173,7 @@ FAKE_OPENOCD_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_openocd_no_target.p
 FAKE_OPENOCD_MISSING_CFG = ROOT / "tests" / "fixtures" / "fake_openocd_missing_cfg.py"
 FAKE_OPENOCD_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_openocd_unconfirmed.py"
 FAKE_OPENOCD_POST_INIT_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_openocd_post_init_unconfirmed.py"
+FAKE_OPENOCD_ERASE_REFUSED = ROOT / "tests" / "fixtures" / "fake_openocd_erase_refused.py"
 FAKE_STLINK = ROOT / "tests" / "fixtures" / "fake_stlink.py"
 FAKE_STLINK_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_unconfirmed.py"
 FAKE_STLINK_READ_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_stlink_read_unconfirmed.py"
@@ -185,6 +186,7 @@ FAKE_STLINK_ERASE_REFUSED = ROOT / "tests" / "fixtures" / "fake_stlink_erase_ref
 FAKE_STLINK_ERASE_MID_FLASH = ROOT / "tests" / "fixtures" / "fake_stlink_erase_mid_flash.py"
 FAKE_PYOCD = ROOT / "tests" / "fixtures" / "fake_pyocd.py"
 FAKE_PYOCD_UNKNOWN_TARGET = ROOT / "tests" / "fixtures" / "fake_pyocd_unknown_target.py"
+FAKE_PYOCD_ERASE_REFUSED = ROOT / "tests" / "fixtures" / "fake_pyocd_erase_refused.py"
 FAKE_GDB = ROOT / "tests" / "fixtures" / "fake_gdb.py"
 
 

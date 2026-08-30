@@ -98,6 +98,8 @@ from agentic_hil.knowledge import (
     CONFIG_SHAPE_URI,
     CONFIG_WIDENING_ERROR,
     CONFIG_WRITE_RIGHT,
+    DEBUGGER_BACKENDS_URI,
+    DEBUGGER_FIELD_MATRIX,
     PERMISSION_CHANGE_IN_OPEN_RUN,
     ResolvedConfigKey,
     config_key_schema,
@@ -712,6 +714,16 @@ def _project_config_set(
                 missing_keys=missing,
                 created_entries=sorted(created_entries),
             )
+        # 1c. And the one description key whose value decides what else the
+        #     entry needs. Read against what the *request* supplies for the
+        #     entry, not what the post-change document happens to contain: the
+        #     entry a switch leaves is already furnished for its old backend, and
+        #     those stale scripts and that old binary must not stand in for the
+        #     fields the new backend needs. A switch completed by other keys in
+        #     the same call still passes whatever order they arrived in.
+        half_switched = _incomplete_backend_switch(document, requested)
+        if half_switched is not None:
+            return half_switched
 
         # 2. The document, not the request. Whatever the keys were called, this
         #    compares what the file grants before against what it grants after,
@@ -838,11 +850,14 @@ def _document_changed_underneath(target_path: Path) -> JsonObject:
     """The plan was made against a description of the bench that has since moved.
 
     Broader than the per-key check on purpose, and not reducible to it: a plan
-    can be decided by values this tool cannot set — a debugger's ``type``, which
-    entries exist at all — and one of those moving invalidates the plan just as
-    completely as a carried key moving. Compared on the description, so a
-    concurrent permissions change, which no plan here reads, does not refuse a
-    write it has nothing to do with.
+    can be decided by values it does not itself carry (a debugger's ``type``,
+    which decides whether an executable belongs in that entry at all, and which
+    entries exist in the first place), and one of those moving invalidates the
+    plan just as completely as a carried key moving. Whether such a value is
+    settable through this tool is beside the point, and ``type`` now is: a
+    per-key expectation covers the keys a plan sends, and these are not among
+    them. Compared on the description, so a concurrent permissions change, which
+    no plan here reads, does not refuse a write it has nothing to do with.
     """
     return {
         "ok": False,
@@ -983,6 +998,159 @@ def _missing_required_fields(document: JsonObject, created_entries: list[str]) -
         entry = ((document.get(section) or {}).get(name)) or {}
         missing += [f"{created}.{field}" for field in node.get("required", []) if field not in entry]
     return sorted(missing)
+
+
+DEBUGGERS_SECTION = "debuggers"
+DEBUGGER_TYPE_FIELD = "type"
+# The backend an entry runs on when it names none. The loader reads the field as
+# `raw.get("type", "openocd")`, so an entry that omits it is already on openocd,
+# and the switch check has to be measured against that effective backend rather
+# than the raw value: writing `openocd` to an entry that never named a type is
+# the no-op it looks like, not a switch that re-demands the backend's fields.
+DEFAULT_DEBUGGER_TYPE = "openocd"
+
+
+def _backend_switches(requested: list[tuple[ResolvedConfigKey, Any]]) -> list[tuple[ResolvedConfigKey, str]]:
+    """The `debuggers.<name>.type` changes in this call, in the order they came."""
+    return [
+        (resolved, str(value))
+        for resolved, value in requested
+        if resolved.section == DEBUGGERS_SECTION and not resolved.under_permissions and resolved.field == DEBUGGER_TYPE_FIELD and isinstance(value, str)
+    ]
+
+
+def _entry_carries(entry: JsonObject, field: str) -> bool:
+    """Whether an entry actually names a field, as opposed to holding a hole.
+
+    ``null`` and the empty string are what a placeholder looks like in this file
+    and are what ``adopt-hardware`` treats as nothing there, so they are nothing
+    here either."""
+    value = entry.get(field)
+    return value is not None and value != ""
+
+
+def _effective_debugger_type(entry: JsonObject) -> str:
+    """The backend an entry resolves to, with the loader's ``openocd`` default.
+
+    ``type`` is optional, and an omitted or placeholder value loads as
+    ``openocd`` because the loader reads it as ``raw.get("type", "openocd")``. A
+    switch is measured against this effective backend, not against the raw field,
+    so re-writing the backend an entry is already on, including ``openocd`` on an
+    entry that never named a type, is the no-op it looks like rather than a
+    switch that re-demands that backend's other fields."""
+    value = entry.get(DEBUGGER_TYPE_FIELD)
+    return value if isinstance(value, str) and value != "" else DEFAULT_DEBUGGER_TYPE
+
+
+def _incomplete_backend_switch(original: JsonObject, requested: list[tuple[ResolvedConfigKey, Any]]) -> JsonObject | None:
+    """Refuse a `type` switch the call does not re-equip the entry for.
+
+    ``type`` is the one description key whose value decides which *other* fields
+    its entry needs, so it is the one that can be written on its own and still
+    produce a bench that is not a bench: an entry naming ``openocd`` with no
+    ``interface_cfg`` and no ``target_cfg`` loads, because both fields have
+    schema defaults, and then reaches the board with whatever those defaults
+    resolve to on this host.
+
+    The check reads what the *request* supplies, not what the post-change entry
+    happens to contain, because the entry a switch leaves is already furnished
+    for the backend it is leaving. A generated ``stlink`` entry carries
+    ``interface_cfg`` and ``target_cfg`` that stlink ignores, and an adopted
+    entry carries an ``executable`` chosen for its old backend; reading the
+    document would let any of those stand in for the values the new backend
+    actually needs, and the switch would land equipped for the wrong one. So a
+    real switch, one whose requested ``type`` differs from the entry's effective
+    backend, which is what its ``type`` field names or ``openocd`` when the
+    optional field is omitted, has to carry, in the same call, every writable
+    field the new backend requires and a fresh ``executable`` (a path, or ``null``
+    to have the new backend's
+    binary discovered) whenever the entry it leaves named one. The refusal names
+    the missing keys so the answer is "send these in the same call" rather than a
+    schema violation on a document the caller never saw, which is the same reason
+    ``_missing_required_fields`` above exists for a newly created entry.
+
+    Only fields *this surface can write* are demanded. ``interface`` on stlink
+    and ``target_type`` on pyocd are required by their backends too, and neither
+    is a key ``project_config_set`` sets, so demanding them would turn a switch
+    from atomic into impossible; both have a working unset behaviour that the
+    field matrix states, which is why they are the backends' own business.
+
+    The other half of a half-switch, a field the *new* backend refuses rather
+    than requires (``connect_mode: under_reset`` on openocd), is deliberately
+    not repeated here. The loader already refuses it, and validate-before-replace
+    below turns that refusal into the same "nothing was written" with the
+    per-backend rule stated in exactly one place.
+    """
+    switches = _backend_switches(requested)
+    if not switches:
+        return None
+    original_section = original.get(DEBUGGERS_SECTION)
+    if not isinstance(original_section, dict):
+        original_section = {}
+    settable = set(config_rule_fields(_rule_for(switches[0][0])))
+    # Which fields the call itself carries for each entry, so a required field or
+    # a fresh executable counts toward the switch only when the request sent it.
+    supplied: dict[str, set[str]] = {}
+    for resolved, _ in requested:
+        if resolved.section == DEBUGGERS_SECTION and not resolved.under_permissions and resolved.entry is not None:
+            supplied.setdefault(resolved.entry, set()).add(resolved.field)
+    incomplete: list[tuple[str, str, list[str], bool]] = []
+    for resolved, backend in switches:
+        old_entry = original_section.get(resolved.entry)
+        old_type = _effective_debugger_type(old_entry) if isinstance(old_entry, dict) else None
+        if old_type == backend:
+            # Not a switch: the entry already runs on this backend, its `type`
+            # names it, or it omits the optional field and defaults to openocd,
+            # so nothing it carries was chosen for a backend it is leaving.
+            continue
+        here = supplied.get(resolved.entry, set())
+        required = sorted(
+            name
+            for name, node in (DEBUGGER_FIELD_MATRIX.get(backend) or {}).items()
+            if isinstance(node, dict) and node.get("status") == "required" and name != DEBUGGER_TYPE_FIELD and name in settable
+        )
+        missing = [f"{DEBUGGERS_SECTION}.{resolved.entry}.{name}" for name in required if name not in here]
+        # The old backend's binary is the other half a type-only switch keeps: an
+        # executable already in the entry was discovered or chosen for the backend
+        # the entry is leaving, so a real switch has to resend it or `null` it.
+        stale_executable = (
+            "executable" in settable
+            and isinstance(old_entry, dict)
+            and _entry_carries(old_entry, "executable")
+            and "executable" not in here
+        )
+        if missing or stale_executable:
+            incomplete.append((resolved.key, backend, missing, stale_executable))
+    if not incomplete:
+        return None
+    first_key, first_backend, first_missing, first_stale = incomplete[0]
+    entry_path = first_key.rsplit(".", 1)[0]
+    missing_keys = sorted(
+        {key for _, _, keys, _ in incomplete for key in keys}
+        | {f"{key.rsplit('.', 1)[0]}.executable" for key, _, _, stale in incomplete if stale}
+    )
+    reasons: list[str] = []
+    if first_missing:
+        reasons.append(
+            f"does not carry {', '.join('`' + key.rsplit('.', 1)[-1] + '`' for key in first_missing)}, which {first_backend} requires"
+        )
+    if first_stale:
+        reasons.append("still carries an `executable` chosen for the backend it is leaving")
+    return _invalid(
+        (first_missing or [f"{entry_path}.executable"])[0],
+        f"`{first_key}` would put this entry on the {first_backend} backend, and the entry "
+        + " and ".join(reasons)
+        + ". A backend switch lands whole or not at all: send the missing keys in the same call. Nothing was written.",
+        rejected_key=first_key,
+        debugger_type=first_backend,
+        missing_keys=missing_keys,
+        next_step=(
+            f"Repeat the call with `{first_key}` and every key in `missing_keys` together. Send "
+            f"`{entry_path}.executable` in it as a path or as `null` to have the new backend's binary discovered: an "
+            "executable already in the entry was chosen for the backend the entry is leaving. "
+            f"{DEBUGGER_BACKENDS_URI} says what each backend requires."
+        ),
+    )
 
 
 def _record_provenance(document: JsonObject, keys: list[str], timestamp: str, actor: str, via: str) -> None:

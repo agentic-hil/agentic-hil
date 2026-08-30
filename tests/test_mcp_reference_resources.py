@@ -358,21 +358,24 @@ def test_an_error_nobody_wrote_a_fix_for_grows_no_invented_advice() -> None:
     assert "do_not" not in refusal
 
 
-# The three the catalogue had no entry for, and the reason the gap mattered:
-# `invalid_argument` is the most frequent refusal on this surface, and the two
-# CAN adapter ones are raised where a frame may or may not have reached the bus,
-# which is precisely when a caller most needs to be told what to do next.
-UNCOVERED_UNTIL_NOW = ("invalid_argument", "can_adapter_protocol_unsupported", "can_adapter_invalid_response")
+# The four the catalogue had no entry for, and the reason each gap mattered:
+# `invalid_argument` is the most frequent refusal on this surface, the two CAN
+# adapter ones are raised where a frame may or may not have reached the bus,
+# which is precisely when a caller most needs to be told what to do next, and
+# `upgrade_failed` is where every upgrade that does not finish lands, so the one
+# path with anything to say had to attach its own `next_steps` to say it while
+# every other reason an upgrade fails went out with nothing at all.
+UNCOVERED_UNTIL_NOW = ("invalid_argument", "can_adapter_protocol_unsupported", "can_adapter_invalid_response", "upgrade_failed")
 
 
 @pytest.mark.parametrize("error_type", UNCOVERED_UNTIL_NOW)
 def test_the_refusals_that_carried_nothing_now_carry_a_way_forward(error_type: str) -> None:
-    """A refusal carries the way forward, and these three did not.
+    """A refusal carries the way forward, and these four did not.
 
-    `remediation_fields` answered `{}` for all three, so the most common refusal
-    this server produces went out with no next step and no `do_not` line while
-    `permission_denied`, `device_busy` and `com_port_identity_mismatch` each
-    carried one."""
+    `remediation_fields` answered `{}` for all of them, so the most common
+    refusal this server produces went out with no next step and no `do_not` line
+    while `permission_denied`, `device_busy` and `com_port_identity_mismatch`
+    each carried one."""
     fields = remediation_fields(error_type)
 
     assert fields["remediation"], error_type

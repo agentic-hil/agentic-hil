@@ -103,10 +103,10 @@ def attached(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict:
 def placeholder_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, config_version: int | None = 2, permissions: dict[str, bool] | None = None, **grants: bool) -> tuple[Path, Path]:
     """The file `init` writes when nothing was attached: type stlink, all null.
 
-    `type` is the one identity field this path cannot set, because it decides
-    which program reaches the board rather than what the board is. A bench that
-    means to be driven through ST-Link says so; everything else in the entry is
-    still the placeholder `init` wrote.
+    `type` is the one field of the entry this path never writes, because a probe
+    hands you an identity and never a choice of debug stack. A bench that means
+    to be driven through ST-Link says so; everything else in the entry is still
+    the placeholder `init` wrote.
 
     `config_version=None` is the file a project written before the read-free
     model already has on disk, where reading a probe still needs `allow_probe`."""
@@ -359,8 +359,10 @@ def test_the_untouched_skeleton_carries_the_board_with_nobody_editing_yaml(tmp_p
     not, and says why: the skeleton's `type` is `openocd` and the attached
     toolchain is STM32CubeProgrammer, so writing that path into this entry would
     produce a file that loads and fails at the first call. `type` is not a key
-    any write door opens, here or in `project_config_set`, so that one is the
-    operator's own edit and the result names it rather than guessing."""
+    adoption writes, because a probe hands you an identity and never a choice of
+    debug stack, so the result names that switch instead of guessing at it. Since
+    #343 the switch itself is a `project_config_set` call rather than a hand
+    edit, and the `next_step` asserted below is what points at it."""
     path = _skeleton_from_init(tmp_path, monkeypatch, "config-adopt-untouched")
     before = path.read_text(encoding="utf-8")
     attached(monkeypatch)
@@ -669,7 +671,8 @@ def test_a_toolchain_from_another_backend_is_reported_and_not_written(tmp_path: 
     """An OpenOCD entry does not take an STM32CubeProgrammer path.
 
     It would load and then fail at the first call, and `type` is deliberately not
-    a key this door opens: it decides which program reaches the board."""
+    a key adoption writes: a probe hands you an identity, not a choice of debug
+    stack. Changing one is `project_config_set`, which the refusal names."""
     workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     document = document_of(path)
     document["debuggers"]["dut"]["type"] = "openocd"
@@ -1152,8 +1155,8 @@ def test_an_entry_named_like_a_reserved_key_is_still_covered_by_the_document_che
 
     def slow(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None) -> dict:
         # The entry is switched to another backend while this board is being
-        # read. `type` is not a key adoption can set, so no per-key expectation
-        # covers it — the whole-document comparison is the only thing that can.
+        # read. `type` is not a key adoption carries, so no per-key expectation
+        # covers it, and the whole-document comparison is the only thing that can.
         meanwhile = document_of(path)
         meanwhile["debuggers"]["permissions"]["type"] = "openocd"
         path.write_text(yaml.safe_dump(meanwhile, sort_keys=False), encoding="utf-8")

@@ -130,7 +130,7 @@ debuggers:
 Three things bound it:
 
 - **Only `type: stlink` carries it.** OpenOCD reaches the target through the scripts named by `interface_cfg` and `target_cfg`, and connecting under reset is a `reset_config` decision inside them that depends on how SRST is wired for that adapter and part; ask for it there. This server passes no connect-mode option to pyOCD at all. Both backends *refuse* `under_reset` when the file is loaded, with `config_invalid` naming the field, rather than reading a value they would then ignore.
-- **Only `flash_firmware` reads it.** `probe_target` keeps connecting hot plug, because it is the least intrusive call this server makes and it erases nothing. `reset_target` and the typed memory reads keep their own connect: what they do to the target is decided by the operation, not by this key.
+- **Only `flash_firmware` reads it.** `probe_target` keeps connecting hot plug, because it is the least intrusive call this server makes and it erases nothing. `reset_target` and the typed memory reads keep their own connect: what they do to the target is decided by the operation, not by this key. The reads connect hot plug for a reason of their own, and it is the opposite of this key's: `mode=UR` holds the target in reset, and RAM read through a held reset line is not a measurement of anything the firmware did.
 - **The reset line has to be wired.** STM32CubeProgrammer pairs `UR` with a hardware reset, so the probe's reset pin must reach the target's NRST. On a Nucleo with its on-board ST-Link it already does; on a board wired with SWDIO, SWCLK and ground alone it does not, and the connect will fail rather than fall back.
 
 `connect_mode` sits with the other things the bench *is*, under `allow_config_description_write`: it grants nothing, and both of its values are a flash the configuration already allows.
@@ -162,9 +162,46 @@ permissions:
   allow_upgrade: true                       # lift this installation to the newest release
 ```
 
-`allow_config_description_write` opens `target.*`, `debuggers.<name>.probe_id` / `executable` / `interface_cfg` / `target_cfg` / `connect_mode`, `com_ports.<name>.device` / `baudrate` / `serial_number`, and every `can_buses.<name>` field except its permissions. `allow_config_permissions_write` opens every permission key in the file: each `permissions:` block, and the two grants that sit directly on a section rather than inside one, `artifacts.allow_upload` and `debug.allow_all_symbols`. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would in the same motion have handed over the permissions block.
+`allow_config_description_write` opens `target.*`, `debuggers.<name>.type` / `probe_id` / `executable` / `interface_cfg` / `target_cfg` / `connect_mode`, `com_ports.<name>.device` / `baudrate` / `serial_number`, and every `can_buses.<name>` field except its permissions. `allow_config_permissions_write` opens every permission key in the file: each `permissions:` block, and the two grants that sit directly on a section rather than inside one, `artifacts.allow_upload` and `debug.allow_all_symbols`. One permission for both would be a master key: set to let an agent enter a 24-character probe serial, it would in the same motion have handed over the permissions block.
 
 `allow_upgrade` is the one that is not about this file. It opens `server_upgrade`, which replaces the installed package with the newest release, because on an MCP host without a shell there is otherwise no way for the main surface to perform the basic maintenance of its own server. It takes no version, so it cannot be used to install a release that reads the rest of this block differently, and it is subject to the same ratchet as everything else here: an agent can set it false and never true.
+
+### Switching a probe to another debug stack
+
+`debuggers.<name>.type` is in the description half, beside the three fields that already decide which binary runs with which scripts. An operator who granted description-write has handed over `executable`, `interface_cfg` and `target_cfg`; which debug stack the bench runs is the same kind of fact about the same bench, and holding it back only meant the file had to be opened by hand for it.
+
+It is the one key here whose value decides which *other* fields its entry needs, so it is the one that is checked as a whole rather than field by field. A change to it is refused unless the entry that comes out of the call carries everything the backend it names requires and this surface can write, and the refusal names the missing keys:
+
+```json
+{"changes": [{"key": "debuggers.dut.type", "value": "openocd"}]}
+```
+
+```text
+invalid_argument   debuggers.dut.interface_cfg
+`debuggers.dut.type` would put this entry on the openocd backend, and the entry
+does not carry `interface_cfg`, `target_cfg`, which openocd requires. A backend
+switch lands whole or not at all: send the missing keys in the same call.
+Nothing was written.
+```
+
+The whole switch is one call:
+
+```json
+{"changes": [
+  {"key": "debuggers.dut.type", "value": "openocd"},
+  {"key": "debuggers.dut.executable", "value": null},
+  {"key": "debuggers.dut.interface_cfg", "value": "C:/tools/openocd/share/openocd/scripts/interface/stlink.cfg"},
+  {"key": "debuggers.dut.target_cfg", "value": "C:/tools/openocd/share/openocd/scripts/target/stm32f4x.cfg"}
+]}
+```
+
+Three notes on that call:
+
+- **Send `executable` too.** It is not demanded, because an entry may legitimately have none and let the backend be discovered, but an executable *already* in the entry was chosen for the backend the entry is leaving. `null` is how you ask for the new backend's binary to be found on PATH.
+- **Only what this surface can write is demanded.** `interface` on stlink and `target_type` on pyocd are required by those backends and are not keys `project_config_set` sets; demanding them would make a switch impossible rather than atomic. Both work unset, and the MCP resource `agentic-hil://reference/debugger-backends` states per backend what it requires, discovers, ignores or refuses.
+- **A field the new backend refuses is caught by the loader.** Nothing on this surface knows what OpenOCD can carry out; what it knows is that the changed file has to load as authoritative before it may replace the one that did. So switching an entry that carries `connect_mode: under_reset` to `openocd` is refused as `config_invalid` naming `debuggers.<name>.connect_mode`, and the file that was there stands untouched. Send `connect_mode: hotplug` in the same call to make that switch land.
+
+A changed `type` is a device description like any other, so the running server keeps answering out of the configuration it loaded until `project_config_reload_description` or a restart.
 
 ### Permissions move one way
 

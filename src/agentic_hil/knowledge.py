@@ -306,6 +306,28 @@ def _substitutions() -> dict[str, str]:
     }
 
 
+# The one thing that fixes a proxy neither the manager's roots nor this machine's
+# store trusts. Standing text, which is why it lives here rather than beside its
+# one caller: `upgrade.py` attaches it as a case-specific `next_steps` entry on the
+# runs whose own words name a trust failure this machine's store did not answer,
+# and the same string reaches `installation_broken` and
+# `installation_changed_after_failed_upgrade`, whose own catalogue entries say
+# nothing about certificates. It is deliberately not a standing `upgrade_failed`
+# remediation step: a run that got past the proxy and then failed for a reason of
+# its own carries `certificates` too, so an unconditional CA imperative would
+# contradict the very result that says the store already worked. The catalogue
+# points at these measured steps through its conditional `certificates` clause
+# instead.
+#
+# Named as a step and never performed: it writes to a trust store, which is the
+# operator's, and the alternative an impatient reader reaches for is a switch
+# that turns verification off, which this project offers nowhere.
+INSTALL_THE_PROXY_CA = (
+    "Install the proxy's own CA certificate into this machine's certificate store. Until that is done there is "
+    "nothing this command can be pointed at that trusts what the proxy presents, and no switch that turns "
+    "verification off is a fallback. TROUBLESHOOTING.md section 1 is the rest of it."
+)
+
 # Keys are "<error_type>" or "<error_type>:<scope>", where scope is the config
 # field the error names or the debugger backend that raised it. Lookup falls back
 # from the scoped key to the bare one, so a scope nobody wrote an entry for still
@@ -439,6 +461,57 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "the manager will resolve against an environment that no longer has the package in it.",
             "Do not delete the scripts directory, the environment or the leftover console script to clean up first. "
             "The reinstall replaces what it needs to, and a hand-cleared PATH entry is one more thing to put back.",
+        ),
+    ),
+    "upgrade_failed": ErrorRemedy(
+        meaning=(
+            "The package manager that owns this installation ran and did not finish, and the installation it was "
+            "going to replace is still the one that was there. The second half is measured rather than assumed: once "
+            "the manager had stopped, the same import the `agentic-hil` console script performs was run through the "
+            "same interpreter, and it answered the version this process was already running. So nothing was replaced, "
+            "nothing is half replaced, and the bench, the configuration and every board are exactly as they were; "
+            "`previous_version` and `version` on this result are the same number, and `installation_intact` says so. "
+            "Why it stopped is the manager's own account: `install` carries it when the manager produced any output, "
+            "and `exception_type` with `detail` when the manager could not be run at all. The usual reasons are an "
+            "index or a network that could not be reached, a TLS-intercepting proxy re-signing the connection to the "
+            "index, a package manager that is broken or no longer where it was, and a release that was withdrawn "
+            "between the resolution and the download."
+        ),
+        remediation=(
+            "Read `install.stderr` on this result. That is the manager saying why it stopped, in its own words, and "
+            "for most of these it is the whole diagnosis. The human rendering prints it as a literal block, so it is "
+            "on the screen without `--json`; if there is no `install` at all, `exception_type` and `detail` say that "
+            "the manager could not be started or did not return in time, which is a different thing from a manager "
+            "that ran and refused.",
+            "If this result carries `certificates`, the cause was a TLS-intercepting proxy and this command has "
+            "already answered it once by itself: that clause says which store was tried and what came of it, and "
+            "`next_steps` carries the one step measured for this machine. Read that clause and do what its `next_steps` "
+            "says before anything else here, which is not always to install a CA: a retry against this machine's own "
+            "store can get past the proxy and then fail for a reason of its own, and there the store already worked and "
+            "the step is to keep it rather than to change it. A failure that carries no `certificates` met no proxy, so "
+            "no trust store is the answer to it.",
+            "Otherwise deal with the reason `install.stderr` gives and run the upgrade again. Nothing was removed, so "
+            "there is nothing to undo first and the second attempt starts exactly where the first one did.",
+            "If it keeps failing, the one-line installer is the repair path, and on a machine that already has an "
+            "installation it repairs in place: `curl -LsSf https://agentic-hil.github.io/install.sh | sh`, or in "
+            "PowerShell `irm https://agentic-hil.github.io/install.ps1 | iex`. It goes through the package manager "
+            "again, recognises the same certificate signatures and retries against this machine's own store by "
+            "itself, and re-registers the agent halves out of the fresh copy. Run it with the agent host closed.",
+        ),
+        do_not=(
+            "Do not report this as a broken or a half-replaced installation. Those are two other answers, "
+            "`installation_broken` and `installation_changed_after_failed_upgrade`, and this is the one where the "
+            "probe found the previous release still loading. Telling an operator their bench is down when it is "
+            "running sends them to a reinstall that nothing here needs.",
+            "Do not reach for a switch that turns certificate verification off, on any manager. This project offers "
+            "none, anywhere, and does not name one: a trust failure it could not answer is a CA to install, not a "
+            "check to remove. TROUBLESHOOTING.md section 1 is the rest of it.",
+            "Do not uninstall the package, delete the environment, or force a reinstall to give the next attempt a "
+            "clean start. Nothing was removed by this failure, and the working installation this result names is the "
+            "one such a cleanup destroys.",
+            "Do not retry through `sudo pip` or `pip install --break-system-packages` because a system Python refused "
+            "the install. That message is the distribution saying the interpreter is not yours to write into; `uv` "
+            "and `pipx` install into environments of their own and need no exception.",
         ),
     ),
     "installation_changed_after_failed_upgrade": ErrorRemedy(
@@ -1287,6 +1360,180 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "protection refusal by destroying more than the failed operation ever asked for.",
         ),
     ),
+    "flash_erase_failed:openocd": ErrorRemedy(
+        meaning=(
+            "OpenOCD could not erase the flash sectors the image covers, and said so in its own words: `failed erasing "
+            "sectors <first> to <last>`. Nothing was written and nothing was verified, and the flash contents are "
+            "unconfirmed rather than known-unchanged: the sectors named before the failing one may already be erased.\n\n"
+            "This used to be reported as a plain `flash_failed`, whose causes are about a wrong image or a wrong "
+            "address and say nothing about an erase. Worse, whenever the transcript carried an unrelated reset line, "
+            "and OpenOCD warns on nearly every `reset halt` that it is only resetting the core, the classification "
+            "became `reset_failed` and sent the operator to the reset line instead. The rule now reads the line "
+            "OpenOCD wrote about the operation that stopped."
+        ),
+        remediation=(
+            "Read `programmer_output.stdout` and `programmer_output.stderr` on the result before anything else. They "
+            "are OpenOCD's own account of what it opened, examined and tried to erase, and `failed erasing sectors "
+            "<first> to <last>` in them names the sector range, which is what says whether the refusal covers the "
+            "whole image or starts partway into it. The log the result names by `log_path` holds the same capture.",
+            "Ask the device about protection rather than about wiring. Read the option bytes for read-out protection, "
+            "write protection or PCROP over the sectors the range names, with a vendor tool or with OpenOCD's own "
+            "`flash info <bank>`, and clear the protection deliberately if that is what it shows.",
+            "Check that the flash bank OpenOCD erases by is this device's. It comes from "
+            "`debuggers.<name>.target_cfg`, and a configuration written for a near neighbour of this part declares "
+            "sector sizes the device refuses at the erase while the connect and the identification both succeeded.",
+            "Treat the board as holding an indeterminate image until a flash programs and verifies. A refused erase "
+            "does not prove the flash is unchanged, which is why the result says the contents are unconfirmed, and "
+            "reflashing is the way through it rather than a retry taken as proof the erase never happened.",
+        ),
+        do_not=(
+            "Do not read this as a reset problem. No reset failed, and re-seating the reset line or changing "
+            "`debuggers.<name>.interface_cfg` on that theory changes nothing about a refused erase.",
+            "Do not reach for a device unlock command such as `stm32f2x unlock` to force the erase through. Those "
+            "answer a protection refusal with a mass erase of the whole part, which destroys more than the failed "
+            "operation ever asked for; the same reasoning is why this service refuses to flash at all once "
+            "`allow_mass_erase` is granted.",
+        ),
+    ),
+    "flash_erase_failed:pyocd": ErrorRemedy(
+        meaning=(
+            "pyOCD could not erase a flash sector the image covers, and said so in its own words: `Failed to erase "
+            "sector at <address>`. Nothing was written and nothing was verified, and the flash contents are unconfirmed "
+            "rather than known-unchanged: the sectors before the failing address may already be erased.\n\n"
+            "This used to be reported as a plain `flash_failed`, and pyOCD logs `Resetting target` as a matter of "
+            "course beside what it is doing, so the same failure with that line in the transcript came back as "
+            "`reset_failed`: the failure of an operation that had in fact succeeded. The rule now reads the line "
+            "pyOCD wrote about the operation that stopped."
+        ),
+        remediation=(
+            "Read `programmer_output.stdout` and `programmer_output.stderr` on the result before anything else. They "
+            "are pyOCD's own account of what it loaded and tried to erase, and `Failed to erase sector at <address>` "
+            "in them names the address the device refused, which is what places the failure inside the image. The log "
+            "the result names by `log_path` holds the same capture.",
+            "Ask the device about protection rather than about wiring. Read the option bytes for read-out protection, "
+            "write protection or PCROP over the sector that address falls in, with the vendor's own tool, and clear the "
+            "protection deliberately if that is what it shows.",
+            "Check that the sector map pyOCD erases by is this device's. It comes from the CMSIS pack behind "
+            "`debuggers.<name>.target_type`, so a target type that resolves to a near neighbour of this part erases at "
+            "addresses the device refuses while the connect and the identification both succeeded. "
+            "`agentic-hil doctor` reports what the configured value resolves to, in "
+            "`debuggers.<name>.target_support`.",
+            "Treat the board as holding an indeterminate image until a flash programs and verifies. A refused erase "
+            "does not prove the flash is unchanged, which is why the result says the contents are unconfirmed, and "
+            "reflashing is the way through it rather than a retry taken as proof the erase never happened.",
+        ),
+        do_not=(
+            "Do not read this as a reset problem. No reset failed, and re-seating the reset line or power-cycling on "
+            "that theory changes nothing about a refused erase.",
+            "Do not answer it with a chip erase (`pyocd erase --chip` or a `--erase chip` flash). That erases the whole "
+            "device rather than the sectors the image covers, and it answers a protection refusal by destroying more "
+            "than the failed operation ever asked for; the same reasoning is why this service refuses to flash at all "
+            "once `allow_mass_erase` is granted.",
+        ),
+    ),
+    # -- A capability this configuration does not have, and the way to one ------
+    # Scoped per backend, because "not supported" is only half an answer: the
+    # useful half is which configuration would support it, and that differs by
+    # what is plugged in. Both entries end at the same place (the probe on the
+    # bench is one OpenOCD drives), and both say what the move costs, because a
+    # way out whose price is discovered afterwards is a dead end with a delay.
+    "not_supported:stlink": ErrorRemedy(
+        meaning=(
+            "This bench runs `type: stlink`, which drives STM32CubeProgrammer's CLI. That CLI programs, resets and "
+            "reads memory; it is not a debug server, so there is no session on this backend to hold a breakpoint, "
+            "resume a core, or report why one stopped. `debug_start_session`, `debug_stop_session`, "
+            "`debug_get_session_status`, `debug_set_breakpoint`, `debug_list_breakpoints`, `debug_clear_breakpoints`, "
+            "`debug_continue`, `debug_halt` and `debug_get_stop_reason` are refused here for that reason, and so is "
+            "`reset_target` with mode `init`, whose reset-init event script is an OpenOCD thing.\n\n"
+            "What is *not* refused any more is the read half of the typed-debug family. `debug_symbol_info`, "
+            "`debug_symbol_value` and `debug_dump_symbol_ihex` are served on this backend with no session behind them: "
+            "the first resolves an address and a size out of the ELF `flash_firmware` put on the board and opens no "
+            "probe at all, and the other two read the target with STM32CubeProgrammer's own memory read. Refusing a "
+            "read this hardware can perform was the bug (#342): it sent a bench that wanted a RAM measurement away "
+            "from its own probe. The two reads that do reach the board also connect hot plug now, because the connect "
+            "they shipped with reset the target, and a read that resets destroys the RAM it was asked for.\n\n"
+            "Nothing was sent to the bench for this refusal. The target is exactly as the last call that did reach it "
+            "left it."
+        ),
+        remediation=(
+            "First check whether a read answers the question. If what is wanted is a value out of the target (a "
+            "counter, a coverage buffer, a status word, a structure), `debug_symbol_value` and "
+            "`debug_dump_symbol_ihex` do that here without a session, and `debug_symbol_info` answers where a symbol "
+            "lives without touching the board. They resolve against the ELF this service flashed, so flash the ELF "
+            "with `flash_firmware` first and keep the symbol in `debug.allowed_symbols`.",
+            "If the step genuinely needs a session (a breakpoint, a resume, a stop reason, stepping), the way out is "
+            "a configuration change and not a different probe: the same ST-Link is a probe OpenOCD drives. Set "
+            "`debuggers.<name>.type` to `openocd`, with `interface_cfg: interface/stlink.cfg` and the `target_cfg` for "
+            "this part, `target/stm32f4x.cfg` for an STM32F4.",
+            "The switch is one `project_config_set` call behind `allow_config_description_write`: send "
+            "`debuggers.<name>.type` together with the fields the new backend requires, and it lands whole or is "
+            "refused naming what is missing. Which debug stack a bench runs is the operator's decision, so report "
+            "the change and get their word before making it. Afterwards the server adopts it through "
+            "`project_config_reload_description` or a restart.",
+            "Say what the move costs before it is made, because parts of this bench change hands with it. OpenOCD has "
+            "to be installed and reachable, by PATH or `debuggers.<name>.executable`. A typed debug session is GDB, so "
+            "`debug.gdb_executable` has to name a GDB that speaks this target, such as `arm-none-eabi-gdb`. A "
+            "`connect_mode: under_reset` on that debugger has to go: OpenOCD refuses the value at load with "
+            "`config_invalid`, and connecting under reset becomes a `reset_config` decision inside the interface and "
+            "target scripts. And the part stops identifying itself: STM32CubeProgrammer reports the device name on "
+            "every connect, while OpenOCD is told what the part is by `target_cfg`, so a wrong script fails to detect "
+            "the target instead of adapting.",
+            "If the bench has to stay on STM32CubeProgrammer, report the step as unavailable on this configuration and "
+            "name which of the two halves was needed. A missing capability that is stated is a decision for the "
+            "operator; one that is worked around quietly is a plan that reports something it did not do.",
+        ),
+        do_not=(
+            "Do not read this as no debug on this bench. Three of the twelve typed-debug tools work here, and they are "
+            "the three that answer what is in memory.",
+            "Do not reach for `openocd`, `gdb`, `st-util` or a raw debugger command to get a breakpoint anyway. That "
+            "bypasses the policy this refusal comes from, takes the probe out from under the bench's own coordination, "
+            "and leaves the operator with no record of what ran.",
+            "Do not swap the probe. The ST-Link is not what refused; the backend the configuration names for it is, "
+            "and the same probe serves both.",
+        ),
+    ),
+    "not_supported:pyocd": ErrorRemedy(
+        meaning=(
+            "This bench runs `type: pyocd`, which this server drives through pyOCD's command-line tools for probing, "
+            "flashing and resetting. No typed-debug tool is served here: not the session family "
+            "(`debug_start_session` and its breakpoints, continue, halt and stop reason), and not the reads "
+            "(`debug_symbol_info`, `debug_symbol_value`, `debug_dump_symbol_ihex`). `reset_target` with mode `init` is "
+            "refused for the same reason: the reset-init event script belongs to OpenOCD.\n\n"
+            "The reads are the honest part of that to know about. pyOCD can read target memory, so this refusal is "
+            "wider than the hardware's own limits, in a way the ST-Link backend's no longer is (#342). What is missing "
+            "is not the command but the evidence: which pyOCD connect reaches a running core without halting or "
+            "resetting it has not been established on a bench here, and a read that silently resets the target "
+            "destroys the RAM it was asked for. Until that is measured, a refusal is the answer that does not lie.\n\n"
+            "Nothing was sent to the bench for this refusal. The target is exactly as the last call that did reach it "
+            "left it."
+        ),
+        remediation=(
+            "The way out is a configuration change rather than different hardware: the probe this backend is driving "
+            "is one OpenOCD drives too. Set `debuggers.<name>.type` to `openocd`, with the `interface_cfg` for the "
+            "probe that is actually plugged in (`interface/stlink.cfg` for an ST-Link, `interface/cmsis-dap.cfg` for "
+            "a CMSIS-DAP probe) and the `target_cfg` for this part.",
+            "The switch is one `project_config_set` call behind `allow_config_description_write`: send "
+            "`debuggers.<name>.type` together with the fields the new backend requires, and it lands whole or is "
+            "refused naming what is missing. Which debug stack a bench runs is the operator's decision, so report "
+            "the change and get their word before making it. Afterwards the server adopts it through "
+            "`project_config_reload_description` or a restart.",
+            "Say what the move costs before it is made. OpenOCD has to be installed and reachable, by PATH or "
+            "`debuggers.<name>.executable`, and `debug.gdb_executable` has to name a GDB that speaks this target, "
+            "because a typed debug session is GDB. `debuggers.<name>.target_type` stops being read: OpenOCD is told "
+            "what the part is by `target_cfg`, so the CMSIS device-family pack that made pyOCD resolve the part is no "
+            "longer what decides whether the bench works, and a wrong `target_cfg` fails to detect the target rather "
+            "than adapting.",
+            "If the bench has to stay on pyOCD, report the step as unavailable on this configuration and name what was "
+            "needed. A read that was refused here and would have worked under `openocd` is worth saying out loud, "
+            "because it is the difference between this bench and the same probe one line of configuration away.",
+        ),
+        do_not=(
+            "Do not reach for `pyocd commander`, `pyocd gdbserver`, `gdb` or a raw debugger command to get the value "
+            "anyway. That bypasses the policy this refusal comes from and takes the probe out from under the bench's "
+            "own coordination.",
+            "Do not swap the probe. The probe is not what refused; the backend the configuration names for it is.",
+        ),
+    ),
     # -- The one flag whose whole value is that it is never silently degraded ---
     CAN_INTERFACE_NOT_FOUND_ERROR: ErrorRemedy(
         meaning=(
@@ -2054,7 +2301,7 @@ def attach_quarantine_guidance(result: JsonObject) -> JsonObject:
 DEBUGGER_FIELD_MATRIX: JsonObject = {
     "openocd": {
         "tool": "openocd",
-        "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant."},
+        "type": {"status": "optional", "value": "openocd", "note": "Default. Omit only if no other backend is meant. Settable over MCP behind allow_config_description_write, and switching an entry to this backend has to carry interface_cfg and target_cfg in the same call, because OpenOCD reaches the board through no other route; an entry that does not name them is refused rather than left half switched. Send executable in that call too, or `null` to have OpenOCD discovered on PATH: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to `openocd` on PATH, except on the untouched starter entry, which stays inert until somebody names a toolchain in it. An absolute path or a value containing a separator is resolved against workspace_root and must exist."},
         "probe_id": {"status": "optional", "note": "Adapter serial number, passed as `adapter serial <probe_id>`. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "OpenOCD selects the target through target_cfg."},
@@ -2066,7 +2313,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
     },
     "stlink": {
         "tool": "STM32_Programmer_CLI (STM32CubeProgrammer)",
-        "type": {"status": "required", "value": "stlink"},
+        "type": {"status": "required", "value": "stlink", "note": "Settable over MCP behind allow_config_description_write. Switching an entry to this backend needs no other key of this surface: interface defaults to SWD, and interface_cfg and target_cfg are ignored here, so they may stay in the entry. Send executable in the same call, or `null` to have STM32_Programmer_CLI discovered: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to STM32_Programmer_CLI on PATH, then the standard STM32CubeProgrammer and STM32CubeIDE install locations."},
         "probe_id": {"status": "optional", "note": "ST-Link serial number, passed as `sn=<probe_id>`. Required once more than one debugger is configured."},
         "target_type": {"status": "ignored", "note": "STM32CubeProgrammer identifies the part itself."},
@@ -2078,7 +2325,7 @@ DEBUGGER_FIELD_MATRIX: JsonObject = {
     },
     "pyocd": {
         "tool": "pyocd",
-        "type": {"status": "required", "value": "pyocd"},
+        "type": {"status": "required", "value": "pyocd", "note": "Settable over MCP behind allow_config_description_write. Switching an entry to this backend needs no other key of this surface, because target_type is not one it writes and pyOCD guesses from the probe's board ID when it is unset; a bench that needs a specific part still has to have target_type in the file. Send executable in the same call, or `null` to have pyocd discovered: an executable already in the entry was chosen for the backend the entry is leaving."},
         "executable": {"status": "discovered", "note": "Falls back to `pyocd` on PATH. Install with `pip install agentic-hil[pyocd]` or `pip install pyocd`."},
         "probe_id": {"status": "optional", "note": "Probe unique ID, passed as `--uid`. pyOCD matches it as a case-insensitive substring and strips a leading `<type>:`, so give the full ID. Required once more than one debugger is configured."},
         "target_type": {"status": "required", "note": "Passed as `--target`. Omitted entirely when unset, leaving pyOCD to guess from the probe's board ID. Most vendor parts resolve only after a CMSIS pack is installed."},
@@ -2363,11 +2610,34 @@ class ConfigKeyRule:
 CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # The description half. `target` and `can_buses` are whole sections in the
     # decision; `debuggers` and `com_ports` are the named subsets, because the
-    # rest of those entries (type, flash_address, resource_id, timeouts, buffer
-    # limits, DTR/RTS) changes what a call does to the board rather than what the
-    # board is, and none of it is what an attached probe hands you.
+    # rest of those entries stays locked on its own merits, each of them a
+    # setting that changes what a call does to the board while describing
+    # nothing about the board: `flash_address` decides where an image lands,
+    # `resource_id` renames the lock a run takes and can hand one probe's
+    # exclusivity to another entry, `timeout_s` decides when a call is abandoned
+    # mid-operation, and the COM buffer limits and DTR/RTS lines decide how much
+    # of a line is read and whether opening a port restarts the target. None of
+    # those is what an attached probe hands you either.
     ConfigKeyRule("target", named=False, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT),
-    # `connect_mode` joins the four above under the same right. It is not a
+    # `type` used to be on that locked list, and the reason given for it was the
+    # same sentence: it changes what a call does to the board. That reason does
+    # not survive next to the three fields standing beside it. `executable`,
+    # `interface_cfg` and `target_cfg` between them already decide which binary
+    # runs with which scripts, so an operator who grants description-write has
+    # handed over what reaches this board whichever way `type` reads; and which
+    # debug stack a bench runs is a description of that bench, learned the way
+    # every other description here is learned, from the hardware in front of
+    # somebody. Leaving it out cost exactly what the split exists to prevent: a
+    # bench that had to switch from CubeProgrammer to OpenOCD left MCP and
+    # edited its own configuration by hand (#343).
+    #
+    # What keeps the switch honest is validation rather than a lock. `type` is
+    # the one description key whose value decides which *other* fields the entry
+    # needs, so a change that names a backend the entry is not equipped for is
+    # refused naming exactly what is missing, and the call lands a whole entry
+    # or changes nothing.
+    #
+    # `connect_mode` joins them under the same right. It is not a
     # permission and it widens nothing: the two values it takes are both a flash
     # this configuration already allows, and the difference between them is
     # whether the target is held in reset while the probe attaches. What it
@@ -2377,7 +2647,7 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # the permissions grant it would sit with the keys that decide authority,
     # where nobody could set it without also being able to grant themselves
     # flashing.
-    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("probe_id", "executable", "interface_cfg", "target_cfg", "connect_mode")),
+    ConfigKeyRule("debuggers", named=True, under_permissions=False, right=CONFIG_DESCRIPTION_RIGHT, fields=("type", "probe_id", "executable", "interface_cfg", "target_cfg", "connect_mode")),
     # `serial_number` is in the description half for the same reason `probe_id`
     # is: it is what an attached board hands you, and it says which unit this
     # entry is rather than what may be done to it. `vid`/`pid` come off the same
@@ -2592,7 +2862,7 @@ _SECTION_PURPOSE: dict[str, str] = {
     "permissions": "What may be done to this project beside its hardware: to this file itself, and to a quarantine incident on this bench.",
     "provenance": "Who wrote this file and who last changed it. A note to a reader; nothing reads it as policy.",
     "target": f"What board this is. Names in reports; `controller` is what a human recognises. Which field actually selects a target per backend, and known-good values: {TARGET_SUPPORT_URI}.",
-    "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. Which of these fields each backend requires, discovers, ignores or refuses, `connect_mode` included: {DEBUGGER_BACKENDS_URI}.",
+    "debuggers": f"The debug probes. The entry name is the routing key a test plan addresses. `type` names the debug stack that drives the entry and is settable like the rest of the description, but only as a whole switch: a change to it has to arrive with whatever the backend it names requires, or it is refused naming what is missing. Which of these fields each backend requires, discovers, ignores or refuses, `type` and `connect_mode` included: {DEBUGGER_BACKENDS_URI}.",
     "debug": "Typed GDB session settings: which symbols may be read and how much.",
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
     "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. From `version: 3` on an entry must say which of them identifies it: a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else an explicit `identity_source` — `vid_pid` for an adapter publishing USB ids but no serial, `device` for one publishing neither. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",

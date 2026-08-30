@@ -98,7 +98,7 @@
         "allow_config_description_write": {
           "type": "boolean",
           "default": false,
-          "description": "Whether an agent may change this bench's description field-wise through project_config_set: target.*, debuggers.<name>.probe_id/executable/interface_cfg/target_cfg/connect_mode, com_ports.<name>.device/baudrate, and every can_buses.<name> field except its permissions. It never reaches a permission key (no permissions: block, and neither artifacts.allow_upload nor debug.allow_all_symbols), so it decides nothing about what may be done to the hardware. This is the grant for the common case: a board was attached after init and its identity has to be entered."
+          "description": "Whether an agent may change this bench's description field-wise through project_config_set: target.*, debuggers.<name>.type/probe_id/executable/interface_cfg/target_cfg/connect_mode, com_ports.<name>.device/baudrate, and every can_buses.<name> field except its permissions. It never reaches a permission key (no permissions: block, and neither artifacts.allow_upload nor debug.allow_all_symbols), so it decides nothing about what may be done to the hardware. This is the grant for the common case: a board was attached after init and its identity has to be entered."
         },
         "allow_config_permissions_write": {
           "type": "boolean",
@@ -203,7 +203,8 @@
               "openocd",
               "stlink",
               "pyocd"
-            ]
+            ],
+            "description": "Which debug stack drives this probe. It is part of the bench description and is settable behind allow_config_description_write, beside executable, interface_cfg and target_cfg, which already decide which binary runs with which scripts. A change to it is refused unless the entry that comes out of the call carries what the named backend requires and this surface can write: switching to openocd needs interface_cfg and target_cfg, so a backend switch lands whole or not at all. Send executable in the same call too, or null to have the new backend's binary discovered, because an executable already in the entry was chosen for the backend the entry is leaving."
           },
           "executable": {
             "type": [

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from conftest import (
     FAKE_GDB,
+    FAKE_PYOCD,
     FAKE_STLINK,
     FAKE_STLINK_READ_UNCONFIRMED,
     FAKE_STLINK_SHORT_READ,
@@ -23,6 +24,7 @@ from agentic_hil.config import ConfigError, load_config
 from agentic_hil.devices import debugger_device
 from agentic_hil.elfsymbols import read_elf_byte_order, read_elf_symbol
 from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, read_intel_hex_file, write_intel_hex_file
+from agentic_hil.knowledge import catalogue_entry
 from agentic_hil.report import overall_success, read_last_report
 from agentic_hil.tools import AgenticHILToolService
 
@@ -1496,12 +1498,22 @@ def test_stlink_dump_reads_target_memory_and_writes_intel_hex(tmp_path: Path) ->
 
 
 def test_stlink_dump_sends_the_measured_read_invocation(tmp_path: Path) -> None:
-    """`-r <address> <size> <file>` behind the reset family's connect arguments.
+    """`-r <address> <size> <file>` behind the least intrusive connect the CLI documents.
 
     The address is hex and the size decimal because that is the form the CLI was
-    measured accepting; the connect block is `mode=NORMAL` because a read is
-    addressed to a target the way a reset is, not with the HOTPLUG connect a
-    bare probe uses.
+    measured accepting. The connect block is `mode=HOTPLUG`, and that is the
+    whole reason this read is allowed to exist: a read that resets the target
+    destroys the RAM it was asked for and hands back the reset image's bytes as a
+    measurement (#342). It used to send `mode=NORMAL`, which is the CLI's own
+    default and a connect that resets, its usage text pairing the mode list with
+    a reset mode that defaults to SWrst, and #329 measured what that costs on
+    this interface: a SysTick counter read across two invocations jumped
+    backwards.
+
+    Pinned negatively as well as positively, because the failure this guards
+    against is silent. Neither reset connect may reappear here, and no `reset=`
+    may travel with the connect: its default is SWrst, so sending one at all
+    would ask the connect chosen to avoid a reset to perform one.
     """
     service = stlink_dump_service(tmp_path)
     try:
@@ -1513,8 +1525,45 @@ def test_stlink_dump_sends_the_measured_read_invocation(tmp_path: Path) -> None:
     assert dumped["ok"] is True, dumped
     logged = json.loads((tmp_path / dumped["log_path"]).read_text(encoding="utf-8"))["command"]
     assert logged.endswith(
-        command_for_log(["-c", "port=SWD", "mode=NORMAL", "-r", hex(CTC_ARRAY_ADDRESS), str(CTC_ARRAY_SIZE), str(tmp_path / "build" / "memory.hex")])
+        command_for_log(["-c", "port=SWD", "mode=HOTPLUG", "-r", hex(CTC_ARRAY_ADDRESS), str(CTC_ARRAY_SIZE), str(tmp_path / "build" / "memory.hex")])
     )
+    assert "mode=NORMAL" not in logged
+    assert "mode=UR" not in logged
+    assert "reset=" not in logged
+
+
+def test_stlink_read_stays_hot_plug_when_the_flash_connects_under_reset(tmp_path: Path) -> None:
+    """`connect_mode` is the flash's key, and a read must not inherit it.
+
+    The one configuration where the two connects disagree, and the one where
+    getting it wrong is worst: `under_reset` is set because a core executing
+    from flash defeats the erase, and it makes the flash connect with `mode=UR`,
+    which holds the target in reset. A read that inherited that would be reading
+    RAM through a reset line held low, which is not a measurement of anything
+    the firmware did.
+
+    Both directions are asserted from one run, so neither can drift into the
+    other: the flash under reset, the read hot plug, out of the same
+    configuration.
+    """
+    service = stlink_dump_service(tmp_path, connect_mode="under_reset")
+    try:
+        flashed = flash_symbol_source(service)
+        value = stlink_symbol_value(service)
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    assert flashed["ok"] is True, flashed
+    flash_log = (tmp_path / flashed["log_path"]).read_text(encoding="utf-8")
+    assert "mode=UR" in flash_log, "the key still reaches the call it exists for"
+
+    for result in (value, dumped):
+        assert result["ok"] is True, result
+        read_log = logged_command(tmp_path, result)
+        assert "mode=HOTPLUG" in read_log, result
+        assert "mode=UR" not in read_log, result
+        assert "mode=NORMAL" not in read_log, result
 
 
 def test_stlink_dump_confirms_success_only_on_the_measured_read_line(tmp_path: Path) -> None:
@@ -1779,13 +1828,22 @@ def test_stlink_dump_resolves_from_an_immutable_copy_not_the_racing_workspace(tm
 
 
 def test_stlink_dump_does_not_open_the_typed_debug_session_family(tmp_path: Path) -> None:
-    """One tool crossed over; the rest of the family still refuses and says why."""
+    """The reads crossed over; the session half still refuses, and now says the way out.
+
+    The refusal used to end at "requires the OpenOCD backend", which names a
+    backend this bench does not run and nothing a caller could do about it, so
+    the reasonable next move looked like buying a different probe (#342). The
+    probe is not the problem: the ST-Link already plugged in is one OpenOCD
+    drives, and what stands between the bench and a breakpoint is one
+    `debuggers.<name>.type` line. So the summary names that change and the
+    catalogue entry behind it carries what the change costs.
+    """
     service = stlink_dump_service(tmp_path)
     try:
         results = {
             "debug_start_session": service.call("debug_start_session", {"image_path": "build/app.elf"}),
             "debug_set_breakpoint": service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}}),
-            "debug_symbol_info": service.call("debug_symbol_info", {"symbol": "CTC_array"}),
+            "debug_get_stop_reason": service.call("debug_get_stop_reason"),
         }
     finally:
         service.close()
@@ -1793,7 +1851,84 @@ def test_stlink_dump_does_not_open_the_typed_debug_session_family(tmp_path: Path
     for tool, result in results.items():
         assert result["ok"] is False, (tool, result)
         assert result["error_type"] == "not_supported", (tool, result)
-        assert result["summary"] == "Typed debug sessions require the OpenOCD backend.", (tool, result)
+        assert "Typed debug sessions require the OpenOCD backend" in result["summary"], (tool, result)
+        # The way out, in the summary itself, because a caller that reads only
+        # the summary is the caller this refusal failed before.
+        assert "`type: openocd`" in result["summary"], (tool, result)
+        assert "interface/stlink.cfg" in result["summary"], (tool, result)
+        # And the price of it, in the catalogue entry the failure carries.
+        remediation = " ".join(result["remediation"])
+        assert "`debuggers.<name>.type`" in remediation, (tool, result)
+        assert "debug.gdb_executable" in remediation, (tool, result)
+        assert "connect_mode: under_reset" in remediation, (tool, result)
+        # The switch is one project_config_set call since #343, and it is still
+        # the operator's decision: the entry says to get their word first.
+        assert "one `project_config_set` call" in remediation, (tool, result)
+        assert "operator's decision" in remediation, (tool, result)
+        # Nothing was spawned, so nothing is owed a recovery step.
+        assert result["target_contacted"] is False, (tool, result)
+        assert result["side_effect_status"] == "not_started", (tool, result)
+        assert result["hardware_state"] == "unchanged", (tool, result)
+
+
+def test_stlink_session_refusal_points_at_the_reads_it_does_serve(tmp_path: Path) -> None:
+    """The first thing the refusal says is that a read may already answer the question.
+
+    A coverage dump is what walked into this refusal (#342), and a coverage dump
+    never needed a session: it needs the bytes of a RAM-resident array. So the
+    remediation's first step is the read half of the same family, by name,
+    before any step that changes the bench.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        refused = service.call("debug_continue", {})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    first_step = refused["remediation"][0]
+    assert "debug_symbol_value" in first_step
+    assert "debug_dump_symbol_ihex" in first_step
+    assert "debug_symbol_info" in first_step
+    assert "do_not" in refused
+    assert any("Three of the twelve" in entry for entry in refused["do_not"]), refused["do_not"]
+
+
+def test_pyocd_session_refusal_names_its_own_way_out(tmp_path: Path) -> None:
+    """The same remediation shape, ending at the probe pyOCD is actually driving.
+
+    pyOCD refuses the whole typed family, reads included, and that is wider than
+    its hardware's own limits: pyOCD can read memory. What is missing is the
+    measurement, not the command, so the entry says so instead of shipping an
+    unproven non-intrusive read. The way out is still a `type` change, and the
+    interface script named is the one for the probe that is plugged in rather
+    than an ST-Link by assumption.
+    """
+    config_path = write_config(tmp_path, debugger_type="pyocd", debugger_executable=FAKE_PYOCD, target_type="stm32f446re")
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        refused = service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})
+        read_refused = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    for result in (refused, read_refused):
+        assert result["ok"] is False, result
+        assert result["error_type"] == "not_supported", result
+        assert "`type: openocd`" in result["summary"], result
+        assert "interface/cmsis-dap.cfg" in result["summary"], result
+        assert result["target_contacted"] is False, result
+        remediation = " ".join(result["remediation"])
+        assert "`debuggers.<name>.type`" in remediation, result
+        assert "operator's decision" in remediation, result
+    # The read half is refused here on purpose, and the reason is written down
+    # in the catalogue rather than left to look like an oversight: pyOCD can
+    # read memory, and what is missing is a bench measurement of which of its
+    # connects leaves a running core alone.
+    entry = catalogue_entry("not_supported:pyocd")
+    assert entry is not None
+    assert "pyOCD can read target memory" in entry["meaning"]
+    assert "has not been established on a bench here" in entry["meaning"]
 
 
 def test_openocd_dump_still_resolves_through_its_own_session(tmp_path: Path) -> None:
@@ -2360,8 +2495,9 @@ def test_stlink_symbol_value_returns_the_bytes_the_openocd_path_would(tmp_path: 
     assert value["summary"] == "Symbol value read from target memory."
     assert value["symbol_source"]["path"] == "build/app.elf"
     # The read was the measured `-r` invocation, behind the same connect block
-    # the dump uses: one command, two endings.
-    assert command_for_log(["-c", "port=SWD", "mode=NORMAL", "-r", hex(BOOT_COUNTER_ADDRESS), str(BOOT_COUNTER_SIZE)]) in logged_command(tmp_path, value)
+    # the dump uses: one command, two endings, and so one connect. Both are
+    # hot plug, because both read RAM a reset would destroy.
+    assert command_for_log(["-c", "port=SWD", "mode=HOTPLUG", "-r", hex(BOOT_COUNTER_ADDRESS), str(BOOT_COUNTER_SIZE)]) in logged_command(tmp_path, value)
 
 
 def test_stlink_symbol_value_leaves_no_file_and_names_none(tmp_path: Path) -> None:
@@ -2519,18 +2655,128 @@ def test_stlink_symbol_value_refuses_a_confirmed_read_that_is_short(tmp_path: Pa
 
 
 def test_stlink_symbol_value_still_refuses_the_rest_of_the_typed_family(tmp_path: Path) -> None:
-    """Two tools have crossed over now. The family's refusal is unchanged for the
-    ones that need a session, and it is the same sentence as before."""
+    """All three reads have crossed over now. The session half has not.
+
+    The split is by what the hardware can do, not by how many tools are on each
+    side: `-r` reads memory with no debug server behind it, and a breakpoint
+    needs one. A halt is the case worth pinning, because STM32CubeProgrammer
+    does have `-halt` and it is still not a debug session: it stops a core it
+    reset on the way in and cannot then be asked why it stopped.
+    """
     service = stlink_dump_service(tmp_path)
     try:
         assert flash_symbol_source(service)["ok"] is True
-        refused = service.call("debug_symbol_info", {"symbol": "boot_counter"})
+        refused = service.call("debug_halt", {})
     finally:
         service.close()
 
     assert refused["ok"] is False, refused
     assert refused["error_type"] == "not_supported"
-    assert refused["summary"] == "Typed debug sessions require the OpenOCD backend."
+    assert "Typed debug sessions require the OpenOCD backend" in refused["summary"]
+    assert "`type: openocd`" in refused["summary"]
+
+
+# --- the read that never opens a probe --------------------------------------
+#
+# Where a symbol lives and how large it is are properties of the image, and the
+# image is on disk. `debug_symbol_info` refused on this backend only because it
+# was filed with the session family (#342), which made a bench with an ST-Link
+# ask the hardware for a fact the hardware was never going to be asked for.
+
+
+def test_stlink_symbol_info_resolves_from_the_flashed_elf(tmp_path: Path) -> None:
+    """The OpenOCD path's answer, out of the ELF this service flashed.
+
+    Same fields and the same summary, plus the `symbol_source` a session would
+    not need: with no loaded image to ask, the result has to say which file
+    answered and prove it is the one on the board.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        info = service.call("debug_symbol_info", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert info["ok"] is True, info
+    assert info["backend"] == "stlink"
+    assert info["symbol"] == "boot_counter"
+    assert info["address"] == hex(BOOT_COUNTER_ADDRESS)
+    assert info["size_bytes"] == BOOT_COUNTER_SIZE
+    assert info["resolved_from"] == "debug_info"
+    assert info["summary"] == "Symbol resolved."
+    assert info["symbol_source"]["path"] == "build/app.elf"
+
+
+def test_stlink_symbol_info_never_opens_the_probe(tmp_path: Path) -> None:
+    """The property that makes this one free: no probe, no lease, no log.
+
+    The two memory reads attach to a live core and are leased as one-shots for
+    it. This one runs a GDB against a file. If it ever grew a connect it would
+    become a hardware interaction wearing a read's clothes, so the absence of a
+    programmer invocation is asserted rather than assumed: the backend writes a
+    log for every CLI run it makes, and a resolution that opened nothing has
+    none to name.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        logs = tmp_path / ".agentic-hil" / "logs"
+        before = sorted(path.name for path in logs.glob("stlink-*"))
+        info = service.call("debug_symbol_info", {"symbol": "boot_counter"})
+        after = sorted(path.name for path in logs.glob("stlink-*"))
+    finally:
+        service.close()
+
+    assert info["ok"] is True, info
+    assert "log_path" not in info
+    assert before == after, "a symbol resolution must not spawn STM32CubeProgrammer"
+    assert info["target_contacted"] is False
+    assert info["side_effect_status"] == "not_started"
+    assert info["hardware_state"] == "unchanged"
+
+
+def test_stlink_symbol_info_refuses_what_the_openocd_path_refuses(tmp_path: Path) -> None:
+    """The allowlist is a property of the project, not of the debugger.
+
+    Word for word the OpenOCD path's two refusals, so a caller reading one
+    cannot tell which backend wrote it. A symbol nobody allowed must not leak an
+    address either, which is why this gate is ahead of the resolution rather
+    than only ahead of the bytes.
+    """
+    service = stlink_dump_service(tmp_path, allowed_symbols=["boot_counter"])
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        not_allowed = service.call("debug_symbol_info", {"symbol": "CTC_array"})
+        malformed = service.call("debug_symbol_info", {"symbol": "not a symbol"})
+    finally:
+        service.close()
+
+    assert not_allowed["ok"] is False, not_allowed
+    assert not_allowed["error_type"] == "permission_denied"
+    assert not_allowed["summary"] == "Symbol is not allowed by debug.allowed_symbols."
+    assert "address" not in not_allowed
+    assert malformed["ok"] is False, malformed
+    assert malformed["error_type"] == "invalid_argument"
+
+
+def test_stlink_symbol_info_refuses_when_no_elf_was_flashed(tmp_path: Path) -> None:
+    """No flashed image, no symbol table that provably describes the board.
+
+    The same refusal the two memory reads give, and for the same reason: an
+    address resolved against a file that was never put on the target is right
+    about the file and wrong about the board, and answering anyway would be the
+    quiet approximation this backend exists to avoid.
+    """
+    service = stlink_dump_service(tmp_path)
+    try:
+        info = service.call("debug_symbol_info", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert info["ok"] is False, info
+    assert info["error_type"] == "symbol_source_not_available"
+    assert info["target_contacted"] is False
 
 
 # --- the sessionless read takes a real one-shot debugger lease ---------------
