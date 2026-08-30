@@ -47,7 +47,9 @@ class and served by every kind. Each action is declared on the method that
 implements it, so the authoritative list is the set of declarations; an action a
 kind does not declare answers `not_supported` naming the kind. From plan format
 v3, `device:` is the one routing key for every step; the v2 route keys stay
-valid as aliases.
+valid as aliases. Which of the debug actions need a `debug_start` before them is
+not the same on every bench, and "What a backend can do travels only as far as
+that backend" below says which need one where, and why.
 
 **Arguments are the test's own parameters.** A firmware image path, a reset
 mode, a breakpoint location, a symbol to dump and where to write it, a frame id
@@ -77,8 +79,9 @@ valid as the v2 spelling. Every other step states its expectation by existing:
 the step must succeed, and the plan stops at the first one that does not.
 
 **A value in target memory is its own claim.** From plan format v5, `read_symbol`
-reads what one allowed symbol currently holds through the debug session the plan
-opened, exactly as the `debug_symbol_value` tool reads it, and its `comparator:`
+reads what one allowed symbol currently holds, through the debug session the plan
+opened or, on a backend that serves the read with no session, straight off the
+probe, exactly as the `debug_symbol_value` tool reads it, and its `comparator:`
 judges the integer those bytes decode to rather than any text: `equals` for one
 value, `range: {min, max}` for inclusive bounds, or `mask` beside `equals` for
 `(value & mask) == equals`, which asserts one flag of a status word without
@@ -269,13 +272,25 @@ executable locations are properties of one machine. Committing them to a plan
 would make the repository carry another machine's hardware inventory, and would
 make the plan wrong the first time a board is swapped.
 
-**Two behaviours are backend-bound and therefore travel only as far as the
-backend does.** The typed debug actions (`debug_start`, `run_until_breakpoint`,
-`dump_memory`, `read_symbol`, `debug_stop`) currently require a debugger of type
-`openocd`, and `reset` with `mode: init` is OpenOCD-only, refused by other
-backends with their own `not_supported`. A flash-and-serial plan runs on all
-three backends; a plan that opens a debug session states, implicitly, that its
-bench runs OpenOCD.
+**What a backend can do travels only as far as that backend.** A typed debug
+session (`debug_start`, `run_until_breakpoint`, `debug_stop`) currently requires
+a debugger of type `openocd`, and `reset` with `mode: init` is OpenOCD-only,
+refused by other backends with their own `not_supported`. A flash-and-serial
+plan runs on all three backends; a plan that opens a debug session states,
+implicitly, that its bench runs OpenOCD.
+
+The two memory reads are the deliberate exception. A plan may carry
+`dump_memory` and `read_symbol` with no `debug_start` before them on a backend
+that serves those reads with no session behind it, which ST-Link does, because
+STM32CubeProgrammer's memory read attaches and reads on its own. On OpenOCD the
+same two steps run inside the session the plan opened, unchanged, and a read
+outside one is refused there as it always has been, because opening one is what
+would fix it. Which backends serve a read standalone is read off the backend
+rather than off a list of type names, so a backend that gains the ability serves
+these plans with nothing in the format or the reactor to change. A bench with
+neither the session nor the standalone read refuses the plan before the run,
+naming the backend, the step and its number, which reads that backend does serve,
+and the configuration change that would run it.
 
 ## Open
 

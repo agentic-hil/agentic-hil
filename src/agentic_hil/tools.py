@@ -25,6 +25,7 @@ from agentic_hil.config import (
     GENERATED_WRITE_PERMISSIONS,
     ConfigError,
     authoritative_config_target,
+    bind_debugger,
     carry_over_permissions,
     generated_permissions,
     grant_every_permission,
@@ -1592,8 +1593,13 @@ class AgenticHILToolService:
         # two: ST-Link names them so they take a real one-shot debugger lease,
         # OpenOCD names neither so they keep running on the session lease. Every
         # other debug tool's class is fixed, and a partial double standing in for
-        # one of them is never asked to answer this.
-        sessionless_read = name in sessionless_capable_debug_tools() and name in self.backend.sessionless_debug_tools()
+        # one of them is never asked to answer this. Asked through
+        # `sessionless_debug_reads` rather than of the backend directly, because
+        # the test reactor asks the same question of the same place when it
+        # decides whether a plan step needs a `debug_start` before it: a lease
+        # class and a plan gate that could disagree would run a step outside any
+        # lease.
+        sessionless_read = name in sessionless_debug_reads(self.backend)
         one_shot = name in debugger_one_shot_tools() or sessionless_read
         starts_session = name == "debug_start_session"
         lease = self._debug_lease
@@ -1964,6 +1970,51 @@ def sessionless_capable_debug_tools() -> frozenset[str]:
     leased as a one-shot on the strength of that answer, which is why it is the
     only question put to the backend and only for these two."""
     return frozenset({"debug_symbol_value", "debug_dump_symbol_ihex"})
+
+
+def sessionless_debug_reads(backend: DebuggerBackend) -> frozenset[str]:
+    """Which typed-debug reads this backend answers with no debug session open.
+
+    The one place that answers that question, and it answers it from what the
+    backend implements rather than from what it is called: the backend names the
+    reads it serves standalone (`DebuggerBackend.sessionless_debug_tools`, which
+    ST-Link answers with both of them because its `-r` attaches and reads with no
+    GDB behind it), and that answer is narrowed to the reads whose class is the
+    backend's to decide at all. No backend type is named here or in either
+    caller, so a backend that grows the ability later is admitted by this same
+    call, with nothing else to change.
+
+    Two callers ask it, and they must not be able to disagree: the coordination
+    layer, deciding whether a read takes its own one-shot debugger lease or runs
+    on a session's, and the test reactor, deciding whether a plan carrying that
+    read needs a `debug_start` step at all. A bench where one said yes and the
+    other no would run a plan step outside any lease.
+
+    Narrowed rather than trusted whole because a backend naming something outside
+    that pair would be claiming a class this project never gives away: a
+    breakpoint, a resume or a session lifecycle is a session operation on every
+    backend, and honouring a wider claim would lease one as a standalone probe
+    contact and let a plan carry it with no session open."""
+    return frozenset(backend.sessionless_debug_tools()) & sessionless_capable_debug_tools()
+
+
+def configured_sessionless_debug_reads(config: AgenticHILConfig, debugger_id: str | None = None) -> frozenset[str]:
+    """The same answer, for a configured probe nothing has built a backend for.
+
+    A caller holding a live backend asks `sessionless_debug_reads` directly. The
+    test reactor's preflight holds none and must not acquire one: a plan it
+    refuses has opened no service, taken no lock and created no directory. So it
+    builds the backend object this configuration names, asks the one place above,
+    and drops it again. That is affordable precisely because a backend does its
+    work in its calls and not in its constructor: building one spawns no process,
+    opens no probe, takes no lock and writes no file, and `close()` on one that
+    never started a session only clears the session it does not have."""
+    bound = config if debugger_id is None or debugger_id == config.debugger_id else bind_debugger(config, debugger_id)
+    backend = create_debugger_backend(bound)
+    try:
+        return sessionless_debug_reads(backend)
+    finally:
+        backend.close()
 
 
 def implicit_run_tools() -> set[str]:

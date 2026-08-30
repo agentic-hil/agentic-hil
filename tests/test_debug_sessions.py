@@ -2789,6 +2789,45 @@ def test_stlink_symbol_info_refuses_when_no_elf_was_flashed(tmp_path: Path) -> N
 # session's own lease instead, and that stays true; here there is none to run on.
 
 
+def test_which_reads_run_without_a_session_is_the_backends_own_answer(tmp_path: Path) -> None:
+    """The one place that answers it, asked of every backend this project has.
+
+    Two callers depend on it and must not be able to disagree: the coordination
+    layer, deciding whether a read takes its own one-shot debugger lease, and the
+    test reactor, deciding whether a plan carrying that read needs a
+    `debug_start` step before it (#345). Neither names a backend type, so what a
+    bench can do here is what its backend implements, and a backend that grows
+    the ability starts being answered for the moment it says so.
+    """
+    from agentic_hil.tools import configured_sessionless_debug_reads
+
+    stlink = load_config(str(write_config(tmp_path / "stlink", debugger_type="stlink")))
+    openocd = load_config(str(write_config(tmp_path / "openocd", debugger_type="openocd", gdb_executable=FAKE_GDB)))
+    pyocd = load_config(str(write_config(tmp_path / "pyocd", debugger_type="pyocd")))
+
+    assert configured_sessionless_debug_reads(stlink) == {"debug_symbol_value", "debug_dump_symbol_ihex"}
+    assert configured_sessionless_debug_reads(openocd) == frozenset()
+    assert configured_sessionless_debug_reads(pyocd) == frozenset()
+
+
+def test_a_backend_claiming_more_than_the_reads_is_narrowed_to_them() -> None:
+    """A session operation is never admitted on a backend's own say-so.
+
+    A memory read is the one typed-debug operation a probe can serve with no GDB
+    behind it. A backend naming a breakpoint, a resume or a session lifecycle
+    here would be claiming a class this project does not give away, and honouring
+    it would lease that call as a standalone probe contact and let a plan carry
+    it with no session open.
+    """
+    from agentic_hil.tools import sessionless_debug_reads
+
+    class OverclaimingBackend:
+        def sessionless_debug_tools(self) -> frozenset[str]:
+            return frozenset({"debug_symbol_value", "debug_continue", "debug_start_session"})
+
+    assert sessionless_debug_reads(OverclaimingBackend()) == {"debug_symbol_value"}  # type: ignore[arg-type]
+
+
 def test_stlink_symbol_value_refuses_while_another_owner_holds_the_probe(tmp_path: Path) -> None:
     """The machine-wide lock, taken for the read the way it is for a flash.
 
@@ -2867,3 +2906,46 @@ def test_stlink_symbol_value_unconfirmed_read_enters_the_incident_path(tmp_path:
         assert service.coordinator.blocked is False
     finally:
         service.close()
+
+
+def test_a_plan_reads_this_bench_with_no_debug_start_at_all(tmp_path: Path) -> None:
+    """The whole route with no double in it: the reactor's own steps, the real
+    ST-Link backend, and a plan that opens no session because this bench has none
+    to open (#345).
+
+    The flash step is what makes the symbol table describe the board, exactly as
+    it does for the tools these steps call. What the plan proves past the tool
+    tests around it is the routing: preflight admits both reads with no
+    `debug_start` anywhere in the file, and each one goes to the same standalone
+    read on the same one-shot lease a hand-made call takes, inside the run the
+    plan declared.
+    """
+    from agentic_hil.test_reactor import TestReactor, load_test_config
+
+    service = stlink_dump_service(tmp_path)
+    plan = tmp_path / ".agentic-hil" / "testconfig.yaml"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text(
+        "version: 5\n"
+        "name: read-without-a-session\n"
+        "steps:\n"
+        "  - {device: dut, action: flash, image_path: build/app.elf}\n"
+        "  - {device: dut, action: read_symbol, symbol: boot_counter, size_bytes: 4}\n"
+        "  - {device: dut, action: dump_memory, symbol: CTC_array, output_path: build/memory.hex}\n",
+        encoding="utf-8",
+    )
+    try:
+        result = TestReactor(service.config, service).run(load_test_config(str(plan), str(tmp_path)))
+    finally:
+        service.close()
+
+    expected = fake_target_bytes(BOOT_COUNTER_ADDRESS, BOOT_COUNTER_SIZE)
+    assert result["ok"] is True, result
+    assert [step["action"] for step in result["steps"]] == ["flash", "read_symbol", "dump_memory"]
+    read = result["steps"][1]["result"]
+    assert read["backend"] == "stlink"
+    assert read["hex"] == expected.hex()
+    assert read["size_bytes"] == BOOT_COUNTER_SIZE
+    # Nothing was opened, so there is nothing for cleanup to close.
+    assert result["cleanup"] == []
+    assert (tmp_path / "build" / "memory.hex").is_file()

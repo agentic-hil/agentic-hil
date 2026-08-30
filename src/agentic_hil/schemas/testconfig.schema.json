@@ -334,7 +334,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["action", "image_path"],
-      "description": "Open this plan's one debug session, exactly as the `debug_start_session` tool does. Every typed debug step below runs inside it and on the debugger that started it; the plan needs no explicit `debug_stop`, because end-of-run cleanup closes the session whether the plan reached that step or a step before it failed. Typed debug sessions are OpenOCD's, and the other backends refuse them with `not_supported`.",
+      "description": "Open this plan's one debug session, exactly as the `debug_start_session` tool does. Every typed debug step below runs inside it and on the debugger that started it; the plan needs no explicit `debug_stop`, because end-of-run cleanup closes the session whether the plan reached that step or a step before it failed. Typed debug sessions are OpenOCD's, and the other backends refuse them with `not_supported`: a plan carrying this step on one of them is refused before the run, naming the backend and this step. `run_until_breakpoint` needs the session this step opens. `dump_memory` and `read_symbol` need it only where the backend has no standalone read of its own, which their own descriptions say.",
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
@@ -361,7 +361,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["action", "symbol", "output_path"],
-      "description": "Write what one allowed symbol holds to a file, as Intel HEX, exactly as the `debug_dump_symbol_ihex` tool writes it: the same allowlist and the same `debug.max_dump_size_bytes` ceiling. This is how a plan keeps a buffer for something outside the run to look at; `read_symbol` is what claims a value inside the run.",
+      "description": "Write what one allowed symbol holds to a file, as Intel HEX, exactly as the `debug_dump_symbol_ihex` tool writes it: the same allowlist and the same `debug.max_dump_size_bytes` ceiling. This is how a plan keeps a buffer for something outside the run to look at; `read_symbol` is what claims a value inside the run. Whether the plan needs a `debug_start` before it is the backend's answer, not the format's: on a backend that serves this read with no session behind it (ST-Link, whose memory read attaches and reads by itself) the step stands alone, and on one whose reads run through a session (OpenOCD) it must be inside the session the plan opened. A bench with neither refuses the plan before the run, naming the backend, this step and what would make it run.",
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
@@ -375,7 +375,7 @@
       "additionalProperties": false,
       "required": ["action", "symbol"],
       "x-since-version": 5,
-      "description": "Read what one allowed symbol currently holds, through the debug session this plan has open, exactly as the `debug_symbol_value` tool reads it: the same allowlist, the same `debug.max_dump_size_bytes` ceiling applied to the resolved size before any memory is read, and the same resolution, which asks the image's debug information first and falls back to the ELF's own symbol table where there is no type to work with, so an assembly-defined object is readable too. With a `comparator:` the step judges the number the bytes decode to and fails naming the value it read; without one it is a plain read, answered exactly as the tool answers it, which is how a plan records a value it does not want to assert. This is the format's first claim about target memory rather than about what a device sent, and it is deliberately not a wait: there is no `timeout_s` here, because a halted target's memory does not change under the step.",
+      "description": "Read what one allowed symbol currently holds, through the debug session this plan has open or, on a backend that serves the read with no session behind it, straight off the probe, exactly as the `debug_symbol_value` tool reads it: the same allowlist, the same `debug.max_dump_size_bytes` ceiling applied to the resolved size before any memory is read, and the same resolution, which asks the image's debug information first and falls back to the ELF's own symbol table where there is no type to work with, so an assembly-defined object is readable too. With a `comparator:` the step judges the number the bytes decode to and fails naming the value it read; without one it is a plain read, answered exactly as the tool answers it, which is how a plan records a value it does not want to assert. This is the format's first claim about target memory rather than about what a device sent, and it is deliberately not a wait: there is no `timeout_s` here, because a halted target's memory does not change under the step. Whether the plan needs a `debug_start` before it is the backend's answer, exactly as it is for `dump_memory`: standalone where the backend serves the read with no session, inside the plan's session where its reads run through one, and refused before the run on a bench with neither, naming the backend, this step and what would make it run.",
       "properties": {
         "device": { "$ref": "#/$defs/device" },
         "debugger": { "$ref": "#/$defs/debugger" },
