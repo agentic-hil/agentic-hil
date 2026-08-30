@@ -1567,7 +1567,7 @@ class AgenticHILToolService:
         # A symbol read the backend serves with no session behind it is a
         # standalone probe contact the same way `probe_target` is, so it needs
         # the same gate. A backend that instead answers it through a session
-        # (OpenOCD, pyOCD) names it in no `sessionless_debug_tools()` set, and
+        # (OpenOCD) names it in no `sessionless_debug_tools()` set, and
         # `debug_start_session` below is where that permission was already
         # checked.
         if name in self.backend.sessionless_debug_tools() and not self.config.probe_allowed():
@@ -1590,15 +1590,15 @@ class AgenticHILToolService:
         # has no session to hold its lease and a session-scoped call on the one
         # that does. Only the symbol reads are ever both, and only the backend
         # knows which it is, so that is the one thing asked and only about those
-        # two: ST-Link names them so they take a real one-shot debugger lease,
-        # OpenOCD names neither so they keep running on the session lease. Every
-        # other debug tool's class is fixed, and a partial double standing in for
-        # one of them is never asked to answer this. Asked through
-        # `sessionless_debug_reads` rather than of the backend directly, because
-        # the test reactor asks the same question of the same place when it
-        # decides whether a plan step needs a `debug_start` before it: a lease
-        # class and a plan gate that could disagree would run a step outside any
-        # lease.
+        # two: ST-Link and pyOCD name them so they take a real one-shot
+        # debugger lease, OpenOCD names neither so they keep running on the
+        # session lease. Every other debug tool's class is fixed, and a partial
+        # double standing in for one of them is never asked to answer this.
+        # Asked through `sessionless_debug_reads` rather than of the backend
+        # directly, because the test reactor asks the same question of the same
+        # place when it decides whether a plan step needs a `debug_start` before
+        # it: a lease class and a plan gate that could disagree would run a step
+        # outside any lease.
         sessionless_read = name in sessionless_debug_reads(self.backend)
         one_shot = name in debugger_one_shot_tools() or sessionless_read
         starts_session = name == "debug_start_session"

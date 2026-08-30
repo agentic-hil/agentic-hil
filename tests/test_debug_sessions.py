@@ -4,12 +4,13 @@ import hashlib
 import json
 import socket
 import struct
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 from conftest import (
     FAKE_GDB,
     FAKE_PYOCD,
+    FAKE_PYOCD_SILENT_READ,
     FAKE_STLINK,
     FAKE_STLINK_READ_UNCONFIRMED,
     FAKE_STLINK_SHORT_READ,
@@ -1783,14 +1784,14 @@ def test_stlink_dump_resolves_from_an_immutable_copy_not_the_racing_workspace(tm
     image's digest. The resolution copies the verified bytes into a private file
     first, so a replacement of the caller's path lands too late to be read.
     """
-    import agentic_hil.backends.stlink as stlink_module
+    import agentic_hil.backends.gdbdebug as resolution_module
 
     service = stlink_dump_service(tmp_path)
     workspace_elf = tmp_path / "build" / "app.elf"
     flashed_bytes = workspace_elf.read_bytes()
     captured: dict = {}
 
-    real_sha256_file = stlink_module.sha256_file
+    real_sha256_file = resolution_module.sha256_file
 
     def racing_sha256_file(path: Path) -> str:
         digest = real_sha256_file(path)
@@ -1798,7 +1799,7 @@ def test_stlink_dump_resolves_from_an_immutable_copy_not_the_racing_workspace(tm
         workspace_elf.write_bytes(b"\x7fELF" + b"\x22" * 64)
         return digest
 
-    real_spawn_command = stlink_module.spawn_command
+    real_spawn_command = resolution_module.spawn_command
 
     def capturing_spawn_command(command, *args, **kwargs):
         elf_arg = next((item for item in command if isinstance(item, str) and item.endswith(".elf")), None)
@@ -1810,8 +1811,8 @@ def test_stlink_dump_resolves_from_an_immutable_copy_not_the_racing_workspace(tm
     try:
         assert flash_symbol_source(service)["ok"] is True
         # Only the offline resolution, not the flash, races the rebuild.
-        monkeypatch.setattr(stlink_module, "sha256_file", racing_sha256_file)
-        monkeypatch.setattr(stlink_module, "spawn_command", capturing_spawn_command)
+        monkeypatch.setattr(resolution_module, "sha256_file", racing_sha256_file)
+        monkeypatch.setattr(resolution_module, "spawn_command", capturing_spawn_command)
         dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
     finally:
         service.close()
@@ -1897,22 +1898,24 @@ def test_stlink_session_refusal_points_at_the_reads_it_does_serve(tmp_path: Path
 def test_pyocd_session_refusal_names_its_own_way_out(tmp_path: Path) -> None:
     """The same remediation shape, ending at the probe pyOCD is actually driving.
 
-    pyOCD refuses the whole typed family, reads included, and that is wider than
-    its hardware's own limits: pyOCD can read memory. What is missing is the
-    measurement, not the command, so the entry says so instead of shipping an
-    unproven non-intrusive read. The way out is still a `type` change, and the
-    interface script named is the one for the probe that is plugged in rather
-    than an ST-Link by assumption.
+    The session half is what is genuinely refused here, and the refusal is not a
+    dead end: the way out is a `type` change, and the interface script named is
+    the one for the probe that is plugged in rather than an ST-Link by
+    assumption.
+
+    The catalogue entry behind it is asserted in the same place because it moved
+    with the code. It used to explain why the reads were refused too, and that
+    paragraph would now be describing a refusal that no longer happens (#344).
     """
     config_path = write_config(tmp_path, debugger_type="pyocd", debugger_executable=FAKE_PYOCD, target_type="stm32f446re")
     service = AgenticHILToolService(load_config(str(config_path)))
     try:
         refused = service.call("debug_set_breakpoint", {"location": {"symbol": "test_done"}})
-        read_refused = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        halt_refused = service.call("debug_halt", {})
     finally:
         service.close()
 
-    for result in (refused, read_refused):
+    for result in (refused, halt_refused):
         assert result["ok"] is False, result
         assert result["error_type"] == "not_supported", result
         assert "`type: openocd`" in result["summary"], result
@@ -1921,14 +1924,321 @@ def test_pyocd_session_refusal_names_its_own_way_out(tmp_path: Path) -> None:
         remediation = " ".join(result["remediation"])
         assert "`debuggers.<name>.type`" in remediation, result
         assert "operator's decision" in remediation, result
-    # The read half is refused here on purpose, and the reason is written down
-    # in the catalogue rather than left to look like an oversight: pyOCD can
-    # read memory, and what is missing is a bench measurement of which of its
-    # connects leaves a running core alone.
     entry = catalogue_entry("not_supported:pyocd")
     assert entry is not None
-    assert "pyOCD can read target memory" in entry["meaning"]
-    assert "has not been established on a bench here" in entry["meaning"]
+    # The reads are served now, and the entry says so first, because a value out
+    # of RAM is what walks into this refusal and never needed a session.
+    assert "`debug_symbol_value`" in entry["remediation"][0]
+    assert "`debug_dump_symbol_ihex`" in entry["remediation"][0]
+    assert "`debug_symbol_info`" in entry["remediation"][0]
+    # And the sentence that used to explain why they were refused is gone rather
+    # than left describing a refusal that no longer happens.
+    assert "has not been established on a bench here" not in entry["meaning"]
+
+
+# --- pyOCD: the read half, on the connect that touches nothing ---------------
+#
+# pyOCD reads target memory, so refusing the whole typed-debug family here was
+# wider than the hardware's own limits (#344). What stood in the way was which
+# of pyOCD's four connect modes reaches a running core without disturbing it.
+# `attach` is the one its own documentation and its own connect sequence agree
+# neither halts nor resets, and it is what these reads send.
+
+
+def pyocd_read_service(tmp_path: Path, *, debugger_executable: Path = FAKE_PYOCD, elf_symbols: list[tuple] | None = None, **config_kwargs) -> AgenticHILToolService:
+    """The pyOCD twin of `stlink_dump_service`.
+
+    `target_type` because pyOCD is told what the part is, and `gdb_executable`
+    because the symbol resolution these reads run first is a GDB against the
+    flashed ELF on every sessionless backend.
+    """
+    config_path = write_config(
+        tmp_path,
+        debugger_type="pyocd",
+        debugger_executable=debugger_executable,
+        target_type="stm32f446re",
+        gdb_executable=FAKE_GDB,
+        **config_kwargs,
+    )
+    elf_path = tmp_path / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(artifact_bytes(elf_symbols=elf_symbols))
+    return AgenticHILToolService(load_config(str(config_path)))
+
+
+def test_pyocd_symbol_value_returns_the_bytes_the_openocd_path_would(tmp_path: Path) -> None:
+    """The whole route on the second backend that has no debug session.
+
+    The ELF is flashed first for the reason the ST-Link route gives: that is
+    what makes a symbol table describe the board. What comes back is the OpenOCD
+    path's result, with the same fields, the same summary and the same readings
+    of the same bytes, plus the `symbol_source` that says which image answered.
+    A plan that reads a counter must not have to know which probe it is running
+    on, which is the whole point of serving this here.
+    """
+    service = pyocd_read_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    expected = fake_target_bytes(BOOT_COUNTER_ADDRESS, BOOT_COUNTER_SIZE)
+    assert value["ok"] is True, value
+    assert value["backend"] == "pyocd"
+    assert value["symbol"] == "boot_counter"
+    assert value["address"] == hex(BOOT_COUNTER_ADDRESS)
+    assert value["size_bytes"] == BOOT_COUNTER_SIZE
+    assert value["resolved_from"] == "debug_info"
+    assert value["hex"] == expected.hex()
+    assert value["value_unsigned"] == int.from_bytes(expected, "little", signed=False)
+    assert value["value_signed"] == int.from_bytes(expected, "little", signed=True)
+    assert value["summary"] == "Symbol value read from target memory."
+    assert value["symbol_source"]["path"] == "build/app.elf"
+
+
+def test_pyocd_read_connects_with_attach_and_nothing_that_disturbs_the_core(tmp_path: Path) -> None:
+    """`--connect attach`, and no way of asking for a halt or a reset beside it.
+
+    The positive half is the command: `savemem ADDR LEN FILE` behind the one
+    connect mode pyOCD documents as reaching a running target without halting
+    it, sent explicitly rather than left to the commander's default, because a
+    default is a decision somebody else can change.
+
+    The negative half is what makes this test worth having, because the failure
+    it guards against is silent. A read that quietly went back to halting would
+    still return bytes, and they would be a halted board's bytes. So none of
+    pyOCD's other three connect modes may appear, `--halt` may not, a
+    `connect_mode` session option may not, and no reset may ride along.
+    """
+    service = pyocd_read_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "boot_counter", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    for result in (value, dumped):
+        assert result["ok"] is True, result
+        logged = logged_command(tmp_path, result)
+        assert "--connect attach" in logged, result
+        assert f"savemem {hex(BOOT_COUNTER_ADDRESS)} {BOOT_COUNTER_SIZE} " in logged, result
+        for forbidden in ("--halt", "-H", "pre-reset", "under-reset", "connect_mode", "-O", "reset"):
+            assert forbidden not in logged, (forbidden, result)
+
+
+def test_pyocd_read_stays_attach_when_the_configuration_names_a_connect_mode(tmp_path: Path) -> None:
+    """`connect_mode` is not the read's key on this backend either.
+
+    pyOCD accepts only `hotplug` for that field and refuses `under_reset` at
+    load, so there is no configuration in which a read could inherit a connect
+    that holds the target down. Both halves are asserted here so the pairing
+    cannot drift: the value the file may carry does not reach the read, and the
+    value that would hurt is refused before a service exists to call.
+    """
+    service = pyocd_read_service(tmp_path, connect_mode="hotplug")
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert value["ok"] is True, value
+    logged = logged_command(tmp_path, value)
+    assert "--connect attach" in logged
+    assert "hotplug" not in logged
+
+    with pytest.raises(ConfigError) as refused:
+        load_config(str(write_config(tmp_path / "under-reset", debugger_type="pyocd", debugger_executable=FAKE_PYOCD, target_type="stm32f446re", connect_mode="under_reset")))
+    assert refused.value.error_type == "config_invalid"
+
+
+def test_pyocd_dump_writes_the_intel_hex_pyocd_itself_cannot(tmp_path: Path) -> None:
+    """The same read, ending in a file, and the ending is this backend's own.
+
+    pyOCD's memory read writes a raw binary, so the Intel HEX a caller was
+    promised is written here from the bytes it read, by the same writer the
+    OpenOCD path uses. The caller's path therefore never reaches pyOCD's command
+    line, and what lands at it is a file that parses back to exactly the window
+    that was requested.
+    """
+    service = pyocd_read_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/new/nested/memory.hex"})
+    finally:
+        service.close()
+
+    assert dumped["ok"] is True, dumped
+    assert dumped["backend"] == "pyocd"
+    assert dumped["symbol"] == "CTC_array"
+    assert dumped["address"] == hex(CTC_ARRAY_ADDRESS)
+    assert dumped["size_bytes"] == CTC_ARRAY_SIZE
+    assert dumped["summary"] == "Symbol memory dumped as Intel HEX."
+    assert dumped["symbol_source"]["path"] == "build/app.elf"
+    output = tmp_path / "build" / "new" / "nested" / "memory.hex"
+    hex_lines = output.read_text(encoding="ascii").splitlines()
+    assert hex_lines[0] == ":020000042000DA"
+    assert hex_lines[-1] == ":00000001FF"
+    assert read_intel_hex_file(output, CTC_ARRAY_ADDRESS, CTC_ARRAY_SIZE) == fake_target_bytes(CTC_ARRAY_ADDRESS, CTC_ARRAY_SIZE)
+    # The path a caller named is theirs, and pyOCD never saw it.
+    assert "memory.hex" not in logged_command(tmp_path, dumped)
+
+
+def test_pyocd_symbol_info_answers_from_the_flashed_elf_without_a_probe(tmp_path: Path) -> None:
+    """The offline resolution #342 shipped is backend-independent, and answers here.
+
+    It was written on the ST-Link backend and left refused on this one, which
+    made a pyOCD bench ask the hardware for a fact the hardware was never going
+    to be asked for. The property worth pinning is the absence: the two memory
+    reads open a probe and are leased for it, and this one runs a GDB against a
+    file, so it writes no pyOCD log at all.
+    """
+    service = pyocd_read_service(tmp_path)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        logs = tmp_path / ".agentic-hil" / "logs"
+        before = sorted(path.name for path in logs.glob("pyocd-*"))
+        info = service.call("debug_symbol_info", {"symbol": "boot_counter"})
+        after = sorted(path.name for path in logs.glob("pyocd-*"))
+    finally:
+        service.close()
+
+    assert info["ok"] is True, info
+    assert info["backend"] == "pyocd"
+    assert info["symbol"] == "boot_counter"
+    assert info["address"] == hex(BOOT_COUNTER_ADDRESS)
+    assert info["size_bytes"] == BOOT_COUNTER_SIZE
+    assert info["resolved_from"] == "debug_info"
+    assert info["summary"] == "Symbol resolved."
+    assert info["symbol_source"]["path"] == "build/app.elf"
+    assert "log_path" not in info
+    assert before == after, "a symbol resolution must not spawn pyOCD"
+    assert info["target_contacted"] is False
+    assert info["side_effect_status"] == "not_started"
+    assert info["hardware_state"] == "unchanged"
+
+
+def test_pyocd_reads_refuse_what_the_openocd_path_refuses(tmp_path: Path) -> None:
+    """The allowlist and the dump cap are properties of the project, not the probe.
+
+    Word for word the refusals the other two backends give, across all three
+    reads, so a caller cannot tell which backend wrote one. The allowlist gate is
+    ahead of the resolution rather than only ahead of the bytes, because a symbol
+    nobody allowed must not leak an address either.
+    """
+    service = pyocd_read_service(tmp_path, allowed_symbols=["boot_counter"], max_dump_size_bytes=8)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        not_allowed = service.call("debug_symbol_info", {"symbol": "CTC_array"})
+        malformed = service.call("debug_symbol_value", {"symbol": "not a symbol"})
+        too_large = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+    finally:
+        service.close()
+
+    assert not_allowed["ok"] is False, not_allowed
+    assert not_allowed["error_type"] == "permission_denied"
+    assert not_allowed["summary"] == "Symbol is not allowed by debug.allowed_symbols."
+    assert "address" not in not_allowed
+
+    # The identifier gate answers `invalid_argument` whichever layer catches it
+    # first, which on a tool call is the shipped schema.
+    assert malformed["ok"] is False, malformed
+    assert malformed["error_type"] == "invalid_argument"
+
+    assert too_large["ok"] is False, too_large
+    assert too_large["error_type"] == "permission_denied"
+    assert not (tmp_path / "build" / "memory.hex").exists()
+
+
+def test_pyocd_dump_larger_than_the_cap_is_refused_before_a_probe_opens(tmp_path: Path) -> None:
+    """The size cap is checked against the resolved size, not the requested one.
+
+    A caller names a symbol, not a length, so the only place the cap can be
+    applied is after the ELF has said how large the object is and before pyOCD
+    is spawned to read it. The refusal carries both numbers for the same reason
+    the other backends' does: the fix is a configuration decision and needs the
+    figure it would have to clear.
+    """
+    service = pyocd_read_service(tmp_path, max_dump_size_bytes=8)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        logs = tmp_path / ".agentic-hil" / "logs"
+        before = sorted(path.name for path in logs.glob("pyocd-*"))
+        refused = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+        after = sorted(path.name for path in logs.glob("pyocd-*"))
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "permission_denied"
+    assert refused["summary"] == "Symbol dump exceeds debug.max_dump_size_bytes."
+    assert refused["size_bytes"] == CTC_ARRAY_SIZE
+    assert refused["max_dump_size_bytes"] == 8
+    assert before == after, "a refused dump must not open the probe"
+
+
+def test_pyocd_read_without_a_flashed_elf_refuses_before_the_probe(tmp_path: Path) -> None:
+    """No ELF, no symbol table that provably describes the board, no read.
+
+    The refusal is the same one the ST-Link path gives and it names the call
+    that fixes it. It also proves nothing was driven: this happens before the
+    probe is opened, so it is a refusal rather than an outcome the bench has to
+    be inspected for.
+    """
+    service = pyocd_read_service(tmp_path)
+    try:
+        refused = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "symbol_source_not_available"
+    assert "flash_firmware" in refused["summary"]
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_status"] == "not_started"
+
+
+def test_pyocd_read_that_left_no_bytes_is_a_failed_read(tmp_path: Path) -> None:
+    """A completed run with no file is a failed read, not an empty answer.
+
+    pyOCD exits 0 for the run, so the exit code alone would report success and a
+    caller would be handed a result with no bytes in it. What settles it is the
+    window that was asked for: the file has to exist and hold exactly
+    `size_bytes`, and anything else is a read that failed after reaching the
+    target, which is why the contact is reported rather than denied.
+    """
+    service = pyocd_read_service(tmp_path, debugger_executable=FAKE_PYOCD_SILENT_READ)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert value["ok"] is False, value
+    assert value["error_type"] == "memory_read_failed"
+    assert value["summary"] == "pyOCD reported a completed run but left no file holding the requested bytes."
+    assert value["target_contacted"] is True
+    assert "hex" not in value
+
+
+def test_pyocd_read_names_the_private_file_the_way_pyocds_own_tokenizer_reads_it() -> None:
+    """pyOCD re-splits `--command` itself, and its rules are not the shell's.
+
+    `pyocd.utility.cmdline.split_command` treats an unquoted backslash as an
+    escape and an unquoted space as a word break, and honours escapes inside
+    double quotes but not inside single ones. A Windows temporary path sent raw
+    would therefore arrive with its separators eaten, and the read would write
+    somewhere else and report bytes it never had. Single quotes and forward
+    slashes are what survive that, and a path carrying a quote of its own is
+    refused rather than sent, because it would end the quoted word early.
+    """
+    from agentic_hil.backends.pyocd import pyocd_command_path
+
+    assert pyocd_command_path(PurePosixPath("/tmp/agentic-hil/symbol-memory.bin")) == "'/tmp/agentic-hil/symbol-memory.bin'"
+    assert pyocd_command_path(PureWindowsPath(r"C:\Temp\agentic hil\symbol-memory.bin")) == "'C:/Temp/agentic hil/symbol-memory.bin'"
+    assert pyocd_command_path(PureWindowsPath(r"C:\Temp\o'brien\symbol-memory.bin")) is None
 
 
 def test_openocd_dump_still_resolves_through_its_own_session(tmp_path: Path) -> None:
