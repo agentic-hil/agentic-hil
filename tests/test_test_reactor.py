@@ -4215,3 +4215,101 @@ def test_a_read_step_is_judged_by_the_backend_of_the_probe_it_names(tmp_path: Pa
     assert result["ok"] is True, result
     assert base.calls == []
     assert [name for name, _ in built[0].calls] == ["debug_symbol_value"]
+
+
+# --- a sessionless read needs its allow_probe checked at preflight, like a session --
+#
+# `debug_start` is refused before the run on a version-1 bench that withholds
+# allow_probe, so the whole plan is rejected before it touches the board. A
+# sessionless read still opens a probe onto a live core and needs the same
+# grant, and until it was checked here the reactor admitted the plan and let the
+# backend refuse the read at its own turn — after any earlier effectful step had
+# already run. The gate is `probe_allowed()`, so a read-free (version 2) bench,
+# which grants reads by exclusivity and carries no allow_probe to set, is still
+# admitted.
+
+
+def test_a_sessionless_read_after_flash_is_refused_before_the_flash_runs(tmp_path: Path) -> None:
+    # A flash ahead of a read the config plainly forbids: the permission is known
+    # before the run, so the whole plan is refused at preflight and the flash
+    # never lands. Were the read admitted, the flash would have mutated the board
+    # before the read's own permission_denied arrived — the hardware-touching a
+    # refusable plan must never reach.
+    path = write_test_config(
+        tmp_path,
+        """version: 5
+steps:
+  - {device: dut, action: flash, image_path: build/app.elf}
+  - {device: dut, action: read_symbol, symbol: boot_counter}
+""",
+    )
+    service = SessionlessReadService((42).to_bytes(4, "little"))
+
+    result = run_symbol_plan(
+        tmp_path,
+        path,
+        service,
+        debugger_type="stlink",
+        permissions={**DEFAULT_TEST_PERMISSIONS, "allow_probe": False},
+    )
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_config_invalid"
+    assert result["failed_step"] == 2
+    refusal = result["validation_error"]
+    assert refusal["field"] == "steps[1].action"
+    assert refusal["action"] == "read_symbol"
+    assert refusal["summary"] == "Reading target memory requires allow_probe on this debugger."
+    assert refusal["permission"] == "allow_probe"
+    # No step ran: the flash the plan led with never reached the service.
+    assert result["steps"] == []
+    assert service.calls == []
+
+
+def test_a_sessionless_dump_after_flash_is_refused_before_the_flash_runs(tmp_path: Path) -> None:
+    # The dump half of the same gate. It is refused ahead of the output-path
+    # validation the dump would otherwise run, so a denied plan makes no service
+    # call of any kind.
+    path = write_test_config(
+        tmp_path,
+        """version: 5
+steps:
+  - {device: dut, action: flash, image_path: build/app.elf}
+  - {device: dut, action: dump_memory, symbol: CTC_array, output_path: build/memory.hex}
+""",
+    )
+    service = SessionlessReadService(b"\x00" * 8)
+
+    result = run_symbol_plan(
+        tmp_path,
+        path,
+        service,
+        debugger_type="stlink",
+        permissions={**DEFAULT_TEST_PERMISSIONS, "allow_probe": False},
+    )
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 2
+    refusal = result["validation_error"]
+    assert refusal["field"] == "steps[1].action"
+    assert refusal["action"] == "dump_memory"
+    assert refusal["summary"] == "Reading target memory requires allow_probe on this debugger."
+    assert refusal["permission"] == "allow_probe"
+    assert result["steps"] == []
+    assert service.calls == []
+
+
+def test_a_read_free_bench_admits_a_sessionless_read_with_no_allow_probe(tmp_path: Path) -> None:
+    # The other side of the gate: a version-2 bench grants reads by exclusivity
+    # and never names allow_probe, so `probe_allowed()` — not the raw flag — is
+    # what keeps the read admitted here.
+    path = write_test_config(
+        tmp_path,
+        "version: 5\nsteps:\n  - {device: dut, action: read_symbol, symbol: boot_counter, size_bytes: 4, comparator: {equals: 42}}\n",
+    )
+    service = SessionlessReadService((42).to_bytes(4, "little"))
+
+    result = run_symbol_plan(tmp_path, path, service, debugger_type="stlink", config_version=2)
+
+    assert result["ok"] is True, result
+    assert [name for name, _ in service.calls] == ["debug_symbol_value"]

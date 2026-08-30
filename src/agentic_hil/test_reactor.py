@@ -2092,6 +2092,17 @@ class DebuggerRunner(StepDevice):
                 return preflight_error(location, step, "debugger", "A debug session may only be stopped on the debugger that started it.", {"debug_session_debugger": state.debug_session})
             state.debug_session = None
             return None
+        if without_session and not config.probe_allowed(debugger):
+            # A sessionless read still opens a probe onto a live core, so it
+            # needs the same allow_probe a debug_start does — and preflight is
+            # where that has to be caught. The backend refuses an ungranted read
+            # on its own, but only when the read's own turn comes: a plan that
+            # flashes and then reads would already have flashed before the read's
+            # permission_denied arrived, mutating a board a plan that could never
+            # run should never have reached. probe_allowed(), not the raw flag,
+            # so a read-free (version 2) bench that grants reads by exclusivity
+            # still admits the step.
+            return preflight_error(location, step, "action", "Reading target memory requires allow_probe on this debugger.", {"permission": "allow_probe"})
         if not without_session:
             if state.debug_session is None:
                 return preflight_error(location, step, "action", "A debug session must be started before this action.")
