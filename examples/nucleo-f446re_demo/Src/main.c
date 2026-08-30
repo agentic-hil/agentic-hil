@@ -48,6 +48,31 @@
 #define USART_CR1_UE (1U << 13)
 #define USART2_BRR_115200_PCLK16MHZ 139U
 
+#define SYST_CSR (*(volatile uint32_t *)0xE000E010U)
+#define SYST_RVR (*(volatile uint32_t *)0xE000E014U)
+#define SYST_CVR (*(volatile uint32_t *)0xE000E018U)
+#define SYST_CSR_ENABLE (1U << 0)
+#define SYST_CSR_TICKINT (1U << 1)
+#define SYST_CSR_CLKSOURCE (1U << 2)
+#define SYSTICK_1MS_AT_16MHZ (16000U - 1U)
+
+/* A millisecond uptime counter in RAM: the witness a non-intrusive debug
+ * read is measured against. A read that resets or halts the core shows up
+ * here as a counter that jumped back or stopped advancing. */
+volatile uint32_t uptime_ms = 0U;
+
+void SysTick_Handler(void)
+{
+    uptime_ms++;
+}
+
+static void systick_init(void)
+{
+    SYST_RVR = SYSTICK_1MS_AT_16MHZ;
+    SYST_CVR = 0U;
+    SYST_CSR = SYST_CSR_CLKSOURCE | SYST_CSR_TICKINT | SYST_CSR_ENABLE;
+}
+
 void SystemInit(void)
 {
     /* Keep the reset clock defaults: HSI feeds APB1 at 16 MHz. */
@@ -93,6 +118,7 @@ static void delay(void)
 int main(void)
 {
     usart2_init();
+    systick_init();
 
     printf("Hello World\n");
     fflush(stdout);
