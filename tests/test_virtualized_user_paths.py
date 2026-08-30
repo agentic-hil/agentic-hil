@@ -275,13 +275,13 @@ def test_every_other_audited_tool_still_proves_its_audit_trail(tmp_path: Path, m
 def test_a_corrupt_report_state_is_not_read_around_by_regeneration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The audit gate holds for an integrity failure a regeneration cannot repair.
 
-    `ensure_audit_ready` refuses two ways and only one — the `state_root` spelling
-    the enforcer will not accept — is the one a regeneration replaces. A corrupt
+    `ensure_audit_ready` refuses two ways and only one, the `state_root` spelling
+    the enforcer will not accept, is the one a regeneration replaces. A corrupt
     `report-state.json` under a `state_root` that resolves cleanly is the other:
     `config_invalid`, which the same regeneration leaves exactly in place, because
     it selects the same healthy root and rewrites nothing under it. Reading the
     board around it would bypass the gate for an integrity failure and report a
-    repair that never lands — the next `probe_target` would meet the same wall.
+    repair that never lands, the next `probe_target` would meet the same wall.
     """
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
@@ -327,7 +327,7 @@ def test_the_audit_repair_read_still_holds_the_configured_resource_id(tmp_path: 
     """A broken `state_root` does not license reading past a board's alias lock.
 
     `resource_id` is the canonical alias a run holds a board through, and a
-    debugger can carry it with `probe_id` still null — so the enumerated
+    debugger can carry it with `probe_id` still null, so the enumerated
     `probe:<serial>` lock the read takes never covers `physical:<resource_id>`.
     The leased path acquires that alias in its own right; the audit-repair read
     has no `state_root` to lease under but must acquire it just the same, or it

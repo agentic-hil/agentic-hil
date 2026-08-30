@@ -2676,7 +2676,7 @@ def discover_for_generation(
     when it did, for the caller to publish. It is filled in for the one case this
     function decides on its own: a configuration that loads and names a
     `state_root` the enforcer refuses, which a regeneration will replace with a
-    usable one — `generation_audit_barrier` is where that case is told apart from
+    usable one, `generation_audit_barrier` is where that case is told apart from
     a corrupt report state or any other audit failure a regeneration does not
     repair, which stay refused. A caller that handed None already knows why it did
     and gets None back rather than a reason invented here.
@@ -2695,8 +2695,8 @@ def discover_for_generation(
         # the read go through the leased path instead would touch the board and
         # then quarantine the bench on the audit record it cannot write, which is
         # the same dead end with a probe read spent on it (#353). The barrier
-        # returns only for that one repairable case — see `generation_audit_barrier`
-        # — so a corrupt report state or any other audit failure a regeneration
+        # returns only for that one repairable case, see `generation_audit_barrier`
+        #, so a corrupt report state or any other audit failure a regeneration
         # does not repair reaches the leased path below and its `audit_unavailable`
         # refusal, rather than being read around here (review round 0, finding 1).
         #
@@ -2735,21 +2735,21 @@ def generation_audit_barrier(current: AgenticHILConfig) -> ConfigError | None:
 
     `ensure_audit_ready` refuses for two unrelated reasons, and only one of them
     is this call's to route around. `unsafe_configured_path` is the `state_root`
-    spelling itself being one the enforcer will not accept — it resolves
-    elsewhere, leaves the workspace, or cannot be written — and that is exactly
+    spelling itself being one the enforcer will not accept, it resolves
+    elsewhere, leaves the workspace, or cannot be written, and that is exactly
     what a regeneration replaces, because `provisionable_state_root` chooses a
     root that passes the same check. Every other failure is about content under a
     `state_root` that is otherwise fine: a corrupt `report-state.json` is
     `config_invalid`, a full disk or a vanished mount is an `OSError`. A
     regeneration does not touch those, so reading the board around them would
     bypass the audit gate for a failure it does not repair and then report a
-    repair that never happened — the next hardware call would meet the very same
+    repair that never happened, the next hardware call would meet the very same
     wall (review round 0, finding 1).
 
     So only the path refusal returns here, and only when the root this workspace
     would regenerate onto is a real one and a *different* one. A regeneration that
     lands back on the same broken spelling repairs nothing, and is left to the
-    ordinary `audit_unavailable` refusal — the same answer every other unrepaired
+    ordinary `audit_unavailable` refusal, the same answer every other unrepaired
     audit failure gets.
     """
     try:
@@ -2769,8 +2769,8 @@ def _regeneration_moves_state_root(current: AgenticHILConfig) -> bool:
     `provisionable_state_root` returns the exact root a regeneration writes,
     chosen to pass every check a later write applies, so a value it returns is
     usable by construction. The one thing left to establish is that it *moves*: a
-    broken `state_root` whose replacement is the same spelling — a compromised
-    subtree under a root that itself resolves cleanly, for one — is not repaired
+    broken `state_root` whose replacement is the same spelling, a compromised
+    subtree under a root that itself resolves cleanly, for one, is not repaired
     by writing the file to name it again, and reading the board around that would
     claim a repair that never lands. When nothing is provisionable at all a
     regeneration repairs nothing either, so that is False too, and the read is
@@ -2804,7 +2804,7 @@ def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] |
     read, and they are the whole of what the regeneration caller adds over a first
     `init`. A first init knows no alias, but a configured bench does, and a run
     another owner holds through a debugger's `resource_id` locks
-    ``physical:<resource_id>`` — a key no enumeration derives, so the
+    ``physical:<resource_id>``, a key no enumeration derives, so the
     `probe:<serial>` locks alone would read the board out from under it. Acquired
     up front beside the enumeration lock and released with everything else, so the
     regeneration honours the same aliases the leased path does even though it has
