@@ -150,12 +150,11 @@ PYOCD_ERASE_FAILURE_MARKERS = ["failed to erase sector"]
 # `under_reset` at load, because holding a target in reset and then reading its
 # RAM measures nothing the firmware did.
 #
-# What is documented is not what is measured. This encodes the least intrusive
-# connect pyOCD documents; the proof that a read leaves a running core untouched
-# is a bench measurement (the #348 SysTick double-read pattern, run against this
-# backend), it belongs to the operator, and it belongs in issue #344. Nothing in
-# a result claims that proof: what a result carries is the log, and the log
-# carries this argv.
+# Documented, and since 2026-08-30 also measured: issue #349 holds the bench
+# evidence, five SysTick pairs on a NUCLEO-F446RE tracking wall clock through
+# this connect, a reset control the counter detected, and a halted-session
+# control in which the same counter froze, which is what makes it a witness.
+# Ten read logs carry this argv with --connect attach and nothing that halts.
 PYOCD_READ_CONNECT_MODE = "attach"
 PYOCD_READ_CONNECT_ARGS = ["--connect", PYOCD_READ_CONNECT_MODE]
 # The typed-debug reads this backend answers with no session behind them, and so
