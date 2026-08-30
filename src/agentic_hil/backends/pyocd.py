@@ -865,7 +865,14 @@ class PyOCDBackend:
     def _proves_no_contact(self, tool: str, backend_error_type: str) -> bool:
         if backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS:
             return True
-        return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
+        # SESSIONLESS_DEBUG_READS beside the older READ_ONLY_TOOLS: a `savemem`
+        # read drives nothing of its own either, so pyOCD reporting it never
+        # connected — no ACK, not responding, unable to connect — is the same
+        # proof of no contact it is for a probe listing. Without them here a
+        # sessionless read that failed before `savemem` keeps no NOT_CONTACTED
+        # fields, and `_finish_symbol_read` turns a provably untouched bench
+        # into `side_effect_status: unknown` and a cleanup-required lease.
+        return tool in (READ_ONLY_TOOLS | SESSIONLESS_DEBUG_READS) and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, completed: CompletedCommand) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check

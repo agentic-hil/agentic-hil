@@ -10,8 +10,10 @@ import pytest
 from conftest import (
     FAKE_GDB,
     FAKE_PYOCD,
+    FAKE_PYOCD_NO_TARGET,
     FAKE_PYOCD_SILENT_READ,
     FAKE_STLINK,
+    FAKE_STLINK_NO_TARGET,
     FAKE_STLINK_READ_UNCONFIRMED,
     FAKE_STLINK_SHORT_READ,
     elf_with_symbols,
@@ -1682,6 +1684,39 @@ def test_stlink_dump_refuses_before_a_symbol_table_describes_the_target(tmp_path
     assert not (tmp_path / "build" / "memory.hex").exists()
 
 
+def test_stlink_symbol_value_that_reaches_no_core_is_released_not_quarantined(tmp_path: Path) -> None:
+    """The ST-Link twin of the pyOCD proof: a read that connected to nothing is a
+    refusal, not a quarantine.
+
+    "No STM32 target found" behind an opened ST-Link is STM32CubeProgrammer's own
+    report that its `-r` reached no core, and a read whose command drives nothing
+    of its own may take it as a proven abort point exactly as a probe listing
+    does. The symbol source is set from the ELF a prior flash proved, so the read
+    resolves and reaches the CLI; the CLI finds no target and the one-shot lease
+    still goes back with nothing to recover.
+    """
+    service = stlink_dump_service(tmp_path, debugger_executable=FAKE_STLINK_NO_TARGET)
+    try:
+        # The board was there for the flash that put this ELF on it; it is not
+        # there for the read. Set directly because this fixture cannot also flash.
+        service._symbol_elf = service.artifacts.validate_local_path("build/app.elf")["artifact"]
+        value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+
+        assert value["ok"] is False, value
+        assert value["error_type"] == "target_not_detected"
+        assert value["target_contacted"] is False
+        assert value["side_effect_status"] == "not_started"
+        assert value["retry_safe"] is True
+        assert value["hardware_state"] == "unchanged"
+        assert value["lease_state"] == "released"
+        assert value.get("cleanup_required") is not True
+        assert value.get("quarantined") is not True
+        assert service.coordinator.blocked is False
+        assert service.coordinator.leases == {}
+    finally:
+        service.close()
+
+
 def test_remember_symbol_elf_keeps_only_the_source_still_proven_on_the_target(tmp_path: Path) -> None:
     """The decision table a flash leaves behind for the offline symbol source.
 
@@ -2221,6 +2256,61 @@ def test_pyocd_read_that_left_no_bytes_is_a_failed_read(tmp_path: Path) -> None:
     assert value["summary"] == "pyOCD reported a completed run but left no file holding the requested bytes."
     assert value["target_contacted"] is True
     assert "hex" not in value
+
+
+def test_pyocd_symbol_value_that_reaches_no_core_is_released_not_quarantined(tmp_path: Path) -> None:
+    """A read whose connect never reached the target refuses; it does not quarantine.
+
+    pyOCD's own "unable to connect" behind a `savemem` that drives nothing of its
+    own is proof the read reached no core, so the board is exactly as the flash
+    ahead of it left it: the one-shot lease goes back and no incident is filed.
+    Until the read was counted read-only for this, the same connect failure was
+    turned into `side_effect_status: unknown` and a cleanup-required lease over a
+    board it provably never touched — a physical `recover` for a read that never
+    happened.
+    """
+    service = pyocd_read_service(tmp_path, debugger_executable=FAKE_PYOCD_NO_TARGET)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+
+        assert value["ok"] is False, value
+        assert value["error_type"] == "target_not_detected"
+        assert value["target_contacted"] is False
+        assert value["side_effect_status"] == "not_started"
+        assert value["retry_safe"] is True
+        assert value["hardware_state"] == "unchanged"
+        assert value["lease_state"] == "released"
+        assert value.get("cleanup_required") is not True
+        assert value.get("quarantined") is not True
+        assert service.coordinator.blocked is False
+        assert service.coordinator.leases == {}
+    finally:
+        service.close()
+
+
+def test_pyocd_symbol_dump_that_reaches_no_core_is_released_not_quarantined(tmp_path: Path) -> None:
+    """The dump half of the same proof, and no Intel HEX is left for a read that
+    reached nothing to read."""
+    service = pyocd_read_service(tmp_path, debugger_executable=FAKE_PYOCD_NO_TARGET)
+    try:
+        assert flash_symbol_source(service)["ok"] is True
+        dumped = service.call("debug_dump_symbol_ihex", {"symbol": "CTC_array", "output_path": "build/memory.hex"})
+
+        assert dumped["ok"] is False, dumped
+        assert dumped["error_type"] == "target_not_detected"
+        assert dumped["target_contacted"] is False
+        assert dumped["side_effect_status"] == "not_started"
+        assert dumped["retry_safe"] is True
+        assert dumped["hardware_state"] == "unchanged"
+        assert dumped["lease_state"] == "released"
+        assert dumped.get("cleanup_required") is not True
+        assert dumped.get("quarantined") is not True
+        assert service.coordinator.blocked is False
+        assert service.coordinator.leases == {}
+        assert not (tmp_path / "build" / "memory.hex").exists()
+    finally:
+        service.close()
 
 
 def test_pyocd_read_names_the_private_file_the_way_pyocds_own_tokenizer_reads_it() -> None:

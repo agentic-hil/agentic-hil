@@ -657,7 +657,14 @@ class STLinkBackend:
     def _proves_no_contact(self, tool: str, backend_error_type: str) -> bool:
         if backend_error_type in self.PRE_CONTACT_BACKEND_ERRORS:
             return True
-        return tool in READ_ONLY_TOOLS and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
+        # SESSIONLESS_DEBUG_READS beside the older READ_ONLY_TOOLS, for the
+        # reason the pyOCD backend carries them: a `-r` read drives nothing of
+        # its own, so "No STM32 target found" behind an opened probe is its
+        # report that the transport reached no core, exactly as it is for a
+        # probe listing. Without them here a read that connected to nothing
+        # would be quarantined as an unknown effect rather than released as the
+        # retry-safe refusal the CLI's own words prove it is.
+        return tool in (READ_ONLY_TOOLS | SESSIONLESS_DEBUG_READS) and backend_error_type in self.READ_ONLY_PRE_CONTACT_BACKEND_ERRORS
 
     def _failure_result(self, tool: str, started_at: str, finished_at: str, elapsed_ms: int, backend_error_type: str, log_path: str, completed: CompletedCommand, operation_result: JsonObject | None = None) -> JsonObject:
         # likely_causes says what may be wrong; remediation says what to check
