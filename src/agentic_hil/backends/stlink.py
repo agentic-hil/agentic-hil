@@ -172,12 +172,12 @@ STLINK_CONNECT_MODES: dict[str, str] = {"hotplug": "HOTPLUG", "under_reset": "UR
 # the connects that reset; sending one alongside HOTPLUG would ask the least
 # intrusive connect for the thing it was chosen to avoid.
 #
-# What is documented is not what is measured. This encodes the least intrusive
-# connect the CLI documents, and it is strictly less intrusive than the NORMAL
-# it replaces; the proof that a read leaves a running core untouched is a bench
-# measurement (the #329 SysTick double-read, run again with this connect), and
-# it belongs to the operator and to issue #342. Nothing in a result claims that
-# proof: what a result carries is the log, and the log carries this argv.
+# Documented, and since 2026-08-30 also measured: issue #348 holds the bench
+# evidence, five SysTick pairs on a NUCLEO-F446RE advancing by wall time
+# through this connect, a deliberate reset control the counter detected, and
+# ten read logs carrying this argv with mode=HOTPLUG and no reset= option.
+# Nothing in a result claims the proof; what a result carries is the log,
+# and the log carries this argv.
 STLINK_READ_CONNECT_MODE: Literal["HOTPLUG"] = "HOTPLUG"
 
 STLINK_SERIAL_PATTERN = re.compile(r"^\s*ST-?LINK\s+SN\s*:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
