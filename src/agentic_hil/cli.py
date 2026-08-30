@@ -46,9 +46,10 @@ from agentic_hil.config import (
     openocd_script_kind,
     permission_summary,
     project_config_directories,
-    project_config_directory,
     project_config_path,
+    resolve_stable_directory,
     safe_directory,
+    safe_writable_directory,
     secure_atomic_write_bytes,
     secure_atomic_write_text,
     secure_optional_read_bytes,
@@ -914,7 +915,7 @@ def _project_mutation_paths(agent: SkillAgent | None, config_path: Path) -> list
         if permission_path is not None:
             paths.append(permission_path)
         if agent.id == "claude-code" and not _configuration_the_projects_walk_finds(config_path):
-            paths.append(_external_project_record_path())
+            paths.append(_external_project_record_mutation_path())
     return _unique_paths(paths)
 
 
@@ -1540,12 +1541,22 @@ def _with_external_project_record_taken_back(result: JsonObject) -> JsonObject:
 
     A step that refused and left the settings file alone keeps the record, since
     the rules it explains are still standing.
+
+    Every candidate spelling, not only the one a read would answer with. Which
+    of the two roots holds the record depends on which one this profile could
+    write when the project was set up, and a release before the walk existed
+    could only ever have written beside the platform default; a removal that
+    took back one spelling would leave the other standing, which is the leftover
+    this command exists to take back.
     """
-    path = _external_project_record_path()
-    if not result["ok"] or not _path_entry_exists(path):
+    if not result["ok"]:
         return result
-    secure_remove_file(path)
-    return {**result, "removed": [*result["removed"], _removed_entry("project record", path)]}
+    removed = [path for path in _external_project_record_candidates() if _path_entry_exists(path)]
+    for path in removed:
+        secure_remove_file(path)
+    if not removed:
+        return result
+    return {**result, "removed": [*result["removed"], *(_removed_entry("project record", path) for path in removed)]}
 
 
 def _remove_claude_code_deny_rules(agent: SkillAgent, path: Path) -> JsonObject:
@@ -2896,8 +2907,96 @@ def _protected_trees_still_wanted(config_path: Path, state_root: Path) -> set[st
 EXTERNAL_PROJECT_RECORD_FILENAME = "external-projects.json"
 
 
+def _external_project_record_candidates() -> tuple[Path, ...]:
+    """Every place this user's record may be, best first.
+
+    Beside each root a project configuration may live under, which is the
+    contract this file has always had, applied to the pair of roots there now
+    are rather than to the platform default alone (#354). The platform default
+    stays first, so on a profile where that root works nothing about this file
+    moves.
+
+    Naming only. Nothing here is created, opened or validated, because most
+    callers are asking whether a record exists rather than where to write one.
+    """
+    return tuple(root.parent / EXTERNAL_PROJECT_RECORD_FILENAME for root in project_config_directories())
+
+
 def _external_project_record_path() -> Path:
-    return project_config_directory().parent / EXTERNAL_PROJECT_RECORD_FILENAME
+    """Where this user's record is, or where it would go.
+
+    The candidate walk and the existing-file-first rule `project_config_path`
+    has, for the same reason: a record that had to be written beside the
+    fallback root is this user's record, and a reader answering with the empty
+    spelling beside the other root would read the projects it names as projects
+    nobody has, which is the whole of #246. Where none exists the answer is
+    beside the platform default, exactly as before.
+
+    One record wins outright rather than two being merged, and it is the one the
+    preference order reaches first. That is what keeps this and
+    `_external_project_record_target` naming the same file: a writer appending
+    beside the second root would add an entry no reader here ever answers with.
+    """
+    candidates = _external_project_record_candidates()
+    for candidate in candidates:
+        with suppress(OSError):
+            if candidate.is_file():
+                return candidate
+    return candidates[0]
+
+
+def _external_project_record_target() -> Path:
+    """Where a record write goes, with the root it needs created.
+
+    `authoritative_config_target` for this file, and for the profile that made
+    it necessary: inside an MSIX AppContainer the platform default is
+    virtualized, every write under it is refused by the enforcer's
+    resolve-identity check, and `init --agent` for an `AGENTIC_HIL_CONFIG`-bound
+    project could then not record the project whose rules it was about to write.
+    It wrote none, which is the refusal by design, and the whole command failed
+    with no way round it but the one lever a stranger never finds (#358).
+
+    Two passes, and the order between them is the whole of it, exactly as it is
+    for the configuration's own target: an existing record wins over a root that
+    could be created now, because the file that is in force is the one a new
+    entry belongs in and a second record beside the other root would be read by
+    nothing.
+    """
+    candidates = _external_project_record_candidates()
+    for candidate in candidates:
+        with suppress(OSError):
+            if candidate.is_file():
+                return candidate
+    failure: ConfigError | None = None
+    for candidate in candidates:
+        try:
+            resolve_stable_directory(safe_writable_directory(candidate.parent, field="config_path"), field="config_path")
+        except ConfigError as error:
+            failure = error
+            continue
+        return candidate
+    raise failure or ConfigError("unsafe_configured_path", "No trusted location for the record of externally bound projects is available on this profile.", {"field": "config_path"})
+
+
+def _external_project_record_mutation_path() -> Path:
+    """The record file this run's rollback has to cover.
+
+    The write target rather than the reader's answer, because the two differ on
+    exactly the profile the walk exists for: with no record anywhere yet the
+    reader names the platform default while the write lands beside the fallback
+    root, and a rollback that snapshotted the first would report the project's
+    changes taken back with the new entry still standing, which is the failure
+    `_project_mutation_paths` already describes for this file.
+
+    A profile with no usable root at all falls back to naming the reader's
+    answer. The record write is going to be refused there whatever this says,
+    and refusing the whole run here, before a single lock is taken, would take
+    that refusal away from the step that can explain it.
+    """
+    try:
+        return _external_project_record_target()
+    except ConfigError:
+        return _external_project_record_path()
 
 
 def _configuration_the_projects_walk_finds(config_path: Path) -> bool:
@@ -2994,6 +3093,12 @@ def _record_external_configuration(config_path: Path) -> JsonObject | None:
         return None
     document = {"configurations": sorted(str(entry) for entry in [*recorded, absolute])}
     try:
+        # Selected inside the `try`, because a profile with no usable root at all
+        # is the same answer to the caller as a root that refuses the write, and
+        # the refusal it raises is the one that names which spelling it compared
+        # against. Until it answers, the location this reports is the reader's,
+        # which is where the record would have been.
+        path = _external_project_record_target()
         secure_atomic_write_text(path, json.dumps(document, indent=2) + "\n")
     except (OSError, ConfigError) as error:
         return {
