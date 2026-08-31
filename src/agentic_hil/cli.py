@@ -2922,6 +2922,30 @@ def _external_project_record_candidates() -> tuple[Path, ...]:
     return tuple(root.parent / EXTERNAL_PROJECT_RECORD_FILENAME for root in project_config_directories())
 
 
+def _record_parent_resolves_stably(candidate: Path) -> bool:
+    """Whether this record's parent names the place it resolves to.
+
+    The resolve-identity half of the mutation check, and the half a virtualized
+    profile fails: inside an MSIX AppContainer the parent of an existing record
+    opens, reads and writes exactly as it is named while `resolve` maps it onto
+    the package's private `LocalCache` tree, so `safe_file_path` refuses every
+    write under it — the same disagreement `resolve_stable_directory` states for
+    the configuration's own root, reaching this file the run after an unpackaged
+    host left a record beside the virtualized default (#358).
+
+    Asked without a write probe and without creating anything, because both the
+    reader deciding which record answers and the walk that picks a write target
+    reach it: the reader must not plant the root a record would have lived under,
+    and for an existing record the parent is already there so the writability half
+    `_external_project_record_target` still proves is the only thing left to ask.
+    """
+    parent = absolute_without_symlinks(candidate).parent
+    try:
+        return parent.resolve() == parent
+    except OSError:
+        return False
+
+
 def _external_project_record_path() -> Path:
     """Where this user's record is, or where it would go.
 
@@ -2936,8 +2960,21 @@ def _external_project_record_path() -> Path:
     preference order reaches first. That is what keeps this and
     `_external_project_record_target` naming the same file: a writer appending
     beside the second root would add an entry no reader here ever answers with.
+
+    An existing record beside a virtualized root is the one exception, and it is
+    the same one the target has (#358). Such a record reads fine — the spelling it
+    was opened by still reaches its bytes — but no write lands in it, so once a run
+    has had to migrate off it the file every writer targets is the safe one beside
+    the next root. The reader answers with the same file: the first existing record
+    a write would be accepted at wins, and only where none is left standing does an
+    existing but unwritable record answer, so the projects it names stay visible
+    until a write carries them across.
     """
     candidates = _external_project_record_candidates()
+    for candidate in candidates:
+        with suppress(OSError):
+            if candidate.is_file() and _record_parent_resolves_stably(candidate):
+                return candidate
     for candidate in candidates:
         with suppress(OSError):
             if candidate.is_file():
@@ -2961,11 +2998,23 @@ def _external_project_record_target() -> Path:
     could be created now, because the file that is in force is the one a new
     entry belongs in and a second record beside the other root would be read by
     nothing.
+
+    An existing record still has to be one a write will actually land in, which
+    the plain "first that exists" rule never asked. Inside an MSIX AppContainer an
+    `%APPDATA%\\agentic-hil\\external-projects.json` an unpackaged host left resolves
+    into the package's private tree, and returning it here dead-ended the very
+    `init --agent` the fallback root exists for: `_project_mutation_paths` locked
+    it, and the lock's `safe_file_path` refused the redirected parent before the
+    safe candidate was ever reached (#358). So the existing-file pass takes only a
+    record whose parent resolves to itself, and the second pass reaches the first
+    location a write can be created and accepted at — where the entries of the
+    unsafe record migrate to, because `_record_external_configuration` reads them
+    through `_external_project_record_path` before it writes the combined set here.
     """
     candidates = _external_project_record_candidates()
     for candidate in candidates:
         with suppress(OSError):
-            if candidate.is_file():
+            if candidate.is_file() and _record_parent_resolves_stably(candidate):
                 return candidate
     failure: ConfigError | None = None
     for candidate in candidates:

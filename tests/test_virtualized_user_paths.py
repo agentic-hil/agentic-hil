@@ -660,6 +660,49 @@ def test_the_project_record_falls_through_a_virtualized_config_root(tmp_path: Pa
     assert _recorded_external_configurations() == [bound]
 
 
+def test_init_migrates_a_record_off_a_virtualized_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An existing default record does not dead-end the fallback it needs (#358).
+
+    The profile the fallback exists for is precisely the one an earlier,
+    unpackaged host already left a record on: `%APPDATA%\\agentic-hil\\external-projects.json`
+    is on disk, and inside the container it resolves into the package's private
+    tree. Returning it as the write target — because it exists — locked a file
+    whose parent `safe_file_path` refuses, so `init --agent claude-code` failed
+    before it wrote a byte, in the very profile the walk was added to support.
+
+    The existing but unwritable record is left exactly as it is, its one entry
+    carried across into the record beside the fallback root alongside the new one,
+    and that safe record is the one every later reader answers with.
+    """
+    bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    default_record, fallback_record = external_project_records()
+    prior = Path.home() / "operator-policy" / "legacy" / "config.yaml"
+    default_record.parent.mkdir(parents=True, exist_ok=True)
+    default_record.write_text(json.dumps({"configurations": [str(prior)]}) + "\n", encoding="utf-8")
+    # Virtualize only after the record is on disk: the container redirects a path
+    # that exists, so this reproduces the unpackaged host's file seen from inside
+    # the package rather than one written there now.
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+    bound = bound_project(monkeypatch)
+    claude_settings(["Bash(curl *)"])
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["steps"]["agent_write_restriction"]["ok"] is True, result["steps"]
+    # The unsafe default is not the write target and not touched: a write to it is
+    # refused, and its bytes are exactly what they were.
+    assert json.loads(default_record.read_text(encoding="utf-8")) == {"configurations": [str(prior)]}
+    # Its entry migrated across, beside the new one, into the record a write lands
+    # in — read through the default before the write and combined with it.
+    assert json.loads(fallback_record.read_text(encoding="utf-8")) == {"configurations": sorted([str(prior), str(bound)])}
+    # And that safe record is what every later reader answers with, so neither the
+    # migrated project nor the new one goes missing.
+    assert _external_project_record_path() == fallback_record
+    assert sorted(_recorded_external_configurations()) == sorted([bound, prior])
+
+
 def test_the_default_record_location_is_unchanged_where_it_works(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The fallback is a fallback, not a relocation of every profile's record.
 
