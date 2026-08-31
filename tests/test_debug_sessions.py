@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import socket
 import struct
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -35,7 +36,12 @@ from agentic_hil.config import (
 from agentic_hil.devices import debugger_device
 from agentic_hil.elfsymbols import read_elf_byte_order, read_elf_symbol
 from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, read_intel_hex_file, write_intel_hex_file
-from agentic_hil.knowledge import GDB_NOT_CONFIGURED_SCOPE, catalogue_entry, remediation_fields
+from agentic_hil.knowledge import (
+    GDB_AUTODETECTED_MISSING_SCOPE,
+    GDB_NOT_CONFIGURED_SCOPE,
+    catalogue_entry,
+    remediation_fields,
+)
 from agentic_hil.report import overall_success, read_last_report
 from agentic_hil.tools import AgenticHILToolService
 
@@ -1766,6 +1772,69 @@ def test_a_configured_gdb_that_stopped_resolving_keeps_saying_so(
     assert refused["summary"] == "Configured debug.gdb_executable could not be found."
     assert refused["likely_causes"] == ["debug.gdb_executable points to a missing file", "GDB is not installed"]
     assert refused["remediation"] == remediation_fields("gdb_not_found")["remediation"]
+    assert any("project_config_set" in step for step in refused["remediation"]), refused["remediation"]
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_status"] == "not_started"
+
+
+def test_an_autodetected_gdb_that_went_missing_is_not_called_a_configured_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third state, which is neither of the two above.
+
+    `debug.gdb_executable` is unset in the file, so `project_config_describe`
+    reports the key unset — but startup autodetected a GDB on PATH and pinned its
+    absolute path, and by the time a session resolves it that file is gone. The
+    configured refusal would send the operator to correct a path they never
+    wrote, contradicting what describe shows; the unconfigured one would claim
+    nothing was ever found. This state earns its own refusal: the key is unset,
+    a GDB found at startup is gone, and the fix is to reinstall one or name it.
+
+    The load a server performs, because pinning is what puts the autodetected
+    path into the field and stamps its provenance — an unpinned `load_config`
+    leaves the key null and would autodetect afresh at resolve time, which is a
+    different code path and not the one production takes.
+    """
+    gdb_path = tmp_path / "toolchain" / "arm-none-eabi-gdb"
+    gdb_path.parent.mkdir(parents=True, exist_ok=True)
+    gdb_path.write_bytes(FAKE_GDB.read_bytes())
+    real_which = shutil.which
+
+    def which_finds_the_autodetected_gdb(name: str, *args: object, **kwargs: object) -> str | None:
+        # Only the GDB candidates resolve to the planted binary; every other
+        # lookup pinning makes (the debugger, say) keeps the real answer, so this
+        # models autodetection finding a GDB and nothing else.
+        if name in GDB_AUTODETECT_CANDIDATES:
+            return str(gdb_path)
+        return real_which(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(shutil, "which", which_finds_the_autodetected_gdb)
+    service = pinned_debug_service(tmp_path, monkeypatch, gdb_executable=None)
+    try:
+        pinned = str(service.config.debug.gdb_executable)
+        # Pinning wrote the autodetected path, not the disabled placeholder, and
+        # recorded that the document named nothing — the state this test exists for.
+        assert not executable_is_disabled(pinned)
+        assert Path(pinned) == gdb_path.resolve()
+        assert service.config.debug.gdb_executable_autodetected is True
+        gdb_path.unlink()
+        refused = start_debug_session(service, mode="attach")
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "gdb_not_found"
+    assert refused["summary"] == "The GDB autodetected when this server started could not be found."
+    assert refused["likely_causes"] == [
+        "debug.gdb_executable is not set in the authoritative project config",
+        "the GDB autodetected on PATH when this server started has since been moved or removed",
+    ]
+    assert refused["remediation"] == remediation_fields("gdb_not_found", GDB_AUTODETECTED_MISSING_SCOPE)["remediation"]
+    # It is a distinct refusal from the two either side of it: not the configured
+    # one, whose path advice would be a lie here, and not the never-found one.
+    assert refused["remediation"] != remediation_fields("gdb_not_found")["remediation"]
+    assert refused["remediation"] != remediation_fields("gdb_not_found", GDB_NOT_CONFIGURED_SCOPE)["remediation"]
+    assert any("Reinstall the GDB" in step for step in refused["remediation"]), refused["remediation"]
     assert any("project_config_set" in step for step in refused["remediation"]), refused["remediation"]
     assert refused["target_contacted"] is False
     assert refused["side_effect_status"] == "not_started"

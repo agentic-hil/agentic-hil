@@ -240,6 +240,13 @@ CONFIG_RUNNING_SERVER_SCOPE = "running_server"
 # GDB and had none to find is scoped here; a `debug.gdb_executable` somebody
 # wrote that no longer resolves keeps the unscoped entry.
 GDB_NOT_CONFIGURED_SCOPE = "not_configured"
+# The third state, which is neither. The document named no GDB, so
+# `project_config_describe` reports the key unset, but startup did autodetect one
+# and pinned its path — and that path has since gone. It is not the unscoped
+# entry, which would send an operator to correct a value nobody wrote, and not
+# `not_configured`, which says nothing was ever found. This scope carries the
+# remediation for a GDB nobody configured that was there and is not now.
+GDB_AUTODETECTED_MISSING_SCOPE = "autodetected_missing"
 # Said by `doctor`, which parses the file at the moment it is asked and is
 # therefore always current — which is exactly why it cannot speak for a server
 # that has been running since before the last edit. It names both ways across,
@@ -1619,6 +1626,36 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not report the bench as unusable. A probe with no GDB behind it still flashes, resets and probes; what "
             "stops here is the typed debug session and the symbol reads, and saying which of them was needed is what "
             "lets the operator decide whether installing one is worth it.",
+        ),
+    ),
+    f"gdb_not_found:{GDB_AUTODETECTED_MISSING_SCOPE}": ErrorRemedy(
+        meaning=(
+            "This bench named no GDB, and the one it found is gone. The authoritative configuration leaves "
+            "`debug.gdb_executable` unset, so this server autodetected `arm-none-eabi-gdb`, `gdb-multiarch` or `gdb` on "
+            "PATH when it loaded and pinned the one it found; that file has since been moved or removed, and the pinned "
+            "path no longer resolves. `project_config_describe` reports the key unset, because unset is what it is — "
+            "nothing in the configuration is wrong and no path in it is stale. A typed debug session is GDB, and so is "
+            "the offline symbol read the ST-Link and pyOCD backends answer out of the flashed ELF, so both refuse until "
+            "one exists again. Nothing was spawned and nothing was said to the target."
+        ),
+        remediation=(
+            "Reinstall the GDB that went missing, or install another that speaks this target: `arm-none-eabi-gdb` for a "
+            "Cortex-M part, `gdb-multiarch` otherwise. Either is found on PATH without the file naming it.",
+            "If one is installed already but not on PATH, name it. `debug.gdb_executable` takes an absolute path and is "
+            "one `project_config_set` call behind `allow_config_description_write`. Which GDB a bench runs is the "
+            "operator's, so report what is missing and get their word before writing it.",
+            "Restart the MCP server either way. The GDB a server uses is resolved and validated once, when it loads its "
+            "configuration, and `debug` is not one of the sections `project_config_reload_description` re-reads, so a "
+            "GDB reinstalled or named under a running server reaches it at its next start.",
+        ),
+        do_not=(
+            "Do not correct a path in the configuration. `debug.gdb_executable` names nothing here; the path that went "
+            "missing was autodetected, not written, so there is no wrong value to fix and nothing `project_config_set` "
+            "would be repairing.",
+            "Do not run `gdb`, `arm-none-eabi-gdb` or `gdb-multiarch` yourself to get the answer anyway. That bypasses "
+            "the policy this refusal comes from and leaves the operator with no record of what ran.",
+            "Do not report the bench as unusable. A probe with no GDB behind it still flashes, resets and probes; what "
+            "stops here is the typed debug session and the symbol reads.",
         ),
     ),
     # -- The one flag whose whole value is that it is never silently degraded ---

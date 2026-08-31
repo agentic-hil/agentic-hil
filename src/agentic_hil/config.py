@@ -878,12 +878,19 @@ def revalidate_permission_dependent_pinning(config: AgenticHILConfig) -> Agentic
 
 
 def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
+    gdb_configured = config.debug.gdb_executable
     gdb_executable = configured_executable(
         config,
-        config.debug.gdb_executable,
+        gdb_configured,
         "debug.gdb_executable",
         candidates=GDB_AUTODETECT_CANDIDATES,
     )
+    # The document named nothing and autodetection found something: the pinned
+    # path is one nobody wrote. The disabled placeholder is not that state — it
+    # is autodetection finding nothing — so it does not count, and a value the
+    # document did name never can. This is the one bit `resolve_gdb_executable`
+    # cannot recover from the pinned path alone, which is absolute either way.
+    gdb_autodetected = gdb_configured is None and gdb_executable is not None and not executable_is_disabled(gdb_executable)
     can_buses = {
         name: replace(
             bus,
@@ -911,7 +918,7 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
         # Re-point the binding at the pinned entry; leaving the pre-pin object
         # bound would run the backend on the unvalidated executable.
         debugger=None if config.debugger_id is None else debuggers[config.debugger_id],
-        debug=replace(config.debug, gdb_executable=gdb_executable),
+        debug=replace(config.debug, gdb_executable=gdb_executable, gdb_executable_autodetected=gdb_autodetected),
         can_buses=can_buses,
     )
 

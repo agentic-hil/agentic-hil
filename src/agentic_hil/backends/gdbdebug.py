@@ -34,7 +34,12 @@ from agentic_hil.gdbmi import (
     parse_gdb_integer,
     write_intel_hex_file,
 )
-from agentic_hil.knowledge import GDB_NOT_CONFIGURED_SCOPE, exclusive_permission_summary, remediation_fields
+from agentic_hil.knowledge import (
+    GDB_AUTODETECTED_MISSING_SCOPE,
+    GDB_NOT_CONFIGURED_SCOPE,
+    exclusive_permission_summary,
+    remediation_fields,
+)
 from agentic_hil.process import spawn_managed_process, terminate_process_tree
 from agentic_hil.report import (
     logs_directory,
@@ -1274,6 +1279,49 @@ def no_gdb_on_this_bench(backend_name: str) -> JsonObject:
     }
 
 
+def autodetected_gdb_missing(backend_name: str) -> JsonObject:
+    """The refusal for a GDB nobody configured that startup found and has lost.
+
+    The third state a missing GDB is in, and the one the two above cannot say
+    without misdiagnosing it. Pinning writes the absolute path of an autodetected
+    GDB into `debug.gdb_executable`, so a bench whose file named none still
+    resolves one while that binary is on disk. When it goes, the field still
+    holds the path pinning wrote, but `project_config_describe` reads the
+    document and reports the key unset — so `configured_gdb_missing` would name a
+    path the operator never wrote, and `no_gdb_on_this_bench` would claim nothing
+    was ever found. This one says what is true: the key is unset, a GDB found at
+    startup is gone, and the way out is the unconfigured bench's, install one or
+    name it. The remediation for that is behind the scope.
+    """
+    return {
+        "ok": False,
+        "backend": backend_name,
+        "error_type": "gdb_not_found",
+        "summary": "The GDB autodetected when this server started could not be found.",
+        "likely_causes": ["debug.gdb_executable is not set in the authoritative project config", "the GDB autodetected on PATH when this server started has since been moved or removed"],
+        **remediation_fields("gdb_not_found", GDB_AUTODETECTED_MISSING_SCOPE),
+        "target_contacted": False,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": True,
+    }
+
+
+def gdb_missing_refusal(config: AgenticHILConfig, backend_name: str) -> JsonObject:
+    """The refusal for a resolved-then-missing GDB, by where its path came from.
+
+    One place decides between the two, so the resolver and the offline symbol
+    read — which meet the same GDB gone at two different moments — cannot drift
+    on which refusal it earns. A path the document named that no longer resolves
+    is the operator's to fix, and keeps the configured refusal. A path pinning
+    autodetected is nobody's, and `project_config_describe` reports the key it
+    came from unset, so it earns the refusal that does not claim otherwise.
+    """
+    if config.debug.gdb_executable_autodetected:
+        return autodetected_gdb_missing(backend_name)
+    return configured_gdb_missing(backend_name)
+
+
 def resolve_gdb_executable(config: AgenticHILConfig, backend_name: str) -> JsonObject:
     """Find the GDB this bench is meant to use, by one rule for every backend.
 
@@ -1299,6 +1347,12 @@ def resolve_gdb_executable(config: AgenticHILConfig, backend_name: str) -> JsonO
     through to autodetection would run whatever a changed PATH now offers,
     including out of the workspace. The bench that has none keeps none until it
     is started again.
+
+    A pinned path that no longer resolves is a missing GDB, and which refusal it
+    earns turns on where the path came from — `gdb_missing_refusal` reads the
+    provenance pinning recorded. A path the document named is the operator's to
+    fix; a path autodetection found is one `project_config_describe` reports as
+    an unset key, so it is not called a missing *configured* GDB.
     """
     configured = config.debug.gdb_executable
     if configured and executable_is_disabled(configured):
@@ -1315,7 +1369,7 @@ def resolve_gdb_executable(config: AgenticHILConfig, backend_name: str) -> JsonO
             found = which(configured)
             if found is not None:
                 return {"ok": True, "executable": found}
-        return configured_gdb_missing(backend_name)
+        return gdb_missing_refusal(config, backend_name)
     for candidate in GDB_AUTODETECT_CANDIDATES:
         found = which(candidate)
         if found is not None:
@@ -1459,8 +1513,11 @@ def resolve_symbol_offline(config: AgenticHILConfig, backend_name: str, tool: st
             # The same refusal `resolve_gdb_executable` writes, from its builder
             # rather than from a copy: a GDB that resolved and then would not
             # start is the state that entry describes, and a second copy here
-            # would be a second place for its advice to age.
-            return {**configured_gdb_missing(backend_name), "tool": tool, "symbol": symbol, **NOT_CONTACTED}
+            # would be a second place for its advice to age. Chosen by the same
+            # provenance too, so a GDB that vanished between resolve and spawn is
+            # named the way it would have been a moment earlier, not as a
+            # configured path when the document configured none.
+            return {**gdb_missing_refusal(config, backend_name), "tool": tool, "symbol": symbol, **NOT_CONTACTED}
         if completed.timed_out:
             return {"ok": False, "tool": tool, "backend": backend_name, "error_type": "timeout", "summary": "Symbol resolution timed out.", "symbol": symbol, **NOT_CONTACTED}
         output = f"{completed.stdout}{completed.stderr}"
