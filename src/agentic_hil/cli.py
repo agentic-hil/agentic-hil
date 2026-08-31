@@ -1578,8 +1578,8 @@ def _with_external_project_record_taken_back(result: JsonObject) -> JsonObject:
     leaves behind is a file, never a live refusal (#358). So that case is caught
     before `secure_remove_file` is ever called, by `_record_parent_resolves_stably`.
 
-    A removal that then fails for any other reason — a read-only mount, an ACL
-    that refuses it, an I/O error, a hard-link the filesystem will not drop — is
+    A removal that then fails for any other reason, a read-only mount, an ACL
+    that refuses it, an I/O error, a hard-link the filesystem will not drop, is
     not that case and is not reported as it: it is collected under `failed` with
     the actual error, the other candidate is still attempted, and the step and the
     uninstall are unsuccessful, because a record this installation wrote is still
@@ -2988,7 +2988,7 @@ def _record_parent_resolves_stably(candidate: Path) -> bool:
     probe and without creating anything: inside an MSIX AppContainer the parent
     of an existing record opens, reads and writes exactly as it is named while
     `resolve` maps it onto the package's private `LocalCache` tree, and every
-    write and removal under it is then refused — the same disagreement
+    write and removal under it is then refused, the same disagreement
     `resolve_stable_directory` states for the configuration's own root (#358).
 
     `uninstall` asks it before it hands a record to `secure_remove_file`, whose
@@ -3010,7 +3010,7 @@ def _record_is_safe_write_target(candidate: Path) -> bool:
     `safe_writable_directory` proves this process can create and delete beside
     the record, and `resolve_stable_directory` proves the parent is the spelling
     it resolves to, so no later `safe_file_path` refuses it. Resolve-identity
-    alone was not enough — a record on a read-only mount, or under a deny ACE or
+    alone was not enough, a record on a read-only mount, or under a deny ACE or
     a filter driver, resolves to itself and still refuses every write, and taking
     it as the target dead-ended `init` on the sidecar lock beside it before the
     usable fallback was ever reached (#358).
@@ -3044,14 +3044,14 @@ def _external_project_record_path() -> Path:
 
     An existing record a write will not land in is the one exception, and it is
     the same one the target has (#358). A record beside a virtualized root, or on
-    a read-only mount, reads fine — the spelling it was opened by still reaches
-    its bytes — but no write lands in it, so once a run has had to migrate off it
+    a read-only mount, reads fine, the spelling it was opened by still reaches
+    its bytes, but no write lands in it, so once a run has had to migrate off it
     the file every writer targets is the safe one beside the next root. The reader
     answers with the same file: the first existing record a write would be
     accepted at wins, and only where none is left standing does an existing but
     unwritable record answer, so the projects it names stay visible until a write
     carries them across. The entries such an unwritable record still holds are not
-    lost by that choice — `_recorded_external_configurations` unions them in from
+    lost by that choice, `_recorded_external_configurations` unions them in from
     every earlier source, not only from the one file named here.
     """
     candidates = _external_project_record_candidates()
@@ -3090,9 +3090,9 @@ def _external_project_record_target() -> Path:
     `init --agent` the fallback root exists for: `_project_mutation_paths` locked
     it, and the lock's `safe_file_path` refused the redirected parent before the
     safe candidate was ever reached (#358). So the existing-file pass takes only a
-    record a write will be created and accepted at — the full `safe_writable_directory`
+    record a write will be created and accepted at, the full `safe_writable_directory`
     plus `resolve_stable_directory` check, so a read-only mount or a deny ACE is
-    turned down here rather than at the lock too — and the second pass reaches the
+    turned down here rather than at the lock too, and the second pass reaches the
     first such location that could be created now. The entries of an unsafe record
     passed over here are not dropped: `_record_external_configuration` writes the
     union `_recorded_external_configurations` reads from every earlier source,
@@ -3177,7 +3177,7 @@ def _external_project_record_read_sources() -> list[Path]:
     Reading both is safe in the other direction too. Every entry in either file is
     a project this tool recorded, under the same owner-only config root the
     project configurations live under, so unioning them keeps a live rule and at
-    worst leaves a stale one standing — the trade every reader of these records
+    worst leaves a stale one standing, the trade every reader of these records
     already makes, and the one #358 chooses over dropping a rule a bench still
     wants. Which single file a write lands in, and which one a read answers with,
     is still one file and still the first safe one; that is
@@ -3239,7 +3239,7 @@ def _recorded_external_configurations() -> list[Path] | None:
     rather than from a record of where it used to be.
 
     The union across `_external_project_record_read_sources`, so an entry either
-    coexisting record holds and the other has not yet been given is still named —
+    coexisting record holds and the other has not yet been given is still named,
     the same `None`-on-unreadable caution applied per source, because a record
     that might name a project and cannot be read is a reason to establish nothing
     rather than to drop what it holds.
@@ -3266,8 +3266,8 @@ def _record_holds(path: Path, configurations: list[str]) -> bool:
     nothing left to reconcile and is left untouched, so a run rewrites the record
     only when the two coexisting files actually disagree. A file that will not
     read as this tool's own answers "no", which for a project already recorded
-    elsewhere is harmless — the write it would provoke is swallowed as a best
-    effort — and never reached for one that is not, because that project is not in
+    elsewhere is harmless, the write it would provoke is swallowed as a best
+    effort, and never reached for one that is not, because that project is not in
     the union a target could already hold.
     """
     entries = _read_record_entries(path)
@@ -3296,8 +3296,8 @@ def _record_external_configuration(config_path: Path) -> JsonObject | None:
 
     The write is also where the coexisting records converge. The union read
     across both roots is written to the single target, so a migration that left
-    the default in place and a later run reading from an unpackaged host — the
-    reverse transition — settle onto one file that names every project rather than
+    the default in place and a later run reading from an unpackaged host, the
+    reverse transition, settle onto one file that names every project rather than
     two that each name half. For a project already recorded the write is owed only
     by that divergence: where the target already holds the union nothing is
     written, and where it cannot be written the run does not fail, because the
@@ -3336,7 +3336,7 @@ def _record_external_configuration(config_path: Path) -> JsonObject | None:
             # not the union could be synchronized onto the target. A target that
             # refuses the write, or a profile with no usable root at all, leaves
             # that reconciliation for a later run rather than failing the whole
-            # setup over a write this project does not need — the dead end #358
+            # setup over a write this project does not need, the dead end #358
             # removed. `_recorded_external_configurations` reads the divergence
             # across every source until then, so nothing goes missing.
             return None

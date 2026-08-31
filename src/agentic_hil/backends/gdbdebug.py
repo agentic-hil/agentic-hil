@@ -1287,7 +1287,7 @@ def autodetected_gdb_missing(backend_name: str) -> JsonObject:
     GDB into `debug.gdb_executable`, so a bench whose file named none still
     resolves one while that binary is on disk. When it goes, the field still
     holds the path pinning wrote, but `project_config_describe` reads the
-    document and reports the key unset — so `configured_gdb_missing` would name a
+    document and reports the key unset, so `configured_gdb_missing` would name a
     path the operator never wrote, and `no_gdb_on_this_bench` would claim nothing
     was ever found. This one says what is true: the key is unset, a GDB found at
     startup is gone, and the way out is the unconfigured bench's, install one or
@@ -1311,7 +1311,7 @@ def gdb_missing_refusal(config: AgenticHILConfig, backend_name: str) -> JsonObje
     """The refusal for a resolved-then-missing GDB, by where its path came from.
 
     One place decides between the two, so the resolver and the offline symbol
-    read — which meet the same GDB gone at two different moments — cannot drift
+    read, which meet the same GDB gone at two different moments, cannot drift
     on which refusal it earns. A path the document named that no longer resolves
     is the operator's to fix, and keeps the configured refusal. A path pinning
     autodetected is nobody's, and `project_config_describe` reports the key it
@@ -1349,7 +1349,7 @@ def resolve_gdb_executable(config: AgenticHILConfig, backend_name: str) -> JsonO
     is started again.
 
     A pinned path that no longer resolves is a missing GDB, and which refusal it
-    earns turns on where the path came from — `gdb_missing_refusal` reads the
+    earns turns on where the path came from, `gdb_missing_refusal` reads the
     provenance pinning recorded. A path the document named is the operator's to
     fix; a path autodetection found is one `project_config_describe` reports as
     an unset key, so it is not called a missing *configured* GDB.

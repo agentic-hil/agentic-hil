@@ -668,7 +668,7 @@ def test_init_migrates_a_record_off_a_virtualized_default(tmp_path: Path, monkey
     The profile the fallback exists for is precisely the one an earlier,
     unpackaged host already left a record on: `%APPDATA%\\agentic-hil\\external-projects.json`
     is on disk, and inside the container it resolves into the package's private
-    tree. Returning it as the write target — because it exists — locked a file
+    tree. Returning it as the write target, because it exists, locked a file
     whose parent `safe_file_path` refuses, so `init --agent claude-code` failed
     before it wrote a byte, in the very profile the walk was added to support.
 
@@ -697,7 +697,7 @@ def test_init_migrates_a_record_off_a_virtualized_default(tmp_path: Path, monkey
     # refused, and its bytes are exactly what they were.
     assert json.loads(default_record.read_text(encoding="utf-8")) == {"configurations": [str(prior)]}
     # Its entry migrated across, beside the new one, into the record a write lands
-    # in — read through the default before the write and combined with it.
+    # in, read through the default before the write and combined with it.
     assert json.loads(fallback_record.read_text(encoding="utf-8")) == {"configurations": sorted([str(prior), str(bound)])}
     # And that safe record is what every later reader answers with, so neither the
     # migrated project nor the new one goes missing.
@@ -775,8 +775,8 @@ def test_a_record_beside_the_fallback_root_stays_the_one_that_is_written(tmp_pat
 def test_a_record_under_both_roots_answers_with_the_platform_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """One file is read from and written to, but every project either names counts.
 
-    The reader still answers with the first candidate that exists — the platform
-    default, the way `project_config_path` picks one configuration — and a run's
+    The reader still answers with the first candidate that exists, the platform
+    default, the way `project_config_path` picks one configuration, and a run's
     new entry still lands in that one file, never a merge of two writable ones.
     What the wanted set is derived from is a different question, and it is the
     union of both: a project named only beside the fallback root is one this tool
@@ -914,7 +914,7 @@ def test_init_migrates_a_record_off_a_write_refused_default(tmp_path: Path, monk
     """Resolve-identity was never the whole of it (round 2, finding 1).
 
     An existing default record whose parent resolves to itself and still refuses
-    every write — a read-only mount, a deny ACE, a filter driver — passed the
+    every write, a read-only mount, a deny ACE, a filter driver, passed the
     resolve-identity check and was taken as the write target, so `init` locked it
     and dead-ended on the sidecar lock beside it before the writable fallback was
     ever reached. The full `safe_writable_directory` check turns it down here, and
@@ -948,7 +948,7 @@ def test_init_unions_a_pre_existing_fallback_with_the_virtualized_default(tmp_pa
 
     The profile the fallback exists for can already hold a record beside it, from
     an earlier `init` on this same host. When it does, the reader answers with the
-    fallback and the virtualized default is passed over — and reading only the
+    fallback and the virtualized default is passed over, and reading only the
     fallback lost every project the default alone still named, which a later
     refresh then took the rules back for. The union across both records is what
     keeps them.
@@ -1039,7 +1039,7 @@ def test_a_migrated_record_survives_the_return_to_an_unpackaged_host(tmp_path: P
     A default record an unpackaged host left, virtualized under a package, has a
     new project's entry migrated into the fallback beside it while the default
     stays unsafe and in place. The moment an unpackaged host reads the same profile
-    the default is writable again — and a reader that stopped at the first safe
+    the default is writable again, and a reader that stopped at the first safe
     record surfaced the stale default alone, so every project only the fallback
     named dropped out of the wanted set and the next refresh took its rule back.
     The union across both records keeps them, and the refresh converges the two
@@ -1072,7 +1072,7 @@ def test_a_migrated_record_survives_the_return_to_an_unpackaged_host(tmp_path: P
     b_rules = [f"Edit({pattern})" for pattern in _claude_code_deny_patterns(project_b, state_b)]
     settings = claude_settings(["Bash(curl *)", *b_rules])
 
-    # The reader retains both projects even though the default — safe again — names
+    # The reader retains both projects even though the default, safe again, names
     # only A.
     assert _external_project_record_path() == default_record
     assert sorted(_recorded_external_configurations()) == sorted([project_a, project_b])
@@ -1095,7 +1095,7 @@ def test_uninstall_reports_a_record_removal_it_could_not_do_as_a_failure(tmp_pat
     """A real removal failure is not a virtualization leftover (round 3, finding 2).
 
     A record whose parent resolves to itself is handed to `secure_remove_file`, and
-    a removal it turns down there — a read-only mount, an ACL, an I/O error — is a
+    a removal it turns down there, a read-only mount, an ACL, an I/O error, is a
     genuine failure, not the redirected-parent case `_LEFT_UNSAFE_RECORD` explains.
     It is reported under `failed` with the actual error, the other record is still
     taken back, and the step and the whole command are unsuccessful, because a file
@@ -1131,7 +1131,7 @@ def test_uninstall_reports_a_record_removal_it_could_not_do_as_a_failure(tmp_pat
     result = uninstall_agent_integration(["claude-code"])
 
     # The step and the whole command are unsuccessful, and the deny rules still
-    # came back — the removal order takes them first, before the records.
+    # came back, the removal order takes them first, before the records.
     assert result["ok"] is False, result
     assert deny_rules(settings) == ["Bash(curl *)"]
     step = result["agents"][0]["steps"]["agent_write_restriction"]

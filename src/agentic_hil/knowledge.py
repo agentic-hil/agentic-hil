@@ -242,7 +242,7 @@ CONFIG_RUNNING_SERVER_SCOPE = "running_server"
 GDB_NOT_CONFIGURED_SCOPE = "not_configured"
 # The third state, which is neither. The document named no GDB, so
 # `project_config_describe` reports the key unset, but startup did autodetect one
-# and pinned its path — and that path has since gone. It is not the unscoped
+# and pinned its path, and that path has since gone. It is not the unscoped
 # entry, which would send an operator to correct a value nobody wrote, and not
 # `not_configured`, which says nothing was ever found. This scope carries the
 # remediation for a GDB nobody configured that was there and is not now.
@@ -1633,7 +1633,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "This bench named no GDB, and the one it found is gone. The authoritative configuration leaves "
             "`debug.gdb_executable` unset, so this server autodetected `arm-none-eabi-gdb`, `gdb-multiarch` or `gdb` on "
             "PATH when it loaded and pinned the one it found; that file has since been moved or removed, and the pinned "
-            "path no longer resolves. `project_config_describe` reports the key unset, because unset is what it is — "
+            "path no longer resolves. `project_config_describe` reports the key unset, because unset is what it is, "
             "nothing in the configuration is wrong and no path in it is stale. A typed debug session is GDB, and so is "
             "the offline symbol read the ST-Link and pyOCD backends answer out of the flashed ELF, so both refuse until "
             "one exists again. Nothing was spawned and nothing was said to the target."

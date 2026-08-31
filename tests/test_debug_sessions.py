@@ -1783,7 +1783,7 @@ def test_an_autodetected_gdb_that_went_missing_is_not_called_a_configured_one(
     """The third state, which is neither of the two above.
 
     `debug.gdb_executable` is unset in the file, so `project_config_describe`
-    reports the key unset — but startup autodetected a GDB on PATH and pinned its
+    reports the key unset, but startup autodetected a GDB on PATH and pinned its
     absolute path, and by the time a session resolves it that file is gone. The
     configured refusal would send the operator to correct a path they never
     wrote, contradicting what describe shows; the unconfigured one would claim
@@ -1791,7 +1791,7 @@ def test_an_autodetected_gdb_that_went_missing_is_not_called_a_configured_one(
     a GDB found at startup is gone, and the fix is to reinstall one or name it.
 
     The load a server performs, because pinning is what puts the autodetected
-    path into the field and stamps its provenance — an unpinned `load_config`
+    path into the field and stamps its provenance, an unpinned `load_config`
     leaves the key null and would autodetect afresh at resolve time, which is a
     different code path and not the one production takes.
     """
@@ -1813,7 +1813,7 @@ def test_an_autodetected_gdb_that_went_missing_is_not_called_a_configured_one(
     try:
         pinned = str(service.config.debug.gdb_executable)
         # Pinning wrote the autodetected path, not the disabled placeholder, and
-        # recorded that the document named nothing — the state this test exists for.
+        # recorded that the document named nothing, the state this test exists for.
         assert not executable_is_disabled(pinned)
         assert Path(pinned) == gdb_path.resolve()
         assert service.config.debug.gdb_executable_autodetected is True

@@ -293,7 +293,7 @@ class DebugInterfaceConfig:
     # document leaves it false, because provenance is a fact about the load and
     # not about the file. It exists so a session that finds the pinned GDB gone
     # can tell "a GDB nobody configured is missing" from "the configured GDB is
-    # missing" — `project_config_describe` reads the document and would report
+    # missing", `project_config_describe` reads the document and would report
     # the key unset for the first, so the configured-path refusal must not.
     gdb_executable_autodetected: bool = False
 

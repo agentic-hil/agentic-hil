@@ -886,8 +886,8 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
         candidates=GDB_AUTODETECT_CANDIDATES,
     )
     # The document named nothing and autodetection found something: the pinned
-    # path is one nobody wrote. The disabled placeholder is not that state — it
-    # is autodetection finding nothing — so it does not count, and a value the
+    # path is one nobody wrote. The disabled placeholder is not that state, it
+    # is autodetection finding nothing, so it does not count, and a value the
     # document did name never can. This is the one bit `resolve_gdb_executable`
     # cannot recover from the pinned path alone, which is absolute either way.
     gdb_autodetected = gdb_configured is None and gdb_executable is not None and not executable_is_disabled(gdb_executable)
