@@ -8,7 +8,7 @@
 # Pinned by digest, not by tag: a tag is a moving target, and an eval that
 # silently changes its base image is an eval whose results cannot be compared
 # across runs. Dependabot's docker ecosystem keeps the digest fresh.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 # mitmproxy is the proxy. curl is how the released one-line installer is fetched
 # and is also half the evidence: curl reads this machine's own store, so the
