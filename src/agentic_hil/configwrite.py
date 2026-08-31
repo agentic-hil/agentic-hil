@@ -325,6 +325,13 @@ def config_document_snapshot(target_path: Path) -> tuple[bytes | None, Exception
     else arrives as the original exception so the caller decides what to say
     about it — and, for the tool documented to report the configuration's state
     even while refusing, so that one read serves both the state and the document.
+
+    That separation rests on the read refusing rather than answering absence for a
+    tree it cannot vouch for, which is what #361 pinned on both platforms. A
+    configuration root that resolves elsewhere used to reach here as ``None,
+    None`` on POSIX, and `parse_config_document` turns that into "this workspace
+    has no configuration to change": the one condition an operator has to see
+    reported as itself, described as an empty profile.
     """
     try:
         return secure_optional_read_bytes(target_path), None

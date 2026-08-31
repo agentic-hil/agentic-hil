@@ -47,6 +47,7 @@ from agentic_hil.config import (
     permission_summary,
     project_config_directories,
     project_config_path,
+    refuse_redirected_parent,
     resolve_stable_directory,
     safe_directory,
     safe_writable_directory,
@@ -1570,9 +1571,10 @@ def _with_external_project_record_taken_back(result: JsonObject) -> JsonObject:
 
     A record beside a virtualized root is named under `left_alone` rather than
     removed, and that is the one branch `_LEFT_UNSAFE_RECORD` explains.
-    `secure_remove_file` runs its Windows removal through `safe_file_path`, which
-    refuses exactly the parent-resolution mismatch such a record has, and letting
-    it raise here would abort the uninstall after the deny rules were already
+    `secure_remove_file` decides whether the file is there with a guarded read,
+    which refuses exactly the parent-resolution mismatch such a record has, on
+    either platform since #361, and letting it raise here would abort the
+    uninstall after the deny rules were already
     taken back and before either record went; naming it and leaving it is
     deliberate, because the record names projects, not permissions, so what it
     leaves behind is a file, never a live refusal (#358). So that case is caught
@@ -2984,23 +2986,28 @@ def _external_project_record_candidates() -> tuple[Path, ...]:
 def _record_parent_resolves_stably(candidate: Path) -> bool:
     """Whether this record's parent names the place it resolves to.
 
-    The resolve-identity check `safe_file_path` applies, asked without a write
-    probe and without creating anything: inside an MSIX AppContainer the parent
-    of an existing record opens, reads and writes exactly as it is named while
-    `resolve` maps it onto the package's private `LocalCache` tree, and every
+    The enforcer's own check, asked as a question instead of a refusal, without a
+    write probe and without creating anything: inside an MSIX AppContainer the
+    parent of an existing record opens, reads and writes exactly as it is named
+    while `resolve` maps it onto the package's private `LocalCache` tree, and every
     write and removal under it is then refused, the same disagreement
     `resolve_stable_directory` states for the configuration's own root (#358).
 
-    `uninstall` asks it before it hands a record to `secure_remove_file`, whose
-    Windows removal runs through exactly this refusal: a record the migration
+    `uninstall` asks it before it hands a record to `secure_remove_file`, which
+    runs its guarded read through exactly this refusal: a record the migration
     left beside a virtualized root would abort the whole command there, after the
     deny rules were already gone, rather than being reported and left where it is.
+
+    `refuse_redirected_parent` rather than a second spelling of the same
+    comparison, since #361 gave that rule a name and one answer on both platforms.
+    A copy here would be free to drift from the refusal it is predicting, which is
+    the whole failure mode this predicts around.
     """
-    parent = absolute_without_symlinks(candidate).parent
     try:
-        return parent.resolve() == parent
-    except OSError:
+        refuse_redirected_parent(absolute_without_symlinks(candidate))
+    except (ConfigError, OSError):
         return False
+    return True
 
 
 def _record_is_safe_write_target(candidate: Path) -> bool:

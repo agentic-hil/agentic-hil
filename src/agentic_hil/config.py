@@ -1284,9 +1284,32 @@ def secure_optional_read_bytes(file_path: str | Path) -> bytes | None:
     Bytes rather than text, because a caller that needs both a digest of a file
     and the document inside it must take one snapshot and answer out of it; the
     digest is over the exact bytes and a second read can straddle an edit.
+
+    ``None`` means absent, and it means absent from a tree this enforcer accepts.
+    A parent that resolves somewhere other than it names is refused instead, for a
+    file that is there and for one that is not, on every platform (#361). That is
+    the one answer this function may not give per platform, because every caller
+    turns it into an action: a snapshot that will be restored, a document reported
+    as the workspace having no configuration, a write about to replace what is
+    there, a removal reported as done. Under a redirected parent none of those
+    conclusions holds. The file may well exist in the tree the name resolves into,
+    the spelling that reached this call cannot establish that it does not, and
+    every write through that spelling is refused anyway; answering ``None`` would
+    hand the caller an absence the tree never asserted.
+
+    The refusal is also the only half of the choice that can be made uniform. The
+    read is already refused for a present file on Windows, and making absence
+    uniformly ``None`` would either have to drop that refusal, weakening the
+    platform the redirection is real on, or leave the same parent answering
+    ``None`` for a missing file and refusing a present one.
+
+    Asked after the chain is walked rather than before, because that is when the
+    question has an answer: an uncreated directory resolves to the spelling it was
+    named by, and the redirect only takes hold once it is there.
     """
     path = absolute_without_symlinks(Path(file_path))
     safe_directory(path.parent)
+    refuse_redirected_parent(path)
     try:
         with safe_open_binary(path) as handle:
             return handle.read()
@@ -2061,27 +2084,47 @@ def trusted_persistent_executable(
             os.close(descriptor)
 
 
+def refuse_redirected_parent(path: Path) -> None:
+    """Refuse a path whose parent names one place and resolves to another.
+
+    Split from the object check in ``safe_file_path``, because the two refusals
+    ask a caller to look at completely different things and one sentence covering
+    both sent an operator down a chain that had nothing wrong with it. This one is
+    about the parent naming a different place than it resolves to, which is what a
+    symlinked component does and equally what an MSIX AppContainer's virtualized
+    %APPDATA% does with no symlink anywhere on the chain. So it carries
+    `resolved_parent`, the spelling it compared against and the one that works,
+    instead of asserting a symlink that may not exist (#354).
+
+    A function of its own, and public, because it is the one rule whose answer may
+    not depend on which platform asks it. It used to be reachable only from inside
+    ``safe_file_path``, which the guarded read consults on Windows and not on
+    POSIX, so the same missing file under the same redirected parent was a refusal
+    on one platform and an absence on the other (#361). Stated once and called
+    from both places, the answer is the same everywhere.
+
+    Says nothing about the leaf, deliberately. Redirection is a property of the
+    tree, so it is decidable for a file that is not there, and that is exactly the
+    case a caller must not be told is a plain absence.
+    """
+    resolved_parent = path.parent.resolve()
+    if resolved_parent != path.parent:
+        raise ConfigError(
+            "unsafe_configured_path",
+            # Not "output file": reads reach this too, and the whole point of
+            # #361 is that they reach it on every platform.
+            "Configured file's parent directory resolves to a different location than it names.",
+            {"path": str(path), "resolved_parent": str(resolved_parent)},
+        )
+
+
 def safe_file_path(file_path: str | Path, workspace: str | Path | None = None) -> Path:
     path = _validated_absolute_file_path(file_path, workspace)
     try:
         existing = os.lstat(path)
     except FileNotFoundError:
         existing = None
-    # Split from the object check below, because the two refusals ask a caller to
-    # look at completely different things and one sentence covering both sent an
-    # operator down a chain that had nothing wrong with it. This one is about the
-    # parent naming a different place than it resolves to, which is what a
-    # symlinked component does and equally what an MSIX AppContainer's
-    # virtualized %APPDATA% does with no symlink anywhere on the chain. So it
-    # carries `resolved_parent`, the spelling it compared against and the one
-    # that works, instead of asserting a symlink that may not exist (#354).
-    resolved_parent = path.parent.resolve()
-    if resolved_parent != path.parent:
-        raise ConfigError(
-            "unsafe_configured_path",
-            "Output file's parent directory resolves to a different location than it names.",
-            {"path": str(path), "resolved_parent": str(resolved_parent)},
-        )
+    refuse_redirected_parent(path)
     if existing is not None and (not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1):
         raise ConfigError(
             "unsafe_configured_path",
