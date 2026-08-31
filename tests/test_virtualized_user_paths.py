@@ -42,6 +42,7 @@ from agentic_hil.cli import (
 from agentic_hil.config import (
     CONFIG_ENV,
     ConfigError,
+    absolute_without_symlinks,
     authoritative_config_target,
     load_authoritative_config,
     project_config_directories,
@@ -875,3 +876,147 @@ def test_uninstall_takes_back_the_record_under_either_root(tmp_path: Path, monke
     assert not fallback_record.exists()
     # What the record named is still standing, which is what `kept` promises.
     assert bound.is_file()
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: the write target has to prove more than resolve-identity, the
+# migration has to keep every earlier record's entries, and uninstall must not
+# crash on the record the migration deliberately leaves behind.
+
+
+def reject_write_probe(monkeypatch: pytest.MonkeyPatch, directory: Path) -> None:
+    """Make one directory refuse the create-and-delete probe, nothing else.
+
+    The stand-in for a read-only mount, a deny ACE or a filter driver: the
+    directory resolves to itself and reads fine, and only `safe_writable_directory`
+    turns it down, which is the half `resolve_stable_directory` never asks. Scoped
+    to the one directory so every other write in `init` behaves normally.
+    """
+    from agentic_hil import cli as cli_module
+
+    real = cli_module.safe_writable_directory
+    refused = os.path.normcase(str(absolute_without_symlinks(directory)))
+
+    def probe(target: str | Path, *, field: str, config_path: str | None = None) -> Path:
+        if os.path.normcase(str(absolute_without_symlinks(Path(target)))) == refused:
+            raise ConfigError("unsafe_configured_path", "Configured directory exists and cannot be written by this process.", {"field": field, "path": str(target)})
+        return real(target, field=field, config_path=config_path)
+
+    monkeypatch.setattr("agentic_hil.cli.safe_writable_directory", probe)
+
+
+def test_init_migrates_a_record_off_a_write_refused_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve-identity was never the whole of it (round 2, finding 1).
+
+    An existing default record whose parent resolves to itself and still refuses
+    every write — a read-only mount, a deny ACE, a filter driver — passed the
+    resolve-identity check and was taken as the write target, so `init` locked it
+    and dead-ended on the sidecar lock beside it before the writable fallback was
+    ever reached. The full `safe_writable_directory` check turns it down here, and
+    the record migrates to the fallback exactly as the virtualized one does.
+    """
+    bench(tmp_path, monkeypatch)
+    default_record, fallback_record = external_project_records()
+    prior = Path.home() / "operator-policy" / "legacy" / "config.yaml"
+    default_record.parent.mkdir(parents=True, exist_ok=True)
+    default_record.write_text(json.dumps({"configurations": [str(prior)]}) + "\n", encoding="utf-8")
+    # The default record's own parent is the only directory that refuses a write;
+    # the fallback root, and everything else `init` touches, stay writable.
+    reject_write_probe(monkeypatch, default_record.parent)
+    bound = bound_project(monkeypatch)
+    claude_settings(["Bash(curl *)"])
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["steps"]["agent_write_restriction"]["ok"] is True, result["steps"]
+    # The write-refused default is not the target and not touched.
+    assert json.loads(default_record.read_text(encoding="utf-8")) == {"configurations": [str(prior)]}
+    # Its entry carried across, beside the new one, into the record a write lands in.
+    assert json.loads(fallback_record.read_text(encoding="utf-8")) == {"configurations": sorted([str(prior), str(bound)])}
+    assert _external_project_record_path() == fallback_record
+    assert sorted(_recorded_external_configurations()) == sorted([bound, prior])
+
+
+def test_init_unions_a_pre_existing_fallback_with_the_virtualized_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fallback that already exists must not drop the default's entries (finding 2).
+
+    The profile the fallback exists for can already hold a record beside it, from
+    an earlier `init` on this same host. When it does, the reader answers with the
+    fallback and the virtualized default is passed over — and reading only the
+    fallback lost every project the default alone still named, which a later
+    refresh then took the rules back for. The union across both records is what
+    keeps them.
+    """
+    bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    default_record, fallback_record = external_project_records()
+    project_a = Path.home() / "operator-policy" / "alpha" / "config.yaml"
+    project_b = Path.home() / "operator-policy" / "beta" / "config.yaml"
+    default_record.parent.mkdir(parents=True, exist_ok=True)
+    default_record.write_text(json.dumps({"configurations": [str(project_a)]}) + "\n", encoding="utf-8")
+    fallback_record.parent.mkdir(parents=True, exist_ok=True)
+    fallback_record.write_text(json.dumps({"configurations": [str(project_b)]}) + "\n", encoding="utf-8")
+    # Virtualize only after both records are on disk, so the default is the file
+    # an unpackaged host left, seen from inside the package.
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+
+    # The isolated probe the review described: with both records valid and the
+    # default virtualized, the default's entry is still surfaced, not only the
+    # fallback's.
+    assert sorted(_recorded_external_configurations()) == sorted([project_a, project_b])
+
+    bound = bound_project(monkeypatch)
+    claude_settings(["Bash(curl *)"])
+
+    result = init_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["steps"]["agent_write_restriction"]["ok"] is True, result["steps"]
+    # The virtualized default is untouched, its entry migrated rather than moved.
+    assert json.loads(default_record.read_text(encoding="utf-8")) == {"configurations": [str(project_a)]}
+    # The fallback holds all three: its own prior entry, the default's, and the new one.
+    assert json.loads(fallback_record.read_text(encoding="utf-8")) == {"configurations": sorted([str(project_a), str(project_b), str(bound)])}
+    assert _external_project_record_path() == fallback_record
+    assert sorted(_recorded_external_configurations()) == sorted([project_a, project_b, bound])
+
+
+def test_uninstall_leaves_the_virtualized_default_record_it_cannot_remove(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Uninstall must finish after the migration, not crash on what it left (finding 3).
+
+    The migration leaves the virtualized default in place and writes a safe
+    fallback beside it. `secure_remove_file` runs its Windows removal through
+    `safe_file_path`, which refuses exactly that record's redirected parent, so
+    handing it the default aborted the command after the deny rules were already
+    gone. The default is reported under `left_alone` instead, the safe fallback is
+    removed, and the deny rules come back cleanly.
+    """
+    bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    default_record, fallback_record = external_project_records()
+    prior = Path.home() / "operator-policy" / "legacy" / "config.yaml"
+    default_record.parent.mkdir(parents=True, exist_ok=True)
+    default_record.write_text(json.dumps({"configurations": [str(prior)]}) + "\n", encoding="utf-8")
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+    # Binds a configuration outside the projects directory, which is the one that
+    # needs the record `init` migrates and `uninstall` then takes back.
+    bound_project(monkeypatch)
+    settings = claude_settings(["Bash(curl *)"])
+
+    assert init_project(agent="claude-code")["ok"] is True
+    # The migration ran: the safe fallback holds the record, the default is left.
+    assert fallback_record.is_file()
+    assert default_record.is_file()
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    assert result["ok"] is True, result
+    assert deny_rules(settings) == ["Bash(curl *)"]
+    # The safe fallback is taken back; the virtualized default is reported and left.
+    record_removed = [item["path"] for item in result["removed"] if item["what"] == "project record"]
+    record_left = [item for item in result["left_alone"] if item["what"] == "project record"]
+    assert record_removed == [str(fallback_record)]
+    assert [item["path"] for item in record_left] == [str(default_record)]
+    assert not fallback_record.exists()
+    assert default_record.exists()
+    assert json.loads(default_record.read_text(encoding="utf-8")) == {"configurations": [str(prior)]}
