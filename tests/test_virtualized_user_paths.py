@@ -31,6 +31,7 @@ import yaml
 
 from agentic_hil.bench import BenchMutex
 from agentic_hil.cli import (
+    _claude_code_deny_patterns,
     _configuration_the_projects_walk_finds,
     _external_project_record_path,
     _recorded_external_configurations,
@@ -772,17 +773,17 @@ def test_a_record_beside_the_fallback_root_stays_the_one_that_is_written(tmp_pat
 
 
 def test_a_record_under_both_roots_answers_with_the_platform_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two records is a preference, not an ambiguity, and it is the config walk's.
+    """One file is read from and written to, but every project either names counts.
 
-    The first candidate that exists wins outright, which is what
-    `project_config_path` does with two configurations, and the entry a run adds
-    goes into that same file. Merging the two would make one record out of files
-    the writer can only ever append to one of, and answering with the second
-    would put an entry where the reader does not look.
-
-    It holds on the unmodified source too, where the platform default is the
-    only spelling anything reads. It is pinned here because the walk is what
-    made a second file expressible at all.
+    The reader still answers with the first candidate that exists — the platform
+    default, the way `project_config_path` picks one configuration — and a run's
+    new entry still lands in that one file, never a merge of two writable ones.
+    What the wanted set is derived from is a different question, and it is the
+    union of both: a project named only beside the fallback root is one this tool
+    recorded just the same, and dropping it from what a refresh accounts for is
+    how the reverse migration lost projects (round 3, finding 1). So the write
+    also carries the union onto the winner, converging the two records rather than
+    leaving one holding half.
     """
     bench(tmp_path, monkeypatch)
     canonical = Path.home() / "benches" / "canonical" / "config.yaml"
@@ -794,15 +795,19 @@ def test_a_record_under_both_roots_answers_with_the_platform_default(tmp_path: P
         record.write_text(json.dumps({"configurations": [str(entry)]}) + "\n", encoding="utf-8")
     settings = claude_settings(["Bash(curl *)"])
 
+    # The reader answers with one file, but the recorded set unions both, so the
+    # project named only beside the fallback root is not dropped.
     assert _external_project_record_path() == default_record
-    assert _recorded_external_configurations() == [canonical]
+    assert sorted(_recorded_external_configurations()) == sorted([canonical, beside])
 
     restriction = restrict_agent_write_access("claude-code", added, Path.home() / ".agentic-hil" / "state")
 
     assert restriction["ok"] is True, restriction
-    assert json.loads(default_record.read_text(encoding="utf-8")) == {"configurations": sorted([str(canonical), str(added)])}
-    # The one that did not win is left exactly as it was: not merged into the
-    # winner, not written through, not removed.
+    # The winner converges to the full union plus the new entry: its own, the
+    # fallback's, and the one just added.
+    assert json.loads(default_record.read_text(encoding="utf-8")) == {"configurations": sorted([str(canonical), str(beside), str(added)])}
+    # The one that did not win is not written through or removed; the writer only
+    # ever appends to the winner, so it keeps its own copy.
     assert json.loads(fallback_record.read_text(encoding="utf-8")) == {"configurations": [str(beside)]}
     assert deny_rules(settings)[0] == "Bash(curl *)"
 
@@ -1020,3 +1025,127 @@ def test_uninstall_leaves_the_virtualized_default_record_it_cannot_remove(tmp_pa
     assert not fallback_record.exists()
     assert default_record.exists()
     assert json.loads(default_record.read_text(encoding="utf-8")) == {"configurations": [str(prior)]}
+
+
+# ---------------------------------------------------------------------------
+# Review round 3: the reverse of the migration must keep every project, and a
+# record removal the filesystem refuses is a failure, not a virtualization
+# leftover.
+
+
+def test_a_migrated_record_survives_the_return_to_an_unpackaged_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reverse migration must not drop a project's rule (round 3, finding 1).
+
+    A default record an unpackaged host left, virtualized under a package, has a
+    new project's entry migrated into the fallback beside it while the default
+    stays unsafe and in place. The moment an unpackaged host reads the same profile
+    the default is writable again — and a reader that stopped at the first safe
+    record surfaced the stale default alone, so every project only the fallback
+    named dropped out of the wanted set and the next refresh took its rule back.
+    The union across both records keeps them, and the refresh converges the two
+    onto the winner.
+    """
+    bench(tmp_path, monkeypatch)
+    default_record, fallback_record = external_project_records()
+    namespace = Path.home() / ".agentic-hil"
+
+    # Two externally bound projects, both readable so the wanted set is fully
+    # established rather than falling back to "remove nothing", with state roots
+    # under this tool's own namespace so their rules are ones a refresh could take
+    # back as abandoned.
+    project_a = Path.home() / "operator-policy" / "alpha" / "config.yaml"
+    project_b = Path.home() / "operator-policy" / "beta" / "config.yaml"
+    state_a, state_b = namespace / "state-alpha", namespace / "state-beta"
+    for config, state in ((project_a, state_a), (project_b, state_b)):
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(f"state_root: {state.as_posix()!r}\n", encoding="utf-8")
+
+    # The post-migration divergence an unpackaged host now reads: the stale default
+    # names only A, the fallback beside it names both. Nothing is virtualized, so
+    # the default is a safe write target again.
+    default_record.parent.mkdir(parents=True, exist_ok=True)
+    default_record.write_text(json.dumps({"configurations": [str(project_a)]}) + "\n", encoding="utf-8")
+    fallback_record.parent.mkdir(parents=True, exist_ok=True)
+    fallback_record.write_text(json.dumps({"configurations": sorted([str(project_a), str(project_b)])}) + "\n", encoding="utf-8")
+
+    # B's deny rule is standing, alongside the operator's own.
+    b_rules = [f"Edit({pattern})" for pattern in _claude_code_deny_patterns(project_b, state_b)]
+    settings = claude_settings(["Bash(curl *)", *b_rules])
+
+    # The reader retains both projects even though the default — safe again — names
+    # only A.
+    assert _external_project_record_path() == default_record
+    assert sorted(_recorded_external_configurations()) == sorted([project_a, project_b])
+
+    # A refresh for A alone: B is in the wanted set only through the record union,
+    # so this is exactly the refresh that took B's rule back before.
+    refresh = restrict_agent_write_access("claude-code", project_a, state_a)
+
+    assert refresh["ok"] is True, refresh
+    assert refresh["removed"] == []
+    # B's rule is still standing: the union kept its tree wanted.
+    assert set(b_rules) <= set(deny_rules(settings))
+    # And the two records converged onto the winner rather than staying split, so a
+    # later loss of the fallback would no longer take B with it.
+    assert json.loads(default_record.read_text(encoding="utf-8")) == {"configurations": sorted([str(project_a), str(project_b)])}
+    assert json.loads(fallback_record.read_text(encoding="utf-8")) == {"configurations": sorted([str(project_a), str(project_b)])}
+
+
+def test_uninstall_reports_a_record_removal_it_could_not_do_as_a_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real removal failure is not a virtualization leftover (round 3, finding 2).
+
+    A record whose parent resolves to itself is handed to `secure_remove_file`, and
+    a removal it turns down there — a read-only mount, an ACL, an I/O error — is a
+    genuine failure, not the redirected-parent case `_LEFT_UNSAFE_RECORD` explains.
+    It is reported under `failed` with the actual error, the other record is still
+    taken back, and the step and the whole command are unsuccessful, because a file
+    this installation wrote is still on disk.
+    """
+    from agentic_hil import cli as cli_module
+
+    bench(tmp_path, monkeypatch)
+    default_record, fallback_record = external_project_records()
+    bound = Path.home() / "benches" / "alpha" / "config.yaml"
+    state = Path.home() / ".agentic-hil" / "state"
+    bound.parent.mkdir(parents=True)
+    bound.write_text(f"state_root: {state.as_posix()!r}\n", encoding="utf-8")
+    for record in (default_record, fallback_record):
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"configurations": [str(bound)]}) + "\n", encoding="utf-8")
+    settings = claude_settings(["Bash(curl *)"])
+    assert restrict_agent_write_access("claude-code", bound, state)["ok"] is True
+
+    # The default record's removal is refused by the filesystem; the fallback's is
+    # not. Nothing is virtualized, so both records resolve stably and both reach
+    # `secure_remove_file` rather than the unstable-parent branch before it.
+    real_remove = cli_module.secure_remove_file
+    refused = os.path.normcase(str(absolute_without_symlinks(default_record)))
+
+    def remove(path: str | Path) -> None:
+        if os.path.normcase(str(absolute_without_symlinks(Path(path)))) == refused:
+            raise PermissionError("read-only filesystem")
+        real_remove(path)
+
+    monkeypatch.setattr("agentic_hil.cli.secure_remove_file", remove)
+
+    result = uninstall_agent_integration(["claude-code"])
+
+    # The step and the whole command are unsuccessful, and the deny rules still
+    # came back — the removal order takes them first, before the records.
+    assert result["ok"] is False, result
+    assert deny_rules(settings) == ["Bash(curl *)"]
+    step = result["agents"][0]["steps"]["agent_write_restriction"]
+    assert step["ok"] is False
+    assert step["error_type"] == "agent_project_record_unremovable"
+    # The unremovable record is reported as a failure with the real reason, not as
+    # a virtualization leftover under `left_alone`.
+    failed = [item for item in result["failed"] if item["what"] == "project record"]
+    assert [item["path"] for item in failed] == [str(default_record)]
+    assert "read-only filesystem" in failed[0]["error"]
+    assert [item for item in result["left_alone"] if item["what"] == "project record"] == []
+    # The other record was still attempted and taken back, and the failed one is
+    # still on disk.
+    record_removed = [item["path"] for item in result["removed"] if item["what"] == "project record"]
+    assert record_removed == [str(fallback_record)]
+    assert not fallback_record.exists()
+    assert default_record.exists()
