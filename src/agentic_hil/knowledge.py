@@ -235,6 +235,18 @@ def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | 
 # `project_config_create` answers, from "the configuration this running server
 # loaded is gone from disk", which it must not.
 CONFIG_RUNNING_SERVER_SCOPE = "running_server"
+# The scope that separates the two states a missing GDB can be in, because they
+# are not one question and do not have one answer. A bench that never named a
+# GDB and had none to find is scoped here; a `debug.gdb_executable` somebody
+# wrote that no longer resolves keeps the unscoped entry.
+GDB_NOT_CONFIGURED_SCOPE = "not_configured"
+# The third state, which is neither. The document named no GDB, so
+# `project_config_describe` reports the key unset, but startup did autodetect one
+# and pinned its path, and that path has since gone. It is not the unscoped
+# entry, which would send an operator to correct a value nobody wrote, and not
+# `not_configured`, which says nothing was ever found. This scope carries the
+# remediation for a GDB nobody configured that was there and is not now.
+GDB_AUTODETECTED_MISSING_SCOPE = "autodetected_missing"
 # Said by `doctor`, which parses the file at the moment it is asked and is
 # therefore always current — which is exactly why it cannot speak for a server
 # that has been running since before the last edit. It names both ways across,
@@ -1556,6 +1568,94 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "breakpoint anyway. That bypasses the policy this refusal comes from and takes the probe out from under "
             "the bench's own coordination.",
             "Do not swap the probe. The probe is not what refused; the backend the configuration names for it is.",
+        ),
+    ),
+    # -- The debugger that is not a probe, in the two states it goes missing in --
+    "gdb_not_found": ErrorRemedy(
+        meaning=(
+            "The GDB this bench names could not be run. `debug.gdb_executable` holds a path or a program name, and "
+            "what it names is not there: no file at that path, or no such program on PATH. A typed debug session is "
+            "GDB, and so is the offline symbol read the ST-Link and pyOCD backends answer out of the flashed ELF, so "
+            "both refuse here. This is resolved before a debug server is started, so nothing was spawned and nothing "
+            "was said to the target: the board is exactly as the last call that did reach it left it."
+        ),
+        remediation=(
+            "Read the value this is about. `project_config_describe` names the authoritative file and reports "
+            "`debug.gdb_executable` as it stands; a toolchain that was upgraded, moved or uninstalled is the usual "
+            "cause, and the file is still naming where it used to be.",
+            "Correct it with one `project_config_set` call behind `allow_config_description_write`. "
+            "`debug.gdb_executable` takes an absolute path to a GDB that speaks this target (`arm-none-eabi-gdb` for a "
+            "Cortex-M part, `gdb-multiarch` otherwise), or the bare program name when it is on PATH. Which GDB a bench "
+            "runs is the operator's, so report the change and get their word before making it.",
+            "Restart the MCP server afterwards. The GDB in force was resolved and validated when the server loaded its "
+            "configuration, and `debug` is not one of the sections `project_config_reload_description` re-reads, so "
+            "the running server keeps the value it started with until it starts again.",
+        ),
+        do_not=(
+            "Do not run `gdb`, `arm-none-eabi-gdb` or `gdb-multiarch` yourself to get the answer anyway. That bypasses "
+            "the policy this refusal comes from, takes the probe out from under this bench's coordination, and leaves "
+            "the operator with no record of what ran.",
+            "Do not point the key at a GDB inside the workspace. A configured executable has to live outside it, so a "
+            "path within it is refused when the configuration loads and the bench stops starting at all.",
+        ),
+    ),
+    f"gdb_not_found:{GDB_NOT_CONFIGURED_SCOPE}": ErrorRemedy(
+        meaning=(
+            "This bench has no GDB at all. The authoritative configuration leaves `debug.gdb_executable` unset, and "
+            "none of `arm-none-eabi-gdb`, `gdb-multiarch` or `gdb` was on PATH when this server started, so the load "
+            "recorded that there is none rather than refusing to start over a toolchain a project may not need. "
+            "Nothing here is misconfigured and no path is wrong: there is nothing to run. A typed debug session is "
+            "GDB, and so is the offline symbol read the ST-Link and pyOCD backends answer out of the flashed ELF, so "
+            "both refuse until one exists. Nothing was spawned and nothing was said to the target."
+        ),
+        remediation=(
+            "Install a GDB that speaks this target: `arm-none-eabi-gdb` for a Cortex-M part, `gdb-multiarch` "
+            "otherwise. Either is found on PATH without the file naming it.",
+            "If one is installed already but not on PATH, name it. `debug.gdb_executable` takes an absolute path and "
+            "is one `project_config_set` call behind `allow_config_description_write`. Which GDB a bench runs is the "
+            "operator's, so report what is missing and get their word before writing it.",
+            "Restart the MCP server either way. The GDB a server uses is resolved and validated once, when it loads "
+            "its configuration, and `debug` is not one of the sections `project_config_reload_description` re-reads, "
+            "so a GDB installed or named under a running server reaches it at its next start.",
+        ),
+        do_not=(
+            "Do not go hunting for a wrong path in the configuration. `debug.gdb_executable` names nothing here, and "
+            "what the running server carries in its place is the record of that, not a path anybody wrote.",
+            "Do not run `gdb`, `arm-none-eabi-gdb` or `gdb-multiarch` yourself to get the answer anyway. That bypasses "
+            "the policy this refusal comes from and leaves the operator with no record of what ran.",
+            "Do not report the bench as unusable. A probe with no GDB behind it still flashes, resets and probes; what "
+            "stops here is the typed debug session and the symbol reads, and saying which of them was needed is what "
+            "lets the operator decide whether installing one is worth it.",
+        ),
+    ),
+    f"gdb_not_found:{GDB_AUTODETECTED_MISSING_SCOPE}": ErrorRemedy(
+        meaning=(
+            "This bench named no GDB, and the one it found is gone. The authoritative configuration leaves "
+            "`debug.gdb_executable` unset, so this server autodetected `arm-none-eabi-gdb`, `gdb-multiarch` or `gdb` on "
+            "PATH when it loaded and pinned the one it found; that file has since been moved or removed, and the pinned "
+            "path no longer resolves. `project_config_describe` reports the key unset, because unset is what it is, "
+            "nothing in the configuration is wrong and no path in it is stale. A typed debug session is GDB, and so is "
+            "the offline symbol read the ST-Link and pyOCD backends answer out of the flashed ELF, so both refuse until "
+            "one exists again. Nothing was spawned and nothing was said to the target."
+        ),
+        remediation=(
+            "Reinstall the GDB that went missing, or install another that speaks this target: `arm-none-eabi-gdb` for a "
+            "Cortex-M part, `gdb-multiarch` otherwise. Either is found on PATH without the file naming it.",
+            "If one is installed already but not on PATH, name it. `debug.gdb_executable` takes an absolute path and is "
+            "one `project_config_set` call behind `allow_config_description_write`. Which GDB a bench runs is the "
+            "operator's, so report what is missing and get their word before writing it.",
+            "Restart the MCP server either way. The GDB a server uses is resolved and validated once, when it loads its "
+            "configuration, and `debug` is not one of the sections `project_config_reload_description` re-reads, so a "
+            "GDB reinstalled or named under a running server reaches it at its next start.",
+        ),
+        do_not=(
+            "Do not correct a path in the configuration. `debug.gdb_executable` names nothing here; the path that went "
+            "missing was autodetected, not written, so there is no wrong value to fix and nothing `project_config_set` "
+            "would be repairing.",
+            "Do not run `gdb`, `arm-none-eabi-gdb` or `gdb-multiarch` yourself to get the answer anyway. That bypasses "
+            "the policy this refusal comes from and leaves the operator with no record of what ran.",
+            "Do not report the bench as unusable. A probe with no GDB behind it still flashes, resets and probes; what "
+            "stops here is the typed debug session and the symbol reads.",
         ),
     ),
     # -- The one flag whose whole value is that it is never silently degraded ---
@@ -3545,7 +3645,7 @@ The one rule that does not bend: set `AGENTIC_HIL_CONFIG` in the host's user-lev
 Rules that hold on both platforms:
 
 - `AGENTIC_HIL_CONFIG` is optional and must be an absolute path to the configuration file.
-- `agentic-hil init --agent <agent>` writes the location of a configuration bound this way into `external-projects.json` beside the projects directory, and it holds nothing but locations. The write refusals that run leaves in the agent's own settings are refreshed on every later run, and a project whose configuration the projects directory does not hold would otherwise be read there as a bench that is gone, so its rule would be taken back while the bench still wanted it. A recorded configuration that cannot be read leaves that question open and no rule is taken back at all; `agentic-hil uninstall` takes the record back together with the rules it explains.
+- `agentic-hil init --agent <agent>` writes the location of a configuration bound this way into `external-projects.json` beside the projects directory, and it holds nothing but locations. Two spellings exist, one beside each projects root (the platform default and `~/.agentic-hil`), and both may hold a record at once: an unpackaged host leaves one beside the default, a virtualized profile writes beside the fallback. Readers union both, so no project goes missing whichever file holds it; a write lands in the one root the profile can actually write (checked as a write, not merely as existing) and converges the union into it, while an unwritable record is read but never targeted. `agentic-hil uninstall` removes what it can and reports a record it cannot remove under `left_alone` with the reason, rather than aborting after the deny rules are already taken back. The write refusals that run leaves in the agent's own settings are refreshed on every later run, and a project whose configuration the projects directory does not hold would otherwise be read there as a bench that is gone, so its rule would be taken back while the bench still wanted it. A recorded configuration that cannot be read leaves that question open and no rule is taken back at all; `agentic-hil uninstall` takes the record back together with the rules it explains.
 - `workspace_root` and `state_root` are both mandatory and absolute, and must not overlap in either direction.
 - The discovered default configuration path is derived from the workspace path, so it is canonical per workspace; a config found elsewhere is only accepted through `AGENTIC_HIL_CONFIG`.
 - Whether an agent may write the configuration is decided by the configuration, in `permissions.allow_config_write`, and by nothing else. There is no second state store: what holds is what a person reads in the file. A workspace with no configuration lets an agent generate one, and a configuration deleted out of band lets it generate a fresh one — the generated skeleton again, at the generated defaults, so the round trip discards every narrowing the operator had asked for and produces the file `agentic-hil init` would have written.

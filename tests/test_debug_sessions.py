@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import socket
 import struct
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -17,17 +18,30 @@ from conftest import (
     FAKE_STLINK_READ_UNCONFIRMED,
     FAKE_STLINK_SHORT_READ,
     elf_with_symbols,
+    write_authoritative_config,
     write_config,
 )
 
 from agentic_hil.backends.common import command_for_log
+from agentic_hil.backends.gdbdebug import GDB_AUTODETECT_CANDIDATES as BACKEND_GDB_CANDIDATES
 from agentic_hil.backends.gdbdebug import decode_symbol_value, image_byte_order, reserve_tcp_port
 from agentic_hil.bench import BenchMutex
-from agentic_hil.config import ConfigError, load_config
+from agentic_hil.config import (
+    GDB_AUTODETECT_CANDIDATES,
+    ConfigError,
+    executable_is_disabled,
+    load_authoritative_config,
+    load_config,
+)
 from agentic_hil.devices import debugger_device
 from agentic_hil.elfsymbols import read_elf_byte_order, read_elf_symbol
 from agentic_hil.gdbmi import GdbMiCommandResult, intel_hex_record, read_intel_hex_file, write_intel_hex_file
-from agentic_hil.knowledge import catalogue_entry
+from agentic_hil.knowledge import (
+    GDB_AUTODETECTED_MISSING_SCOPE,
+    GDB_NOT_CONFIGURED_SCOPE,
+    catalogue_entry,
+    remediation_fields,
+)
 from agentic_hil.report import overall_success, read_last_report
 from agentic_hil.tools import AgenticHILToolService
 
@@ -1638,8 +1652,13 @@ def test_stlink_dump_names_the_gdb_it_needs_when_the_bench_has_none(tmp_path: Pa
 
     The offline query is the one thing this route needs that the vendor CLI does
     not provide, so its absence has to be named. With `debug.gdb_executable`
-    unset and nothing autodetectable on PATH, config load pins the disabled
-    placeholder and the dump refuses before it opens the probe.
+    unset and nothing autodetectable on PATH, the dump refuses before it opens
+    the probe.
+
+    Deliberately the unpinned load, which is the only load that reaches this
+    branch at all: `load_config` leaves the field null, so autodetection runs at
+    the moment the refusal is written rather than at startup. What a server does
+    with the same bench is the pinned pair below, and the two land on one answer.
     """
     monkeypatch.setenv("PATH", "")
     config_path = write_config(tmp_path, debugger_type="stlink", gdb_executable=None)
@@ -1656,11 +1675,181 @@ def test_stlink_dump_names_the_gdb_it_needs_when_the_bench_has_none(tmp_path: Pa
     assert refused["ok"] is False, refused
     assert refused["error_type"] == "gdb_not_found"
     assert refused["summary"] == "No GDB executable could be found."
-    assert "set debug.gdb_executable in the authoritative project config" in refused["likely_causes"]
+    assert "no GDB was found on PATH when this server started" in refused["likely_causes"]
     assert refused["symbol"] == "CTC_array"
     assert refused["target_contacted"] is False
     assert refused["side_effect_status"] == "not_started"
     assert not (tmp_path / "build" / "memory.hex").exists()
+
+
+# ---------------------------------------------------------------------------
+# The two states a missing GDB is in, read on the load production takes (#359).
+#
+# Everything above parses one file with `load_config`, which no production
+# entrypoint calls. That matters for exactly this field: `load_authoritative_config`
+# pins it, and pinning is what puts a path into `debug.gdb_executable` on a
+# bench whose file named none. Read unpinned, such a bench falls through to the
+# unconfigured branch; read the way a server reads it, it used to arrive at the
+# *configured* refusal and be told a path it never wrote had gone missing.
+
+
+def pinned_debug_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **config_kwargs) -> AgenticHILToolService:
+    """An OpenOCD bench with an image to attach to, loaded the way a server loads.
+
+    The authoritative loader rather than `load_config`, because pinning is the
+    step under test: what `debug.gdb_executable` holds at the moment a session
+    resolves it is decided there, and a test that skips it cannot see the state
+    every production refusal was actually in.
+    """
+    workspace = (tmp_path / "workspace").resolve()
+    write_authoritative_config(workspace, monkeypatch, **config_kwargs)
+    elf_path = workspace / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(artifact_bytes())
+    monkeypatch.chdir(workspace)
+    return AgenticHILToolService(load_authoritative_config(workspace))
+
+
+def test_a_bench_that_never_named_a_gdb_is_not_told_a_configured_one_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report's own case: no GDB anywhere, on the load a server performs.
+
+    `debug.gdb_executable` is null in the file and nothing autodetects, so
+    pinning writes its disabled placeholder rather than refusing to start a
+    bench that may never need a debug session. The refusal has to read that
+    placeholder as what it records. Two facts, neither of them about a wrong
+    path: the file configured nothing, and startup found nothing. The fix is a
+    GDB on this host or the key set to one, which is where the remediation goes.
+    """
+    monkeypatch.setenv("PATH", "")
+    service = pinned_debug_service(tmp_path, monkeypatch, gdb_executable=None)
+    try:
+        assert executable_is_disabled(str(service.config.debug.gdb_executable)), "the state this test exists for"
+        refused = start_debug_session(service, mode="attach")
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "gdb_not_found"
+    assert refused["summary"] == "No GDB executable could be found."
+    assert refused["likely_causes"] == [
+        "debug.gdb_executable is not set in the authoritative project config",
+        "no GDB was found on PATH when this server started",
+    ]
+    assert refused["remediation"] == remediation_fields("gdb_not_found", GDB_NOT_CONFIGURED_SCOPE)["remediation"]
+    assert any("project_config_set" in step for step in refused["remediation"]), refused["remediation"]
+    assert any("Install a GDB" in step for step in refused["remediation"]), refused["remediation"]
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_status"] == "not_started"
+
+
+def test_a_configured_gdb_that_stopped_resolving_keeps_saying_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other state, and the one the wording was always right about.
+
+    A GDB this file names, resolved and pinned at startup, gone from the disk by
+    the time a session asks for it. Nothing about the placeholder may reach this
+    case: the operator wrote a path, the path is what is wrong, and the refusal
+    still says so. The summary and the causes hold on the source before #359 as
+    well as after, which is the point of asserting them here; the remediation is
+    new, and names the one call that corrects the key.
+    """
+    gdb_path = tmp_path / "toolchain" / "arm-none-eabi-gdb"
+    gdb_path.parent.mkdir(parents=True, exist_ok=True)
+    gdb_path.write_bytes(FAKE_GDB.read_bytes())
+    service = pinned_debug_service(tmp_path, monkeypatch, gdb_executable=gdb_path)
+    try:
+        assert not executable_is_disabled(str(service.config.debug.gdb_executable))
+        gdb_path.unlink()
+        refused = start_debug_session(service, mode="attach")
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "gdb_not_found"
+    assert refused["summary"] == "Configured debug.gdb_executable could not be found."
+    assert refused["likely_causes"] == ["debug.gdb_executable points to a missing file", "GDB is not installed"]
+    assert refused["remediation"] == remediation_fields("gdb_not_found")["remediation"]
+    assert any("project_config_set" in step for step in refused["remediation"]), refused["remediation"]
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_status"] == "not_started"
+
+
+def test_an_autodetected_gdb_that_went_missing_is_not_called_a_configured_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third state, which is neither of the two above.
+
+    `debug.gdb_executable` is unset in the file, so `project_config_describe`
+    reports the key unset, but startup autodetected a GDB on PATH and pinned its
+    absolute path, and by the time a session resolves it that file is gone. The
+    configured refusal would send the operator to correct a path they never
+    wrote, contradicting what describe shows; the unconfigured one would claim
+    nothing was ever found. This state earns its own refusal: the key is unset,
+    a GDB found at startup is gone, and the fix is to reinstall one or name it.
+
+    The load a server performs, because pinning is what puts the autodetected
+    path into the field and stamps its provenance, an unpinned `load_config`
+    leaves the key null and would autodetect afresh at resolve time, which is a
+    different code path and not the one production takes.
+    """
+    gdb_path = tmp_path / "toolchain" / "arm-none-eabi-gdb"
+    gdb_path.parent.mkdir(parents=True, exist_ok=True)
+    gdb_path.write_bytes(FAKE_GDB.read_bytes())
+    real_which = shutil.which
+
+    def which_finds_the_autodetected_gdb(name: str, *args: object, **kwargs: object) -> str | None:
+        # Only the GDB candidates resolve to the planted binary; every other
+        # lookup pinning makes (the debugger, say) keeps the real answer, so this
+        # models autodetection finding a GDB and nothing else.
+        if name in GDB_AUTODETECT_CANDIDATES:
+            return str(gdb_path)
+        return real_which(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(shutil, "which", which_finds_the_autodetected_gdb)
+    service = pinned_debug_service(tmp_path, monkeypatch, gdb_executable=None)
+    try:
+        pinned = str(service.config.debug.gdb_executable)
+        # Pinning wrote the autodetected path, not the disabled placeholder, and
+        # recorded that the document named nothing, the state this test exists for.
+        assert not executable_is_disabled(pinned)
+        assert Path(pinned) == gdb_path.resolve()
+        assert service.config.debug.gdb_executable_autodetected is True
+        gdb_path.unlink()
+        refused = start_debug_session(service, mode="attach")
+    finally:
+        service.close()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "gdb_not_found"
+    assert refused["summary"] == "The GDB autodetected when this server started could not be found."
+    assert refused["likely_causes"] == [
+        "debug.gdb_executable is not set in the authoritative project config",
+        "the GDB autodetected on PATH when this server started has since been moved or removed",
+    ]
+    assert refused["remediation"] == remediation_fields("gdb_not_found", GDB_AUTODETECTED_MISSING_SCOPE)["remediation"]
+    # It is a distinct refusal from the two either side of it: not the configured
+    # one, whose path advice would be a lie here, and not the never-found one.
+    assert refused["remediation"] != remediation_fields("gdb_not_found")["remediation"]
+    assert refused["remediation"] != remediation_fields("gdb_not_found", GDB_NOT_CONFIGURED_SCOPE)["remediation"]
+    assert any("Reinstall the GDB" in step for step in refused["remediation"]), refused["remediation"]
+    assert any("project_config_set" in step for step in refused["remediation"]), refused["remediation"]
+    assert refused["target_contacted"] is False
+    assert refused["side_effect_status"] == "not_started"
+
+
+def test_the_backend_autodetects_from_the_loader_s_own_candidate_list() -> None:
+    """One list, not two copies that agree today.
+
+    The loader's autodetection at startup and the backend's fallback answer the
+    same question, and while each had its own literal the two could be edited
+    apart: a candidate added where GDB is discovered would not be a candidate
+    where GDB is resolved, and the difference would show up as a bench that
+    loads fine and then cannot start a session.
+    """
+    assert BACKEND_GDB_CANDIDATES is GDB_AUTODETECT_CANDIDATES
 
 
 def test_stlink_dump_refuses_before_a_symbol_table_describes_the_target(tmp_path: Path) -> None:

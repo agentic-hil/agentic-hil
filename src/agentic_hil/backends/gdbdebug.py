@@ -18,7 +18,13 @@ from agentic_hil.backends.common import (
     spawn_command,
     which,
 )
-from agentic_hil.config import ConfigError, display_path, safe_configured_directory
+from agentic_hil.config import (
+    GDB_AUTODETECT_CANDIDATES,
+    ConfigError,
+    display_path,
+    executable_is_disabled,
+    safe_configured_directory,
+)
 from agentic_hil.elfsymbols import read_elf_byte_order, read_elf_symbol
 from agentic_hil.gdbmi import (
     GdbMiClient,
@@ -28,7 +34,12 @@ from agentic_hil.gdbmi import (
     parse_gdb_integer,
     write_intel_hex_file,
 )
-from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
+from agentic_hil.knowledge import (
+    GDB_AUTODETECTED_MISSING_SCOPE,
+    GDB_NOT_CONFIGURED_SCOPE,
+    exclusive_permission_summary,
+    remediation_fields,
+)
 from agentic_hil.process import spawn_managed_process, terminate_process_tree
 from agentic_hil.report import (
     logs_directory,
@@ -42,7 +53,6 @@ from agentic_hil.report import (
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 DEBUG_MODES = ["attach", "reset_halt", "load"]
-GDB_AUTODETECT_CANDIDATES = ["arm-none-eabi-gdb", "gdb-multiarch", "gdb"]
 DEBUG_SYMBOL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$")
 BREAKPOINT_FILE_PATTERN = re.compile(r"^[A-Za-z0-9_./\\:-]+$")
 MEMORY_CONTENTS_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{2})*$")
@@ -1223,6 +1233,95 @@ class GdbDebugSessions:
         return self._report({**result, "ok": False, "error_type": "audit_broken", "cleanup_required": True, "quarantined": True})
 
 
+def configured_gdb_missing(backend_name: str) -> JsonObject:
+    """The refusal for a GDB this configuration names and this host has not got.
+
+    Resolved before a debug server is spawned, so a missing GDB is a call that
+    never started anything: refuse, do not quarantine. One builder because the
+    offline symbol query raises the same refusal a second time, when the GDB
+    that resolved will not start after all, and two copies of a refusal are two
+    places for its advice to drift from the catalogue's.
+    """
+    return {
+        "ok": False,
+        "backend": backend_name,
+        "error_type": "gdb_not_found",
+        "summary": "Configured debug.gdb_executable could not be found.",
+        "likely_causes": ["debug.gdb_executable points to a missing file", "GDB is not installed"],
+        **remediation_fields("gdb_not_found"),
+        "target_contacted": False,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": True,
+    }
+
+
+def no_gdb_on_this_bench(backend_name: str) -> JsonObject:
+    """The refusal for a bench that never named a GDB and had none to find.
+
+    A different statement from the one above, and it took #359 to separate them:
+    this one is about a configuration that is *right*, on a host that has no GDB
+    installed, so nothing in the file is worth reading and no path is worth
+    hunting for. What fixes it is a GDB on this host or the key set to one, and
+    the catalogue entry behind the scope carries both.
+    """
+    return {
+        "ok": False,
+        "backend": backend_name,
+        "error_type": "gdb_not_found",
+        "summary": "No GDB executable could be found.",
+        "likely_causes": ["debug.gdb_executable is not set in the authoritative project config", "no GDB was found on PATH when this server started"],
+        **remediation_fields("gdb_not_found", GDB_NOT_CONFIGURED_SCOPE),
+        "target_contacted": False,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": True,
+    }
+
+
+def autodetected_gdb_missing(backend_name: str) -> JsonObject:
+    """The refusal for a GDB nobody configured that startup found and has lost.
+
+    The third state a missing GDB is in, and the one the two above cannot say
+    without misdiagnosing it. Pinning writes the absolute path of an autodetected
+    GDB into `debug.gdb_executable`, so a bench whose file named none still
+    resolves one while that binary is on disk. When it goes, the field still
+    holds the path pinning wrote, but `project_config_describe` reads the
+    document and reports the key unset, so `configured_gdb_missing` would name a
+    path the operator never wrote, and `no_gdb_on_this_bench` would claim nothing
+    was ever found. This one says what is true: the key is unset, a GDB found at
+    startup is gone, and the way out is the unconfigured bench's, install one or
+    name it. The remediation for that is behind the scope.
+    """
+    return {
+        "ok": False,
+        "backend": backend_name,
+        "error_type": "gdb_not_found",
+        "summary": "The GDB autodetected when this server started could not be found.",
+        "likely_causes": ["debug.gdb_executable is not set in the authoritative project config", "the GDB autodetected on PATH when this server started has since been moved or removed"],
+        **remediation_fields("gdb_not_found", GDB_AUTODETECTED_MISSING_SCOPE),
+        "target_contacted": False,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": True,
+    }
+
+
+def gdb_missing_refusal(config: AgenticHILConfig, backend_name: str) -> JsonObject:
+    """The refusal for a resolved-then-missing GDB, by where its path came from.
+
+    One place decides between the two, so the resolver and the offline symbol
+    read, which meet the same GDB gone at two different moments, cannot drift
+    on which refusal it earns. A path the document named that no longer resolves
+    is the operator's to fix, and keeps the configured refusal. A path pinning
+    autodetected is nobody's, and `project_config_describe` reports the key it
+    came from unset, so it earns the refusal that does not claim otherwise.
+    """
+    if config.debug.gdb_executable_autodetected:
+        return autodetected_gdb_missing(backend_name)
+    return configured_gdb_missing(backend_name)
+
+
 def resolve_gdb_executable(config: AgenticHILConfig, backend_name: str) -> JsonObject:
     """Find the GDB this bench is meant to use, by one rule for every backend.
 
@@ -1232,8 +1331,32 @@ def resolve_gdb_executable(config: AgenticHILConfig, backend_name: str) -> JsonO
     GDB, and only an unconfigured bench falls back to autodetection. Both
     refusals name `debug.gdb_executable`, because that is the one field an
     operator sets to fix either.
+
+    A pinned placeholder is neither of those states, and reading it as a
+    configured path was the bug (#359). Pinning writes it into
+    `debug.gdb_executable` when the file named no GDB and startup autodetected
+    none, so on `load_authoritative_config`, which is the load production takes,
+    every bench without a GDB arrived here carrying a path and was told its
+    *configured* GDB was missing, for a file that had configured nothing. It is
+    answered as what it records instead.
+
+    Recognised rather than followed: the search the placeholder stands for has
+    already run, at the one moment its answer is checked. Pinning is what proves
+    a resolved GDB is a single-link regular file outside the workspace, and a
+    `which` call at session start would prove neither, so a placeholder falling
+    through to autodetection would run whatever a changed PATH now offers,
+    including out of the workspace. The bench that has none keeps none until it
+    is started again.
+
+    A pinned path that no longer resolves is a missing GDB, and which refusal it
+    earns turns on where the path came from, `gdb_missing_refusal` reads the
+    provenance pinning recorded. A path the document named is the operator's to
+    fix; a path autodetection found is one `project_config_describe` reports as
+    an unset key, so it is not called a missing *configured* GDB.
     """
     configured = config.debug.gdb_executable
+    if configured and executable_is_disabled(configured):
+        return no_gdb_on_this_bench(backend_name)
     if configured:
         has_path_separator = "/" in configured or "\\" in configured
         if Path(configured).is_absolute() or has_path_separator:
@@ -1246,14 +1369,12 @@ def resolve_gdb_executable(config: AgenticHILConfig, backend_name: str) -> JsonO
             found = which(configured)
             if found is not None:
                 return {"ok": True, "executable": found}
-        # Resolved before the debug server is spawned, so a missing GDB is
-        # a call that never started anything: refuse, do not quarantine.
-        return {"ok": False, "backend": backend_name, "error_type": "gdb_not_found", "summary": "Configured debug.gdb_executable could not be found.", "likely_causes": ["debug.gdb_executable points to a missing file", "GDB is not installed"], "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+        return gdb_missing_refusal(config, backend_name)
     for candidate in GDB_AUTODETECT_CANDIDATES:
         found = which(candidate)
         if found is not None:
             return {"ok": True, "executable": found}
-    return {"ok": False, "backend": backend_name, "error_type": "gdb_not_found", "summary": "No GDB executable could be found.", "likely_causes": ["install arm-none-eabi-gdb or gdb-multiarch", "set debug.gdb_executable in the authoritative project config"], "target_contacted": False, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+    return no_gdb_on_this_bench(backend_name)
 
 
 # What the offline symbol query prints, and what is read back out of it. Named
@@ -1389,7 +1510,14 @@ def resolve_symbol_offline(config: AgenticHILConfig, backend_name: str, tool: st
         args = gdb_symbol_query_args(str(gdb["executable"]), str(staged_elf), symbol)
         completed = spawn_command(args, str(staging_dir), min(config.debugger.timeout_s, GDB_SYMBOL_QUERY_TIMEOUT_S))
         if completed.not_found:
-            return {"ok": False, "tool": tool, "backend": backend_name, "error_type": "gdb_not_found", "summary": "Configured debug.gdb_executable could not be found.", "likely_causes": ["debug.gdb_executable points to a missing file", "GDB is not installed"], "symbol": symbol, **NOT_CONTACTED}
+            # The same refusal `resolve_gdb_executable` writes, from its builder
+            # rather than from a copy: a GDB that resolved and then would not
+            # start is the state that entry describes, and a second copy here
+            # would be a second place for its advice to age. Chosen by the same
+            # provenance too, so a GDB that vanished between resolve and spawn is
+            # named the way it would have been a moment earlier, not as a
+            # configured path when the document configured none.
+            return {**gdb_missing_refusal(config, backend_name), "tool": tool, "symbol": symbol, **NOT_CONTACTED}
         if completed.timed_out:
             return {"ok": False, "tool": tool, "backend": backend_name, "error_type": "timeout", "summary": "Symbol resolution timed out.", "symbol": symbol, **NOT_CONTACTED}
         output = f"{completed.stdout}{completed.stderr}"

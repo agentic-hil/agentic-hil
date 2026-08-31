@@ -288,6 +288,14 @@ class DebugInterfaceConfig:
     allowed_symbols: list[str]
     allow_all_symbols: bool
     max_dump_size_bytes: int
+    # Whether `gdb_executable` above is a path pinning found by autodetection
+    # rather than one the document named. Only pinning sets it; the parsed
+    # document leaves it false, because provenance is a fact about the load and
+    # not about the file. It exists so a session that finds the pinned GDB gone
+    # can tell "a GDB nobody configured is missing" from "the configured GDB is
+    # missing", `project_config_describe` reads the document and would report
+    # the key unset for the first, so the configured-path refusal must not.
+    gdb_executable_autodetected: bool = False
 
 
 @dataclass(frozen=True)

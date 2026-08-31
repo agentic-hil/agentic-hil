@@ -46,9 +46,10 @@ from agentic_hil.config import (
     openocd_script_kind,
     permission_summary,
     project_config_directories,
-    project_config_directory,
     project_config_path,
+    resolve_stable_directory,
     safe_directory,
+    safe_writable_directory,
     secure_atomic_write_bytes,
     secure_atomic_write_text,
     secure_optional_read_bytes,
@@ -171,6 +172,12 @@ _KEPT_CONFIGURATION = (
 _LEFT_FOREIGN_ENTRY = (
     "Agentic HIL did not write this, so it stays. Once the package is gone it will name a command that is "
     "gone with it, and whether to edit the file is the operator's decision."
+)
+_LEFT_UNSAFE_RECORD = (
+    "This record's parent resolves to a different location than it names, so the enforcer refuses every write "
+    "and removal under it, and the migration wrote a second record beside a usable root rather than touch it. "
+    "It names projects, not permissions, so leaving it takes protection off nothing; remove it yourself once "
+    "the profile that redirected it is gone."
 )
 
 
@@ -914,7 +921,7 @@ def _project_mutation_paths(agent: SkillAgent | None, config_path: Path) -> list
         if permission_path is not None:
             paths.append(permission_path)
         if agent.id == "claude-code" and not _configuration_the_projects_walk_finds(config_path):
-            paths.append(_external_project_record_path())
+            paths.append(_external_project_record_mutation_path())
     return _unique_paths(paths)
 
 
@@ -1167,6 +1174,7 @@ def uninstall_agent_integration(agents: list[str] | None = None) -> JsonObject:
     reports = [_uninstall_one_agent(agent) for agent in skill_agents() if not wanted or agent.id in wanted]
     removed = [item for report in reports for item in report["removed"]]
     left_alone = [item for report in reports for item in report["left_alone"]]
+    failed_items = [item for report in reports for item in report.get("failed", [])]
     kept = _uninstall_kept_trees(external_configurations)
     failed = [report["agent"] for report in reports if not report["ok"]]
 
@@ -1175,6 +1183,8 @@ def uninstall_agent_integration(agents: list[str] | None = None) -> JsonObject:
     summary = f"Agentic HIL's user-wide half was taken back for {_named_agents([report['agent'] for report in reports])}: {len(removed)} item(s) removed."
     if left_alone:
         summary += f" {len(left_alone)} item(s) this installation did not write were left where they were; `left_alone` names each one."
+    if failed_items:
+        summary += f" {len(failed_items)} item(s) this installation wrote could not be removed and are still on disk; `failed` names each one and why."
     if failed:
         summary += f" It could not be finished for {_named_agents(failed)}; that agent's step says why."
     summary += f" The package is still installed and this command cannot remove it: run `{command}`."
@@ -1186,6 +1196,7 @@ def uninstall_agent_integration(agents: list[str] | None = None) -> JsonObject:
         "agents": reports,
         "removed": removed,
         "left_alone": left_alone,
+        **({"failed": failed_items} if failed_items else {}),
         "kept": kept,
         "package_removal": {"manager": upgrade.owning_manager(), "command": command, **({"package_directory": package_directory} if package_directory else {})},
         "next_step": (
@@ -1214,6 +1225,7 @@ def _uninstall_one_agent(agent: SkillAgent) -> JsonObject:
     }
     removed = [item for step in steps.values() for item in step["removed"]]
     left_alone = [item for step in steps.values() for item in step["left_alone"]]
+    failed = [item for step in steps.values() for item in step.get("failed", [])]
     ok = all(step["ok"] for step in steps.values())
     if not ok:
         summary = f"Agentic HIL's half for {agent.display_name} was not fully taken back; `steps` says which part and why."
@@ -1221,7 +1233,7 @@ def _uninstall_one_agent(agent: SkillAgent) -> JsonObject:
         summary = f"Agentic HIL's half for {agent.display_name} was taken back."
     else:
         summary = f"Nothing to take back for {agent.display_name}: this installation had written nothing of its own here."
-    return {"agent": agent.id, "ok": ok, "summary": summary, "removed": removed, "left_alone": left_alone, "steps": steps}
+    return {"agent": agent.id, "ok": ok, "summary": summary, "removed": removed, "left_alone": left_alone, **({"failed": failed} if failed else {}), "steps": steps}
 
 
 def _uninstall_step(summary: str, *, ok: bool = True, removed: list[JsonObject] | None = None, left_alone: list[JsonObject] | None = None, **fields: object) -> JsonObject:
@@ -1235,6 +1247,14 @@ def _removed_entry(what: str, path: Path | str) -> JsonObject:
 
 def _left_entry(what: str, path: Path | str, reason: str) -> JsonObject:
     return {"what": what, "path": str(path), "reason": reason}
+
+
+def _failed_entry(what: str, path: Path | str, error: object) -> JsonObject:
+    """One thing this command tried to take back and could not, with the reason it
+    was refused. Separate from `_left_entry`, which is a thing left untouched on
+    purpose; this is a removal that was attempted and failed, and it is what makes
+    a step unsuccessful."""
+    return {"what": what, "path": str(path), "error": str(error)}
 
 
 def _remove_agent_mcp(agent: SkillAgent) -> JsonObject:
@@ -1540,12 +1560,62 @@ def _with_external_project_record_taken_back(result: JsonObject) -> JsonObject:
 
     A step that refused and left the settings file alone keeps the record, since
     the rules it explains are still standing.
+
+    Every candidate spelling, not only the one a read would answer with. Which
+    of the two roots holds the record depends on which one this profile could
+    write when the project was set up, and a release before the walk existed
+    could only ever have written beside the platform default; a removal that
+    took back one spelling would leave the other standing, which is the leftover
+    this command exists to take back.
+
+    A record beside a virtualized root is named under `left_alone` rather than
+    removed, and that is the one branch `_LEFT_UNSAFE_RECORD` explains.
+    `secure_remove_file` runs its Windows removal through `safe_file_path`, which
+    refuses exactly the parent-resolution mismatch such a record has, and letting
+    it raise here would abort the uninstall after the deny rules were already
+    taken back and before either record went; naming it and leaving it is
+    deliberate, because the record names projects, not permissions, so what it
+    leaves behind is a file, never a live refusal (#358). So that case is caught
+    before `secure_remove_file` is ever called, by `_record_parent_resolves_stably`.
+
+    A removal that then fails for any other reason, a read-only mount, an ACL
+    that refuses it, an I/O error, a hard-link the filesystem will not drop, is
+    not that case and is not reported as it: it is collected under `failed` with
+    the actual error, the other candidate is still attempted, and the step and the
+    uninstall are unsuccessful, because a record this installation wrote is still
+    standing and the operator was not told it is gone.
     """
-    path = _external_project_record_path()
-    if not result["ok"] or not _path_entry_exists(path):
+    if not result["ok"]:
         return result
-    secure_remove_file(path)
-    return {**result, "removed": [*result["removed"], _removed_entry("project record", path)]}
+    removed: list[Path] = []
+    left_alone: list[JsonObject] = []
+    failed: list[JsonObject] = []
+    for path in _external_project_record_candidates():
+        if not _path_entry_exists(path):
+            continue
+        if not _record_parent_resolves_stably(path):
+            left_alone.append(_left_entry("project record", path, _LEFT_UNSAFE_RECORD))
+            continue
+        try:
+            secure_remove_file(path)
+        except (OSError, ConfigError) as error:
+            failed.append(_failed_entry("project record", path, error))
+            continue
+        removed.append(path)
+    if removed:
+        result = {**result, "removed": [*result["removed"], *(_removed_entry("project record", path) for path in removed)]}
+    if left_alone:
+        result = {**result, "left_alone": [*result["left_alone"], *left_alone]}
+    if failed:
+        detail = "; ".join(f"{item['path']} ({item['error']})" for item in failed)
+        result = {
+            **result,
+            "ok": False,
+            "error_type": "agent_project_record_unremovable",
+            "failed": [*result.get("failed", []), *failed],
+            "summary": f"{result['summary']} A project record this installation wrote could not be removed and a live file was left behind: {detail}.",
+        }
+    return result
 
 
 def _remove_claude_code_deny_rules(agent: SkillAgent, path: Path) -> JsonObject:
@@ -2896,8 +2966,173 @@ def _protected_trees_still_wanted(config_path: Path, state_root: Path) -> set[st
 EXTERNAL_PROJECT_RECORD_FILENAME = "external-projects.json"
 
 
+def _external_project_record_candidates() -> tuple[Path, ...]:
+    """Every place this user's record may be, best first.
+
+    Beside each root a project configuration may live under, which is the
+    contract this file has always had, applied to the pair of roots there now
+    are rather than to the platform default alone (#354). The platform default
+    stays first, so on a profile where that root works nothing about this file
+    moves.
+
+    Naming only. Nothing here is created, opened or validated, because most
+    callers are asking whether a record exists rather than where to write one.
+    """
+    return tuple(root.parent / EXTERNAL_PROJECT_RECORD_FILENAME for root in project_config_directories())
+
+
+def _record_parent_resolves_stably(candidate: Path) -> bool:
+    """Whether this record's parent names the place it resolves to.
+
+    The resolve-identity check `safe_file_path` applies, asked without a write
+    probe and without creating anything: inside an MSIX AppContainer the parent
+    of an existing record opens, reads and writes exactly as it is named while
+    `resolve` maps it onto the package's private `LocalCache` tree, and every
+    write and removal under it is then refused, the same disagreement
+    `resolve_stable_directory` states for the configuration's own root (#358).
+
+    `uninstall` asks it before it hands a record to `secure_remove_file`, whose
+    Windows removal runs through exactly this refusal: a record the migration
+    left beside a virtualized root would abort the whole command there, after the
+    deny rules were already gone, rather than being reported and left where it is.
+    """
+    parent = absolute_without_symlinks(candidate).parent
+    try:
+        return parent.resolve() == parent
+    except OSError:
+        return False
+
+
+def _record_is_safe_write_target(candidate: Path) -> bool:
+    """Whether a write to this record would be created and then accepted.
+
+    Both halves the enforcer applies, in the order a write meets them:
+    `safe_writable_directory` proves this process can create and delete beside
+    the record, and `resolve_stable_directory` proves the parent is the spelling
+    it resolves to, so no later `safe_file_path` refuses it. Resolve-identity
+    alone was not enough, a record on a read-only mount, or under a deny ACE or
+    a filter driver, resolves to itself and still refuses every write, and taking
+    it as the target dead-ended `init` on the sidecar lock beside it before the
+    usable fallback was ever reached (#358).
+
+    Called only for a record that already exists, so the probe lands in a parent
+    that is already there and plants no root of its own; a caller weighing a
+    candidate that is not on disk asks `safe_writable_directory` directly, where
+    building the chain is the point.
+    """
+    try:
+        resolve_stable_directory(safe_writable_directory(candidate.parent, field="config_path"), field="config_path")
+    except (ConfigError, OSError):
+        return False
+    return True
+
+
 def _external_project_record_path() -> Path:
-    return project_config_directory().parent / EXTERNAL_PROJECT_RECORD_FILENAME
+    """Where this user's record is, or where it would go.
+
+    The candidate walk and the existing-file-first rule `project_config_path`
+    has, for the same reason: a record that had to be written beside the
+    fallback root is this user's record, and a reader answering with the empty
+    spelling beside the other root would read the projects it names as projects
+    nobody has, which is the whole of #246. Where none exists the answer is
+    beside the platform default, exactly as before.
+
+    One record wins outright rather than two being merged, and it is the one the
+    preference order reaches first. That is what keeps this and
+    `_external_project_record_target` naming the same file: a writer appending
+    beside the second root would add an entry no reader here ever answers with.
+
+    An existing record a write will not land in is the one exception, and it is
+    the same one the target has (#358). A record beside a virtualized root, or on
+    a read-only mount, reads fine, the spelling it was opened by still reaches
+    its bytes, but no write lands in it, so once a run has had to migrate off it
+    the file every writer targets is the safe one beside the next root. The reader
+    answers with the same file: the first existing record a write would be
+    accepted at wins, and only where none is left standing does an existing but
+    unwritable record answer, so the projects it names stay visible until a write
+    carries them across. The entries such an unwritable record still holds are not
+    lost by that choice, `_recorded_external_configurations` unions them in from
+    every earlier source, not only from the one file named here.
+    """
+    candidates = _external_project_record_candidates()
+    for candidate in candidates:
+        with suppress(OSError):
+            if candidate.is_file() and _record_is_safe_write_target(candidate):
+                return candidate
+    for candidate in candidates:
+        with suppress(OSError):
+            if candidate.is_file():
+                return candidate
+    return candidates[0]
+
+
+def _external_project_record_target() -> Path:
+    """Where a record write goes, with the root it needs created.
+
+    `authoritative_config_target` for this file, and for the profile that made
+    it necessary: inside an MSIX AppContainer the platform default is
+    virtualized, every write under it is refused by the enforcer's
+    resolve-identity check, and `init --agent` for an `AGENTIC_HIL_CONFIG`-bound
+    project could then not record the project whose rules it was about to write.
+    It wrote none, which is the refusal by design, and the whole command failed
+    with no way round it but the one lever a stranger never finds (#358).
+
+    Two passes, and the order between them is the whole of it, exactly as it is
+    for the configuration's own target: an existing record wins over a root that
+    could be created now, because the file that is in force is the one a new
+    entry belongs in and a second record beside the other root would be read by
+    nothing.
+
+    An existing record still has to be one a write will actually land in, which
+    the plain "first that exists" rule never asked. Inside an MSIX AppContainer an
+    `%APPDATA%\\agentic-hil\\external-projects.json` an unpackaged host left resolves
+    into the package's private tree, and returning it here dead-ended the very
+    `init --agent` the fallback root exists for: `_project_mutation_paths` locked
+    it, and the lock's `safe_file_path` refused the redirected parent before the
+    safe candidate was ever reached (#358). So the existing-file pass takes only a
+    record a write will be created and accepted at, the full `safe_writable_directory`
+    plus `resolve_stable_directory` check, so a read-only mount or a deny ACE is
+    turned down here rather than at the lock too, and the second pass reaches the
+    first such location that could be created now. The entries of an unsafe record
+    passed over here are not dropped: `_record_external_configuration` writes the
+    union `_recorded_external_configurations` reads from every earlier source,
+    which is where they migrate to.
+    """
+    candidates = _external_project_record_candidates()
+    for candidate in candidates:
+        with suppress(OSError):
+            if candidate.is_file() and _record_is_safe_write_target(candidate):
+                return candidate
+    failure: ConfigError | None = None
+    for candidate in candidates:
+        try:
+            resolve_stable_directory(safe_writable_directory(candidate.parent, field="config_path"), field="config_path")
+        except ConfigError as error:
+            failure = error
+            continue
+        return candidate
+    raise failure or ConfigError("unsafe_configured_path", "No trusted location for the record of externally bound projects is available on this profile.", {"field": "config_path"})
+
+
+def _external_project_record_mutation_path() -> Path:
+    """The record file this run's rollback has to cover.
+
+    The write target rather than the reader's answer, because the two differ on
+    exactly the profile the walk exists for: with no record anywhere yet the
+    reader names the platform default while the write lands beside the fallback
+    root, and a rollback that snapshotted the first would report the project's
+    changes taken back with the new entry still standing, which is the failure
+    `_project_mutation_paths` already describes for this file.
+
+    A profile with no usable root at all falls back to naming the reader's
+    answer. The record write is going to be refused there whatever this says,
+    and refusing the whole run here, before a single lock is taken, would take
+    that refusal away from the step that can explain it.
+    """
+    try:
+        return _external_project_record_target()
+    except ConfigError:
+        return _external_project_record_path()
 
 
 def _configuration_the_projects_walk_finds(config_path: Path) -> bool:
@@ -2920,25 +3155,57 @@ def _configuration_the_projects_walk_finds(config_path: Path) -> bool:
     return os.path.normcase(str(candidate.parent.parent)) in roots
 
 
-def _recorded_external_configurations() -> list[Path] | None:
-    """Every configuration rules were written for that the projects walk misses.
+def _external_project_record_read_sources() -> list[Path]:
+    """Every existing record whose entries a reader has to account for.
 
-    `init --agent` for a project bound by `AGENTIC_HIL_CONFIG` derives its rules
-    from a configuration outside the projects directory, and without this nothing
-    on disk would say that project exists. The entries the walk does find are
-    dropped here, so this answers only what the walk cannot, and a configuration
-    the operator later moved under the projects directory is read from there
-    rather than from a record of where it used to be.
+    Both roots' records, whichever of them exist, because a project can end up
+    named on one and not the other and only their union names them all. The
+    migration in `_record_external_configuration` writes the combined set beside a
+    usable root when the default it read from is unsafe, and deliberately leaves
+    that default in place, so the same profile then carries both files at once.
 
-    `None` means the file is there and is not the record this tool writes, and
-    every caller treats that as an answer it could not establish rather than as
-    an empty one. A relative entry is that same case: this writes absolute paths
-    only, and resolving one against whatever directory the process happens to
-    stand in would invent a tree.
+    Stopping at the first safe record dropped projects across the reverse of the
+    transition the migration supports. A default an unpackaged host left,
+    virtualized under a package, takes the new entries into the fallback beside it
+    while the default stays unsafe and unread-past; the moment an unpackaged host
+    reads the same profile the default is writable again, so a walk that stopped
+    there surfaced the stale default alone and lost every project only the
+    fallback names. A later refresh then reads those projects as ones nothing on
+    disk still asks for and takes their rules back (#358, the #246 failure the
+    record exists to prevent).
 
-    Nothing is trusted out of this file beyond which configurations to go and
-    read, and it lives under the same owner-only config root the project
-    configurations themselves do, so it opens no door that directory did not.
+    Reading both is safe in the other direction too. Every entry in either file is
+    a project this tool recorded, under the same owner-only config root the
+    project configurations live under, so unioning them keeps a live rule and at
+    worst leaves a stale one standing, the trade every reader of these records
+    already makes, and the one #358 chooses over dropping a rule a bench still
+    wants. Which single file a write lands in, and which one a read answers with,
+    is still one file and still the first safe one; that is
+    `_external_project_record_target` and `_external_project_record_path`, not
+    this.
+
+    Existing files only, and no candidate that is not on disk is probed, so this
+    plants no root on a profile whose whole configuration lives somewhere else.
+    """
+    sources: list[Path] = []
+    for candidate in _external_project_record_candidates():
+        is_file = False
+        with suppress(OSError):
+            is_file = candidate.is_file()
+        if is_file:
+            sources.append(candidate)
+    return sources
+
+
+def _read_record_entries(path: Path) -> list[Path] | None:
+    """The absolute configurations one record names, or None if it is not ours.
+
+    `None` means the file is there and is not the record this tool writes
+    (unreadable, not JSON, the wrong shape, or an entry this writer never
+    produces), and every caller treats that as an answer it could not establish
+    rather than as an empty one. A relative entry is that same case: this writes
+    absolute paths only, and resolving one against whatever directory the process
+    happens to stand in would invent a tree. An absent file is the empty answer.
 
     A plain read rather than `secure_optional_read_text`, which builds the
     directory chain it reads through. This is asked on profiles whose whole
@@ -2946,7 +3213,7 @@ def _recorded_external_configurations() -> list[Path] | None:
     plant the root it would have lived under.
     """
     try:
-        raw = _external_project_record_path().read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return []
     except (OSError, UnicodeDecodeError):
@@ -2958,8 +3225,55 @@ def _recorded_external_configurations() -> list[Path] | None:
     entries = document.get("configurations") if isinstance(document, dict) else None
     if not isinstance(entries, list) or not all(isinstance(entry, str) and Path(entry).is_absolute() for entry in entries):
         return None
-    found = [absolute_without_symlinks(Path(entry)) for entry in entries]
-    return [path for path in found if not _configuration_the_projects_walk_finds(path)]
+    return [absolute_without_symlinks(Path(entry)) for entry in entries]
+
+
+def _recorded_external_configurations() -> list[Path] | None:
+    """Every configuration rules were written for that the projects walk misses.
+
+    `init --agent` for a project bound by `AGENTIC_HIL_CONFIG` derives its rules
+    from a configuration outside the projects directory, and without this nothing
+    on disk would say that project exists. The entries the walk does find are
+    dropped here, so this answers only what the walk cannot, and a configuration
+    the operator later moved under the projects directory is read from there
+    rather than from a record of where it used to be.
+
+    The union across `_external_project_record_read_sources`, so an entry either
+    coexisting record holds and the other has not yet been given is still named,
+    the same `None`-on-unreadable caution applied per source, because a record
+    that might name a project and cannot be read is a reason to establish nothing
+    rather than to drop what it holds.
+
+    Nothing is trusted out of these files beyond which configurations to go and
+    read, and they live under the same owner-only config root the project
+    configurations themselves do, so they open no door that directory did not.
+    """
+    merged: dict[str, Path] = {}
+    for source in _external_project_record_read_sources():
+        entries = _read_record_entries(source)
+        if entries is None:
+            return None
+        for entry in entries:
+            merged.setdefault(os.path.normcase(str(entry)), entry)
+    return [path for path in merged.values() if not _configuration_the_projects_walk_finds(path)]
+
+
+def _record_holds(path: Path, configurations: list[str]) -> bool:
+    """Whether this record already names exactly these configurations.
+
+    The convergence check the synchronization below asks before it writes: with
+    the union read across every source, a target already carrying all of it has
+    nothing left to reconcile and is left untouched, so a run rewrites the record
+    only when the two coexisting files actually disagree. A file that will not
+    read as this tool's own answers "no", which for a project already recorded
+    elsewhere is harmless, the write it would provoke is swallowed as a best
+    effort, and never reached for one that is not, because that project is not in
+    the union a target could already hold.
+    """
+    entries = _read_record_entries(path)
+    if entries is None:
+        return False
+    return {os.path.normcase(str(entry)) for entry in entries} == {os.path.normcase(entry) for entry in configurations}
 
 
 def _record_external_configuration(config_path: Path) -> JsonObject | None:
@@ -2979,6 +3293,19 @@ def _record_external_configuration(config_path: Path) -> JsonObject | None:
     a rule is never written for a project this cannot vouch for. The other order
     would be a record naming a project whose rules were then refused, which costs
     nothing at all, since a recorded configuration only ever keeps rules standing.
+
+    The write is also where the coexisting records converge. The union read
+    across both roots is written to the single target, so a migration that left
+    the default in place and a later run reading from an unpackaged host, the
+    reverse transition, settle onto one file that names every project rather than
+    two that each name half. For a project already recorded the write is owed only
+    by that divergence: where the target already holds the union nothing is
+    written, and where it cannot be written the run does not fail, because the
+    project's rule is accounted for by the record that already reads and
+    `_recorded_external_configurations` keeps reading the union until a later run
+    can heal it. A project not yet recorded still fails hard if it cannot be
+    written, exactly as before, so no rule is written for a project this cannot
+    vouch for.
     """
     path = _external_project_record_path()
     recorded = _recorded_external_configurations()
@@ -2990,12 +3317,29 @@ def _record_external_configuration(config_path: Path) -> JsonObject | None:
             "path": str(path),
         }
     absolute = absolute_without_symlinks(config_path)
-    if any(os.path.normcase(str(entry)) == os.path.normcase(str(absolute)) for entry in recorded):
-        return None
-    document = {"configurations": sorted(str(entry) for entry in [*recorded, absolute])}
+    already = any(os.path.normcase(str(entry)) == os.path.normcase(str(absolute)) for entry in recorded)
+    document = {"configurations": sorted(str(entry) for entry in ([*recorded] if already else [*recorded, absolute]))}
     try:
+        # Selected inside the `try`, because a profile with no usable root at all
+        # is the same answer to the caller as a root that refuses the write, and
+        # the refusal it raises is the one that names which spelling it compared
+        # against. Until it answers, the location this reports is the reader's,
+        # which is where the record would have been.
+        path = _external_project_record_target()
+        if already and _record_holds(path, document["configurations"]):
+            return None
         secure_atomic_write_text(path, json.dumps(document, indent=2) + "\n")
     except (OSError, ConfigError) as error:
+        if already:
+            # Only the coexisting records were being reconciled; this project is
+            # already named on a record that reads, so its rule stands whether or
+            # not the union could be synchronized onto the target. A target that
+            # refuses the write, or a profile with no usable root at all, leaves
+            # that reconciliation for a later run rather than failing the whole
+            # setup over a write this project does not need, the dead end #358
+            # removed. `_recorded_external_configurations` reads the divergence
+            # across every source until then, so nothing goes missing.
+            return None
         return {
             "ok": False,
             "error_type": "agent_project_record_unwritable",
