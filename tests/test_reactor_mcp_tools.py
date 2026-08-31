@@ -89,12 +89,18 @@ def test_a_plan_run_over_mcp_answers_with_the_reactor_result_and_its_report(tmp_
 
 
 def test_a_detached_plan_started_over_mcp_answers_with_a_handle_and_then_finishes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detached_runs) -> None:  # noqa: F811
-    """`detach: true` answers with a handle to a run that is really running.
+    """`detach: true` answers with a handle to a run that is really under way.
 
     The same contract the command line's `--detach` has: the answer comes as
     soon as the worker holds the devices it declared, so a handle it returned is
     a handle with the bench, and the run then finishes on its own without the
-    call that started it staying open."""
+    call that started it staying open.
+
+    Which of the two states the answer is caught in is not that contract, so it
+    is not asked. A plan short enough to finish inside a test can also finish
+    inside the start command's own poll on a machine busy enough, which is #364
+    in the command line's spelling of this. What is asked is the handle, the
+    bench behind it and the ending, and the ending is waited for."""
     workspace, plan = bench_workspace(tmp_path, monkeypatch, SHORT_DELAY_PLAN)
     config = load_authoritative_config(workspace)
 
@@ -104,11 +110,16 @@ def test_a_detached_plan_started_over_mcp_answers_with_a_handle_and_then_finishe
     assert result["ok"] is True, result.get("worker_output") or result
     assert result["tool"] == "test_reactor_start"
     assert result["detached"] is True
-    assert result["state"] == "running"
+    assert result["state"] in {"running", "finished"}, (
+        f"a run this call had just launched answered {result.get('state')!r}: {result.get('summary')!r}"
+    )
     assert result["run"].startswith("run-")
     assert result["report_path"] == ".agentic-hil/reports/last-report.json"
     finished = wait_for_state(config, result["run"], {"finished", "stopped", "worker_gone"})
-    assert finished["state"] == "finished", worker_log(config, result["run"])
+    assert finished["state"] == "finished", (
+        f"the run ended in state {finished.get('state')!r} ({finished.get('summary')!r}); its worker printed:\n"
+        f"{worker_log(config, result['run'])}"
+    )
     assert finished["run_ok"] is True
 
 

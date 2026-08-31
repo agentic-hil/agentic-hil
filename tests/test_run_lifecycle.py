@@ -79,24 +79,42 @@ def kill_hard(pid: int) -> None:
 
 
 def wait_for_state(config, handle: str, states: set[str], timeout_s: float = 60.0) -> dict:
+    """Wait, bounded, for a run to reach one of a set of states.
+
+    The bound is what makes a run that never gets there a failure here rather
+    than a suite that hangs, so the failure is written here too: what was waited
+    for, what the run said instead, how long it was given, and what its worker
+    printed, which for a worker that died on its way is the only account of why.
+    A record dumped whole says none of those things first; it hands a reader of
+    a CI log a document and leaves them to work out which field of it was the
+    answer."""
     from agentic_hil.runlifecycle import run_status
 
-    deadline = time.monotonic() + timeout_s
+    started = time.monotonic()
     while True:
         status = run_status(config, handle)
         if status.get("state") in states:
             return status
-        assert time.monotonic() < deadline, status
+        waited_s = time.monotonic() - started
+        assert waited_s < timeout_s, (
+            f"{handle} was still in state {status.get('state')!r} after {waited_s:.1f}s of waiting for one of "
+            f"{sorted(states)}; it says {status.get('summary')!r} and its worker printed:\n{worker_log(config, handle)}"
+        )
         time.sleep(0.1)
 
 
-def worker_log(config, handle: str) -> str:
-    """What the worker printed, which is the only place a failure that stopped it
-    before it could write a report shows up."""
+def worker_log(config, handle: str, limit: int = 4000) -> str:
+    """The tail of what the worker printed, which is the only place a failure
+    that stopped it before it could write a report shows up.
+
+    Tailed rather than whole because it goes into assertion messages: a worker
+    stuck in something that prints is exactly the failure this is wanted for,
+    and the last of what it said is the part that says where it got to."""
     from agentic_hil.runlifecycle import runs_directory
 
     path = runs_directory(config) / f"{handle}.log"
-    return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else "<no worker log>"
+    text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else "<no worker log>"
+    return text[-limit:]
 
 
 def last_report(workspace: Path) -> dict:
@@ -112,13 +130,21 @@ def wait_for_progress_step(workspace: Path, config, handle: str, step: int, time
     of the failure needs rather than a minute of nothing."""
     from agentic_hil.runlifecycle import TERMINAL_RUN_STATES, read_run_record
 
-    deadline = time.monotonic() + timeout_s
+    started = time.monotonic()
     while True:
         record = read_run_record(config, handle) or {}
         if (record.get("progress") or {}).get("step") == step:
             return
-        assert record.get("state") not in TERMINAL_RUN_STATES, (record, last_report(workspace))
-        assert time.monotonic() < deadline, (record, last_report(workspace))
+        state, reached = record.get("state"), (record.get("progress") or {}).get("step")
+        assert state not in TERMINAL_RUN_STATES, (
+            f"{handle} ended in state {state!r} on step {reached!r} without ever reaching step {step}; "
+            f"its report says {last_report(workspace).get('summary')!r}"
+        )
+        waited_s = time.monotonic() - started
+        assert waited_s < timeout_s, (
+            f"{handle} was still in state {state!r} on step {reached!r} after {waited_s:.1f}s of waiting for step {step}; "
+            f"its report says {last_report(workspace).get('summary')!r}"
+        )
         time.sleep(0.05)
 
 
@@ -472,6 +498,21 @@ def test_a_detached_run_holds_its_devices_and_refuses_another_caller_by_name(tmp
 
 
 def test_a_detached_run_goes_from_running_to_finished(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detached_runs) -> None:
+    # The ending is what this asks about, and the ending is the only part of it
+    # that is not a moment. Which state the first poll catches is a question
+    # about a 1200 ms plan against the time it takes to spawn an interpreter and
+    # take the bench, which on a loaded runner is the same order of magnitude:
+    # asserting `running` there asserted that the machine was not busy, and #364
+    # is the Windows leg where it was, answering with the whole finished
+    # document and no word about which field of it was the point.
+    #
+    # So the poll is held to what is true of this run either way, that it is
+    # somewhere on the road from running to finished and nowhere else; the wait
+    # for the ending is bounded and says what it saw; and that the run really did
+    # run is taken from the report it left rather than from a poll that had to
+    # arrive while it was still going. That a live run answers `running` is a
+    # claim about the reader, and it is placed rather than raced in
+    # `test_a_status_poll_answers_running_until_the_worker_publishes_the_end`.
     from agentic_hil.cli import start_detached_test_reactor
     from agentic_hil.runlifecycle import run_status
 
@@ -482,13 +523,28 @@ def test_a_detached_run_goes_from_running_to_finished(tmp_path: Path, monkeypatc
     detached_runs.append((config, result["run"]))
 
     status = run_status(config, result["run"])
-    assert status["state"] == "running", status
+    assert status["state"] in {"running", "finished"}, (
+        f"a run of this plan is on its way from running to finished, and {result['run']} answered "
+        f"{status.get('state')!r}: {status.get('summary')!r}"
+    )
     finished = wait_for_state(config, result["run"], {"finished", "stopped", "worker_gone"})
-    assert finished["state"] == "finished", worker_log(config, result["run"])
+    assert finished["state"] == "finished", (
+        f"the run ended in state {finished.get('state')!r} ({finished.get('summary')!r}); its worker printed:\n"
+        f"{worker_log(config, result['run'])}"
+    )
     assert finished["run_ok"] is True
     report = json.loads((workspace / ".agentic-hil" / "reports" / "last-report.json").read_text(encoding="utf-8"))
     assert report["ok"] is True
     assert report["run"] == result["run"]
+    # And it ran the plan rather than being cut short on the way to that record.
+    # The reactor reports `waited_ms` and `stop_requested` only for a wait it
+    # ended early, so a delay step carrying the plan's own duration and nothing
+    # else is the whole of that duration, waited. Which is what "was running"
+    # means here, asked of the run's own account of what it did.
+    delay = report["steps"][0]["result"]
+    assert delay["duration_ms"] == 1200
+    assert "waited_ms" not in delay
+    assert "stop_requested" not in delay
 
 
 def test_a_detached_run_goes_from_running_to_stopped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detached_runs) -> None:
@@ -907,6 +963,43 @@ def test_a_status_poll_that_meets_the_rename_answers_the_state(tmp_path: Path, m
     assert status["ok"] is True
     assert status["state"] == "stopped"
     assert status["error_type"] == "run_stopped"
+
+
+def test_a_status_poll_answers_running_until_the_worker_publishes_the_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The transition #364 tried to catch with a stopwatch, placed here instead.
+    # A detached run answers `running`, and says where it has got to, for as long
+    # as the worker behind it holds the run's lifetime lock; from the moment that
+    # worker publishes its terminal record the same handle answers the run's own
+    # verdict. Timing that against a plan short enough to end inside a test asks
+    # whether the machine was busy, and gets a different answer on the day it
+    # was. So the two records are handed to the reader as the script it would
+    # have seen, and what is asserted is the answer each one gets rather than
+    # which one a poll happened to land on.
+    import agentic_hil.runlifecycle as runlifecycle
+
+    config, handle, reads = torn_record_bench(
+        tmp_path,
+        monkeypatch,
+        whole_record("running", name="testconfig", progress={"step": 1, "action": "delay"}),
+        whole_record("finished", run_ok=True, error_type=None, report_path=".agentic-hil/reports/last-report.json", finished_at="t1"),
+    )
+    # The worker is there for the first poll. A lock nobody holds is the dead
+    # worker's answer, which is the neighbouring test and not this one.
+    monkeypatch.setattr(runlifecycle, "worker_is_gone", lambda *_: False)
+
+    running = runlifecycle.run_status(config, handle)
+    finished = runlifecycle.run_status(config, handle)
+
+    assert running["ok"] is True
+    assert running["state"] == "running"
+    assert running["stop_requested_at"] is None
+    assert running["summary"] == "This run is on step 1 (delay)."
+    assert finished["state"] == "finished"
+    assert finished["run_ok"] is True
+    assert finished["summary"] == "This run ended and passed; its report is at .agentic-hil/reports/last-report.json."
+    # One record read for each poll: each answer is the record that poll was
+    # given, not a second look taken after a probe went the other way.
+    assert reads.record_reads == 2
 
 
 def test_a_stop_request_that_cannot_be_read_is_still_a_stop_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
