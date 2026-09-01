@@ -519,8 +519,8 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
     Two things the answer is careful about. The window it waits in accounts for
     the device wait the worker was handed, so a legitimate wait for a held bench
     is not mistaken for a stuck worker. And a worker that reached a terminal
-    state before it could be caught at ``running`` — a refusal published at once,
-    or a plan short enough to finish inside the window — is reported with its own
+    state before it could be caught at ``running`` (a refusal published at once,
+    or a plan short enough to finish inside the window) is reported with its own
     verdict, not as a successful launch: launch success is reserved for a running
     worker and for an already-finished run only when it passed.
 
@@ -532,7 +532,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
     worker's liveness instead.
 
     The wait is validated here, before a worker is spawned. The worker refuses a
-    bad wait too — it runs the same validator when it acquires its devices — but
+    bad wait too (it runs the same validator when it acquires its devices), but
     a non-finite wait handed to a detached process would strand it: a NaN deadline
     is one ``time.monotonic()`` never reaches, so a worker holding for a device
     polls forever, past the window this command waits in, and the caller is told
@@ -612,7 +612,7 @@ def _detached_terminal_result(handle: str, record: JsonObject, report: str) -> J
     """The start command's answer for a run that already ended.
 
     The worker published a terminal record before it could be caught at
-    ``running``, so there is nothing to launch — there is a verdict, and the
+    ``running``, so there is nothing to launch. There is a verdict, and the
     caller gets it. ``ok`` is the run's own ``run_ok`` so a refused start (a held
     bench answers ``device_busy`` at once) exits non-zero, and the failure's
     ``error_type`` and failed-step fields travel with it instead of being dropped

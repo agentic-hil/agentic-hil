@@ -40,7 +40,7 @@
         ]
       }
     },
-    "device": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "x-since-version": 3, "description": "Name of the configured entry this step drives — a `debuggers`, `com_ports` or `can_buses` entry. The one routing key of format version 3: the configuration knows which section a name belongs to, so the step does not have to spell it. The version 2 keys below stay valid as readable aliases; a step writes one or the other, never both." },
+    "device": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "x-since-version": 3, "description": "Name of the configured entry this step drives: a `debuggers`, `com_ports` or `can_buses` entry. The one routing key of format version 3: the configuration knows which section a name belongs to, so the step does not have to spell it. The version 2 keys below stay valid as readable aliases; a step writes one or the other, never both." },
     "debugger": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a debuggers.<name> entry. Optional when the project configures exactly one debugger; required when it configures several." },
     "portId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a com_ports.<name> entry." },
     "busId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "description": "Name of a can_buses.<name> entry." },
@@ -52,14 +52,14 @@
       "type": "object",
       "additionalProperties": false,
       "x-since-version": 3,
-      "description": "What a feedback step claims about what it received. An object rather than a bare value on purpose: the preprocessing a bench eventually needs — scaling a raw count into a unit, converting a base — is addable here as further keys without invalidating a plan written today. None of that exists yet. Exactly one of `equals` and `pattern` says what to look for; `range` narrows a `pattern` capture to a numeric interval. The claim is judged against everything read so far, so output that arrives in pieces still counts, and a step whose claim is never met fails with the tail of what the port did say.",
+      "description": "What a feedback step claims about what it received. An object rather than a bare value on purpose: the preprocessing a bench eventually needs (scaling a raw count into a unit, converting a base) is addable here as further keys without invalidating a plan written today. None of that exists yet. Exactly one of `equals` and `pattern` says what to look for; `range` narrows a `pattern` capture to a numeric interval. The claim is judged against everything read so far, so output that arrives in pieces still counts, and a step whose claim is never met fails with the tail of what the port did say.",
       "oneOf": [
         { "required": ["equals"], "not": { "required": ["pattern"] } },
         { "required": ["pattern"], "not": { "required": ["equals"] } }
       ],
       "dependentRequired": { "range": ["pattern"] },
       "properties": {
-        "equals": { "type": "string", "minLength": 1, "description": "The value the output must equal — not merely contain. A serial line has no end, so this is read two ways: any one complete line of what was received matches as soon as its terminator arrives, and the whole of what was received matches on the last pass, once the step's timeout has run out and nothing further is coming. Surrounding whitespace is removed either way. A value the board never terminates therefore costs the full timeout, because until then it cannot be told apart from a value still arriving. Mutually exclusive with `pattern`." },
+        "equals": { "type": "string", "minLength": 1, "description": "The value the output must equal, not merely contain. A serial line has no end, so this is read two ways: any one complete line of what was received matches as soon as its terminator arrives, and the whole of what was received matches on the last pass, once the step's timeout has run out and nothing further is coming. Surrounding whitespace is removed either way. A value the board never terminates therefore costs the full timeout, because until then it cannot be told apart from a value still arriving. Mutually exclusive with `pattern`." },
         "pattern": { "type": "string", "minLength": 1, "description": "A Python regular expression the output must match, with `re.search` semantics: it is anchored where it is written and nowhere else, so write `^` or `$` when the position is part of the claim. A pattern that does not compile is refused before the run starts. Mutually exclusive with `equals`." },
         "range": {
           "type": "object",
@@ -77,7 +77,7 @@
       "type": "object",
       "additionalProperties": false,
       "x-since-version": 3,
-      "description": "Which frame a `can_read` step requires: an identifier filter and a claim about the payload, in the same vocabulary a serial comparator uses. `id` is mandatory because a bus carries every node's traffic — a payload matched without saying whose frame it was is a green another ECU can produce. Frames are judged one at a time as they arrive, never concatenated: a frame is a complete unit, so there is no half-arrived value to wait out and no seam to match across. A step whose claim is never met fails with the tail of the frames the bus did carry, so a wrong identifier and a silent bus read differently.",
+      "description": "Which frame a `can_read` step requires: an identifier filter and a claim about the payload, in the same vocabulary a serial comparator uses. `id` is mandatory because a bus carries every node's traffic: a payload matched without saying whose frame it was is a green another ECU can produce. Frames are judged one at a time as they arrive, never concatenated: a frame is a complete unit, so there is no half-arrived value to wait out and no seam to match across. A step whose claim is never met fails with the tail of the frames the bus did carry, so a wrong identifier and a silent bus read differently.",
       "required": ["id"],
       "oneOf": [
         { "required": ["equals"], "not": { "required": ["pattern"] } },
@@ -213,7 +213,7 @@
         "device": { "$ref": "#/$defs/device" },
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_write" },
-        "text": { "type": "string", "description": "Text to send, encoded with the port's configured encoding. Write the line ending the firmware expects — nothing is appended for you." },
+        "text": { "type": "string", "description": "Text to send, encoded with the port's configured encoding. Write the line ending the firmware expects. Nothing is appended for you." },
         "hex": { "type": "string", "pattern": "^[0-9A-Fa-f\\s]*$", "description": "Raw bytes to send, as hexadecimal. Use this when the stimulus is a protocol frame rather than text." }
       }
     },
@@ -253,7 +253,7 @@
         "port_id": { "$ref": "#/$defs/portId" },
         "action": { "const": "uart_expect" },
         "text": { "type": "string", "minLength": 1, "description": "The substring the port's output must contain. Mutually exclusive with `pattern`." },
-        "pattern": { "type": "string", "minLength": 1, "description": "A Python regular expression the port's output must match, with `re.search` semantics: it is anchored where it is written and nowhere else, so write `^` or `$` when the position is part of the claim. Use this to check that the board answered with the right value — a counter, a measurement, a version string — rather than merely that it answered. A pattern that does not compile is refused before the run starts. Mutually exclusive with `text`." },
+        "pattern": { "type": "string", "minLength": 1, "description": "A Python regular expression the port's output must match, with `re.search` semantics: it is anchored where it is written and nowhere else, so write `^` or `$` when the position is part of the claim. Use this to check that the board answered with the right value (a counter, a measurement, a version string) rather than merely that it answered. A pattern that does not compile is refused before the run starts. Mutually exclusive with `text`." },
         "timeout_s": { "$ref": "#/$defs/positiveTimeout" }
       }
     },
@@ -402,7 +402,7 @@
       "additionalProperties": false,
       "required": ["action", "duration_ms"],
       "x-since-version": 3,
-      "description": "Wait, driving nothing. Served by every device kind, so the step names the device the plan is waiting on and appears in the run's result like any other step — a wait that left no trace would be a gap in the record of what a test did. Prefer a read with a `comparator:` wherever the plan is really waiting for the board to say something: a delay long enough to be safe is a delay that makes every run slower.",
+      "description": "Wait, driving nothing. Served by every device kind, so the step names the device the plan is waiting on and appears in the run's result like any other step: a wait that left no trace would be a gap in the record of what a test did. Prefer a read with a `comparator:` wherever the plan is really waiting for the board to say something: a delay long enough to be safe is a delay that makes every run slower.",
       "anyOf": [
         { "required": ["device"] },
         { "required": ["debugger"] },

@@ -28,7 +28,7 @@ PROJECT_PROFILE = "agentic-hil.config.example.yaml"
 PROFILE_KEYS_READ = ("target", "debuggers", "artifacts", "com_ports")
 
 # The probe flags a generated configuration decides, and the value it writes for
-# each, both read from `generated_permissions` — the one place that also drives
+# each, both read from `generated_permissions`: the one place that also drives
 # `grant_every_permission` and the skeleton. A second list here would be the one
 # that quietly stops deciding a flag somebody added to the schema, and a second
 # set of *defaults* here is what once left a generated bench unable to flash.
@@ -127,14 +127,14 @@ def discover_attached_hardware(
     ``probe_id`` names which of several attached probes this is about. It selects
     among what is enumerated and never adds to it: a serial that is not attached
     is refused naming the ones that are. Without it, more than one probe is
-    ``ambiguous_hardware`` rather than a silent choice — picking one is how the
+    ``ambiguous_hardware`` rather than a silent choice. Picking one is how the
     wrong board ends up in a configuration. Selection folds case with
     ``fold_hardware_id``, which is the identity every device lock key and every
     probe comparison in this repository uses, so the probe this selects, the probe
     that gets locked and the probe a mismatch check names are one probe.
 
     ``before_connect`` is called with the enumerated spelling of the selected
-    serial after enumeration and before the HOTPLUG connect — the last point at
+    serial after enumeration and before the HOTPLUG connect: the last point at
     which nothing has been said to that particular board yet. Returning a result
     from it aborts discovery and that result is the answer, which is how a caller
     takes the machine-wide lock on the probe it is about to talk to.
@@ -248,8 +248,8 @@ def select_probe_id(requested: str, enumerated: list[str]) -> str | None:
     Matched with ``fold_hardware_id`` and with nothing else, because selection is
     the same question as locking and comparing: *which physical unit is this*. One
     ST-Link is ``0669FF…`` to STM32CubeProgrammer and ``0669ff…`` to udev, so case
-    has to fold or exact membership answers ``adapter_not_found`` — "plug the
-    board in" — for a board that is plugged in.
+    has to fold or exact membership answers ``adapter_not_found`` ("plug the
+    board in") for a board that is plugged in.
 
     It folds case and no more. A looser rule here than the one the lock key and
     the mismatch check use is worse than a strict one: a request for ``AB-CD``
@@ -265,13 +265,13 @@ def select_probe_id(requested: str, enumerated: list[str]) -> str | None:
 def correlate_com_port(probe_id: str, available: JsonObject) -> JsonObject | None:
     """The one host serial port that carries this probe's serial, or None.
 
-    The identity is ``fold_hardware_id`` — the same rule ``select_probe_id``, the
+    The identity is ``fold_hardware_id``: the same rule ``select_probe_id``, the
     lock key and the mismatch check use, and for the same reason. This used to
     strip punctuation as well, on the theory that a correlation keys nothing and
     can therefore afford to be loose. It cannot: the port it picks is written
     into ``com_ports.<name>.device`` by adoption, so a probe serial ``AB-CD``
     matching a *sole* host port whose serial is really ``ABCD`` puts another
-    device's port into an entry whose `allow_write` may already be true — a
+    device's port into an entry whose `allow_write` may already be true: a
     single false match, which the tie guard is by construction blind to. One
     identity for one physical unit, everywhere, is the only version of this that
     cannot silently name the wrong device.
@@ -300,7 +300,7 @@ def port_device_name(matched_port: JsonObject) -> str:
     which names the board rather than the order it was enumerated in; the
     inventory already resolved it. Windows publishes no openable equivalent, so
     there the kernel name is written and ``serial_number`` carries the identity
-    instead — see ``comports.serial_by_id_links``."""
+    instead: see ``comports.serial_by_id_links``."""
     stable = matched_port.get("stable_device")
     if isinstance(stable, str) and stable:
         return stable
@@ -313,7 +313,7 @@ def profile_baudrate(profile_port: JsonObject, port_name: str) -> int:
     `agentic-hil.config.example.yaml` is hand-written and reaches this with no
     schema in front of it, unlike the file it helps generate. A bare `int()` over
     it turned `baudrate: fast` into a `ValueError` out of a generation that had
-    already read the board — a traceback where the project's own rule is that a
+    already read the board: a traceback where the project's own rule is that a
     refusal names the field, says what was expected and is safe to act on.
 
     `bool` is refused rather than converted for the reason `validated_wait`
@@ -376,7 +376,7 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             # is granted except for the two that block flashing while they are
             # true. The default comes
             # from `generated_permissions` rather than being written here, so
-            # this path cannot disagree with the skeleton again — it did, and the
+            # this path cannot disagree with the skeleton again. It did, and the
             # discovery path is the one a bench with a board attached takes, so
             # it was the copy that mattered.
             #
@@ -385,8 +385,8 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             # project's example configuration meant it, and a default that
             # overrode it would be the same silent widening the carried-over
             # permissions on the regeneration path exist to prevent. Over MCP
-            # this profile decides nothing at all — `project_config_create`
-            # rewrites every permission afterwards — because there it is
+            # this profile decides nothing at all (`project_config_create`
+            # rewrites every permission afterwards) because there it is
             # repository-controlled data rather than a file a person ran `init`
             # against.
             "permissions": {flag: bool(requested_permissions.get(flag, default)) for flag, default in generated_permissions("debuggers").items()},
@@ -433,8 +433,8 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
                 **usb_ids,
                 # The template this fills in says `version: 3`, where an entry
                 # carrying no serial has to declare what identifies it instead.
-                # A serial is what this path normally writes — the port was found
-                # by it — so this is the adapter that published none, and the
+                # A serial is what this path normally writes (the port was found
+                # by it), so this is the adapter that published none, and the
                 # file says which of the two it is rather than leaving a reader
                 # to guess.
                 **({} if serial_number else {"identity_source": "_".join(usb_ids) or "device"}),

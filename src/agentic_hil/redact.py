@@ -26,7 +26,7 @@ second of two measures rather than the only one: the broker and its participants
 keep the key out of every result payload by construction, and this pattern is
 what catches the field somebody adds later without reading that argument. Note
 that the pattern is anchored at the end of the key and ``authkey`` does not end
-in ``key``-as-a-word — ``token|secret|...`` never matched it — so the arm is
+in ``key``-as-a-word (``token|secret|...`` never matched it), so the arm is
 explicit rather than a widening of the existing one, which would also have
 started redacting ``resource_key``-shaped fields that are not credentials.
 """

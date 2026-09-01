@@ -86,7 +86,7 @@ class ArtifactManager:
             "allowed_root": self._is_under_allowed_roots(resolved),
             "allowed_extension": resolved.suffix.lower() in self.config.artifacts.allowed_extensions,
             # Both views, because either one alone lies here. Lexical alone
-            # reports a junction that leaves the workspace as contained — the
+            # reports a junction that leaves the workspace as contained: the
             # very case whose refusal this flag exists to name. Resolved alone
             # would call a path contained that only reaches the workspace by
             # following a link, which safe_open_binary's O_NOFOLLOW gate refuses.
@@ -186,7 +186,7 @@ class ArtifactManager:
             source_file = source_context.__enter__()
             descriptor = source_file.fileno()
         except (ConfigError, OSError) as error:
-            # A missing file that validation never saw either did not change —
+            # A missing file that validation never saw either did not change:
             # it was never there. Saying "changed after validation" sends the
             # caller back to re-validate, which will keep succeeding under
             # validation.require_existing_file: false; the artifact has to be
@@ -232,7 +232,7 @@ class ArtifactManager:
             expected_sha256 = artifact.get("integrity_sha256") or artifact.get("sha256")
             # integrity_sha256 is None only when validation saw no file at all,
             # which validation.require_existing_file: false permits. Everything
-            # that inspects content — size, ELF/HEX/BIN plausibility, the hash —
+            # that inspects content (size, ELF/HEX/BIN plausibility, the hash)
             # was skipped for those bytes, so a file that appears between
             # validation and staging would otherwise be flashed unchecked.
             if expected_sha256 is None:

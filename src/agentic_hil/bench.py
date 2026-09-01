@@ -12,7 +12,7 @@ than what it locks.
 ``state_root``. On 2026-08-02 two sessions held the same Nucleo and could not
 see each other because their ``state_root`` differed; a lock kept per
 configuration is not a bench lock. There is deliberately no environment override
-for the location — an override is how two sessions diverge again.
+for the location: an override is how two sessions diverge again.
 
 **Crash safety without an operator.** Ownership is the OS advisory lock on
 ``<digest>.lock``, which the kernel drops when the holding process dies. A
@@ -200,7 +200,7 @@ def fold_resource_name(resource: str) -> str:
     for prefix in ("com:serial:", "physical:", "can:"):
         if resource.startswith(prefix):
             return prefix + fold_hardware_id(resource[len(prefix) :])
-    # `probe:` is a probe serial or the `type` fallback — both hardware ids that
+    # `probe:` is a probe serial or the `type` fallback: both hardware ids that
     # `DebuggerDevice.lock_key` builds with `fold_hardware_id`, which casefolds on
     # POSIX as well as on Windows. Folding it as a path instead left a
     # hand-written `probe:<SERIAL>` uppercase on POSIX while the configured
@@ -211,7 +211,7 @@ def fold_resource_name(resource: str) -> str:
     # `probe-exe:` key so a pre-upgrade process or a raw caller cannot take the
     # probe out from under it. A path and a serial are told apart by being an
     # absolute filesystem path, which a configured executable is (pinning makes it
-    # one) and which a probe serial or a backend type name never is — a stricter
+    # one) and which a probe serial or a backend type name never is: a stricter
     # test than "contains a separator", so a serial that happened to carry one is
     # still a hardware id and the round-1 fix above stands.
     if resource.startswith("probe:"):
@@ -223,7 +223,7 @@ def fold_resource_name(resource: str) -> str:
     # debugger executable; the path rule leaves an opaque name alone on POSIX and
     # lowercases it on Windows, which is what `fold_device_path` already did to
     # it by the time it was a name. Folding case into a POSIX path would rewrite
-    # `probe-exe:/usr/bin/Foo` to a name no configured debugger ever locks — the
+    # `probe-exe:/usr/bin/Foo` to a name no configured debugger ever locks: the
     # same bug facing the other way, which is why the executable keeps a prefix
     # of its own rather than sharing `probe:`.
     for prefix in ("com:", "probe-exe:"):
@@ -236,20 +236,20 @@ def _is_executable_path(value: str) -> bool:
     """Whether a bare `probe:` value is the legacy executable spelling, not an id.
 
     The legacy `probe:<executable>` key is the only `probe:` name that is a
-    host path, and a configured executable is always absolute — pinning
+    host path, and a configured executable is always absolute: pinning
     resolves it to an absolute path before it is ever a lock key
     (`/usr/bin/openocd`, `C:\\Tools\\openocd.exe`). A probe serial and a
     backend type name are never absolute paths. Testing for an absolute path
     rather than for a separator is deliberate: a probe serial that happened to
     contain a `/` would be misread as a path by the looser test and split from
-    the casefolded key its `probe_id` locks — the very split this fold exists
-    to prevent, reintroduced — whereas it is not absolute and so stays a
+    the casefolded key its `probe_id` locks (the very split this fold exists
+    to prevent, reintroduced), whereas it is not absolute and so stays a
     hardware id here.
 
     Rooted counts as absolute on purpose. Python 3.13 redefined
     ``ntpath.isabs`` so a drive-less rooted path (``\\opt\\tools\\openocd``,
     which is what ``os.path.normcase`` makes of a POSIX-style executable) stopped
-    being absolute on Windows — so the same key folded as a path under 3.12 and
+    being absolute on Windows, so the same key folded as a path under 3.12 and
     as a hardware id under 3.13, and the legacy spelling stopped colliding with
     the ``probe-exe:`` holder on exactly one interpreter. A rooted value is
     still never a probe serial, so the wider reading reintroduces nothing."""
@@ -528,7 +528,7 @@ def validated_wait(wait_s: object) -> float:
 
     Public because the MCP surface has to reach it *before* it converts: a
     frontend that ran `float()` over the payload first handed this a value that
-    had already lost the distinction it makes — `float(True)` is `1.0`, and a
+    had already lost the distinction it makes: `float(True)` is `1.0`, and a
     wait nobody could have meant became a one-second wait instead of an
     `invalid_argument`. Taking the raw object is the whole contract.
     """
@@ -537,8 +537,8 @@ def validated_wait(wait_s: object) -> float:
     if isinstance(wait_s, bool) or not isinstance(wait_s, (int, float)):
         raise ConfigError("invalid_argument", "A device wait must be a number of seconds.", {"field": "wait_s", "value": wait_s})
     value = float(wait_s)
-    # NaN slips past both range checks below — every comparison against it is
-    # false — so a NaN wait would become a NaN deadline that `time.monotonic() >=
+    # NaN slips past both range checks below (every comparison against it is
+    # false), so a NaN wait would become a NaN deadline that `time.monotonic() >=
     # deadline` never reaches, and the holder of a device would be polled forever.
     # Infinity is caught by the upper bound already, but reject every non-finite
     # value here so the one validator is the single gate: a wait must be a real,

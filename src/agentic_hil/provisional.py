@@ -3,7 +3,7 @@
 A raw handle (serial port, python-can Bus, adapter bridge) is opened before the
 session object that will own it exists. If the session constructor fails and the
 immediate rollback close also fails, the raw handle would otherwise become
-unreachable — still live on the hardware, but with no reference for a second
+unreachable: still live on the hardware, but with no reference for a second
 cleanup attempt. Registering the handle here the moment it is opened keeps it
 reachable so a later ``service.close()`` can retry the close until it succeeds.
 """

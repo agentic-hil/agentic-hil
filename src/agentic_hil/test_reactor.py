@@ -59,12 +59,12 @@ from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
 REPEAT_ACTION = "repeat"
 # What a `uart_expect` that timed out answers with: the last of what the line
 # actually said. Capped, because a chatty port must not turn one red step into an
-# unbounded result — but never zero, because a red step that cannot say what the
+# unbounded result, but never zero, because a red step that cannot say what the
 # port did say is the failure an operator has to reproduce by hand.
 UART_EXPECT_TAIL_BYTES = 512
 # How long a `uart_expect` pass that read nothing waits before the next one.
-# Reached only when `com_read` returned early — a session that is no longer
-# active ends its wait at once — so this paces a line that has stopped talking
+# Reached only when `com_read` returned early (a session that is no longer
+# active ends its wait at once), so this paces a line that has stopped talking
 # rather than spinning on it until the step's deadline.
 UART_EXPECT_IDLE_POLL_S = 0.05
 # What a `uart_expect` says about itself, per kind of expectation: (matched,
@@ -82,7 +82,7 @@ UART_EXPECT_SUMMARIES: dict[str, tuple[str, str]] = {
     ),
 }
 # What a `comparator:` says about itself, per kind of claim: (met, unmet). Same
-# two-sentence shape as the v2 table above and for the same reason — a plan that
+# two-sentence shape as the v2 table above and for the same reason: a plan that
 # waited for an exact value and a plan that waited for a value inside a range
 # fail for different reasons, and one sentence for both would send an operator
 # looking for the wrong thing.
@@ -146,7 +146,7 @@ SYMBOL_VALUE_FIELDS: tuple[str, ...] = ("symbol", "address", "size_bytes", "reso
 # How many of the frames a `can_read` comparator saw are reported when its claim
 # went unmet. The `received_tail` honesty, in the unit this medium has: a red
 # step that cannot say what the bus did carry is a failure an operator has to
-# reproduce by hand — and a busy bus must not turn one red step into an
+# reproduce by hand, and a busy bus must not turn one red step into an
 # unbounded result, which is why it is the last few rather than all of them.
 CAN_COMPARATOR_TAIL_FRAMES = 16
 # How long a `can_read` comparator pass that read no frames waits before the
@@ -181,15 +181,15 @@ def never_stopped() -> bool:
 
 
 def decoded_equals(decoded: str, expected: str, final: bool) -> bool:
-    """True when what the line said equals `expected` — not merely contains it.
+    """True when what the line said equals `expected`, not merely contains it.
 
     A serial line has no end, so "the whole thing" is read two ways. Any one
     complete line of what was received counts at once: a terminator is the board
     saying that value is finished, which is what a board printing its banner in a
     loop looks like, where the whole buffer is never one value.
 
-    The whole of what was received counts too — a board that answers once and
-    stops sends no terminator — but only on the last pass, once the step's
+    The whole of what was received counts too (a board that answers once and
+    stops sends no terminator), but only on the last pass, once the step's
     deadline has run out and nothing further is coming. Accepting it earlier
     would pass `equals: "Hello"` on a board halfway through printing "Hello
     World", and a framework answering green to a value that was still arriving is
@@ -198,7 +198,7 @@ def decoded_equals(decoded: str, expected: str, final: bool) -> bool:
         return True
     lines = decoded.splitlines()
     if lines and not decoded.endswith(("\n", "\r")):
-        # The last fragment has no terminator yet, so it is not a line — it is
+        # The last fragment has no terminator yet, so it is not a line: it is
         # the beginning of one, and matching it would be matching a prefix.
         lines = lines[:-1]
     return any(line.strip() == expected for line in lines)
@@ -208,8 +208,8 @@ class StepComparator:
     """What a feedback step claims about what it received.
 
     An object in the plan (`comparator: {equals: ...}`) rather than a bare value,
-    so the preprocessing a bench eventually needs — scaling a raw count into a
-    unit, converting a base — can be added as further keys without invalidating
+    so the preprocessing a bench eventually needs (scaling a raw count into a
+    unit, converting a base) can be added as further keys without invalidating
     plans written today. None of that is implemented here; the shape is what
     makes it addable.
 
@@ -249,14 +249,14 @@ class StepComparator:
 
         Decimal here, because a serial line carries text a human wrote a format
         string for. A medium whose output is bytes rendered as hexadecimal reads
-        its captures in that base instead, and says so by overriding this — the
+        its captures in that base instead, and says so by overriding this: the
         one place the two differ, so a `range` means the same thing either
         way: bounds in decimal, held against the value that was really there."""
         return float(text)
 
     def matches(self, decoded: str, final: bool) -> bool:
         """Whether what has been received meets this claim. `final` is true on
-        the pass the step's deadline has run out on — the last look at the line,
+        the pass the step's deadline has run out on: the last look at the line,
         where a value that never carried a terminator can still be judged."""
         if self.equals is not None:
             return decoded_equals(decoded, self.equals, final)
@@ -316,7 +316,7 @@ def comparator_pattern_refusal(location: StepLocation, step: TestStep) -> JsonOb
     Written once for every medium a comparator judges: what a pattern must
     satisfy is a property of the claim, not of the line or the bus it is read
     against, so a serial step and a frame step are refused in the same shape and
-    under the same field name — which is what makes the two readable side by side
+    under the same field name, which is what makes the two readable side by side
     in a report."""
     comparator = step.arguments.get("comparator") or {}
     return pattern_refusal(
@@ -350,8 +350,8 @@ class UartReadOutcome:
 # What a step means is answered by one class per device kind (see StepDevice
 # below), and ACTION_SCHEMAS / ROUTE_FIELDS are merged from those classes rather
 # than written out here. Routing used to be a two-way split held in two
-# constants — "UART or debugger?" in one, "which actions need a probe?" in
-# another — and the second was already documented as the thing that would go
+# constants ("UART or debugger?" in one, "which actions need a probe?" in
+# another), and the second was already documented as the thing that would go
 # stale silently the first time a kind was added. The authority is now the class
 # that serves the action, which cannot be added to without answering for itself.
 
@@ -417,7 +417,7 @@ class TestStep:
     # `com_ports` entry, a CAN action names a `can_buses` entry. Each is the
     # `route_field` of the device class that serves the action, so this list and
     # ROUTE_FIELDS cannot disagree. `debugger` may be None only while the project
-    # configures exactly one probe. A step names its device once — an alias
+    # configures exactly one probe. A step names its device once: an alias
     # beside `device:` is refused at preflight rather than silently preferred.
     debugger: str | None = None
     port_id: str | None = None
@@ -493,7 +493,7 @@ class PlanState:
     build nothing: a plan that fails validation has opened no service, taken no
     lock and created no directory, and the surest way to keep that true is for
     preflight to have nowhere to put such a thing. It also makes preflight
-    repeatable — the same plan asked twice gets the same answer."""
+    repeatable: the same plan asked twice gets the same answer."""
 
     # The debugger holding this plan's one debug session, if any. Plan-wide
     # rather than per probe: flashing is refused while *any* session is open.
@@ -580,7 +580,7 @@ def reject_superseded_plan_version(raw: JsonObject, path: str | None = None) -> 
     """Refuse a version 1 plan by name.
 
     Version 1 steps addressed a `device:` naming a single modelled unit the
-    config no longer has — not the `device:` of version 3, which names one entry
+    config no longer has, not the `device:` of version 3, which names one entry
     of the `debuggers`, `com_ports` or `can_buses` sections. Leaving the plan at
     version 1 would have made every old plan invalid with only a bare const
     mismatch to go on, so the break gets a version boundary and a message that
@@ -745,7 +745,7 @@ def raise_test_config_validation_error(error: Any, path: str | None, prefix: lis
     if error.validator in {"enum", "const"}:
         details["allowed_values"] = error.validator_value if error.validator == "enum" else [error.validator_value]
     if error.validator == "oneOf":
-        # A step whose alternatives are "exactly one of these keys" — the shape
+        # A step whose alternatives are "exactly one of these keys": the shape
         # `uart_expect` uses for `text` / `pattern`. Bare, a oneOf failure names
         # only the step, which is the difference between "this step is wrong
         # somewhere" and "say one of these two". The keys come off the branches
@@ -796,8 +796,8 @@ class StepActionSpec:
     role: str = ""
     # True when the step's own arguments are the tool's arguments, so preflight
     # can put them through that tool's MCP contract. False for an action that
-    # reads its arguments itself — a deadline and an expectation are not
-    # `com_read` arguments — and builds the call it makes.
+    # reads its arguments itself (a deadline and an expectation are not
+    # `com_read` arguments) and builds the call it makes.
     forwards_arguments: bool = True
     # False for an action that drives no hardware: it still routes to a device
     # and still appears in the run's steps, but nothing about sessions,
@@ -831,7 +831,7 @@ def step_action(
     Declaration-on-the-method rather than a dictionary built in `__init__`: the
     plan schema is exported by reading these off the classes, which must keep
     working without constructing a device and therefore without a bench. Applied
-    more than once to one method, it declares that method under each name — which
+    more than once to one method, it declares that method under each name, which
     is how an older action name stays valid beside a newer one."""
 
     def declare(method: Any) -> Any:
@@ -855,8 +855,8 @@ def collect_step_actions(device_class: type) -> dict[str, StepActionSpec]:
     """Every action a device class serves, its own and its ancestors'.
 
     Walked base-first, so a subclass redeclaring an inherited name replaces it
-    rather than being shadowed by it, and an action declared once on the base —
-    `delay` — is served by every kind without any of them repeating it."""
+    rather than being shadowed by it, and an action declared once on the base
+    (`delay`) is served by every kind without any of them repeating it."""
     collected: dict[str, StepActionSpec] = {}
     for ancestor in reversed(device_class.__mro__):
         for attribute in vars(ancestor).values():
@@ -895,8 +895,8 @@ class StepDevice:
     subclass and nothing else.
 
     ``StepDevice`` is deliberately not a ``devices.Device``. That hierarchy
-    answers what a unit *is* — its hardware-derived lock key, its tool
-    vocabulary, its mutex — and it is imported by the backends themselves; a plan
+    answers what a unit *is* (its hardware-derived lock key, its tool
+    vocabulary, its mutex), and it is imported by the backends themselves; a plan
     step is a different question, asked one layer up. Each subclass here names
     its ``device_class`` and builds one for identity, so there is still exactly
     one place that says what a serial line is.
@@ -944,7 +944,7 @@ class StepDevice:
         # True once this device has actually run an action that drives it. A
         # device object is built on first use, and `delay` routes to one without
         # touching it, so being in the run's `devices` map is not proof the run
-        # drove this unit — failure recovery asks this instead.
+        # drove this unit. Failure recovery asks this instead.
         self.drove_device = False
         # This device's actions, bound: the string a plan writes, the schema that
         # validates it and the method that runs it, in one place, built once.
@@ -1017,7 +1017,7 @@ class StepDevice:
     def tool_calls(cls, config: AgenticHILConfig, step: TestStep) -> list[tuple[str, JsonObject]]:
         """The plan-supplied tool calls a step will make, as (tool, arguments),
         so preflight can put them through the exact MCP contract validators the
-        dispatcher enforces — a step this reactor's schema accepted but the tool
+        dispatcher enforces. A step this reactor's schema accepted but the tool
         contract rejects then fails before any backend builds hardware state.
 
         Read off the declaration: an action that forwards the step's own
@@ -1048,7 +1048,7 @@ class StepDevice:
 
         Look the action string up among this device's declarations, hold the step
         to that action's own schema, call the method. A string this kind does not
-        declare is `not_supported` naming the kind by construction — there is no
+        declare is `not_supported` naming the kind by construction. There is no
         table to forget to add it to."""
         bound = self.actions.get(step.action)
         if bound is None:
@@ -1066,7 +1066,7 @@ class StepDevice:
             return invalid
         if bound.spec.touches_device:
             # Recorded before the call, not after: an action that drove the probe
-            # and then failed — the reset this run is recovering from — still
+            # and then failed (the reset this run is recovering from) still
             # drove it, and is exactly the device recovery must not skip.
             self.drove_device = True
         return bound.call(step)
@@ -1102,8 +1102,8 @@ class StepDevice:
 
         Declared once here, so every device kind serves it and none of them had
         to be told: a plan waiting on a board is waiting on that board whatever
-        kind of thing it is. It is still a step — it routes to a named device and
-        it appears in the run's result — because a wait that left no trace would
+        kind of thing it is. It is still a step (it routes to a named device and
+        it appears in the run's result) because a wait that left no trace would
         be a gap in the record of what a test did.
 
         The wait is sliced, and the slices are counted against one deadline
@@ -1155,7 +1155,7 @@ class StepDevice:
 
 
 # `StepDevice` declares `delay` itself, and `__init_subclass__` only fires for
-# subclasses, so the base's own collection is made here — one call, the same one
+# subclasses, so the base's own collection is made here: one call, the same one
 # every kind gets.
 StepDevice.step_action_specs = collect_step_actions(StepDevice)
 StepDevice.step_actions = {name: spec.schema for name, spec in StepDevice.step_action_specs.items()}
@@ -1165,7 +1165,7 @@ class SessionDevice(StepDevice):
     """A device a plan opens and closes: a serial line, a CAN bus.
 
     The two differ in their permissions and in the traffic they carry, not in
-    their session — both can be left open by a plan that fails, both may only be
+    their session: both can be left open by a plan that fails, both may only be
     closed by the run that opened them, and both are closed again by that run's
     cleanup. That is written once, here.
 
@@ -1293,7 +1293,7 @@ class UartRunner(SessionDevice):
 
     @step_action("uart_write", schema="uartWrite", tool="com_write")
     def _uart_write(self, step: TestStep) -> JsonObject:
-        """Serial stimulus, straight through `com_write` — the same tool and the
+        """Serial stimulus, straight through `com_write`: the same tool and the
         same permission an agent driving the line by hand would meet. A port the
         config will not let a plan write to is refused by name at preflight, so
         the plan is corrected rather than the bench half driven."""
@@ -1301,8 +1301,8 @@ class UartRunner(SessionDevice):
 
     @step_action("uart_expect", schema="uartExpect", tool="com_read", forwards_arguments=False)
     def _uart_expect(self, step: TestStep) -> JsonObject:
-        # Exactly one of the two is present — the schema's own `oneOf` is what
-        # holds that — so the first one found names both the claim and the key
+        # Exactly one of the two is present (the schema's own `oneOf` is what
+        # holds that), so the first one found names both the claim and the key
         # the result reports it under.
         field_name = next(name for name in self.expect_fields if step.arguments.get(name) is not None)
         return self._expect(field_name, str(step.arguments[field_name]), float(step.arguments["timeout_s"]))
@@ -1362,7 +1362,7 @@ class UartRunner(SessionDevice):
 
         A pattern is `re.search`, so it is anchored where it is written and
         nowhere else: a plan that means "the line starts this way" writes the
-        `^` itself. Compiled once per step rather than per read — the pattern
+        `^` itself. Compiled once per step rather than per read: the pattern
         already compiled cleanly at preflight, so this cannot raise. Neither kind
         judges the last pass differently, so both ignore `final`."""
         if field_name == "text":
@@ -1404,7 +1404,7 @@ class UartRunner(SessionDevice):
         }
 
     def _compare(self, comparator: StepComparator, timeout_s: float) -> JsonObject:
-        """Read until the comparator is met, or fail saying what was received —
+        """Read until the comparator is met, or fail saying what was received,
         and, for a range, which value was captured against which bounds."""
         met, unmet = COMPARATOR_SUMMARIES[comparator.claim]
         outcome = self._read_until(timeout_s, comparator.written, comparator.matches)
@@ -1418,8 +1418,8 @@ class UartRunner(SessionDevice):
     def _read_until(self, timeout_s: float, written: str, matches: Callable[[str, bool], bool]) -> UartReadOutcome:
         """Read this line until `matches` is satisfied or the deadline passes.
 
-        The plan's own read path and nothing else: each pass is one `com_read` —
-        the tool an agent would call by hand — waiting out whatever is left of
+        The plan's own read path and nothing else: each pass is one `com_read`
+        (the tool an agent would call by hand), waiting out whatever is left of
         the step's deadline. `com_read` returns the moment the session has bytes,
         so a banner that arrives in pieces is several short reads rather than one
         long one, and the match is therefore made against everything read so far
@@ -1457,7 +1457,7 @@ class UartRunner(SessionDevice):
             received.extend(chunk)
             del received[:-window]
             # Asked before the match, so the pass the deadline has run out on is
-            # the one that gets the last look — where a claim that can only be
+            # the one that gets the last look, where a claim that can only be
             # settled by "nothing more is coming" is allowed to settle.
             expired = time.monotonic() >= deadline
             if matches(decode_bytes(bytes(received), encoding), expired):
@@ -1466,8 +1466,8 @@ class UartRunner(SessionDevice):
                 return UartReadOutcome(False, reads, received_bytes, bytes(received[-UART_EXPECT_TAIL_BYTES:]), encoding)
             if not chunk:
                 # A read that returned nothing while time was left had its own
-                # wait cut short — `com_read` ends its wait at once on a session
-                # that is no longer active — so pace the next pass rather than
+                # wait cut short (`com_read` ends its wait at once on a session
+                # that is no longer active), so pace the next pass rather than
                 # spinning on a line that has stopped talking.
                 time.sleep(min(UART_EXPECT_IDLE_POLL_S, max(0.0, deadline - time.monotonic())))
 
@@ -1475,8 +1475,8 @@ class UartRunner(SessionDevice):
 class CanFrameComparator(StepComparator):
     """Which frame a `can_read` step requires.
 
-    The claim vocabulary is the base class's — `equals`, `pattern`, `pattern`
-    with `range` — asked of the medium a bus actually has. Two things follow from
+    The claim vocabulary is the base class's (`equals`, `pattern`, `pattern`
+    with `range`), asked of the medium a bus actually has. Two things follow from
     a frame being a complete unit that arrives with an identifier on it, and they
     are the whole of the difference:
 
@@ -1502,7 +1502,7 @@ class CanFrameComparator(StepComparator):
             self.equals = self.equals if parsed_equals is None else parsed_equals.hex()
         # The schema requires `id` and holds both it and `id_mask` to an integer
         # or a hexadecimal string, so these parse. A comparator built by hand
-        # without an id selects nothing rather than everything — the safe
+        # without an id selects nothing rather than everything: the safe
         # direction, because the unsafe one is a step that passes on a frame
         # nobody asked about.
         self.frame_id: int | None = parse_can_id(raw.get("id"))
@@ -1538,7 +1538,7 @@ class CanFrameComparator(StepComparator):
         payload = str(frame.get("data_hex") or "")
         if self.equals is not None:
             return payload == self.equals
-        # `final` decides nothing on this medium — it exists so a serial value
+        # `final` decides nothing on this medium. It exists so a serial value
         # that never carried a terminator can still be judged when time runs out,
         # and a frame is never in that state.
         return self.matches(payload, False)
@@ -1569,7 +1569,7 @@ class CanRunner(SessionDevice):
 
     The action set is the CAN tool surface and nothing beyond it: open, close,
     send one classic frame, read frames. Each permission refusal below is the one
-    the backend would raise, moved to where a plan can still be corrected — a
+    the backend would raise, moved to where a plan can still be corrected: a
     contradiction between a plan and the bus it names belongs to the plan, not to
     the bench half way through a run."""
 
@@ -1621,8 +1621,8 @@ class CanRunner(SessionDevice):
 
     @classmethod
     def tool_calls(cls, config: AgenticHILConfig, step: TestStep) -> list[tuple[str, JsonObject]]:
-        """A `can_read` reads its own arguments when it carries a comparator — a
-        deadline and a claim are not `can_read` arguments — so the call preflight
+        """A `can_read` reads its own arguments when it carries a comparator (a
+        deadline and a claim are not `can_read` arguments), so the call preflight
         checks is the one this step will really make, built the same way."""
         name = cls.step_config_id(config, step)
         if step.action != "can_read" or not step.arguments.get("comparator") or name is None:
@@ -1649,7 +1649,7 @@ class CanRunner(SessionDevice):
                     location,
                     step,
                     "wait_timeout_s",
-                    "A `can_read` with a `comparator:` waits out its own `timeout_s`, reading again until the claim is met, so `wait_timeout_s` — how long one read waits — has nothing left to mean. Name one of the two.",
+                    "A `can_read` with a `comparator:` waits out its own `timeout_s`, reading again until the claim is met, so `wait_timeout_s` (how long one read waits) has nothing left to mean. Name one of the two.",
                     {"error_type": "invalid_argument"},
                 )
         return super().preflight(reactor, location, step, state)
@@ -1673,14 +1673,14 @@ class CanRunner(SessionDevice):
             # `listen_only: true` is not an obstacle standing in the way of the
             # send: it is the claim that observing this bus sends nothing, which
             # is the bus this plan itself declared. A controller held to it emits
-            # no dominant bit, so the send could never leave it — and the adapter
+            # no dominant bit, so the send could never leave it, and the adapter
             # settles the mode when the session opens, long before the send step
             # would be reached. Refusing the plan says which of its two halves to
             # change; refusing at the bench would only say the frame did not go.
             #
             # Named `can_listen_only_mode`, the same as the tool's own gate. The
-            # plan route reaches it earlier — at preflight, before a session is
-            # opened — but it is one refusal with one catalogue entry, so a
+            # plan route reaches it earlier (at preflight, before a session is
+            # opened), but it is one refusal with one catalogue entry, so a
             # reader who has met it once has met it everywhere. Note the ordering
             # above: `allow_write` is checked first here and the mode first in
             # the tool. A plan that names a bus it cannot write is a plan to
@@ -1691,7 +1691,7 @@ class CanRunner(SessionDevice):
                 location,
                 step,
                 "action",
-                "This CAN bus is configured `listen_only: true` — the claim that observing it sends nothing — so a plan cannot also send on it. Send on a second `can_buses` entry configured `listen_only: false`, drop the send step, or set `listen_only: false` on this entry if the bus may be transmitted on.",
+                "This CAN bus is configured `listen_only: true` (the claim that observing it sends nothing), so a plan cannot also send on it. Send on a second `can_buses` entry configured `listen_only: false`, drop the send step, or set `listen_only: false` on this entry if the bus may be transmitted on.",
                 {"error_type": LISTEN_ONLY_MODE_ERROR, "listen_only": True, "config_field": f"can_buses.{cls.step_config_id(reactor.config, step)}.listen_only"},
             )
         return None
@@ -1700,7 +1700,7 @@ class CanRunner(SessionDevice):
 
     def _compare(self, comparator: CanFrameComparator, max_frames: object | None, timeout_s: float) -> JsonObject:
         """Read until a frame meets the comparator, or fail saying which frames
-        the bus did carry — and, for a range, which value was captured against
+        the bus did carry, and, for a range, which value was captured against
         which bounds."""
         met, unmet = CAN_COMPARATOR_SUMMARIES[comparator.claim]
         outcome = self._read_until(comparator, max_frames, timeout_s)
@@ -1714,8 +1714,8 @@ class CanRunner(SessionDevice):
     def _read_until(self, comparator: CanFrameComparator, max_frames: object | None, timeout_s: float) -> CanReadOutcome:
         """Read this bus until a frame meets the claim or the deadline passes.
 
-        The plan's own read path and nothing else: each pass is one `can_read` —
-        the tool an agent would call by hand — waiting out whatever is left of the
+        The plan's own read path and nothing else: each pass is one `can_read`
+        (the tool an agent would call by hand), waiting out whatever is left of the
         step's deadline, and every frame it yields is judged as it arrives. A
         frame is atomic, so nothing is carried across passes the way a serial
         line's bytes are; what the passes are for is that the frame this plan
@@ -2047,8 +2047,8 @@ class DebuggerRunner(StepDevice):
             # debug session holds, so a reset inside one could only ever come
             # back busy; and the permission that governs it is the one the
             # config names for this probe. Which resets a backend can actually
-            # perform is deliberately not asked here: a mode it will not run —
-            # `init` off OpenOCD — is refused by that backend with its own
+            # perform is deliberately not asked here: a mode it will not run
+            # (`init` off OpenOCD) is refused by that backend with its own
             # `not_supported`, and that refusal is the honest answer.
             if state.debug_session is not None:
                 return preflight_error(location, step, "action", "The target cannot be reset while a debug session is active.", {"debug_session_debugger": state.debug_session})
@@ -2332,8 +2332,8 @@ ACTION_SCHEMAS = {
 # `device` is format v3's universal routing key and is read for every kind; the
 # rest are the v2 spellings, which stay valid as aliases.
 ROUTE_FIELDS: tuple[str, ...] = ("device", *dict.fromkeys(device_class.route_field for device_class in STEP_DEVICE_CLASSES))
-# An action can be served by more than one kind — `delay` is declared once on the
-# base and therefore inherited by all of them — so this maps to every claimant
+# An action can be served by more than one kind (`delay` is declared once on the
+# base and therefore inherited by all of them), so this maps to every claimant
 # and the name the step gave settles which one runs it.
 STEP_DEVICE_CLASSES_BY_ACTION: dict[str, tuple[type[StepDevice], ...]] = {
     action: tuple(device_class for device_class in STEP_DEVICE_CLASSES if action in device_class.step_actions)
@@ -2381,7 +2381,7 @@ def step_device_class(config: AgenticHILConfig, step: TestStep) -> type[StepDevi
 
     One claimant is the ordinary case and the action alone answers it. For an
     action every kind serves, the routing key is what decides: a v2 alias names
-    its kind outright, and a `device:` is looked up in the configured entries —
+    its kind outright, and a `device:` is looked up in the configured entries,
     which is where "the configuration knows which class a name belongs to" is
     actually cashed. A name in no section, or in two of them, is not answered
     here; preflight refuses it saying which."""
@@ -2452,7 +2452,7 @@ class TestReactor:
 
     def step_device(self, step: TestStep) -> StepDevice:
         """The device a step drives. DeviceError when the plan named something
-        the config does not declare — preflight refuses that before any step
+        the config does not declare. Preflight refuses that before any step
         runs, so reaching it here means the plan was never validated."""
         device_class = step_device_class(self.config, step)
         name = None if device_class is None else device_class.step_config_id(self.config, step)
@@ -2648,7 +2648,7 @@ class TestReactor:
     def cleanup_devices(self) -> list[StepDevice]:
         """Every device this run touched, in the order their sessions close.
 
-        Each kind declares where it falls (``cleanup_order``) — debug sessions
+        Each kind declares where it falls (``cleanup_order``): debug sessions
         before serial lines and CAN buses, because a still-attached debugger can
         keep writing to a line this plan is about to close. Within one kind the
         last device opened closes first."""
@@ -2747,7 +2747,7 @@ class TestReactor:
             # After the devices are closed and after this result exists, so the
             # evidence is written before anything drives the board again, and
             # `ok` is not touched: recovering the bench does not un-fail a test.
-            # Reached for a failed cleanup as well as for a failed step —
+            # Reached for a failed cleanup as well as for a failed step:
             # cleanup is where the unconfirmed-effect incidents come from, and
             # those are precisely the ones that used to sit until a person came.
             #
@@ -2764,8 +2764,8 @@ class TestReactor:
 
         Debugger steps run on per-probe services (see `DebuggerRunner.service_for`),
         and both reset-into-halt and the probe re-read act on one probe's backend.
-        The base service is either unbound — the multi-probe CLI leaves
-        `config.debugger` None — or bound to a probe this run may never have
+        The base service is either unbound (the multi-probe CLI leaves
+        `config.debugger` None) or bound to a probe this run may never have
         driven, so recovering through it resets the wrong board, or withholds
         reset as `allow_reset_missing`, while the probes the plan actually drove
         are left as the failed run put them. So each touched probe is recovered
@@ -2776,7 +2776,7 @@ class TestReactor:
         single-probe bench recovers its one board, and an unbound base service
         reports honestly that nothing here establishes a target's state.
 
-        Only a probe the run actually drove is recovered — `device.drove_device`,
+        Only a probe the run actually drove is recovered: `device.drove_device`,
         not mere presence in `devices`. A probe used solely as a `delay` route is
         constructed like any other but touched nothing, so resetting and halting
         it here would drive a board no hardware action in the plan ever reached."""
@@ -2794,8 +2794,8 @@ class TestReactor:
         """One `recovery` block for a run that drove several probes.
 
         Each probe's own block is kept whole under `recoveries`, and the
-        top-level fields answer the run's question — did recovery run, and did
-        every probe it drove come back — without a caller having to walk the map.
+        top-level fields answer the run's question (did recovery run, and did
+        every probe it drove come back) without a caller having to walk the map.
         The bench is recovered only when every touched probe is; any probe left
         failed, errored or withheld pulls the aggregate down to the worst of
         them."""
@@ -2818,7 +2818,7 @@ class TestReactor:
 
         The walk is device-kind-blind: each step is handed to the class that
         serves its action, which answers for its own config entry, its own
-        permissions and its own session. Nothing here is built — see PlanState."""
+        permissions and its own session. Nothing here is built: see PlanState."""
         state = PlanState()
         return self._preflight_steps(test_config.steps, StepLocation.top, state)
 
@@ -2851,7 +2851,7 @@ class TestReactor:
                 location,
                 step,
                 ROUTE_FIELDS[0],
-                "Every device kind serves this action, so the step's `device:` must name exactly one configured entry — this one names none, or names an entry in more than one section.",
+                "Every device kind serves this action, so the step's `device:` must name exactly one configured entry: this one names none, or names an entry in more than one section.",
                 {claimant.configured_field: sorted(claimant.config_entries(self.config)) for claimant in candidates},
             )
         name_error = device_class.name_refusal(self, location, step)
@@ -2898,7 +2898,7 @@ class TestReactor:
 
 def step_debugger_id(config: AgenticHILConfig, step: TestStep) -> str | None:
     """The probe a debugger step runs on: the name the plan gave, or the only
-    configured one. None means the plan must name it — with several probes
+    configured one. None means the plan must name it: with several probes
     configured, picking one for the author is how the wrong board gets
     flashed."""
     named = step.debugger if step.debugger is not None else step.device
@@ -2916,8 +2916,8 @@ def plan_devices(config: AgenticHILConfig, test_config: TestConfig) -> DeviceSet
     preflight refuses that step with a message about the name, which is a better
     answer than a lock failure about a device nobody configured.
 
-    Two steps naming one physical unit — a probe and its virtual COM port under
-    one resource_id, the same port under two config entries — yield one device,
+    Two steps naming one physical unit (a probe and its virtual COM port under
+    one resource_id, the same port under two config entries) yield one device,
     because DeviceSet keys on the hardware and not on what the plan called it.
 
     Each step's own device class says which unit it drives (`identify`), so a

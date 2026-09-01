@@ -164,7 +164,7 @@ def canonical_audit_evidence(config: AgenticHILConfig, log_path: str | Path) -> 
     The canonical copy is the trusted ledger of agent-initiated hardware EFFECTS.
     The workspace mirror may legitimately hold extra passive lines (e.g. COM RX
     feedback) that are not mirrored, so verification checks that every canonical
-    line is still present in the workspace log in order — deletion or alteration
+    line is still present in the workspace log in order: deletion or alteration
     of an effect record fails; extra passive lines are tolerated."""
     canonical = canonical_audit_log_path(config, log_path)
     canonical_exists = Path(canonical).exists()
@@ -250,14 +250,14 @@ def config_in_force(config: AgenticHILConfig) -> JsonObject:
     happen" is the question an audit trail exists to answer, and for a flash or a
     mass erase it is the only one that matters.
 
-    The digest is ``AgenticHILConfig.config_digest`` — the exact bytes this
-    server parsed and is enforcing — published in the spelling ``config_status``
+    The digest is ``AgenticHILConfig.config_digest`` (the exact bytes this
+    server parsed and is enforcing), published in the spelling ``config_status``
     already uses, so the record and a live answer can be compared directly and
     the fact has one name. It is deliberately *not* the coordinator's
     ``config_sha256``: that one answers a different question ("is the file the
     same now as when this lease was taken", which is what ``recover`` compares),
-    it is published in a different spelling — the bare hex the lease records on
-    disk carry, not the algorithm-prefixed one ``config_status`` uses — and a
+    it is published in a different spelling (the bare hex the lease records on
+    disk carry, not the algorithm-prefixed one ``config_status`` uses), and a
     report is written on paths that never took a lease at all. It is derived from
     these same parsed bytes; it used to come from a second
     read at coordinator construction and could, under the very race this record
@@ -278,8 +278,8 @@ def config_in_force(config: AgenticHILConfig) -> JsonObject:
         "file_state": status.get("state"),
         "file_digest": status.get("current_digest"),
         # `configstate`'s own predicate, so "diverged" means here exactly what it
-        # means in a live result. In particular `unknown` is not divergence — it
-        # is a comparison that was never made — and `file_state` says which.
+        # means in a live result. In particular `unknown` is not divergence (it
+        # is a comparison that was never made), and `file_state` says which.
         "diverged_from_file": config_stale(status),
         "checked_at": status.get("checked_at"),
     }
@@ -298,8 +298,8 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     enriched.setdefault("audit_ok", True)
     # setdefault, not assignment: `recommit_report_with_status` and the adoption
     # path commit the same report again after a terminal lease transition, and
-    # the version an action ran under must not be restamped by a later check —
-    # that would replace the one fact the record is for with a fact about the
+    # the version an action ran under must not be restamped by a later check.
+    # That would replace the one fact the record is for with a fact about the
     # re-commit.
     enriched.setdefault(CONFIG_IN_FORCE_KEY, config_in_force(config))
     try:
@@ -576,7 +576,7 @@ def audit_unavailable(tool: str, error: Exception) -> JsonObject:
 
 
 # What a session publishes about its own earliest hardware touch, and the field a
-# later reader — including the dead-owner release in the coordination layer —
+# later reader (including the dead-owner release in the coordination layer)
 # consults instead of inferring one.
 CONTACT_MARKER_KEY = "first_contact_at"
 CONTACT_MARKER_SOURCE_KEY = "first_contact_by"
@@ -590,8 +590,8 @@ class ContactMarker:
     not know about. That question used to be answered by classifying the
     exception: a per-backend set of classes that prove no contact, and everything
     outside the set treated as unknown. Three benches were held in one week by
-    failures nobody had enumerated — a socket bind, a missing interface, a port
-    another program was already holding — and every miss failed the same way,
+    failures nobody had enumerated (a socket bind, a missing interface, a port
+    another program was already holding), and every miss failed the same way,
     because a set of known-innocent classes is only ever as complete as the last
     incident.
 
@@ -607,14 +607,14 @@ class ContactMarker:
 
     Three states, and the third is the reason this is not a boolean:
 
-    ``made`` — contact is proven. Everything downstream keeps precisely the
+    ``made``: contact is proven. Everything downstream keeps precisely the
     behaviour it has today, quarantines included.
 
-    ``proves_no_contact`` — nothing was recorded, and the failure happened at or
+    ``proves_no_contact``: nothing was recorded, and the failure happened at or
     before the point where contact would have been recorded had it occurred. This
     is the state that licenses the refusal.
 
-    Neither — ``record_unproven`` was called. Some backends reach a place where
+    Neither: ``record_unproven`` was called. Some backends reach a place where
     contact can be neither shown nor ruled out: a bridge process that was handed
     an open request and never answered leaves its own side to itself. Reading that
     as innocence is exactly the failure quarantine exists to prevent, so it
@@ -683,7 +683,7 @@ def no_contact_refusal(result: JsonObject, contact: ContactMarker) -> JsonObject
 
     A result already carrying ``cleanup_required`` keeps it. The marker speaks
     about the hardware; ``cleanup_required`` is usually about something else still
-    live on this host — an unreaped bridge child, a handle that would not close —
+    live on this host (an unreaped bridge child, a handle that would not close),
     and a process that is still running can still act, whatever the bus state was
     when it started.
 
@@ -701,16 +701,16 @@ def no_contact_refusal(result: JsonObject, contact: ContactMarker) -> JsonObject
 
 
 # Tools whose device lease is taken inside the call they report and given back
-# inside it — unless the call reached the hardware, in which case a session start
+# inside it, unless the call reached the hardware, in which case a session start
 # keeps it for the session.
 #
 # Read by the coordination layer to decide whether a report can speak for a lease
 # that is still open on disk. For a tool in this set, a report
 # saying `side_effect_status: not_started` beside a still-active lease says the
-# owner died between committing that report and releasing the lease — and in that
+# owner died between committing that report and releasing the lease, and in that
 # window nothing can have touched the bench, because the next call would have
 # written the next report. Every other tool runs under a lease an earlier call
-# opened, and that earlier call — the session start that did reach the hardware —
+# opened, and that earlier call (the session start that did reach the hardware)
 # is no longer in the report state at all; a `can_read` failure on an open bus
 # reports `not_started` truthfully about itself and says nothing about the open.
 # That is the distinction this set exists to make, and widening it past the tools
