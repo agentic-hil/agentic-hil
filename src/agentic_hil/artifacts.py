@@ -17,6 +17,7 @@ from agentic_hil.config import (
     display_path,
     is_path_within,
     is_path_within_frozen,
+    resolve_stable_directory,
     resolve_work_path,
     safe_configured_directory,
     safe_open_binary,
@@ -100,11 +101,15 @@ class ArtifactManager:
             return self._validation_error("Firmware artifact is outside allowed artifact roots.", validation)
         if self.config.validation.require_allowed_extension and not validation["allowed_extension"]:
             return self._validation_error("Firmware artifact extension is not allowed.", validation)
-        # safe_open_binary below refuses this too, but only as "not a single-link
-        # regular file" carrying a backend_error about an *output* file. Name the
-        # real reason here: no configuration key relaxes workspace containment,
-        # so a caller told "regular file" would keep retrying a path that can
-        # never work.
+        # safe_open_binary below refuses this too, and no longer as a symlink or
+        # a regular-file claim: `_validated_absolute_file_path`, the first check
+        # it makes, answers a path outside the workspace with "Path leaves the
+        # workspace." That sentence is lost a few lines further down, where every
+        # refusal out of the guarded open is folded into "must be a single-link
+        # regular file that can be opened safely" with the real reason left in
+        # backend_error. Name it here instead: no configuration key relaxes
+        # workspace containment, so a caller told "regular file" would keep
+        # retrying a path that can never work.
         if not validation["within_workspace"]:
             return self._validation_error(
                 "Firmware artifact is outside workspace_root. Artifact paths must stay inside the configured workspace; no permission relaxes this.",
@@ -188,6 +193,9 @@ class ArtifactManager:
                     "side_effect_status": "not_started",
                     "retry_safe": True,
                 }
+            permanent = self._permanent_path_refusal(source, error, tool)
+            if permanent is not None:
+                return permanent
             return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after validation.", "backend_error": str(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
 
         temporary_path: Path | None = None
@@ -252,6 +260,60 @@ class ArtifactManager:
             if staging_directory is not None:
                 with suppress(OSError):
                     staging_directory.rmdir()
+
+    def _permanent_path_refusal(self, source: Path, error: ConfigError | OSError, tool: str) -> JsonObject | None:
+        """The guarded read's own refusal, wherever no retry can lift it.
+
+        `artifact_changed` with `retry_safe: true` is the right answer for a file
+        swapped between validation and staging: build it again or validate it
+        again, and the next attempt goes through. It is the wrong answer for the
+        two refusals that are about the configured workspace rather than about
+        the file. A workspace whose spelling resolves somewhere else, which is
+        what an MSIX AppContainer does to a project under a virtualized
+        `%LOCALAPPDATA%`, refuses every read under it for as long as the
+        configuration names that spelling; an artifact validated under one
+        workspace and staged under another leaves the second one lexically.
+        Neither moves because a caller tries again, so a retryable answer there
+        invites a retry that cannot succeed, once and then forever.
+
+        The workspace decides it, not the artifact's own parent, because
+        redirection is a property of the tree: a root that resolves to itself is
+        outside a redirected one, and a root that does not takes every path under
+        it with it. An ancestor below a healthy workspace that becomes a symlink
+        resolves elsewhere too, and that one is the mid-swap the retryable answer
+        was written for, so it keeps it.
+
+        Both spellings the refusal carries come across with it: `path` is what
+        the configuration names, `resolved_parent` is where it lands, and the
+        resolved one is the answer, being the spelling that works.
+        """
+        if not isinstance(error, ConfigError) or error.error_type != "unsafe_configured_path":
+            return None
+        if is_path_within_frozen(source, Path(self.config.work_dir)) and self._workspace_resolves_to_itself():
+            return None
+        return {
+            "tool": tool,
+            **error.to_dict(),
+            "side_effect_committed": False,
+            "side_effect_status": "not_started",
+            "retry_safe": False,
+        }
+
+    def _workspace_resolves_to_itself(self) -> bool:
+        """Whether the configured workspace is outside any redirected tree.
+
+        `resolve_stable_directory` is that rule, asked rather than restated: the
+        record walk's hand-rolled copy of this same comparison is what #361 took
+        out, so that the question one caller asks and the rule every enforcer
+        applies cannot drift apart. It answers a workspace this host cannot
+        resolve at all the same way, and correctly: that is a configured root no
+        retry repairs either.
+        """
+        try:
+            resolve_stable_directory(Path(self.config.work_dir), field="workspace_root")
+        except ConfigError:
+            return False
+        return True
 
     def resolve_artifact_id(self, artifact_id: str, tool: str = "flash_firmware") -> JsonObject:
         if not self.config.artifacts.allow_upload:
