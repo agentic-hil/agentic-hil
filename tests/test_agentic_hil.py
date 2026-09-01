@@ -7,6 +7,7 @@ import posixpath
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -6205,6 +6206,100 @@ open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
     finally:
         if child.poll() is None:
             child.kill()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup regression")
+def test_process_cleanup_takes_an_empty_group_over_a_signal_it_could_not_deliver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The teardown signal that fails because there is nobody left to signal.
+
+    Darwin answers EPERM, not ESRCH, for a group the kernel still knows but whose
+    remaining members are all zombies: its group iterator skips zombies, and a
+    pass that signalled nobody is reported as a permission failure under POSIX
+    conformance rather than as an empty group. Every teardown here walks through
+    that state by design, so the delivery error was being raised over a tree that
+    was already gone, and the session close above it turned that into a helper
+    that "remains registered for cleanup retry": an operator sent after a process
+    that is not there, and a bus held for it.
+
+    The sequence is replayed as injected answers rather than as timing, so it
+    reproduces on any POSIX host and the ending is decided by the code: the child
+    is gone, the signal is refused, and the membership question answers empty.
+    Empty is the same positive confirmation the delivered path returns on, so
+    this returns and the record is forgotten.
+    """
+    child = spawn_managed_process([sys.executable, "-c", "pass"])
+    child.wait(timeout=30)
+    attempted: list[int] = []
+
+    def killpg_as_macos_answered(pgid: int, sig: int) -> None:
+        assert pgid == child.pid
+        if sig == 0:
+            # The membership question: the reaper has been past, so nothing is left.
+            raise ProcessLookupError()
+        attempted.append(sig)
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(process_module.os, "killpg", killpg_as_macos_answered)
+
+    terminate_process_tree(child, 0.1)
+
+    assert attempted == [signal.SIGTERM]
+    assert all(record.child is not child for record in process_module.managed_processes())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup regression")
+def test_process_cleanup_reports_a_signal_it_could_not_deliver_to_a_group_that_stays(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of the same question, and the one that must keep failing.
+
+    Here the group answers the membership probe the same refusal for the whole
+    wait, which is a member that is there and was not stopped. Nothing about the
+    tolerance above may soften that: the report still names the pid and the signal
+    that did not land, and the record stays registered so the sweep retries it.
+    """
+    child = spawn_managed_process([sys.executable, "-c", "import time; time.sleep(30)"])
+    real_killpg = process_module.os.killpg
+    refusing = True
+
+    def killpg_refusing_everything(pgid: int, sig: int) -> None:
+        if not refusing:
+            real_killpg(pgid, sig)
+            return
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(process_module.os, "killpg", killpg_refusing_everything)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        terminate_process_tree(child, 0.1)
+
+    assert str(excinfo.value) == (
+        f"Could not signal process group {child.pid} with SIGTERM while killing pid {child.pid}, "
+        "and the group still had a member after a 0.1s wait."
+    )
+    assert [record.state for record in process_module.managed_processes() if record.child is child] == ["cleanup_pending"]
+    refusing = False
+    terminate_process_tree(child, 5.0)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup regression")
+def test_process_cleanup_takes_an_already_gone_group_that_answers_esrch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same already-gone tree under the answer Linux gives for it.
+
+    Holds either side of the tolerance above, and is here so it keeps holding:
+    ESRCH from the signal has always meant the group is empty, and reading it as
+    anything else would break every teardown of a child that exited on its own.
+    """
+    child = spawn_managed_process([sys.executable, "-c", "pass"])
+    child.wait(timeout=30)
+
+    def killpg_as_linux_answered(pgid: int, sig: int) -> None:
+        assert pgid == child.pid
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(process_module.os, "killpg", killpg_as_linux_answered)
+
+    terminate_process_tree(child, 0.1)
+
+    assert all(record.child is not child for record in process_module.managed_processes())
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object regression")

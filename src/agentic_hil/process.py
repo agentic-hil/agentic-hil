@@ -249,18 +249,62 @@ def _terminate_process_tree(child: subprocess.Popen, timeout_s: float) -> None:
         _forget_process(child)
         return
 
-    with suppress(ProcessLookupError):
-        os.killpg(child_pgid, signal.SIGTERM)
-    if _wait_for_process_group(child, child_pgid, timeout_s):
-        _forget_process(child)
-        return
-    with suppress(ProcessLookupError):
-        os.killpg(child_pgid, signal.SIGKILL)
-    if not _wait_for_process_group(child, child_pgid, timeout_s):
-        _terminate_single_child(child, timeout_s)
-        if _process_group_exists(child_pgid):
-            raise RuntimeError("Process group remained active after SIGKILL.")
+    # SIGTERM for a clean stop, then SIGKILL for whatever ignored it, and after
+    # each the membership question: has the group actually emptied.
+    #
+    # A signal that could not be delivered is not by itself the failure, and
+    # letting that error out before asking anything else is what made a torn-down
+    # helper look like a survivor. Darwin answers EPERM, not ESRCH, for a group
+    # the kernel still knows but whose remaining members are all zombies: its
+    # group iterator skips zombies, and a pass that signalled nobody is reported
+    # as a permission failure under POSIX conformance rather than as an empty
+    # group. Every teardown here walks through that state by design, because the
+    # leader is a zombie from the moment it dies until the wait below collects it
+    # and a descendant the SIGTERM killed is one until init collects it. So the
+    # delivery error routinely describes a tree that is already gone, and the
+    # session close above it turned that into a helper that "remains registered
+    # for cleanup retry": an operator sent looking for a process that is not
+    # there, and a bus held for it.
+    #
+    # The question that decides the answer is the membership one, so it is asked
+    # first either way and the delivery error is reported only when the group also
+    # refuses to read empty. That swallows nothing: a group holding a live member
+    # this run may not signal refuses the liveness probe the same way for the
+    # whole wait, and still raises below, naming the pid and the signal.
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        delivered = _signal_process_group(child_pgid, sig)
+        if _wait_for_process_group(child, child_pgid, timeout_s):
+            _forget_process(child)
+            return
+        if not delivered:
+            raise RuntimeError(
+                f"Could not signal process group {child_pgid} with {signal.Signals(sig).name} while killing pid {child.pid}, "
+                f"and the group still had a member after a {max(0.1, timeout_s):g}s wait."
+            )
+    _terminate_single_child(child, timeout_s)
+    if _process_group_exists(child_pgid):
+        raise RuntimeError("Process group remained active after SIGKILL.")
     _forget_process(child)
+
+
+def _signal_process_group(pgid: int, sig: int) -> bool:
+    """Signal every process in the group, and say whether anything was reached.
+
+    True when the signal was delivered or the group was already gone: both mean
+    there is nothing this call failed to reach. False when it could not be
+    delivered (``PermissionError`` or another ``OSError``), which says only that
+    nothing in the group was signalled, not that something is still in it. On
+    Darwin it is also the answer for a group whose remaining members are all
+    zombies, so the caller settles it by asking whether the group still has a
+    member rather than by assuming one is there: see :func:`_terminate_process_tree`.
+    """
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
 
 
 def _child_process_group(child: subprocess.Popen) -> int | None:
@@ -300,6 +344,17 @@ def _wait_for_process_group(child: subprocess.Popen, pgid: int, timeout_s: float
 
 
 def _process_group_exists(pgid: int) -> bool:
+    """Whether the process group still has a member.
+
+    ``killpg(pgid, 0)`` sends no signal; it asks the membership question. Only
+    ``ProcessLookupError``, the empty group, is the absence a teardown may build
+    on. ``PermissionError`` means a member is there that this run may not signal,
+    which is the opposite of gone, and that is why the same EPERM reads as
+    "reached nobody" in :func:`_signal_process_group` and as "still there" here:
+    one is being asked whether the signal landed, this one whether anything is
+    left. A group that answers this way for a whole wait is the genuine
+    cannot-signal case and is reported as one.
+    """
     try:
         os.killpg(pgid, 0)
         return True

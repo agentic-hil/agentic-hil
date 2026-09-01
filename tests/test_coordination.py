@@ -14,6 +14,7 @@ import pytest
 import yaml
 from conftest import DEFAULT_TEST_PERMISSIONS, write_config
 
+from agentic_hil import process as process_module
 from agentic_hil.bridge import BRIDGE_PROTOCOL_VERSION, BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.can import CanBusService, normalize_received_frames, payload_frame
 from agentic_hil.cli import debugger_probes, entrypoint
@@ -42,9 +43,29 @@ from agentic_hil.process import (
 from agentic_hil.report import overall_success, read_last_report, report_state_path, write_report
 from agentic_hil.tools import AgenticHILToolService
 
+FAKE_CAN_BRIDGE = Path(__file__).parent / "fixtures" / "fake_can_bridge.py"
+
 
 def config_for(workspace: Path, **kwargs):
     return load_config(str(write_config(workspace, **kwargs)))
+
+
+def process_can_config(workspace: Path):
+    """A CAN bus whose adapter is a real child process, not a stub in this one.
+
+    The teardown under test is a signal to that child's process group, so the
+    child has to exist for the question to mean anything.
+    """
+    return config_for(
+        workspace,
+        can_buses_yaml=(
+            "can_buses:\n"
+            "  bench:\n"
+            '    adapter: "process"\n'
+            '    channel: "vcan0"\n'
+            f'    executable: "{FAKE_CAN_BRIDGE.as_posix()}"\n'
+        ),
+    )
 
 
 def test_coordinator_creates_no_state_before_hardware_is_coordinated(tmp_path: Path) -> None:
@@ -191,6 +212,86 @@ def test_process_cleanup_is_scoped_to_service_owner() -> None:
             terminate_process_tree(first, 5)
         if second.poll() is None:
             terminate_process_tree(second, 5)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup regression")
+def test_can_session_stop_closes_a_helper_whose_group_refuses_the_signal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole pile-up, end to end, over a helper that is already gone.
+
+    Darwin answers EPERM, not ESRCH, for a group whose remaining members are all
+    zombies, and the teardown used to let that error out before asking whether
+    anything was left. One refused signal then became a CAN session that "could
+    not be closed and remains registered for cleanup retry", a bus held for it,
+    and a second report of the same non-survivor from the process sweep behind
+    it. The answers are injected rather than waited for, so the state that only
+    macOS produces is reachable from any POSIX host.
+
+    After the fix that state means what it says: the session close reports a
+    helper still registered only when the group refuses the membership question
+    too, which is a process that is demonstrably there.
+    """
+    service = CanBusService(process_can_config(tmp_path))
+    started = service.session_start("bench", clear_rx_queue=False)
+    assert started["ok"] is True
+    child = service.sessions["bench"].adapter_session.child
+
+    def killpg_as_macos_answered(pgid: int, sig: int) -> None:
+        if sig == 0:
+            # The membership question, once the bridge has exited and been reaped.
+            raise ProcessLookupError()
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(process_module.os, "killpg", killpg_as_macos_answered)
+
+    stopped = service.session_stop("bench")
+    service.close()
+
+    assert stopped["ok"] is True
+    assert stopped["summary"] == "CAN bus session stopped."
+    assert child.poll() is not None
+    assert "bench" not in service.sessions
+    assert all(record.child is not child for record in process_module.managed_processes())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup regression")
+def test_can_session_stop_still_registers_a_helper_whose_group_will_not_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The retry path, unchanged, for the close that genuinely did not confirm.
+
+    The group refuses the membership question for the whole wait here, so this
+    run cannot show that its helper stopped. That is what the registered-for-retry
+    report is for, and it still fires: the session stays in the service, the
+    record stays in the process registry, and the sweep behind it reports the pid
+    and the signal that did not land rather than a bare errno.
+    """
+    service = CanBusService(process_can_config(tmp_path))
+    started = service.session_start("bench", clear_rx_queue=False)
+    assert started["ok"] is True
+    child = service.sessions["bench"].adapter_session.child
+    real_killpg = process_module.os.killpg
+    refusing = True
+
+    def killpg_refusing_everything(pgid: int, sig: int) -> None:
+        if not refusing:
+            real_killpg(pgid, sig)
+            return
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(process_module.os, "killpg", killpg_refusing_everything)
+    monkeypatch.setattr("agentic_hil.bridge.CHILD_REAP_TIMEOUT_S", 0.1)
+
+    stopped = service.session_stop("bench")
+
+    assert stopped["ok"] is False
+    assert stopped["error_type"] == "can_adapter_close_failed"
+    assert stopped["summary"] == "CAN bus session could not be closed and remains registered for cleanup retry."
+    assert "bench" in service.sessions
+    assert cleanup_registered_processes(0.1, owner_marker=service.coordinator.owner_marker) == [
+        f"pid {child.pid}: RuntimeError: Could not signal process group {child.pid} with SIGTERM "
+        f"while killing pid {child.pid}, and the group still had a member after a 0.1s wait."
+    ]
+
+    refusing = False
+    service.close()
 
 
 @pytest.mark.parametrize(
