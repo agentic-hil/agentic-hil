@@ -3,8 +3,8 @@
 A server parses its configuration once and enforces that one document until it
 exits. That rule was written for the **permission** half, and it is right there:
 grants were taken as a whole, and a document that appeared underneath a running
-server may not widen them. It also hit the **description** half — probe serials,
-COM devices, baudrates, ``target.*`` — for which it was never meant, and that is
+server may not widen them. It also hit the **description** half (probe serials,
+COM devices, baudrates, ``target.*``) for which it was never meant, and that is
 what an operator hit every time a board was plugged in after the file was
 written: the file said the right thing, the server said the old thing, and the
 only way across was a restart of the agent's MCP server.
@@ -12,7 +12,7 @@ only way across was a restart of the agent's MCP server.
 This module is the description-only reload, and every restriction the original
 decision put on a reload still holds:
 
-* It happens only when it is asked for by name — ``project_config_reload_description``
+* It happens only when it is asked for by name: ``project_config_reload_description``
   over MCP, ``agentic-hil config-reload`` at a shell. Never automatically, never
   as a side effect of noticing that the file moved.
 * It is refused while this server holds hardware, and while an incident on this
@@ -21,7 +21,7 @@ decision put on a reload still holds:
   moving it underneath them repoints the names an operator is about to be asked
   to physically check.
 * **The permissions are not re-read at all.** Not narrowed, not compared,
-  not adopted — the permission state after a reload is the byte-for-byte one
+  not adopted: the permission state after a reload is the byte-for-byte one
   parsed at startup. A device the loaded policy has never heard of arrives with
   the dataclass defaults, which are all ``False``, so a board that appears on
   disk can be probed and read (exclusivity, not a grant, is what protects a read
@@ -40,13 +40,13 @@ decision put on a reload still holds:
 
 The reload re-reads four sections and nothing else:
 
-``target``, ``debuggers``, ``com_ports``, ``can_buses`` — what hardware this
+``target``, ``debuggers``, ``com_ports``, ``can_buses``: what hardware this
 bench *is*. Within an entry the ``permissions:`` block is skipped; everything
 else in it comes from disk.
 
 Everything outside those four stays exactly as it was loaded, and the reason is
 the rule about a field that is both: ``debug``, ``artifacts``, ``validation`` and
-``recovery`` each mix description with authority in one section —
+``recovery`` each mix description with authority in one section:
 ``debug.allow_all_symbols`` and ``artifacts.allow_upload`` are grants sitting
 directly on a section, ``artifacts.allowed_roots`` and ``debug.allowed_symbols``
 are allowlists that decide what may be flashed and what may be read out of a
@@ -69,7 +69,7 @@ Two more that are refused by name, for the same reason:
 ## What a reload leaves visible
 
 Afterwards the description in force *is* the file's, so ``config_status`` reports
-that file as unchanged — a server that had just taken the disk's description and
+that file as unchanged: a server that had just taken the disk's description and
 still called it stale would be lying about its own state. What does not
 disappear is the other half: if the file's permission blocks differ from the ones
 this server is enforcing, ``config_status`` carries ``permissions_source``, which
@@ -178,7 +178,7 @@ def moved_paths(before: JsonObject, after: JsonObject) -> list[str]:
     """Which dotted paths two views disagree about, in one sorted list.
 
     A path present on one side only counts as a disagreement, which is what makes
-    an entry that appeared on disk — or one that was deleted from it — show up as
+    an entry that appeared on disk (or one that was deleted from it) show up as
     the change it is rather than as nothing.
     """
     left, right = _flatten(before), _flatten(after)
@@ -211,7 +211,7 @@ def _carried_permissions(loaded_entries: dict[str, Any], name: str, empty: Any) 
     ``empty`` is the all-``False`` dataclass, and it is what an entry the loaded
     policy has never seen gets. Absent is denied: there is no grant here to carry
     over, so none is invented, and every permission check downstream reads these
-    same objects — so a board that appeared on disk is denied by the same gate
+    same objects, so a board that appeared on disk is denied by the same gate
     that denies a board an operator switched off.
     """
     entry = loaded_entries.get(name)
@@ -223,14 +223,14 @@ def merged_description(loaded: AgenticHILConfig, disk: AgenticHILConfig) -> Agen
 
     Built with ``dataclasses.replace`` off the loaded policy, so every section
     this reload does not touch is carried over by construction rather than by
-    being copied field by field — a section added to the configuration later is
+    being copied field by field: a section added to the configuration later is
     then *not* reloaded by default, which is the safe direction for a decision
     that has to be made deliberately per section.
 
     Raises ``ConfigError`` when the composition does not pass the validations
     that depend on which permissions apply. The disk document was validated
     under the grants *it* carries, and this object pairs its entries with the
-    grants parsed at startup — a pairing no load has seen. Under version 1 the
+    grants parsed at startup: a pairing no load has seen. Under version 1 the
     difference is not cosmetic: an entry whose grants on disk are all false
     reaches no hardware, so pinning skipped its OpenOCD script check, and the
     startup grants put a real probe behind exactly those unchecked scripts. The
@@ -251,8 +251,8 @@ def merged_description(loaded: AgenticHILConfig, disk: AgenticHILConfig) -> Agen
     # The binding follows the name this server is already driving, not the file's
     # ordering: a second board appearing in the file must not repoint a server
     # that is bound to the first. It moves only when the name it held is no
-    # longer there, and then only where there is exactly one board it could mean
-    # — which is also how a bench that configured no debugger at all picks up the
+    # longer there, and then only where there is exactly one board it could mean,
+    # which is also how a bench that configured no debugger at all picks up the
     # first one somebody plugs in.
     debugger_id = loaded.debugger_id if loaded.debugger_id in debuggers else (next(iter(debuggers)) if len(debuggers) == 1 else None)
     debugger = debuggers.get(debugger_id) if debugger_id is not None else None
@@ -272,7 +272,7 @@ def merged_description(loaded: AgenticHILConfig, disk: AgenticHILConfig) -> Agen
         # where they came from: it stays on the document parsed at startup for
         # the life of this process, however many reloads run over it. Whether
         # the divergence is worth reporting is a separate, re-answered question
-        # — does this file *state* the grants being enforced — and it is kept in
+        # (does this file *state* the grants being enforced), and it is kept in
         # its own field. Folding the two together by moving the digest onto a
         # file whose grants happened to match made the next reload that did find
         # a difference name that intermediate file as the permission source, and
@@ -297,7 +297,7 @@ def reload_description(
     """Re-read this bench's description, or say why nothing was re-read.
 
     Returns the configuration to swap in and the answer, or ``None`` and a
-    refusal. Splitting it that way keeps the decision — what may be adopted —
+    refusal. Splitting it that way keeps the decision (what may be adopted)
     out of the service, which owns the other half: when the swap happens and what
     has to be told about it.
     """
@@ -442,14 +442,14 @@ def _quarantine_refusal(existing: AgenticHILConfig, quarantine: JsonObject) -> J
         "path": existing.config_path,
         "workspace_root": existing.workspace_root,
         "next_steps": [
-            "Resolve the incident first: `hardware_lease_status` reports it, and it carries `quarantine_guidance` — "
+            "Resolve the incident first: `hardware_lease_status` reports it, and it carries `quarantine_guidance`: "
             "what was attempted, what is confirmed, what is unknown, and the physical check the operator performs "
             "before `agentic-hil recover --confirm-safe-state --quarantine-id <id>`.",
             "Repeat this call after the recovery. Nothing here was done, so there is nothing to undo and nothing that "
             "makes the second attempt different from this one.",
         ],
         **NOT_STARTED,
-        # This call provably reached no hardware — it reads a file — so repeating
+        # This call provably reached no hardware (it reads a file), so repeating
         # it once the incident is cleared is safe. `quarantined` above is a fact
         # about the bench, not a claim that this call put it there.
         "retry_safe": True,
@@ -457,7 +457,7 @@ def _quarantine_refusal(existing: AgenticHILConfig, quarantine: JsonObject) -> J
 
 
 def _unloadable_refusal(existing: AgenticHILConfig, error: Exception) -> JsonObject:
-    """The file is gone, will not open, or will not load — said in its own terms.
+    """The file is gone, will not open, or will not load, said in its own terms.
 
     The vocabulary is the one ``config_status`` already uses for those three
     states, and the block is carried so the state and the refusal cannot
@@ -501,7 +501,7 @@ def _uncomposable_refusal(existing: AgenticHILConfig, error: ConfigError) -> Jso
     problem and telling an operator to repair it would send them at a document
     that is already valid on its own terms. What failed is the pairing: a check
     the file was exempt from under its own grants applies again once this
-    server's wider grants are put behind its entries — an OpenOCD entry whose
+    server's wider grants are put behind its entries: an OpenOCD entry whose
     scripts were never validated because nothing in that file could drive it.
     Adopting it would be the split this reload exists to avoid, so nothing was
     re-read and the policy in force is untouched.

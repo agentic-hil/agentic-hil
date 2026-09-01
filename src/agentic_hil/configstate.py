@@ -1,8 +1,8 @@
 """Whether the configuration this server enforces is still the one on disk.
 
 A running server parses the authoritative configuration once and answers out of
-it until it exits. That is deliberate — a policy must not change under a held
-board — but it was silent, and silence is what made it a defect: an operator who
+it until it exits. That is deliberate (a policy must not change under a held
+board), but it was silent, and silence is what made it a defect: an operator who
 switched a debugger from `stlink` to `pyocd` got `pyocd` from the CLI and
 `stlink` from `debugger_info` in the same minute, with nothing in either answer
 to say which of them was reading the file that exists now.
@@ -15,7 +15,7 @@ This module answers only that question, and it answers it about one file: the
 one this server loaded. Whether that file is the workspace's authoritative
 location at all is a different condition with a different remedy, decided by
 ``configwrite._authoritative_path``, and the two are deliberately not folded into
-one message — "your file changed" and "you are bound to the wrong file" send an
+one message: "your file changed" and "you are bound to the wrong file" send an
 operator to different places.
 
 Nothing here reloads anything. A changed file is reported and still not obeyed,
@@ -25,7 +25,7 @@ the file is ``configwrite.granted_rights``, which takes the narrower of the two
 sides and can therefore only ever take a right away.
 
 One thing does change what this module compares against, and it is not automatic:
-``agentic_hil.configreload`` re-reads the *description* — devices, not grants —
+``agentic_hil.configreload`` re-reads the *description* (devices, not grants)
 when it is asked for by name, and moves ``config_digest`` onto the document it
 took. After that, "unchanged" is a claim about the description in force, and the
 permission half of the same configuration may be older. That is not hidden here:
@@ -42,8 +42,8 @@ has to name two documents rather than one. ``description_source`` and
 ``loaded_at`` stays the startup parse and the pair would otherwise read as one
 snapshot.
 
-Nothing here says what a restart would do either. That claim used to be made —
-`changed` meant "a restart loads what is on disk now" — and holding it needed a
+Nothing here says what a restart would do either. That claim used to be made
+(`changed` meant "a restart loads what is on disk now"), and holding it needed a
 candidate validation that matched startup exactly: two code paths that have to
 stay congruent, where every difference between them is a defect, and four were
 found in four review rounds. The claim was cut back to the observation that
@@ -76,7 +76,7 @@ STATE_CHANGED = "changed"
 # before there is anything to read at all, and the policy in force now exists
 # only in this process.
 STATE_MISSING = "missing"
-# It is there and could not be read — a permission, a device error, bytes that
+# It is there and could not be read: a permission, a device error, bytes that
 # are no longer UTF-8. Unknown, and unknown is not the same as unchanged.
 STATE_UNREADABLE = "unreadable"
 # This configuration did not come from a file this process read, so there is
@@ -91,8 +91,8 @@ STALE_STATES = frozenset({STATE_CHANGED, STATE_MISSING, STATE_UNREADABLE})
 RUNNING_SERVER_SCOPE = "running_server"
 
 # Which document the description in force came from, and therefore which
-# document `loaded_digest` names. `loaded_at` is always the startup parse — that
-# is when the permissions were taken and they are never taken again — so without
+# document `loaded_digest` names. `loaded_at` is always the startup parse (that
+# is when the permissions were taken and they are never taken again), so without
 # this the two fields sit under one word while naming two different snapshots.
 DESCRIPTION_FROM_STARTUP = "startup"
 DESCRIPTION_FROM_RELOAD = "description_reload"
@@ -103,7 +103,7 @@ def read_config_snapshot(path: str | Path) -> tuple[bytes | None, Exception | No
 
     Exists so that a caller which needs both the status of a file and the
     document in it takes *one* snapshot and answers out of it. Two reads can
-    straddle an edit, and then one answer describes two versions of the file —
+    straddle an edit, and then one answer describes two versions of the file:
     `state: unchanged` beside values that came from a document that is not the
     unchanged one.
     """
@@ -172,7 +172,7 @@ def config_status(config: AgenticHILConfig | None, *, snapshot: tuple[bytes | No
     # Decoded, deliberately not to produce the digest: the digest is over the
     # exact bytes, because that is what was hashed at load time. The decode is
     # the same one `load_config` performs, and bytes that are not text are a file
-    # that cannot be compared at all rather than one that differs — the same
+    # that cannot be compared at all rather than one that differs: the same
     # class of answer as a file that will not open.
     try:
         raw.decode("utf-8")
@@ -239,7 +239,7 @@ def _permissions_source(config: AgenticHILConfig) -> JsonObject:
     """Whether the grants in force came from a different document than the description.
 
     Empty for every configuration that was parsed in one piece, which is every
-    one this process loads from a file — both digests are then the same bytes and
+    one this process loads from a file: both digests are then the same bytes and
     there is nothing to distinguish. They come apart only through a description
     reload (``agentic_hil.configreload``) whose file also carried different
     permissions, and then the divergence is exactly what must not disappear: the
@@ -257,7 +257,7 @@ def _permissions_source(config: AgenticHILConfig) -> JsonObject:
     ``permissions_digest`` never moves off the startup document, so the digest
     and ``loaded_at`` below are always the same snapshot. What suppresses the
     block is the reload's own answer to whether the description in force states
-    the grants being enforced (``permissions_match_description``) — a comparison,
+    the grants being enforced (``permissions_match_description``): a comparison,
     not a claim about provenance, and the two are deliberately not the same
     field.
     """
@@ -284,8 +284,8 @@ def _is_missing(error: Exception) -> bool:
 
     Only the error that originated says so. An earlier version asked
     ``os.path.lexists`` as a second opinion, and that call answers ``False`` for
-    every stat failure it meets — an ancestor that is not a directory, a
-    directory that cannot be traversed — so a file that exists and needs its path
+    every stat failure it meets (an ancestor that is not a directory, a
+    directory that cannot be traversed), so a file that exists and needs its path
     repaired was reported as one that had been deleted, with restore-the-file
     remediation that fixes nothing.
     """
@@ -343,7 +343,7 @@ def config_stale(status: JsonObject) -> bool:
 def with_config_status(result: JsonObject, status: JsonObject, *, prominent: bool = False) -> JsonObject:
     """Attach what this answer was decided by.
 
-    ``prominent`` is for the two answers the issue names — `debugger_info` and
+    ``prominent`` is for the two answers the issue names: `debugger_info` and
     `doctor`. They carry the block whatever the state is, so that "this is the
     configuration in force" is a positive statement in the place an operator
     compares two backends, and a divergence is said in the summary rather than

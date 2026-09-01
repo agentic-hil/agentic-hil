@@ -1,7 +1,7 @@
 """Carrying attached hardware into a configuration that was written without it.
 
 Discovery used to happen exactly once, at ``init`` time. The most common way to
-set a bench up — install the tool, then plug the board in — therefore produced a
+set a bench up (install the tool, then plug the board in) therefore produced a
 placeholder file (``probe_id: null``, ``executable: null``, a placeholder target)
 and no way back into it. In the session that produced this, that ended with an
 agent printing a 24-character probe serial for a person to retype, which is the
@@ -16,8 +16,8 @@ what a file written on another machine, or before the toolchain was installed,
 cannot state. Every one of them falls in the description half of the
 configuration write, so this path cannot reach a ``permissions:`` block at all.
 
-**It takes no values from its caller.** Arguments *select* — which probe of
-several, which entry receives them — and never supply. The values come from
+**It takes no values from its caller.** Arguments *select* (which probe of
+several, which entry receives them) and never supply. The values come from
 what is attached to this machine, exactly as ``project_config_create``'s do.
 
 **It never overwrites a value somebody chose.** A field is carried only when the
@@ -29,7 +29,7 @@ retyping it removes.
 
 **It reads the board the way every other read of a board happens.** Enumerating
 probes and connecting in HOTPLUG mode is a hardware read, and a read still
-perturbs — an SWD attach halts the core. What answers that in this repository is
+perturbs: an SWD attach halts the core. What answers that in this repository is
 not a grant but exclusivity, so this takes the same machine-wide locks
 ``debugger_probes_list`` takes, writes the same audit record, and quarantines the
 same way if the read raises. Both the MCP tool and ``agentic-hil adopt-hardware``
@@ -138,7 +138,7 @@ def is_unset(value: Any, section: str, field: str) -> bool:
 
     Three spellings of nothing, and no fourth: the key is absent or ``null``, it
     is an empty string, or it is exactly the placeholder the shipped skeleton
-    writes for that key — ``target.controller: "unknown-controller"`` is the one
+    writes for that key. ``target.controller: "unknown-controller"`` is the one
     that matters in practice. Anything else is a value somebody chose, including
     a wrong one, and this path does not get to decide it was a mistake."""
     if value is None:
@@ -170,7 +170,7 @@ def _choose_debugger(document: JsonObject, requested: str | None) -> tuple[str, 
     """Which debugger entry this is about, or a refusal that names the choice.
 
     With several probes configured and none named there is no entry this could
-    mean, and choosing one is how a serial lands on the wrong board — the same
+    mean, and choosing one is how a serial lands on the wrong board: the same
     rule `devices.debugger_device` follows for a run."""
     entries = _entries(document, "debuggers")
     if requested is not None:
@@ -200,8 +200,8 @@ def _choose_debugger(document: JsonObject, requested: str | None) -> tuple[str, 
 def discovered_port_names(matched_port: JsonObject | None) -> tuple[str, ...]:
     """Every name the discovered port answers to, stable spelling first.
 
-    A port has two on Linux — ``/dev/serial/by-id/usb-..._0669FF...-if02`` and
-    ``/dev/ttyACM0`` — and one on Windows. Both name one device, so an entry
+    A port has two on Linux (``/dev/serial/by-id/usb-..._0669FF...-if02`` and
+    ``/dev/ttyACM0``) and one on Windows. Both name one device, so an entry
     holding either of them is this port, and recognising that is what lets a
     configuration written before stable names existed be *re-spelled* rather than
     treated as somebody's deliberate choice of another device."""
@@ -214,7 +214,7 @@ def discovered_port_names(matched_port: JsonObject | None) -> tuple[str, ...]:
 def _names_discovered_port(value: object, port_names: tuple[str, ...]) -> bool:
     """Whether a configured `device` is one of the discovered port's spellings.
 
-    A path question, so case folds the way the host's own filesystem folds it —
+    A path question, so case folds the way the host's own filesystem folds it:
     `COM7` and `com7` are one port on Windows and `/dev/ttyACM0` and
     `/dev/ttyacm0` are two on Linux."""
     if not isinstance(value, str) or not value:
@@ -229,7 +229,7 @@ def _stabilises_device(current: object, device: str, port_names: tuple[str, ...]
     True in exactly one situation: the entry already names this very port, by a
     spelling the host can reassign, and the discovered spelling is one it cannot.
     Deliberately that narrow. It is not a licence to normalise the case of a name
-    somebody wrote, and it can never repoint an entry at a different device —
+    somebody wrote, and it can never repoint an entry at a different device:
     both would be adoption overruling an operator, which is the thing this whole
     path does not do.
 
@@ -245,11 +245,11 @@ def _choose_com_port(document: JsonObject, requested: str | None, port_names: tu
     """Which COM port entry receives the discovered device, if any.
 
     An entry that already names this device wins, so running this twice on a
-    bench with several ports is idempotent instead of ambiguous — and "names this
+    bench with several ports is idempotent instead of ambiguous, and "names this
     device" means any of the port's spellings, so the entry is still recognised
     on the run that upgrades its kernel name to the stable one. Otherwise: the
     named one, the only one, or a new one when there is none. Several ports and
-    no name is not resolved here — the caller is told to choose."""
+    no name is not resolved here: the caller is told to choose."""
     entries = _entries(document, "com_ports")
     if requested is not None:
         return requested, entries.get(requested)
@@ -308,7 +308,7 @@ def _adopted_identity_source(entry: JsonObject | None, device: str, serial: str,
 
     The first job is the declaration itself: an entry that will still carry no
     serial, no ``resource_id`` and no ``/dev/serial/by-id/...`` name gets the
-    honest name of what does identify it — ``vid_pid``, ``vid``, ``pid``, or
+    honest name of what does identify it: ``vid_pid``, ``vid``, ``pid``, or
     ``device`` when the adapter published nothing at all. That is the deliberate
     exception version 3 requires, written by the command that found out it
     applies rather than by hand.
@@ -318,7 +318,7 @@ def _adopted_identity_source(entry: JsonObject | None, device: str, serial: str,
     be replaced by one that does; adoption then fills the serial in, and a
     declaration left behind saying ``device`` would contradict the entry it sits
     in and refuse the file at load. So a declaration that has gone stale is
-    corrected — narrowly, and only towards what the entry's own keys now say. It
+    corrected: narrowly, and only towards what the entry's own keys now say. It
     is not a value adoption is overruling: it never was a choice, only a record.
 
     ``None`` when the entry needs no declaration and carries none, which is the
@@ -367,7 +367,7 @@ def _different_board(debugger_name: str, configured: str, discovered: str) -> Js
     ``target.controller``, the COM device and the backend executable all describe
     *that* board. Carrying the ones that happen to be unset while keeping a
     ``probe_id`` that names a different probe produces a configuration whose
-    debugger drives one Nucleo and whose UART talks to another — a file that
+    debugger drives one Nucleo and whose UART talks to another: a file that
     loads, passes `doctor`, and is wrong in the one way nobody would look for.
     So the disagreement is not a per-key `kept`: nothing is planned and nothing
     is written."""
@@ -491,13 +491,13 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
         # This entry carries its own `target:` block, and `bind_debugger` gives
         # that block to everything that runs on this probe. Writing the detected
         # controller into the top-level `target:` would therefore not reach this
-        # board at all — it would change the fallback the *other* entries use,
+        # board at all: it would change the fallback the *other* entries use,
         # which is a different board, from a call that named this one. The closed
         # key model has no `debuggers.<name>.target.*` key, so there is nowhere
         # correct to put it.
         #
         # That is a fact about where a value could go, not about what the value
-        # is — and the two were being conflated. Every override went to
+        # is, and the two were being conflated. Every override went to
         # `unavailable` with "set the discovered value yourself", including one
         # that already held exactly the discovered controller (nothing to do) and
         # one that deliberately held something else (an operator's choice this
@@ -533,7 +533,7 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
                     "discovered_value": controller,
                     "reason": (
                         f"`debuggers.{debugger_name}` has its own `target:` block naming a controller, and the attached "
-                        "board reports a different one. Somebody set that value, so adoption does not replace it — and "
+                        "board reports a different one. Somebody set that value, so adoption does not replace it, and "
                         "does not tell you to replace it either: a deliberate override and a stale one look the same from "
                         "here, and only the operator knows which this is."
                     ),
@@ -585,8 +585,8 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
         current_device = (port_entry or {}).get("device")
         if _stabilises_device(current_device, device, port_names):
             # The entry already names this very port, by its other spelling.
-            # Rewriting it is not replacing a value somebody chose — it is the
-            # same device, written down so it survives the next replug — so it
+            # Rewriting it is not replacing a value somebody chose (it is the
+            # same device, written down so it survives the next replug), so it
             # goes to `carried` rather than to `kept`, which is where the "keeps
             # working, and gets fixed on the next adopt-hardware" half of
             # the serial-port identity rule is actually implemented.
@@ -626,8 +626,8 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
         # The same record already carries the vendor and product ids, so they
         # cost nothing to write and they are what makes the serial mean a unit:
         # a USB serial is unique within a vendor and nowhere else.
-        # Reported exactly like the serial — carried, already current, or left
-        # alone — because they are the same kind of fact about the same entry.
+        # Reported exactly like the serial (carried, already current, or left
+        # alone) because they are the same kind of fact about the same entry.
         for field, discovered in (("vid", port_vid), ("pid", port_pid)):
             if discovered is None:
                 continue
@@ -649,8 +649,8 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
         # and the ids above, so an entry adopted from a cheap USB-serial bridge
         # satisfies version 3 without anybody hand-editing YAML.
         #
-        # Not written when the entry names hardware on its own — a serial, a
-        # `resource_id`, or a `/dev/serial/by-id/...` name — because there the
+        # Not written when the entry names hardware on its own (a serial, a
+        # `resource_id`, or a `/dev/serial/by-id/...` name) because there the
         # declaration would be a key that repeats what is already unambiguous.
         declared = _adopted_identity_source(port_entry, device, port_serial, port_vid, port_pid)
         current_declaration = (port_entry or {}).get("identity_source")
@@ -713,8 +713,8 @@ def project_config_adopt_hardware(
 ) -> JsonObject:
     """Read what is attached and carry its identity into the configuration.
 
-    ``coordinator`` is the caller's own — the MCP service's, so a hold it already
-    has is seen — and a caller that has none gets one for the length of this call.
+    ``coordinator`` is the caller's own (the MCP service's, so a hold it already
+    has is seen), and a caller that has none gets one for the length of this call.
     There is deliberately no way to run this without one: the read below talks to
     a board, and a board on this machine belongs to whoever holds it."""
     if coordinator is not None or existing is None:
@@ -731,7 +731,7 @@ def _guarded(workspace: Path, existing: AgenticHILConfig | None, arguments: Json
         return _adopt(workspace, existing, arguments, coordinator, open_holds=open_holds, actor=actor, via=via)
     except ConfigError as error:
         # Reading the document is the first thing this does, so a file that will
-        # not decode or will not parse arrives here — as a refusal that says so,
+        # not decode or will not parse arrives here, as a refusal that says so,
         # carrying the state of the configuration, rather than as an internal
         # error from underneath the MCP layer.
         return with_config_status({"tool": PROJECT_CONFIG_ADOPT, **error.to_dict(), **NOT_STARTED}, config_status(existing))
@@ -742,7 +742,7 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
         raise ConfigError("config_file_not_found", "This workspace has no Agentic HIL configuration to carry hardware into.", {"workspace_root": str(workspace)})
     # Before discovery, not only before the write. Enumerating probes and
     # connecting in HOTPLUG mode talks to the board, and a run holding it must not
-    # have something reach past it — the same reason a configuration write is
+    # have something reach past it: the same reason a configuration write is
     # refused here, one step earlier because this call touches hardware first.
     if open_holds:
         return _held_refusal(existing, open_holds)
@@ -895,7 +895,7 @@ def _optional_string(value: object) -> str | None:
 def _read_denied(existing: AgenticHILConfig, debugger_id: str, target_path: Path) -> JsonObject | None:
     """Refuse to read a probe a version 1 configuration keeps closed.
 
-    From version 2 on there is no read permission — exclusivity replaced it, and
+    From version 2 on there is no read permission: exclusivity replaced it, and
     the locks below are that exclusivity. A version 1 file still says whether its
     probe may be read at all, and `allow_probe: false` there means `probe_target`
     and `debugger_probes_list` are both refused. Adoption reads the same probe by
@@ -920,8 +920,8 @@ def _read_denied(existing: AgenticHILConfig, debugger_id: str, target_path: Path
         "workspace_root": existing.workspace_root,
         "next_step": (
             "This refusal is the answer to the request. Report it and name the permission that is denied, then stop. "
-            "You must not enable it, and you must not read the probe another way. Migrating this file to version 2 — "
-            "where reading needs no grant — is the operator's edit."
+            "You must not enable it, and you must not read the probe another way. Migrating this file to version 2 "
+            "(where reading needs no grant) is the operator's edit."
         ),
         "reference": CONFIG_SHAPE_URI,
         **remediation_fields("permission_denied"),
@@ -935,8 +935,8 @@ def configured_probe_resource(existing: AgenticHILConfig, debugger_id: str) -> l
 
     ``resource_id`` and ``probe_id`` name a physical unit and produce the same
     keys a run holding that board holds. The remaining fallbacks name a toolchain
-    — every unfilled skeleton on the host would derive one and the same
-    `probe:openocd` — so locking those would serialize two unrelated benches
+    (every unfilled skeleton on the host would derive one and the same
+    `probe:openocd`), so locking those would serialize two unrelated benches
     against each other while protecting neither, and none is returned.
 
     Every key the device carries, not just its primary: an entry naming both a
@@ -961,7 +961,7 @@ def discover_under_hardware_lease(
 ) -> tuple[JsonObject, JsonObject | None]:
     """Read the attached probe holding what a probe read holds.
 
-    Four things, and none of them is this path's invention — they are what
+    Four things, and none of them is this path's invention. They are what
     `debugger_probes_list` already does for the same two commands:
 
     * the audit trail is proven writable *before* the board is touched, so a
@@ -980,11 +980,11 @@ def discover_under_hardware_lease(
       locks taken and the leases quarantined, because what was said to that board
       is then unknown. A terminal record that cannot be committed comes after the
       locks are already back, so it raises the incident on the coordinator
-      instead — same effect on the next caller, which is that there is no next
+      instead: same effect on the next caller, which is that there is no next
       hardware call until an operator resolves it.
 
     ``tool`` names the caller in every result and record, and ``reason_prefix``
-    names it in a quarantine reason — the callers are `project_config_adopt_hardware`,
+    names it in a quarantine reason: the callers are `project_config_adopt_hardware`,
     `project_config_create` and `agentic-hil init`, and an incident
     has to say which one left it.
 
@@ -1023,7 +1023,7 @@ def discover_under_hardware_lease(
         discovery = discover_attached_hardware(probe_id=probe_id, before_connect=before_connect)
     except BaseException as error:
         # Fail closed. What reached the board is unknown, so the locks stay taken
-        # and an operator — or `agentic-hil recover` — owns the incident.
+        # and an operator (or `agentic-hil recover`) owns the incident.
         for lease in held:
             lease.quarantine(f"{reason_prefix}_discovery_exception", error)
         raise
@@ -1048,7 +1048,7 @@ def discover_under_hardware_lease(
             # failure and leaves the lease registered, blocking and quarantined.
             # Discarding that answer reported a clean read of a board this
             # process is still holding, and let the configuration write go ahead
-            # under it — the one place where "the hardware is fine now" has to be
+            # under it: the one place where "the hardware is fine now" has to be
             # a checked claim rather than an assumption.
             released = lease.release() and released
     status = _combined_status(held)
@@ -1073,8 +1073,8 @@ def _terminal_audit_refusal(
 ) -> JsonObject:
     """The locks came back clean and the record of that could not be written.
 
-    The leases are gone by the time this runs — released, deregistered, their
-    locks handed back — so there is nothing left to quarantine and the status they
+    The leases are gone by the time this runs (released, deregistered, their
+    locks handed back), so there is nothing left to quarantine and the status they
     ended in says `released`, `cleanup_required: false`, `quarantined: false`.
     Returning that beside `audit_failed_after_action` was two answers to one
     question: the summary said the bench needed an operator and every field a
@@ -1088,7 +1088,7 @@ def _terminal_audit_refusal(
     `cleanup_required` project record, which is what makes this survive the
     process: the next owner adopts it instead of finding a clean slate, and
     `agentic-hil recover` is the way out for both. A coordinator that cannot be
-    poisoned — already closed, project lock unavailable — is reported rather than
+    poisoned (already closed, project lock unavailable) is reported rather than
     swallowed, and the refusal stands either way."""
     resources = [str(resource) for resource in status.get("resources") or [] if isinstance(resource, str)]
     poison_error: str | None = None
@@ -1120,7 +1120,7 @@ def _terminal_audit_refusal(
         "retry_safe": False,
     }
     if poison_error is not None:
-        # The incident could not even be raised. Say so — the refusal is still a
+        # The incident could not even be raised. Say so: the refusal is still a
         # refusal, and an operator now has two things to look at rather than one.
         refusal["quarantine_error"] = poison_error
     return refusal
@@ -1130,7 +1130,7 @@ def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject,
     """Refuse, and make the audit trail say so.
 
     The read is written as an `ok: true`, `lease_state: active` report before the
-    release is attempted, which is right — the read happened. What was wrong was
+    release is attempted, which is right: the read happened. What was wrong was
     stopping there: the release then failed, this returned `resource_quarantined`,
     and nothing rewrote the record. `get_last_report` went on describing a clean
     active discovery and `classify_last_error` had no failure at all, so the two
@@ -1138,8 +1138,8 @@ def _refuse_after_failed_release(existing: AgenticHILConfig, record: JsonObject,
 
     So the terminal outcome is committed before it is returned. Committed
     unconditionally, unlike ``recommit_report_with_status``: that helper skips the
-    write when the lease states already agree, and here they can — a release can
-    report failure while leaving the lease's own state alone — and skipping is
+    write when the lease states already agree, and here they can (a release can
+    report failure while leaving the lease's own state alone), and skipping is
     exactly the hole being closed. `last_failure` is what this is for, and only a
     written failure report reaches it.
 
@@ -1175,14 +1175,14 @@ def _discovery_side_effect(discovery: JsonObject) -> JsonObject:
     ``bool(discovery.get("side_effect_committed", False))`` rendered a marker
     that was never set as the positive claim that nothing was committed, and the
     status beside it defaulted to `not_started` from the same absence. Absence
-    means unknown here as everywhere else — ``mark_side_effect`` turns a missing
+    means unknown here as everywhere else: ``mark_side_effect`` turns a missing
     marker into `side_effect_status: unknown` precisely because a backend that
     could not tell must not be read as one that said no.
 
     So an absent marker stays absent and the status says `unknown`. A discovery
     that stated its own status keeps it; one that stated only the marker gets the
     status ``mark_side_effect`` would give it. Unreachable from the discovery
-    path as it stands — every result it returns carries the marker — which is
+    path as it stands (every result it returns carries the marker), which is
     what makes the coercion worth removing rather than relying on.
     """
     committed = discovery.get("side_effect_committed")
@@ -1204,7 +1204,7 @@ def _release_refusal(discovery: JsonObject, status: JsonObject, tool: str) -> Js
 
     Nothing is written after this. The read itself succeeded, so its result is
     carried for the operator to read, but a configuration written now would be
-    written by a process holding quarantined hardware — and the answer would say
+    written by a process holding quarantined hardware, and the answer would say
     `ok: true` about a bench that needs `agentic-hil recover` before anything
     else touches it.
     """
@@ -1220,7 +1220,7 @@ def _release_refusal(discovery: JsonObject, status: JsonObject, tool: str) -> Js
         "hardware_discovery": discovery,
         "next_step": "Resolve the incident with `agentic-hil recover` once the bench is known to be in a safe state, then call this again.",
         # The read is what happened; the release is what did not. Both are said,
-        # and neither is inferred from the other — including where the discovery
+        # and neither is inferred from the other, including where the discovery
         # said neither.
         **_discovery_side_effect(discovery),
         "hardware_state": str(discovery.get("hardware_state") or "unknown"),
@@ -1242,8 +1242,8 @@ def _combined_status(held: list[HardwareLease]) -> JsonObject:
     """One lease status for however many locks this read had to take.
 
     The aggregate state is the worst of them, not the first non-`active` one. A
-    read takes two or three locks — the enumeration pseudo-resource and the
-    physical probe — and they are released independently, so "the first one that
+    read takes two or three locks (the enumeration pseudo-resource and the
+    physical probe), and they are released independently, so "the first one that
     is not active" was whichever came first in the list: with the enumeration
     lease released and the probe lease in `cleanup_required`, the result said
     `lease_state: released` beside `cleanup_required: true`. Callers are told to
