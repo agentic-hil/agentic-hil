@@ -113,10 +113,11 @@ CI_LOCK_ROOT_NAME = ".agentic-hil"
 CI_LOCK_NAME = "ci-linux.lock"
 # A second file beside the lock, and a different kind of thing: never a record,
 # never removed, holding nobody. Runs take a machine-wide OS lock on it for the
-# split second in which a dead lock is read, judged and replaced, so that step
-# is indivisible across every run on this machine. The record lock says *who*
-# holds the machine; this one serialises the one moment two runs could each undo
-# the other's takeover. See `_machine_wide_guard`.
+# split second in which the lock file is created, or a dead one read, judged and
+# replaced, so that step is indivisible across every run on this machine. The
+# record lock says *who* holds the machine; this one serialises the moments two
+# runs could each undo the other's takeover, or one read another's half-written
+# record. See `_machine_wide_guard`.
 CI_LOCK_GUARD_NAME = "ci-linux.lock.guard"
 # Bumped when a reader of this file could otherwise misread it. An unknown
 # version is never judged stale: a newer checkout of this repository running
@@ -474,13 +475,16 @@ def _lock_fd_exclusive(descriptor: int) -> None:
 def _machine_wide_guard(path: Path):
     """Hold the machine-wide guard for the length of the `with` block.
 
-    Reading the holder record, judging it dead and replacing it has to be one
-    indivisible step. It is not, on its own: two runs that both find the same
-    dead holder each remove the file and each create it, and the one that
-    returns first is holding a lock the second is about to delete out from under
-    it -- two containers on one daemon, the single outcome this file exists to
-    prevent. `O_EXCL` cannot close that window, because the loser's confirming
-    read comes after the winner has already been told it holds the lock.
+    Creating the lock file, reading the holder record, judging it dead and
+    replacing it has to be one indivisible step. It is not, on its own: two runs
+    that both find the same dead holder each remove the file and each create it,
+    and the one that returns first is holding a lock the second is about to
+    delete out from under it -- two containers on one daemon, the single outcome
+    this file exists to prevent. A plain create is no safer alone: it publishes
+    the path with `O_EXCL` an instant before it writes the record, and a
+    contender that reads in that instant sees an empty file and calls it stale.
+    `O_EXCL` cannot close either window, because the loser's confirming read
+    comes after the winner has already been told it holds the lock.
 
     So the takeover runs under an OS lock that only one run on the machine can
     hold at a time. It is deliberately not the record lock grown a second job:
@@ -522,11 +526,12 @@ class RunLock:
     crashed and whose pid has since been reused looks alive, and the next run
     queues instead of starting. It waits; it never runs twice.
 
-    The one step the record cannot make atomic on its own -- reading a holder,
-    judging it dead, and replacing it -- runs under a short-lived OS lock that
-    the kernel releases the instant this process exits (see
-    `_machine_wide_guard`). That guard is not the bench mutex and not the record
-    lock; it is held for the moment of a takeover and for nothing else.
+    Creating the file, reading a holder, judging it dead and replacing it are
+    the steps the record cannot make atomic on its own, and they run under a
+    short-lived OS lock that the kernel releases the instant this process exits
+    (see `_machine_wide_guard`). That guard is not the bench mutex and not the
+    record lock; it is held only while a run takes the lock or breaks a dead one,
+    never during the run itself.
     """
 
     def __init__(self, *, path: Path | None = None, root: Path | None = None, image: str = "", pytest_args: list[str] | None = None):
@@ -555,18 +560,20 @@ class RunLock:
         announced_at: float | None = None
         waited_from = time.monotonic()
         while True:
-            if self._create():
-                self._mark_held(announced_at, waited_from)
-                return
-            # A lock already exists. Reading it, judging its holder dead and
-            # replacing it must be one indivisible step across the machine, or
-            # two runs that both find the same dead holder each remove what the
-            # other just created and both start a container. The guard makes it
-            # atomic; the read below is fresh under the guard, so a lock a
-            # contender broke and took over between the failed create and here
-            # is seen as the live lock it now is, not the dead one it was.
             record = None
+            # Create, read, judge-stale and break all run under the one
+            # machine-wide guard. A create publishes the path with `O_EXCL` for
+            # the instant before it writes the record into it; taking the guard
+            # across that instant is what stops a contender from failing its own
+            # create, reading the half-made file, calling it stale, and breaking
+            # a lock whose creator is about to return holding it. No run writes
+            # this file except under the guard and no run reads it except under
+            # the guard, so a reader sees a whole record or no file, never the
+            # empty moment between a create and its write.
             with _machine_wide_guard(self.guard_path):
+                if self._create():
+                    self._mark_held(announced_at, waited_from)
+                    return
                 record = read_lock_record(self.path)
                 if record and record.get("owner_id") == self.record["owner_id"]:
                     # This run's own record, which it can only be reading because
@@ -585,11 +592,11 @@ class RunLock:
                     if self._create():
                         self._mark_held(announced_at, waited_from)
                         return
-                    # The break left the path free for a moment, and another
-                    # run's plain create -- the fast path above, which needs no
-                    # guard -- took it before ours did. That run holds the
-                    # machine now; re-read it on the next turn and wait for
-                    # whoever it is.
+                    # The break freed the path and this run's own create still
+                    # did not take it. No other run can have slipped in under the
+                    # guard, so this is the confirming read failing on the record
+                    # this run just wrote; loop, read it back under the guard and
+                    # recognise it as ours.
                     continue
             if not wait:
                 raise RunLockBusy(record)
@@ -626,11 +633,12 @@ class RunLock:
     def _create(self) -> bool:
         """Try to become the holder, and confirm that this run actually did.
 
-        `O_EXCL` is atomic, so two runs racing to create the file where none
-        existed already resolve cleanly: one wins, the loser catches
-        `FileExistsError` and queues. Breaking a stale lock and creating over it
-        is the step that is not atomic on its own, and `acquire` runs that under
-        the machine guard rather than leaning on this read.
+        Always called under the machine-wide guard (see `acquire`), so all of it
+        -- publishing the path with `O_EXCL`, writing the record, and confirming
+        it -- is one step no other run can read into the middle of. `O_EXCL`
+        stays as the backstop it always was: the create fails rather than
+        truncating whatever a path already holds, so a run is never the one that
+        made a file some other run is using.
 
         The confirming read stays for the one thing the guard does not cover: a
         filesystem that hands back the create's own descriptor and then fails

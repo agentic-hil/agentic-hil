@@ -654,6 +654,130 @@ def test_two_runs_that_both_find_a_dead_holder_yield_exactly_one_container(
     assert surviving["pid"] == os.getpid()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the guard's blocking take-over is POSIX flock; msvcrt retries rather than blocking, so the interleaving this forces is not the one that ships on Windows",
+)
+def test_a_partial_first_write_is_never_taken_for_a_stale_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The publication window, run for real on two threads. A create makes the
+    lock file visible with `O_EXCL` an instant before it writes the record into
+    it. A contender that fails its own create must not read that empty file,
+    judge it stale, break it, and start a second container against a creator
+    that is about to return holding the lock.
+
+    The two roles are staged so the outcome is asserted, not raced. The creator
+    opens the file and pauses before writing the record. If it holds the guard
+    while it pauses -- what the fix guarantees -- the contender blocks at the
+    guard and cannot read the empty file at all, so the creator waits only until
+    the contender has reached the guard, then finishes; the contender goes on to
+    read a whole record and yield. If the create were *not* under the guard --
+    the bug this exists to catch -- the contender would take the free guard,
+    read the empty file, be held at the break until the creator had returned
+    holding the lock, and only then break it: two holders, which the assertions
+    reject.
+    """
+    only_these_are_running(monkeypatch, os.getpid())
+
+    creator_thread: list[threading.Thread] = []
+    creator_took_guard = threading.Event()
+    first_file_is_visible = threading.Event()
+    contender_reached_guard = threading.Event()
+    contender_about_to_break = threading.Event()
+    creator_has_returned = threading.Event()
+
+    def is_creator() -> bool:
+        return bool(creator_thread) and threading.current_thread() is creator_thread[0]
+
+    real_lock_fd = ci_linux._lock_fd_exclusive
+
+    def lock_fd_that_marks_who_is_at_the_guard(descriptor: int) -> None:
+        # Fired just before the blocking take-over of the guard, by whichever
+        # role reaches it: the creator sets a flag the pause below reads to tell
+        # the fix from the bug; the contender announces it is at the guard so the
+        # creator holding it knows the contender can only be blocked there.
+        (creator_took_guard if is_creator() else contender_reached_guard).set()
+        real_lock_fd(descriptor)
+
+    monkeypatch.setattr(ci_linux, "_lock_fd_exclusive", lock_fd_that_marks_who_is_at_the_guard)
+
+    real_dumps = json.dumps
+
+    def dumps_that_pauses_the_creator_mid_publish(obj: object, **kwargs: object) -> str:
+        # Called from `_create`, after `O_EXCL` has made the file visible and
+        # before its record is written: the empty publication window itself.
+        if is_creator():
+            first_file_is_visible.set()
+            if creator_took_guard.is_set():
+                # The fix: the creator holds the guard, so a contender can only
+                # block at it. Wait until it has, proving it stays blocked, then
+                # finish -- no contender ever reads the empty file.
+                contender_reached_guard.wait(timeout=10)
+            else:
+                # The bug: the create is not under the guard. Let the contender
+                # read the empty file and reach the break, then finish and return
+                # holding the lock before it breaks -- the double-acquire.
+                contender_about_to_break.wait(timeout=10)
+        return real_dumps(obj, **kwargs)
+
+    monkeypatch.setattr(
+        ci_linux,
+        "json",
+        SimpleNamespace(dumps=dumps_that_pauses_the_creator_mid_publish, loads=json.loads),
+    )
+
+    real_break = ci_linux.RunLock._break
+
+    def break_that_waits_for_the_creator_to_return(self: ci_linux.RunLock) -> None:
+        # Only reached on the buggy path, where the contender read the empty file
+        # as stale. Holding it here until the creator has returned holding the
+        # lock is what turns the window into the two-holder outcome the assertion
+        # then rejects; the fix never lets the contender read, so this never runs.
+        if not is_creator():
+            contender_about_to_break.set()
+            creator_has_returned.wait(timeout=10)
+        real_break(self)
+
+    monkeypatch.setattr(ci_linux.RunLock, "_break", break_that_waits_for_the_creator_to_return)
+
+    verdicts: dict[str, str] = {}
+    record_verdict = threading.Lock()
+
+    def verdict_of(run: ci_linux.RunLock) -> str:
+        try:
+            run.acquire(wait=False)
+        except ci_linux.RunLockBusy:
+            return "busy"
+        return "held" if run.held else "busy"
+
+    def be_the_creator() -> None:
+        outcome = verdict_of(ci_linux.RunLock())
+        with record_verdict:
+            verdicts["creator"] = outcome
+        creator_has_returned.set()
+
+    def be_the_contender() -> None:
+        first_file_is_visible.wait(timeout=10)
+        outcome = verdict_of(ci_linux.RunLock())
+        with record_verdict:
+            verdicts["contender"] = outcome
+
+    creator = threading.Thread(target=be_the_creator, name="creator")
+    contender = threading.Thread(target=be_the_contender, name="contender")
+    creator_thread.append(creator)
+    creator.start()
+    contender.start()
+    for thread in (creator, contender):
+        thread.join(timeout=15)
+
+    assert not creator.is_alive() and not contender.is_alive()
+    assert verdicts.get("creator") == "held"
+    assert verdicts.get("contender") == "busy"
+    surviving = json.loads(ci_linux.ci_lock_path().read_text(encoding="utf-8"))
+    assert surviving["pid"] == os.getpid()
+
+
 def test_asking_whether_a_process_runs_must_not_end_it() -> None:
     """`os.kill(pid, 0)` is a liveness probe on POSIX and a kill on Windows,
     where CPython maps every signal but the console events onto
