@@ -100,6 +100,24 @@ LOCK_NOTICE_INTERVAL_S = 60.0
 # and `holder_notice` explains it: it is cleared by an operator who has stopped
 # the container, never automatically.
 CLEANUP_REQUIRED_FIELD = "cleanup_required"
+# The version stamped onto a cleanup-required record, and the whole reason the
+# field above is not enough on its own. A reader on this checkout refuses a
+# record carrying `CLEANUP_REQUIRED_FIELD` before it ever looks at the version
+# (see `stale_reason` and `holder_notice`), but a checkout from before that field
+# existed does not read it: it sees an ordinary `version: 1` record naming a dead
+# pid and breaks it on liveness, onto the daemon the leftover container never
+# left -- the very starvation the mark exists to prevent, reintroduced by the one
+# reader that cannot see the mark. Two checkouts sharing this file is an ordinary
+# case here, so that older reader is not hypothetical. The fix is the property
+# `LOCK_RECORD_VERSION`'s own note already names: a version an older checkout
+# cannot read is a record it will not break. So a cleanup record is stamped with
+# a version no shipped reader recognises as one of its own; an older reader finds
+# `record.get("version") != <its own>` and fails closed, queueing behind the
+# record exactly as it already does for a newer ordinary version. It must stay
+# distinct from `LOCK_RECORD_VERSION` and from any value a released reader treats
+# as an ordinary, breakable record. A reader on this checkout still refuses it by
+# the cleanup field, which is why that check stays ahead of the version check.
+LOCK_CLEANUP_RECORD_VERSION = 2
 
 # Windows, where `os.kill(pid, 0)` is not a liveness probe: CPython maps every
 # signal other than the console events onto TerminateProcess, so asking that
@@ -324,6 +342,9 @@ def stale_reason(record: dict | None, path: Path) -> str | None:
     """
     if record is None:
         return None
+    # Ahead of the version check on purpose: a cleanup record carries a version
+    # this reader would otherwise not recognise as its own, and even if it did,
+    # the cleanup mark, not liveness, is the reason it may not be broken.
     if record.get(CLEANUP_REQUIRED_FIELD):
         return None
     if record.get("version") != LOCK_RECORD_VERSION:
@@ -570,6 +591,15 @@ class RunLock:
         stops the leftover container and removes the file by hand. `detail` is
         what that operator, and the next run's queue notice, are told about it.
 
+        The rewrite also restamps the record's `version` to
+        `LOCK_CLEANUP_RECORD_VERSION`. The cleanup field holds this checkout's
+        readers, which look for it before the version; it does not hold a checkout
+        from before the field existed, which reads the same record as an ordinary
+        `version: 1` holder and, finding the pid dead, breaks it -- the leftover
+        container's machine handed to the next run anyway. A version no such
+        reader recognises makes it fail closed and queue instead, so the mark
+        survives every reader sharing this file, not only the ones that know it.
+
         The rewrite is atomic -- a whole record staged and `os.replace`d over the
         lock, so no reader catches the file mid-write -- and it runs while this
         process is still alive, so a contender either reads the live pid before it
@@ -585,6 +615,7 @@ class RunLock:
             return
         record = dict(self.record)
         record[CLEANUP_REQUIRED_FIELD] = detail
+        record["version"] = LOCK_CLEANUP_RECORD_VERSION
         staging = self.path.with_name(f"{self.path.name}.{self.record['owner_id']}.cleanup")
         try:
             descriptor = os.open(staging, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)

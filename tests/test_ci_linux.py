@@ -91,6 +91,32 @@ def only_these_are_running(monkeypatch: pytest.MonkeyPatch, *pids: int) -> None:
     monkeypatch.setattr(run_lock, "process_is_running", lambda pid: pid in pids)
 
 
+def a_version_1_reader_would_break(record: dict) -> str | None:
+    """The pre-cleanup-field reader contract, reconstructed here so a test can
+    hold a cleanup record up to it.
+
+    This is the `stale_reason` a checkout from before `CLEANUP_REQUIRED_FIELD`
+    existed runs: it knows version 1, this machine and liveness, and nothing about
+    the cleanup mark, so it cannot be defended by that mark. Two checkouts sharing
+    the one lock file is an ordinary case here, so this reader is exactly what a
+    cleanup record must survive. `version` is the literal 1 an older checkout
+    hard-codes as its own; liveness goes through the same `process_is_running` the
+    tests fake, so a dead pid reads dead here too. Returns the removal reason it
+    would announce, or None when it would leave the lock alone."""
+    if record is None:
+        return None
+    if record.get("version") != 1:
+        return None
+    if record.get("host") != socket.gethostname():
+        return None
+    pid = record.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return "an older checkout would remove this lock for naming no usable pid"
+    if run_lock.process_is_running(pid):
+        return None
+    return "an older checkout would remove this lock for naming a dead pid"
+
+
 def never_waits(monkeypatch: pytest.MonkeyPatch) -> None:
     """A lock nobody holds must be taken, not queued on."""
 
@@ -499,6 +525,42 @@ def test_retain_for_cleanup_leaves_a_record_the_next_run_will_not_take(
     # retain_for_cleanup gave it up, so release is a no-op and the record stays.
     holder.release()
     assert run_lock.lock_path().exists()
+
+
+def test_a_cleanup_record_survives_the_version_1_reader_an_older_checkout_runs(
+    a_machine_of_this_tests_own: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cleanup record must be unbreakable under the version-1 reader contract,
+    not only under this checkout's `stale_reason`.
+
+    The cleanup field holds every reader on this checkout, because they look for
+    it before the version. It holds nothing on a checkout from before the field
+    existed: that reader sees an ordinary holder, judges its dead pid stale, and
+    breaks the lock -- the leftover container's machine handed to the next run,
+    the starvation the mark exists to prevent, reintroduced by the one reader that
+    cannot see the mark. What defends the record there is that its version is not
+    one that reader recognises, so it fails closed and queues instead. This test
+    holds a real cleanup record up to a faithful copy of that older reader."""
+    holder = run_lock.RunLock(tool=ci_linux.TOOL_NAME, runs_for=ci_linux.RUNS_FOR)
+    holder.acquire(wait=False)
+    holder.retain_for_cleanup("container agentic-hil-loop-xyz still exists after removal")
+    record = json.loads(run_lock.lock_path().read_text(encoding="utf-8"))
+
+    only_these_are_running(monkeypatch)  # every pid, this record's included, reads dead
+
+    # The mark is there, and so is the version that makes an older reader fail closed.
+    assert record[run_lock.CLEANUP_REQUIRED_FIELD]
+    assert record["version"] == run_lock.LOCK_CLEANUP_RECORD_VERSION
+    assert record["version"] != 1
+
+    # The pre-cleanup-field reader, which cannot read the mark, still leaves it
+    # alone -- solely because the version is not its own.
+    assert a_version_1_reader_would_break(record) is None
+
+    # And the version is exactly what protects it: stamp the same record back to
+    # version 1 and that older reader breaks it on the dead pid, the round-0 bug.
+    reverted_to_v1 = dict(record, version=1)
+    assert a_version_1_reader_would_break(reverted_to_v1) is not None
 
 
 @pytest.mark.parametrize("age_seconds", [0.0, 600.0])
