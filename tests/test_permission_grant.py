@@ -1,7 +1,7 @@
 """`agentic-hil grant` and `agentic-hil revoke`: the gate on the one-way street.
 
-0.8.0 built the ratchet — an agent writes `false` into a permission over
-MCP and never `true` — and answered the other direction for a configuration that
+0.8.0 built the ratchet (an agent writes `false` into a permission over
+MCP and never `true`) and answered the other direction for a configuration that
 does not exist yet: a generation opens everything it can. For one that does exist there
 was no answer that did not cost the rest of the file, and the three routes an
 operator had were one refusal and two resets: `project_config_set` only
@@ -78,7 +78,7 @@ def bench(
     """A bench somebody grew: settings all over it, and every permission closed.
 
     The device grants start `false` because that is the state these commands are
-    about — a configuration generated before the inversion, or narrowed since.
+    about: a configuration generated before the inversion, or narrowed since.
     The project grants start `false` too unless a test asks otherwise, so the
     default here is the hardest case: a file `project_config_set` cannot move a
     permission in at all."""
@@ -127,7 +127,7 @@ def test_the_bench_from_the_issue_is_repaired_without_losing_the_file(tmp_path: 
     The owner's own words, and the point of the whole command:
     the workaround it replaces was deleting the configuration, which returns an
     open one and throws away everything else. So the assertion that matters is
-    not that the flag is true — it is that the baudrate, the bitrate, the
+    not that the flag is true: it is that the baudrate, the bitrate, the
     `resource_id`, the state root and the artifact roots are still there."""
     workspace, path = bench(tmp_path, monkeypatch)
     before = document_of(path)
@@ -218,7 +218,7 @@ def test_the_terminal_move_is_no_longer_terminal_for_a_person(tmp_path: Path, mo
     assert reopened["ok"] is True, reopened
     assert document_of(path)["permissions"][CONFIG_PERMISSIONS_RIGHT] is True
     # And closing it again from here says what closing it costs, in the words
-    # the frozen notice already had — now naming the surgical way back too.
+    # the frozen notice already had, now naming the surgical way back too.
     froze = run(workspace, "revoke", f"permissions.{CONFIG_PERMISSIONS_RIGHT}")
     assert froze["ok"] is True, froze
     assert froze["permissions_frozen"]["closed_key"] == f"permissions.{CONFIG_PERMISSIONS_RIGHT}"
@@ -337,7 +337,7 @@ def test_the_command_is_only_on_the_command_line(tmp_path: Path, monkeypatch: py
 
 
 def test_a_whole_entry_is_not_a_name_this_command_takes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """No section form and no wildcard — the open question, decided.
+    """No section form and no wildcard: the open question, decided.
 
     A section form would mean whatever `config_rule_fields` reads out of the
     shipped schema at the moment it runs, so a permission added in a later
@@ -352,7 +352,7 @@ def test_a_whole_entry_is_not_a_name_this_command_takes(tmp_path: Path, monkeypa
         assert refused["error_type"] == "invalid_argument"
         assert [item["key"] for item in refused["rejected_keys"]] == [spelling]
 
-    # `*` is a legal entry name — the schema allows `[A-Za-z0-9_.-]+`, and every
+    # `*` is a legal entry name: the schema allows `[A-Za-z0-9_.-]+`, and every
     # entry id in this file is the operator's to choose. So a star cannot be
     # reserved as a wildcard without taking a name away, and it is read as the
     # entry it spells: one this configuration does not have. That is a second
@@ -395,7 +395,7 @@ def test_an_entry_this_configuration_does_not_have_is_named_as_such(tmp_path: Pa
     """`can_buses.ghost.allow_write` spells a key the model recognises.
 
     So it is not caught by the name check above and reaches the write path,
-    where a permission does not bring a device into existence — the rule that
+    where a permission does not bring a device into existence, the rule that
     was already there, reached from this command too."""
     workspace, path = bench(tmp_path, monkeypatch)
 
@@ -487,7 +487,7 @@ def test_the_short_form_never_shadows_a_description_key(tmp_path: Path, monkeypa
 
 
 def test_opening_what_is_already_open_is_a_no_op_and_not_a_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Not an error — asking for what is already so is how somebody makes sure.
+    """Not an error: asking for what is already so is how somebody makes sure.
 
     But not a change either, and the difference is visible in the file: nothing
     is written, so there is no provenance bump and no change marker in a header
@@ -571,7 +571,7 @@ def test_a_run_blocks_it_as_completely_as_a_lease(tmp_path: Path, monkeypatch: p
     `begin_run` takes the machine-wide device locks and no project lock; the
     project lock is a lease's. So a run between two of its own calls is invisible
     to the check that catches a session, and asking only that question would have
-    let a permission move in the middle of somebody's test — the one thing
+    let a permission move in the middle of somebody's test, the one thing
     the open-run refusal rules out. The device locks are the second question, and this is
     the case that makes them necessary rather than thorough."""
     workspace, _ = bench(tmp_path, monkeypatch)
@@ -608,8 +608,8 @@ def test_a_run_that_starts_after_the_status_read_still_refuses_the_write(tmp_pat
     under the old policy while the write moved the policy underneath. The command
     now holds every configured device across the check-and-write on the same
     machine-wide locks a run takes, so a run that begins the instant after the
-    status read — modelled here by starting one inside the seam the writer used to
-    leave open — collides with the writer rather than slipping through. Either the
+    status read (modelled here by starting one inside the seam the writer used to
+    leave open) collides with the writer rather than slipping through. Either the
     run or the write is refused; here it is the write, and nothing is written.
 
     Against the pre-fix command this passed the status read, wrote the file, and
@@ -645,7 +645,7 @@ def test_a_run_that_starts_after_the_status_read_still_refuses_the_write(tmp_pat
     # The one thing the rule rules out did not happen: the file is untouched.
     assert path.read_bytes() == before
 
-    # With the seam gone — no run in the gap — the same command writes, so the
+    # With the seam gone (no run in the gap), the same command writes, so the
     # atomic hold did not close the ordinary path along with the race.
     monkeypatch.setattr(cli, "bench_open_holds", real_bench_open_holds)
     assert cli.change_permission("grant", ["can_buses.dut.allow_write"])["ok"] is True
@@ -656,8 +656,8 @@ def test_a_device_repointed_after_the_status_read_refuses_the_write(tmp_path: Pa
     """The gap round 1's transaction still left: the key set itself moves.
 
     The command derived the devices to hold from the config it loaded before the
-    status read. If another writer repoints a device in the gap — `COM9` to
-    `COM10` — a run can take `com:COM10` while the command holds only `com:COM9`,
+    status read. If another writer repoints a device in the gap (`COM9` to
+    `COM10`), a run can take `com:COM10` while the command holds only `com:COM9`,
     and the two never collide: the old command re-read the moved document and
     wrote the permission with a run holding the bench underneath it, the exact
     outcome the rule rules out. The command now derives its locks and the
@@ -677,7 +677,7 @@ def test_a_device_repointed_after_the_status_read_refuses_the_write(tmp_path: Pa
     def a_device_moves_then_a_run_starts(cfg: Any) -> dict | None:
         holds = real_bench_open_holds(cfg)  # the real read: the bench is free
         if holds is None and moved["key"] is None:
-            # Another writer repoints the port, and a run takes its new lock — both
+            # Another writer repoints the port, and a run takes its new lock, both
             # inside the seam the command used to leave between the read and the write.
             document = document_of(path)
             document["com_ports"]["dut_uart"]["device"] = "COM10"

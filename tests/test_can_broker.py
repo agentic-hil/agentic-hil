@@ -73,7 +73,7 @@ SINGLE_OWNER_STATUS_JSON = '{"adapter": "peak", "bitrate": 500000, "channel": "P
 
 # The same capture for the parsed entry itself. Compared below against this dict
 # plus *exactly* the two keys shares brought, so the assertion says what a
-# share-less entry gained — two inert defaults — and would fail on anything else
+# share-less entry gained (two inert defaults) and would fail on anything else
 # that moved.
 SINGLE_OWNER_ENTRY_JSON = '{"adapter": "peak", "args": [], "bitrate": 500000, "channel": "PCAN_USBBUS1", "data_bitrate": null, "executable": null, "fd": false, "listen_only": false, "max_buffer_frames": 1024, "max_frame_data_bytes": 8, "pcanbasic_dll": null, "permissions": {"allow_read": true, "allow_write": true}, "poll_interval_ms": 10, "receive_own_messages": false, "resource_id": null, "timeout_s": 10.0}'
 
@@ -117,7 +117,7 @@ def test_a_service_enforced_bus_never_reports_a_controller_proof(tmp_path: Path)
     """A software claim must not be readable as a controller one, on any line.
 
     `listen_only_enforcement` in a bus status has always meant the evidence the
-    *adapter* would give — `driver_verified` on peak. On a bus that says its
+    *adapter* would give: `driver_verified` on peak. On a bus that says its
     listen-only is enforced at the service, that evidence is not what backs the
     flag, and leaving it as the answer would tell an operator a controller was
     put in a state nobody put it in. The capability is still reported; it is
@@ -208,7 +208,7 @@ def test_a_share_may_not_be_named_after_a_configuration_block_or_a_grant(tmp_pat
 
     It reads a mapping called `permissions` as grants at any depth, and any key
     beginning with `allow_` as a grant unless it is one level below a named
-    section — which a share name is not. Either spelling would have the walker
+    section, which a share name is not. Either spelling would have the walker
     reading a participant view as a permission."""
     from agentic_hil.config import ConfigError
 
@@ -223,7 +223,7 @@ def test_a_participant_grant_is_governed_by_the_permissions_right(tmp_path: Path
 
     A participant that may transmit is a bus that may be written, whatever it is
     called. If the permission walk missed a share's block, a run could be given
-    the medium by a description-level edit — the exact thing the two-right split
+    the medium by a description-level edit, the exact thing the two-right split
     exists to stop."""
     from agentic_hil.configwrite import permission_surface
 
@@ -483,7 +483,7 @@ def test_lock_probe_refuses_an_impostor_that_does_not_hold_the_bus(tmp_path: Pat
     """A peer's claim to own the bus is not evidence; the free lock is.
 
     The impostor here is not a broken endpoint. It authenticates, it answers a
-    well-formed `attached`, it publishes a descriptor naming itself — and it
+    well-formed `attached`, it publishes a descriptor naming itself, and it
     forges the holder record too, because that record is advisory: any process
     can write the file that says who owns the lock. Every question that can be
     answered by asking, it answers correctly, and any handshake that only asked
@@ -642,7 +642,7 @@ def test_service_listen_only_opens_the_adapter_without_controller_mode(tmp_path:
     the controller's own mode. Opening the adapter must not demand the controller
     listen-only that `controller` enforcement proves, or a bench configured for the
     documented weaker mode fails to open wherever that controller proof is
-    unavailable — while its status already reports software filtering. The
+    unavailable, while its status already reports software filtering. The
     controller enforcement path is unchanged: the adapter is still asked for it."""
     import agentic_hil.can as can_module
     from agentic_hil.bench import BenchMutex
@@ -731,7 +731,7 @@ def _inprocess_broker(tmp_path: Path, config, *, bus_id: str = "bench", names=("
     """A broker in this process, its participants seated by hand.
 
     The subprocess tests above own the transport and the lifecycle; this owns the
-    send-decision logic — incident-versus-participant scope, the payload bound —
+    send-decision logic (incident-versus-participant scope, the payload bound),
     including the raise path no real adapter reaches, because both catch their own
     backend errors and return a failure object. The mutex is rooted under the
     test's own tmp_path so nothing touches the machine-wide lock."""
@@ -749,7 +749,7 @@ def _inprocess_broker(tmp_path: Path, config, *, bus_id: str = "bench", names=("
 
 
 def test_a_returned_send_failure_gates_the_bus_and_aborts_every_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:
-    """The adapter's own `send()` returns `ok: false` — the usual direct-adapter
+    """The adapter's own `send()` returns `ok: false`, the usual direct-adapter
     failure path, since it catches backend errors rather than raising. The frame
     may already be on the wire, so the effect is unknown and the whole bus goes,
     not only the sender."""
@@ -783,7 +783,7 @@ def test_a_returned_send_failure_gates_the_bus_and_aborts_every_participant(tmp_
 
 def test_a_raised_send_gates_the_bus_and_aborts_every_participant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Both real adapters catch their own backend errors, so the raise path is
-    the broker's defensive catch-all — exercised here in process. An adapter whose
+    the broker's defensive catch-all, exercised here in process. An adapter whose
     `send()` raises must gate the bus, abort every participant, and leave the
     transmit effect unknown rather than claiming nothing committed."""
     config = shared_config(tmp_path, monkeypatch)
@@ -811,7 +811,7 @@ def test_a_raised_send_gates_the_bus_and_aborts_every_participant(tmp_path: Path
     # the incident carries the frame and the sequence it was logged under, and the
     # whole-bus log holds that same tx frame. A `Participant.send()` records this
     # send under `result["frame_seq"]`, so the frame is attributable from either
-    # end — the invariant a returned send failure already keeps, now kept on the
+    # end, the invariant a returned send failure already keeps, now kept on the
     # raise path too rather than leaving the bus log with only the incident.
     seq = result["frame_seq"]
     assert result["frame"] == wire
@@ -852,7 +852,7 @@ def test_a_brokered_send_refuses_on_a_listen_only_bus(tmp_path: Path, monkeypatc
     """The same bus-level gate the single-owner `can_send` applies, by the same name.
 
     `_listen_only_conflict` refuses a writer at attach, so this participant is
-    seated by hand — which is the point: the property belongs to the bus, not to
+    seated by hand, which is the point: the property belongs to the bus, not to
     one check in the attach handler, and a share that reached the adapter by some
     other door would still be transmitting onto a bus declared silent. The
     adapter is a tripwire, and both enforcement levels answer alike, because
@@ -877,7 +877,7 @@ def test_a_brokered_send_refuses_on_a_listen_only_bus(tmp_path: Path, monkeypatc
     assert result["side_effect_status"] == "not_started"
     assert result["retry_safe"] is False
     # `listen_only_enforcement` is this bus's configured level, not the adapter's
-    # capability — the same renaming a brokered bus status performs, so a
+    # capability, the same renaming a brokered bus status performs, so a
     # `service` claim is never printed as a controller state.
     assert result["listen_only_enforcement"] == enforcement
     assert result["listen_only_proof"] == ("controller" if enforcement == "controller" else "software_filter")
@@ -1027,7 +1027,7 @@ def test_a_killed_broker_leaves_a_corpse_that_the_next_attach_replaces(tmp_path:
     """One hard-killed broker must not brick the bus until somebody deletes a file.
 
     A broker that is killed never runs its cleanup, so its descriptor and authkey
-    outlive it. The lock probe correctly refuses that endpoint — it owns nothing —
+    outlive it. The lock probe correctly refuses that endpoint (it owns nothing)
     and if the refusal were the end of the story the bus would stay unusable. It
     is not: a descriptor whose bus lock is free is provably a corpse, because a
     live broker holds that lock from before it publishes until after it
@@ -1177,7 +1177,7 @@ def test_a_client_that_cannot_derive_an_address_still_attaches_to_a_published_br
     BSD) with a long local temp root derives no address that fits `sockaddr_un`.
     Deriving one before consulting the descriptor would refuse such a client with
     `config_invalid` even though the running broker's endpoint is short and
-    bindable — so the derived address is validated only on the branch that
+    bindable, so the derived address is validated only on the branch that
     spawns a broker, never before attaching to one that exists."""
     from agentic_hil.bench import BenchMutex
     from agentic_hil.config import ConfigError
@@ -1196,8 +1196,8 @@ def test_a_client_that_cannot_derive_an_address_still_attaches_to_a_published_br
         # non-abstract-socket machine with a long temp root hits: the filesystem
         # path overflows the AF_UNIX cap and there is no abstract-socket
         # fallback, so `endpoint_address` refuses. Windows addresses are named
-        # pipes with no such length limit — `endpoint_address` returns one before
-        # it ever consults these two helpers — so patching them raises nothing
+        # pipes with no such length limit: `endpoint_address` returns one before
+        # it ever consults these two helpers, so patching them raises nothing
         # there. This simulation is therefore POSIX-only, and the ordering it was
         # meant to guard is asserted directly below on every OS.
         if os.name != "nt":
@@ -1211,7 +1211,7 @@ def test_a_client_that_cannot_derive_an_address_still_attaches_to_a_published_br
         # The ordering itself, on every supported OS: attaching to a broker that
         # already published an endpoint must never derive a local one. Replace the
         # derivation with a spy that fails loudly, so a regression that consulted
-        # this client's own — possibly unusable — address before the descriptor
+        # this client's own (possibly unusable) address before the descriptor
         # would raise here instead of passing on a host where the derivation
         # happens to succeed (Windows being exactly such a host).
         def _forbidden_derivation(*args: object, **kwargs: object) -> str:
@@ -1219,7 +1219,7 @@ def test_a_client_that_cannot_derive_an_address_still_attaches_to_a_published_br
 
         monkeypatch.setattr(canbroker, "endpoint_address", _forbidden_derivation)
 
-        # The client attaches on the broker's published endpoint regardless — its
+        # The client attaches on the broker's published endpoint regardless: its
         # own derivation is never reached because a broker is not spawned.
         beta = attach_participant(config, "bench", "beta")
         try:

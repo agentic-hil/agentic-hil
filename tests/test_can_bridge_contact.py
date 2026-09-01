@@ -4,7 +4,7 @@ The defect these tests exist for: `open_process_adapter` answered
 `side_effect_committed: False` on the protocol-shape refusal even when the bridge
 had already answered `ok: true` to `open`. A bridge that has opened is on the bus;
 whether it sent anything only the bridge knows. `False` there was not a finding
-but an assumption, and the optimistic one — the reader of that report is told the
+but an assumption, and the optimistic one: the reader of that report is told the
 session never started.
 
 agentic-hil/agentic-hil#115 settled this for the listen-only refusal, which is the
@@ -209,7 +209,7 @@ def test_a_bridge_that_refused_the_open_itself_still_says_the_bus_was_untouched(
 #
 # agentic-hil/agentic-hil#141. A bridge's refusal of `open` was one case and is
 # now two, split on what the bridge says about its own channel. The clean
-# refusal — the mistyped channel, by far the most common bridge failure — keeps
+# refusal (the mistyped channel, by far the most common bridge failure) keeps
 # the answer it has always had, because it is a bad config and not a bench
 # incident. The bridge that opened a channel and then failed at a later step of
 # its own initialization is on the bus while it says so, and gets the treatment

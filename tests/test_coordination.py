@@ -1537,7 +1537,7 @@ def test_status_reports_a_held_bench_while_a_declared_run_holds_the_devices(tmp_
     """The project lock is a lease's, and a run does not take it.
 
     `begin_run` locks every declared device and leaves the project lock alone, so
-    between two calls of a live run there is genuinely no project lock to find —
+    between two calls of a live run there is genuinely no project lock to find,
     and every declared board is genuinely held. A status read derived from that
     lock alone answered "free" at exactly the moment the bench was busiest.
 
@@ -1770,7 +1770,7 @@ def test_release_fault_reraises_keyboard_interrupt(tmp_path: Path, monkeypatch: 
 # The backend names its abort point before the target and still cannot account
 # for the call: the board's run state is not in question, only this host's
 # bookkeeping, which is exactly the class a read-only re-read settles. Without
-# `target_contacted` the same result would be the stronger reason instead — see
+# `target_contacted` the same result would be the stronger reason instead, see
 # test_quarantine_triggers.
 UNCONFIRMED_PROBE = {
     "ok": False,
@@ -1890,7 +1890,7 @@ def test_machine_recovery_refuses_while_the_probe_stays_unreachable(tmp_path: Pa
 
         # Was: `resource_quarantined`, because every hardware call was refused
         # while an incident stood. A probe is the recovery class now and is not
-        # refused — but the automatic attempt still runs ahead of it and still
+        # refused, but the automatic attempt still runs ahead of it and still
         # fails against an unreachable probe, so the thing this test guards is
         # unchanged: nothing clears an incident it could not verify.
         assert "incident_resolved" not in attempted
@@ -1942,8 +1942,8 @@ def test_readonly_policy_leaves_an_unconfirmed_reset_to_the_operator(tmp_path: P
         monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
         attempted = service.call("probe_target")
 
-        # Was: `resource_quarantined`. The probe runs now — it is the recovery
-        # class — and the policy still decides what a *read* is allowed to
+        # Was: `resource_quarantined`. The probe runs now (it is the recovery
+        # class) and the policy still decides what a *read* is allowed to
         # settle, which is the tooth here. Under `readonly` a reachable probe
         # attests reachability and nothing about a core that may be running, so
         # the incident stays with the operator exactly as before.

@@ -339,7 +339,7 @@ def test_a_detached_start_refuses_a_non_finite_wait_before_spawning_a_worker(tmp
     """A non-finite wait is refused up front, never handed to a detached worker.
 
     A NaN wait becomes a deadline `time.monotonic()` never reaches, so a worker
-    holding for a device would poll it forever — past the window the start command
+    holding for a device would poll it forever, past the window the start command
     waits in, leaving a live process behind a caller told the start failed.
     `start_detached_run` validates the wait before it spawns anything, so the
     value can never reach a process nobody is watching. The CLI's `type=float`
@@ -403,7 +403,7 @@ def test_the_publish_window_grows_with_the_bounded_device_wait() -> None:
 
     A worker told to wait for a held device stays in `starting` for the whole of
     that wait, so a deadline that counted only the fixed startup window would
-    call it unresponsive while it does exactly what it was asked to — and then
+    call it unresponsive while it does exactly what it was asked to, and then
     walk away from a live process that later acquires the devices and runs the
     plan. The wait is added on, bounded by the bench's own maximum, never
     unbounded, and a value the worker would refuse falls back to the base window
@@ -424,7 +424,7 @@ def test_a_non_finite_device_wait_is_refused_by_the_shared_validator() -> None:
     """NaN and infinity are not waits: the one validator every acquisition shares
     refuses them.
 
-    A NaN wait slips past a range check — every comparison against it is false —
+    A NaN wait slips past a range check (every comparison against it is false),
     and would become a NaN deadline `time.monotonic()` never reaches, polling a
     held device forever. Refusing it in `validated_wait` closes that for every
     caller at once, the interactive acquisition and the detached worker alike,
@@ -444,8 +444,8 @@ def test_a_terminal_detached_record_is_answered_with_its_own_verdict() -> None:
     """A run that ended before the start caught it at `running` gets its verdict.
 
     Launch success is reserved for a running worker and for an already-finished
-    run only when it passed. A finished-and-failed record — the held bench's
-    `device_busy` is the case — is answered `ok: false` with the run's own
+    run only when it passed. A finished-and-failed record (the held bench's
+    `device_busy` is the case) is answered `ok: false` with the run's own
     `error_type` and failed-step fields, so the CLI exits non-zero rather than
     printing a handle to a run that is already over."""
     from agentic_hil.cli import result_succeeded

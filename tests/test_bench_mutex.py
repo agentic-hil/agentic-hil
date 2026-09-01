@@ -1,7 +1,7 @@
 """The machine-wide device mutex that replaced the read permission.
 
 Every test here is about the property the permission used to provide: while one
-run holds a board, nothing else on the machine reaches it — no matter which
+run holds a board, nothing else on the machine reaches it, no matter which
 configuration, state_root, or process the other side came from.
 """
 from __future__ import annotations
@@ -352,7 +352,7 @@ steps:
 
     # One entry per physical device, not per step: the mutex locks boards. The
     # UART named by two steps is a single lock, and the executable-identified
-    # debugger is two names rather than two devices — its `probe-exe:` key and the
+    # debugger is two names rather than two devices: its `probe-exe:` key and the
     # legacy `probe:` twin it also holds so an unupgraded process cannot take it
     # out from under this run. Two devices, three lock names.
     assert sum(1 for item in devices if item.startswith("com:")) == 1

@@ -1,7 +1,7 @@
 """Upgrading over MCP: what it may do, what it may not, and what it may claim.
 
-`server_upgrade` reverses the CLI-only rule. Upgrading was CLI-only —
-the command was named and never run — and on a host that is only an MCP client
+`server_upgrade` reverses the CLI-only rule. Upgrading was CLI-only
+(the command was named and never run), and on a host that is only an MCP client
 there is then no way at all for the main surface to perform the basic maintenance
 of its own server. The tool exists now, and it keeps three teeth:
 
@@ -49,7 +49,7 @@ SOCKETCAN_BUS = """can_buses:
 """
 
 # The line `uv tool upgrade` writes on stderr beside exit code 0 when the
-# installation it was asked to move is recorded with an exact pin — measured on
+# installation it was asked to move is recorded with an exact pin, measured on
 # the reporter's box, and the reason the pin is read out of the
 # text rather than out of the return code.
 UV_EXACT_PIN_HINT = (
@@ -88,7 +88,7 @@ def fake_manager(
 
     `_host_locks_running_files` is replaced along with it, because otherwise
     every one of these tests would exercise the Windows refusal on Windows and
-    the manager path on Linux — two different suites wearing one name. The
+    the manager path on Linux: two different suites wearing one name. The
     platform branch has a test of its own, on both sides."""
     calls: list[list[str]] = []
 
@@ -122,7 +122,7 @@ def test_the_configuration_can_close_this_tool_and_the_refusal_names_the_key(
 
     The point of a new permission is that an operator can say no to this one
     thing without giving up the rest of the surface, so the refusal has to name
-    the key it came from — a `permission_denied` that does not is a search."""
+    the key it came from: a `permission_denied` that does not is a search."""
     never_runs(monkeypatch)
     tools = AgenticHILToolService(upgradable_config(tmp_path, allow_upgrade=False))
     try:
@@ -150,7 +150,7 @@ def test_the_upgrade_is_refused_while_a_run_holds_the_bench(
 
     A declared run took its locks under the release that is running. Replacing
     that release mid-run moves the rules during the run they govern, which is the
-    same objection as changing a permission underneath it — so the same answer,
+    same objection as changing a permission underneath it, so the same answer,
     with an error type of its own because what is refused is not a write."""
     calls = fake_manager(monkeypatch, installed=subprocess.CompletedProcess([], 0, "installed\n", ""), version_after="9.9.9")
     tools = AgenticHILToolService(upgradable_config(tmp_path))
@@ -187,7 +187,7 @@ def test_a_host_that_locks_running_files_is_told_the_upgrade_is_the_command_line
     result that announced it: a failure would have nobody left to report to, and
     would leave the half-replaced environment the whole guard exists to prevent.
     So the tool says which command does it and does not pretend to have started
-    anything — with the extras named, because the reader is about to reinstall.
+    anything, with the extras named, because the reader is about to reinstall.
     """
     never_runs(monkeypatch)
     monkeypatch.setattr("agentic_hil.upgrade._host_locks_running_files", lambda: True)
@@ -241,7 +241,7 @@ def test_a_pinned_installation_is_refused_with_a_command_that_keeps_the_extras(
     assert refused["installed_extras"] == ["can"]
     assert refused["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
     # Nothing moved, so nothing is to be restarted, and both version fields say
-    # the same number — which is what makes this a refusal and not an upgrade.
+    # the same number, which is what makes this a refusal and not an upgrade.
     assert refused["restart_required"] is False
     assert refused["previous_version"] == refused["version"] == __version__
     assert refused["running_version"] == __version__
@@ -293,7 +293,7 @@ def test_an_installation_that_is_already_current_is_not_reported_as_an_upgrade(
 ) -> None:
     """`uv tool upgrade` exits 0 with nothing to do, and this is that outcome.
 
-    A success, because nothing is wrong — and not an upgrade, because nothing
+    A success, because nothing is wrong, and not an upgrade, because nothing
     moved. No restart is asked for, which is the whole of what the CLI fix was
     about at the other end."""
     fake_manager(
@@ -325,7 +325,7 @@ def test_the_tool_offers_no_argument_that_could_choose_a_version(tmp_path: Path)
     through the code: an agent that can install an older release installs one
     that reads `permissions:` under the rules of its day. So the guarantee is
     the *absence* of a parameter, which is a property of the published schema
-    and is checked as one — no properties at all, and additionalProperties
+    and is checked as one: no properties at all, and additionalProperties
     false, so a caller that sends one anyway is refused rather than ignored."""
     schema = next(tool["inputSchema"] for tool in MCP_TOOLS if tool["name"] == SERVER_UPGRADE)
 
@@ -373,7 +373,7 @@ def test_the_result_warns_when_the_installation_lost_an_extra_the_configuration_
     raising it, so an installation created as `agentic-hil[can]` comes back
     without the extra and nothing said so until the first CAN call. The warning
     carries the command that repairs it, and that command names the union of what
-    is installed and what is missing — one that named only the missing extra
+    is installed and what is missing: one that named only the missing extra
     would take the others away."""
     fake_manager(
         monkeypatch,
@@ -427,7 +427,7 @@ def test_doctor_names_the_extra_the_configuration_needs_and_the_installation_lac
     """The first hole: until now the first CAN call found this.
 
     `doctor` is where an operator looks before a bench misbehaves, so the
-    contradiction belongs there — with the exact reinstall line, because a
+    contradiction belongs there, with the exact reinstall line, because a
     warning that does not carry the command is the start of a search. It is a
     warning and not a failure: the configuration is valid and every other part of
     the bench works."""

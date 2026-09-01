@@ -19,10 +19,10 @@ target type before it goes looking for a probe: ``pyocd reset --target <unknown>
 prints "Waiting for a debug probe to be connected..." and waits, and with ``-W``
 it fails on "No connected debug probes" without ever reaching the target type.
 The type is resolved inside ``Board.__init__``, which runs while the session is
-being built — after a probe has been opened. What makes a boardless test possible
+being built, after a probe has been opened. What makes a boardless test possible
 is narrower and is asserted below: ``Board.__init__`` reaches its refusal reading
-session options alone, so a probeless session — a documented pyOCD usage, "useful
-to create a session that operates only as a container for session options" — is
+session options alone, so a probeless session (a documented pyOCD usage, "useful
+to create a session that operates only as a container for session options") is
 enough to make the real refusal.
 """
 
@@ -85,7 +85,7 @@ def test_the_markers_the_classifier_matches_on_are_still_in_the_real_message() -
     """The two independent markers, named separately so a failure says which died.
 
     Either one alone classifies the message, so losing one is not yet the
-    regression — but it is the drift that preceded it last time, and it is
+    regression, but it is the drift that preceded it last time, and it is
     invisible unless something asserts it.
     """
     lower = real_pyocd_refusal().lower()
@@ -103,7 +103,7 @@ def test_the_real_refusal_is_classified_as_a_target_type_problem(tmp_path: Path)
     """The guard the issue asks for, with nothing else able to rescue it.
 
     ``_classify_output`` is called directly rather than through a run, because a
-    run would apply ``_confirm_target_support`` afterwards — the ``pyocd json
+    run would apply ``_confirm_target_support`` afterwards: the ``pyocd json
     --targets`` cross-check, which would reclassify a message the phrases missed
     and hide exactly the drift this test exists to catch.
     """
@@ -211,7 +211,7 @@ def test_the_stub_carries_the_installed_pyocd_wording(tmp_path: Path) -> None:
     """The stub is only evidence if its refusal is the library's.
 
     Without this, a stub that silently stopped reaching pyOCD would keep the test
-    above passing on wording of its own — the failure mode this whole file exists
+    above passing on wording of its own: the failure mode this whole file exists
     to remove.
     """
     log = json.loads(

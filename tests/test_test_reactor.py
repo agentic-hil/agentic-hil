@@ -59,12 +59,12 @@ class RecordingService:
         self.audit_failure_call = audit_failure_call
         self.fail_call = fail_call
         # What the line says, one entry per com_read, in the order it says it. An
-        # exhausted list is a silent port — which is exactly what a board that
+        # exhausted list is a silent port, which is exactly what a board that
         # never printed its banner looks like from here.
         self.uart_reads = list(uart_reads or [])
         self.uart_encoding = uart_encoding
         # What the bus carries, one entry per can_read, in the order it carries
-        # it. An exhausted list is a quiet bus — which is what a node that never
+        # it. An exhausted list is a quiet bus, which is what a node that never
         # sent the frame a plan is waiting for looks like from here.
         self.can_reads = list(can_reads or [])
         self.reset_result = reset_result
@@ -747,7 +747,7 @@ def test_a_failed_multi_debugger_run_recovers_through_the_touched_probes(tmp_pat
     assert result["failed_step"] == 2
 
     # Each touched probe recovered through its own bound service; the base
-    # service — bound to no probe — was never asked to.
+    # service (bound to no probe) was never asked to.
     assert built["dut"].recovery_calls == [["dut"]]
     assert built["probe_b"].recovery_calls == [["probe_b"]]
     assert base.recovery_calls == [], "the unbound base service must not be the one recovered"
@@ -764,7 +764,7 @@ def test_a_failed_multi_debugger_run_recovers_through_the_touched_probes(tmp_pat
 def test_a_probe_used_only_as_a_delay_route_is_not_recovered(tmp_path: Path) -> None:
     # `delay` is declared `touches_device=False`: it routes to a named probe and
     # is recorded as a step, but drives no hardware. A run that delays on one probe
-    # and then fails a real reset on another must recover only the probe it drove —
+    # and then fails a real reset on another must recover only the probe it drove:
     # resetting and halting a board no hardware action in the plan ever reached is
     # exactly what recovery must not do.
     from agentic_hil.test_reactor import TestConfig, TestReactor, TestStep
@@ -809,7 +809,7 @@ def test_a_probe_used_only_as_a_delay_route_is_not_recovered(tmp_path: Path) -> 
     assert result["failed_step"] == 2
 
     # The delay step still built dut's device and per-probe service, so absence
-    # from `devices` is not why it is spared — it is spared because it drove nothing.
+    # from `devices` is not why it is spared: it is spared because it drove nothing.
     assert "dut" in built, "the delay step builds dut's device and service"
     assert built["dut"].recovery_calls == [], "a delay-only probe must not be recovered"
     assert built["probe_b"].recovery_calls == [["probe_b"]]
@@ -818,7 +818,7 @@ def test_a_probe_used_only_as_a_delay_route_is_not_recovered(tmp_path: Path) -> 
 
     recovery = result["recovery"]
     assert recovery["outcome"] == "recovered", recovery
-    # Exactly one probe was driven, so recovery took the single-probe path — there
+    # Exactly one probe was driven, so recovery took the single-probe path: there
     # is no per-probe aggregate that could name the delay-only dut.
     assert "recoveries" not in recovery
 
@@ -890,8 +890,8 @@ def test_driving_an_unnamed_probe_is_refused_when_several_are_configured(tmp_pat
     assert driven["side_effect_committed"] is False
     assert "debugger-probes" in driven["summary"]
     # Discovery is the way out of that state, so the unnamed-probe guard must
-    # not swallow it. (OpenOCD answers not_supported on its own — it cannot
-    # enumerate — but the refusal is the backend's, not the guard's.)
+    # not swallow it. (OpenOCD answers not_supported on its own: it cannot
+    # enumerate, but the refusal is the backend's, not the guard's.)
     assert "configured_debuggers" not in listed
     assert listed["backend"] == "openocd"
 
@@ -1006,7 +1006,7 @@ steps:
 
 def test_debug_steps_execute_on_the_named_debugger_service(tmp_path: Path) -> None:
     # Inverse direction: the bound probe is pyocd (no typed debug), but the probe
-    # the step NAMES is openocd — preflight must pass and the steps must run on
+    # the step NAMES is openocd: preflight must pass and the steps must run on
     # that probe's own service, not the base service.
     from agentic_hil.test_reactor import TestReactor
 
@@ -1345,7 +1345,7 @@ steps:
 def test_preflight_refuses_a_can_send_on_a_listen_only_bus(tmp_path: Path) -> None:
     # Writing is permitted here; the bus itself is what refuses. `listen_only`
     # is the claim that observing this bus sends nothing, so a plan that also
-    # sends on it contradicts the bus it declared — and that is a fault in the
+    # sends on it contradicts the bus it declared, and that is a fault in the
     # plan, findable before anything reaches the bench.
     config = can_config(tmp_path, listen_only=True, allow_write=True)
     plan_path = write_test_config(
@@ -1378,8 +1378,8 @@ steps:
 def test_a_can_send_step_is_refused_by_the_tool_even_if_preflight_is_bypassed(tmp_path: Path) -> None:
     """The plan route's second line of defence, and the reason it is a second one.
 
-    Preflight is the better refusal — it names the plan's own contradiction
-    before a session exists — but it is a check the reactor performs, and a check
+    Preflight is the better refusal (it names the plan's own contradiction
+    before a session exists), but it is a check the reactor performs, and a check
     can be got round. The tool the step routes to answers the same way for a call
     that arrives at it anyway, so the guarantee does not rest on preflight having
     run.
@@ -1438,7 +1438,7 @@ def test_preflight_refuses_can_traffic_before_the_bus_is_open(tmp_path: Path) ->
 
 def test_a_can_session_may_only_be_closed_by_the_plan_that_opened_it(tmp_path: Path) -> None:
     # Preflight refuses this plan, so the ownership guard underneath it is
-    # reached only by a step that got past preflight — which is exactly what it
+    # reached only by a step that got past preflight, which is exactly what it
     # is there for.
     from agentic_hil.test_reactor import TestStep
 
@@ -1474,7 +1474,7 @@ steps:
     devices = declared_devices(config, load_test_config(str(plan_path), str(tmp_path)))
 
     assert can_device(config, "dut_can").lock_key in devices
-    # One entry per physical unit, not one per step — where a unit is every key
+    # One entry per physical unit, not one per step, where a unit is every key
     # its device holds, not one: an executable debugger carries its legacy
     # `probe:<path>` alias beside `probe-exe:` so old and new processes collide
     # during an upgrade window, and counting keys would break each time a
@@ -1490,7 +1490,7 @@ def test_every_device_kind_answers_for_its_own_actions() -> None:
     # The one authority: a step action exists because a method declared it, and
     # the schema map, the routing keys and the tools are all read back off those
     # declarations. A kind naming a tool its device does not own, or a schema
-    # entry the bundled schema does not define, would be a second answer — and
+    # entry the bundled schema does not define, would be a second answer, and
     # so would an action nothing implements.
     from importlib import resources
 
@@ -1510,7 +1510,7 @@ def test_every_device_kind_answers_for_its_own_actions() -> None:
         assert device_class.step_actions == {name: spec.schema for name, spec in device_class.step_action_specs.items()}
         for action, spec in device_class.step_action_specs.items():
             # An action claimed by two kinds is only ever one declaration two
-            # kinds inherited — `delay`, declared once on the base. Two kinds
+            # kinds inherited: `delay`, declared once on the base. Two kinds
             # declaring the same name separately is the drift this forbids.
             assert claimed.get(action, spec) == spec, f"{action} is declared twice, by two different methods"
             claimed[action] = spec
@@ -1667,7 +1667,7 @@ def test_uart_expect_pattern_matches_a_value_split_across_two_reads(tmp_path: Pa
     # The reason a pattern exists at all: checking the board answered with the
     # *right* value, not merely that it answered. The reading is split mid-number
     # across two reads, so this only passes if the pattern is searched against the
-    # decoded rolling buffer rather than against the chunk that arrived last —
+    # decoded rolling buffer rather than against the chunk that arrived last:
     # a per-chunk search sees "temp=23" and "7C" and matches neither.
     config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
     plan_path = write_test_config(
@@ -1721,7 +1721,7 @@ steps:
 
 def test_uart_expect_pattern_timeout_reports_the_tail_like_a_text_step(tmp_path: Path) -> None:
     # A pattern that never matches fails the same named way a text step does and
-    # answers with the same bounded tail — a red result stays readable without
+    # answers with the same bounded tail: a red result stays readable without
     # reconnecting to the board, whichever kind of claim went unmet.
     config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
     plan_path = write_test_config(
@@ -1792,7 +1792,7 @@ steps:
 @pytest.mark.parametrize("expected_text", ["Hello World", "Hello World " * 20])
 def test_uart_expect_timeout_caps_the_reported_tail(tmp_path: Path, expected_text: str) -> None:
     # A chatty port must not turn one red step into an unbounded result, and the
-    # tail it does report is the end of the traffic — the part nearest whatever
+    # tail it does report is the end of the traffic, the part nearest whatever
     # went wrong.
     from agentic_hil.test_reactor import UART_EXPECT_TAIL_BYTES
 
@@ -1906,7 +1906,7 @@ steps:
 
 def test_new_steps_are_refused_when_they_name_a_device_the_config_does_not_declare(tmp_path: Path) -> None:
     # A route field naming nothing configured is answered by the name, not by a
-    # lock failure about a device nobody declared — for the new steps as for the
+    # lock failure about a device nobody declared, for the new steps as for the
     # old ones, because each is answered by the class that serves it.
     config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
     expect_plan = write_test_config(
@@ -2036,7 +2036,7 @@ def test_unknown_reactor_action_still_names_the_two_new_ones(tmp_path: Path) -> 
 # The four `version: 2` plans this repository ships, frozen as text at the point
 # format v3 was introduced. The files themselves move on to the v3 idiom; these
 # copies do not, because what has to keep holding is that a plan already written
-# against v2 — on someone's bench, in someone's CI — parses to the same steps and
+# against v2 (on someone's bench, in someone's CI) parses to the same steps and
 # runs to the same result after v3 lands. A pin against the live files would only
 # ever prove that the files agree with themselves.
 V2_EXAMPLE_PLAN = """version: 2
@@ -2326,7 +2326,7 @@ steps:
 
 
 def test_comparator_equals_matches_a_value_split_across_reads(tmp_path: Path) -> None:
-    # `equals` is the whole value, not a substring — and the value still arrives
+    # `equals` is the whole value, not a substring, and the value still arrives
     # in pieces, so the claim is judged against everything read so far.
     config = uart_config(tmp_path)
     plan_path = write_test_config(
@@ -2396,7 +2396,7 @@ steps:
 
 def test_comparator_equals_judges_unterminated_output_when_time_runs_out(tmp_path: Path) -> None:
     # A board that answers once and stops sends no terminator, so the whole of
-    # what was received is judged on the last pass — and only there, which is
+    # what was received is judged on the last pass, and only there, which is
     # what the test above holds.
     config = uart_config(tmp_path)
     plan_path = write_test_config(
@@ -2655,7 +2655,7 @@ steps:
 
 def can_frame(frame_id: int, data_hex: str = "", *, extended: bool = False) -> dict:
     """One received frame, in the shape `can_read` normalizes every adapter's
-    answer to — so a test that passes here is a test the real read path feeds."""
+    answer to, so a test that passes here is a test the real read path feeds."""
     data = bytes.fromhex(data_hex)
     return {"id": frame_id, "id_hex": f"0x{frame_id:x}", "extended": extended, "rtr": False, "data_hex": data.hex(), "dlc": len(data)}
 
@@ -2692,7 +2692,7 @@ def test_can_comparator_matches_the_frame_the_plan_named(tmp_path: Path) -> None
     # of the bytes, not part of the claim.
     assert read["comparator"] == {"id": "0x123", "equals": "01 ff"}
     # The frame was not in the queue the first read drained, so the step read
-    # again — which is the whole difference from a plain read.
+    # again, which is the whole difference from a plain read.
     assert read["reads"] == 2
     assert read["frames_read"] == 3
 
@@ -2700,7 +2700,7 @@ def test_can_comparator_matches_the_frame_the_plan_named(tmp_path: Path) -> None
 def test_can_comparator_ignores_a_frame_carrying_the_payload_under_another_id(tmp_path: Path) -> None:
     # A bus carries every node's traffic. The payload this plan is waiting for is
     # on the wire twice and never under the identifier it named, so the step is
-    # red — and says which frames it did see, because "the id is wrong in the
+    # red, and says which frames it did see, because "the id is wrong in the
     # plan" and "the board never sent it" are different repairs.
     config = can_config(tmp_path)
     plan_path = can_comparator_plan(tmp_path, '{id: "0x123", equals: "01ff"}', timeout_s="0.05")
@@ -2739,7 +2739,7 @@ def test_a_can_comparator_selects_by_frame_type_not_identifier_alone(tmp_path: P
     # A standard 0x123 and an extended 0x123 are two different frames on the wire.
     # A comparator that does not say `extended` waits for the standard one, so the
     # extended twin carrying the expected payload is passed over and the standard
-    # twin behind it is the match — the same distinction the broker's participant
+    # twin behind it is the match: the same distinction the broker's participant
     # filters draw. Without the discriminator the extended twin was a false accept.
     config = can_config(tmp_path)
     plan_path = can_comparator_plan(tmp_path, '{id: "0x123", equals: "01ff"}')
@@ -2792,7 +2792,7 @@ def test_a_masked_can_comparator_still_separates_the_frame_types(tmp_path: Path)
 def test_a_standard_comparator_shows_the_frame_type_of_the_extended_twin_it_rejected(tmp_path: Path) -> None:
     # The reproduction the review named: an extended 0x123 carrying the expected
     # payload, judged by a standard comparator. It is rejected on frame type, and
-    # its `frames_tail` entry must carry `extended: true` — otherwise the failure
+    # its `frames_tail` entry must carry `extended: true`, otherwise the failure
     # shows an id and a payload identical to the requested frame and omits the only
     # field that explains why it did not match.
     config = can_config(tmp_path)
@@ -2810,7 +2810,7 @@ def test_a_standard_comparator_shows_the_frame_type_of_the_extended_twin_it_reje
 def test_can_comparator_range_reads_its_capture_in_the_base_the_payload_is_written_in(tmp_path: Path) -> None:
     # The signal, not merely the frame: the pattern says where in the payload the
     # value is and the range says which values are acceptable. The capture comes
-    # out of hexadecimal, so `19` here is 25 — read as decimal it would be 19 and
+    # out of hexadecimal, so `19` here is 25: read as decimal it would be 19 and
     # this bench would report a settled reading as out of range.
     config = can_config(tmp_path)
     plan_path = can_comparator_plan(tmp_path, '{id: 513, pattern: "^02(..)$", range: {min: 20, max: 30}}')

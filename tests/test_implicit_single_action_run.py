@@ -4,7 +4,7 @@ Since the abort seam existed, a run that failed put the bench back into a state
 the next run could start from. An effect tool called with no run open sat
 outside that entirely: a `com_write`, a `can_send`, a `flash_firmware` from an
 agent doing one thing took its lease, failed into an incident, and left a
-padlock whose only key was `hardware_recover` or a person at a shell — while
+padlock whose only key was `hardware_recover` or a person at a shell, while
 the identical call between `bench_run_start` and `bench_run_stop` recovered
 itself.
 
@@ -15,7 +15,7 @@ than copied beside it. The teeth here are in four places:
 * a bare effect call that fails aborts into a recovery action that reaches the
   board, and the incident it raised is resolved with its own ledger line;
 * a bare effect call that succeeds leaves nothing held and no run open;
-* a call inside a declared run is untouched — the declared run keeps its own
+* a call inside a declared run is untouched: the declared run keeps its own
   boundary, and recovery still happens at its own teardown and not mid-run;
 * the wrapped set is the effect class and nothing else: no read, no session
   start, no configuration tool.
@@ -157,7 +157,7 @@ def ledger(config) -> list[dict]:
 def test_a_bare_effect_call_declares_an_implicit_run_and_says_so(tmp_path: Path) -> None:
     """"This call ran in a run" and "an agent declared a run around this call"
     are different facts, and an operator reading the report afterwards has to be
-    able to tell them apart — so the run block names itself implicit rather than
+    able to tell them apart, so the run block names itself implicit rather than
     leaving the reader to infer it from an absence."""
     config = config_for(tmp_path)
     service = AgenticHILToolService(config, backend=FakeBackend())
@@ -181,7 +181,7 @@ def test_a_bare_effect_call_declares_an_implicit_run_and_says_so(tmp_path: Path)
 def test_a_bare_effect_call_that_succeeds_leaves_no_run_open(tmp_path: Path) -> None:
     """The run the call opened is the call's own, and it ends with the call.
     A dangling one would hold the bench against the next caller for the rest of
-    this process's life — nothing times a run out, by design."""
+    this process's life: nothing times a run out, by design."""
     config = config_for(tmp_path)
     service = AgenticHILToolService(config, backend=FakeBackend())
     try:
@@ -204,7 +204,7 @@ def test_a_bare_effect_call_that_succeeds_leaves_no_run_open(tmp_path: Path) -> 
 
 def test_a_bare_flash_that_fails_aborts_into_a_recovery_action(tmp_path: Path) -> None:
     """The whole point. One call, no run declared by anybody, an unconfirmed
-    result — and a reset-into-halt reaches the board without a person being
+    result, and a reset-into-halt reaches the board without a person being
     asked for anything.
 
     `ok` stays false in the same breath: recovering the bench does not un-fail
@@ -250,7 +250,7 @@ def test_a_bare_com_write_that_fails_aborts_and_drives_the_recovery_action(tmp_p
     board may have acted on them; nothing on this host can say, which is why it
     quarantines. What is new is that the single-action run the call declared for
     itself then aborts, the run ends, and the recovery action drives the target
-    into a defined state — exactly what the same call gets between
+    into a defined state, exactly what the same call gets between
     `bench_run_start` and `bench_run_stop`.
 
     The incident itself is *not* settled here, and that is unchanged rather than
@@ -274,7 +274,7 @@ def test_a_bare_com_write_that_fails_aborts_and_drives_the_recovery_action(tmp_p
         assert result["run"]["aborted"] is True, result
         # The run declared the port it was about to write to, and nothing else.
         # Folded by the same production rule the lock key uses: backslashed and
-        # lowercased on Windows, verbatim on POSIX — the test must not re-implement it.
+        # lowercased on Windows, verbatim on POSIX: the test must not re-implement it.
         assert result["run"]["declared_devices"] == [fold_resource_name(f"com:{DEVICE}")], result["run"]
         recovery = result["recovery"]
         assert recovery["attempted"] is True, recovery
@@ -340,7 +340,7 @@ def test_a_failure_inside_a_declared_run_still_recovers_at_that_run_s_teardown(t
     """The load-bearing half of "no behaviour change inside a declared run": the
     recovery does not move earlier. An agent driving several steps under one
     declaration must not have the board reset out from under step two because
-    step one failed — the verdict is the run's, and so is the teardown."""
+    step one failed: the verdict is the run's, and so is the teardown."""
     config = config_for(tmp_path)
     backend = FakeBackend(flash_unconfirmed=True)
     service = AgenticHILToolService(config, backend=backend)
@@ -400,7 +400,7 @@ def test_the_wrapped_set_is_exactly_the_effect_class(tmp_path: Path) -> None:
     tool added later from being silently left outside the run model; the names
     are what make a change to it a decision somebody has to write down."""
     assert implicit_run_tools() == {"com_write", "can_send", "flash_firmware", "probe_target", "reset_target"}
-    # Every member raises incidents — that is the base the derivation subtracts
+    # Every member raises incidents: that is the base the derivation subtracts
     # from, and a member outside it could never abort into anything.
     assert implicit_run_tools() <= audited_hardware_tools()
     # And the three subtracted groups are out, each for its own reason.
@@ -410,8 +410,8 @@ def test_the_wrapped_set_is_exactly_the_effect_class(tmp_path: Path) -> None:
 
 
 def test_the_read_only_exclusion_matches_this_server_s_own_classification() -> None:
-    """`tools.py` may not decide behaviour from the annotation table — contracts
-    says so and its own test enforces it — so the read-only set is written out
+    """`tools.py` may not decide behaviour from the annotation table (contracts
+    says so and its own test enforces it), so the read-only set is written out
     beside the code that uses it and the two are compared here instead. Note
     which tool is *not* excluded: `probe_target` connects, an SWD attach halts a
     running core, and this repository classifies that as an effect."""
@@ -424,7 +424,7 @@ def test_the_read_only_exclusion_matches_this_server_s_own_classification() -> N
 
 def test_a_read_only_call_declares_no_run(tmp_path: Path) -> None:
     """A read leaves nothing for a recovery action to put back, so it gets no
-    run and no teardown — the behavioural half of the set above."""
+    run and no teardown, the behavioural half of the set above."""
     config = config_for(tmp_path)
     service = AgenticHILToolService(config, backend=FakeBackend())
     try:

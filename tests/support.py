@@ -10,7 +10,7 @@ from pathlib import Path
 REAL_HOME = Path(os.path.expanduser("~"))
 # The profile root on every platform. It used to divert to Local AppData on
 # Windows because the trust check refused the per-user Temp ACL; it no longer
-# does, and Local AppData was the wrong place anyway — a packaged host process
+# does, and Local AppData was the wrong place anyway: a packaged host process
 # has its writes there redirected into its own LocalCache, so the launcher never
 # landed where the path said it did.
 LAUNCHER_ROOT = REAL_HOME / f"agentic-hil-pytest-launcher-{os.getpid()}"

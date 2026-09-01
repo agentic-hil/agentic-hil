@@ -1,7 +1,7 @@
 """Clearing a quarantine over MCP, and the class boundary that stays.
 
 `hardware_lease_status` has distinguished `auto_recoverable` from
-the rest since 0.8.0, but `recover` lived only at the shell — so on a host with no
+the rest since 0.8.0, but `recover` lived only at the shell, so on a host with no
 shell an agent could see an incident, explain it, and do nothing about it, even
 when the incident had provably never touched a board.
 
@@ -132,7 +132,7 @@ def test_a_no_contact_reason_is_cleared_over_mcp(tmp_path: Path) -> None:
 
 
 def test_the_audit_line_names_the_agent_and_not_a_person(tmp_path: Path) -> None:
-    """Two ways into one transition, and the ledger has to say which was taken —
+    """Two ways into one transition, and the ledger has to say which was taken,
     otherwise a recovery nobody signed reads exactly like one somebody did."""
     config = config_for(tmp_path)
     quarantine(config, LEASE_RELEASE_RETRY_REASON)
@@ -199,7 +199,7 @@ def test_a_hardware_call_that_adopted_the_incident_first_widens_its_reasons(tmp_
 
     Taking a lease over a record a dead owner left behind stamps
     `owner_process_exited_without_release` onto the incident, on top of whatever
-    reason it already carried — `acquire`'s adoption path predates the
+    reason it already carried: `acquire`'s adoption path predates the
     no-contact evidence check and still fires on any unreleased record. So an
     incident that was clearable from here stops being clearable once a hardware
     call has been tried against it, and this tool belongs before that retry
@@ -276,7 +276,7 @@ def test_a_mixed_incident_refuses_on_the_reason_that_needs_a_person(tmp_path: Pa
 def test_a_machine_settleable_reason_is_still_refused_here(tmp_path: Path) -> None:
     """The narrowing that matters, and the one a reader is most likely to argue
     with. `debugger_result_unconfirmed` is inside this bench's `recoverable_
-    reasons` under the default `reset_halt` policy — but what settles it is a
+    reasons` under the default `reset_halt` policy, but what settles it is a
     verified reset into halt, actually performed, and this call performs nothing.
     So it refuses, and says which situation it is: the automatic path will run
     that predicate on the next hardware call."""
@@ -347,8 +347,8 @@ def test_a_configuration_that_names_nothing_grants_nothing() -> None:
 
 
 def test_the_one_way_street_already_covers_the_new_key() -> None:
-    """The ratchet is structural — every leaf inside a `permissions` mapping is a
-    permission — so the new grant is on it without configwrite learning its name.
+    """The ratchet is structural (every leaf inside a `permissions` mapping is a
+    permission), so the new grant is on it without configwrite learning its name.
     That is what makes this a key and not a special case."""
     from agentic_hil.configwrite import permission_surface
 
@@ -416,12 +416,12 @@ def test_the_recovery_guidance_matches_the_tool_contract_boundary() -> None:
     with no argument, a reason that needs somebody at the board clears only by
     relaying an operator_statement, and the audit-broken and nobody-to-ask cases
     keep the operator's own command line. This is the consistency assertion the
-    finding asked for — before it, the schema and generated comments said
+    finding asked for: before it, the schema and generated comments said
     physical reasons are refused over MCP with no such argument, which the tool
     stopped being true of when operator_statement arrived.
 
-    The authoritative agent instructions — `AGENTS.md` and both shipped skill
-    copies — are held to the same boundary here. Round 1 left them still telling
+    The authoritative agent instructions (`AGENTS.md` and both shipped skill
+    copies) are held to the same boundary here. Round 1 left them still telling
     an agent that every remaining quarantine is the operator's to clear from a
     shell, which sends a host with no operator shell away from the very route
     `operator_statement` opened; the round-2 finding asked that these surfaces be
@@ -459,7 +459,7 @@ def test_the_recovery_guidance_matches_the_tool_contract_boundary() -> None:
         assert "hardware_recover" in surfaces[name], name
 
     # None of the generated surfaces still claims the physical route does not
-    # exist over MCP — the exact stale wordings this finding removed.
+    # exist over MCP, the exact stale wordings this finding removed.
     for name in ("config_template", "config_schema", "mcp_workflow_prompt"):
         lowered = surfaces[name].lower()
         assert "no argument on the mcp tool" not in lowered, name
@@ -487,8 +487,8 @@ def test_the_recovery_guidance_matches_the_tool_contract_boundary() -> None:
 
     # And positively: the skills' relay path now hands what is left to
     # `hardware_recover` carrying the operator's statement, not to a shell. This
-    # phrase is unique to the repaired paragraph — the unchanged `hardware_recover`
-    # section says "carry their sentence", never "carrying their statement" — so a
+    # phrase is unique to the repaired paragraph (the unchanged `hardware_recover`
+    # section says "carry their sentence", never "carrying their statement"), so a
     # revert of the repair drops it and this assertion fails.
     for name in ("skill_src", "skill_plugin"):
         assert "carrying their statement" in collapse_whitespace(surfaces[name]).lower(), name
@@ -537,8 +537,8 @@ def test_each_refusal_carries_its_own_fix(key: str) -> None:
 #
 # The class boundary did not move: a claim about a physical bench still comes
 # from a person. What moved is who may carry the sentence. Telling an agent in a
-# chat window to send its operator hunting for a shell — on a host that may not
-# have one — never protected the board; it only meant the claim was made out of
+# chat window to send its operator hunting for a shell (on a host that may not
+# have one) never protected the board; it only meant the claim was made out of
 # band and the ledger never saw it.
 
 
@@ -615,7 +615,7 @@ def test_an_empty_statement_is_not_a_statement(tmp_path: Path) -> None:
 def test_the_refusal_explains_the_argument_and_the_lie_it_would_be(tmp_path: Path) -> None:
     """A refusal that only says "a person must do this" sends an agent looking
     for a shell. What is actually needed is the person's sentence, and the agent
-    is already talking to them — so the refusal says to ask, says what happens to
+    is already talking to them, so the refusal says to ask, says what happens to
     the answer, and says outright what inventing one would be. The operator's own
     command line stays in it as the route for when there is nobody to ask."""
     config = config_for(tmp_path)

@@ -3,7 +3,7 @@
 
 fake_openocd.py executes the `-c` scripts it is given, so it prints the
 init-stage marker and the success marker whenever the script reaches them, and
-an error when it does not. This one prints neither and no failure text either —
+an error when it does not. This one prints neither and no failure text either:
 the case where the process's own report is *missing* rather than negative, which
 a real run reaches when the markers are lost, buffered away or omitted by a
 build that echoes differently.

@@ -68,7 +68,7 @@ def test_python_can_never_raises_an_initialization_error_for_a_failed_bind() -> 
 
     `CanOperationError` is not a subclass of `CanInitializationError`, so the
     SocketCAN branch's `isinstance` check against the initialization class cannot
-    catch a bind failure however it is wrapped — and `SocketcanBus.__init__`
+    catch a bind failure however it is wrapped, and `SocketcanBus.__init__`
     re-raises the bare `OSError` from `bind_socket` in the first place. Either
     way the number is in the chain and the class is not the one being tested for.
     """
@@ -83,7 +83,7 @@ def test_python_can_never_raises_an_initialization_error_for_a_failed_bind() -> 
 
 def test_the_socketcan_bind_is_where_a_missing_interface_is_found() -> None:
     """`bind_socket` is what raises for a nonexistent interface, and it runs
-    inside the constructor — which is what makes "constructor time only" a real
+    inside the constructor, which is what makes "constructor time only" a real
     boundary and not a hopeful one."""
     real_can_module()
     import inspect
@@ -233,8 +233,8 @@ def test_the_refusal_carries_its_own_fix() -> None:
 
 def test_the_classifier_is_reachable_without_a_can_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`socketcan_interface_missing` reads exception attributes and the bus
-    entry only. A host with no python-can never gets here — the import failure
-    refuses first — but the helper must not be the thing that needs it."""
+    entry only. A host with no python-can never gets here (the import failure
+    refuses first), but the helper must not be the thing that needs it."""
     config = can_config(tmp_path)
     monkeypatch.setitem(sys.modules, "can", None)
 

@@ -554,7 +554,7 @@ def test_a_tag_pin_in_a_covered_file_whose_entry_does_not_claim_it_fails(tree: P
     """The class, not the instance, of that defect.
 
     evals/install/README.md is covered, but its entry extracts expected_version
-    fields — a git-tag pin there would again be a mention nothing checks, and
+    fields: a git-tag pin there would again be a mention nothing checks, and
     `uncovered_files` would again stay silent because the file is covered.
     """
     readme = tree / "evals" / "install" / "README.md"

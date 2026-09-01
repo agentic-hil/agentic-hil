@@ -251,7 +251,7 @@ def _no_host_stm32_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
     `agentic-hil init` reads the attached bench whatever else is in the workspace,
     so any test that runs it would otherwise spawn whatever STM32CubeProgrammer is
     installed on the machine running the suite and connect to whatever is plugged
-    into it — passing on a bare CI container and doing real hardware I/O on a
+    into it: passing on a bare CI container and doing real hardware I/O on a
     developer's bench. A test that wants a toolchain patches this name itself, and
     that patch runs after this one."""
     monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: None)

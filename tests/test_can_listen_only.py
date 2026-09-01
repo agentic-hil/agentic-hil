@@ -2,7 +2,7 @@
 
 The defect these tests exist for: the direct python-can path
 built its bus without `listen_only`, so a bus an operator had declared
-must-not-be-disturbed was joined by a node that sends dominant ACK bits — while
+must-not-be-disturbed was joined by a node that sends dominant ACK bits, while
 the shipped catalogue called the flag "the way to prove a reading did not touch
 anything".
 
@@ -96,7 +96,7 @@ def fake_pcan_bus(*, reported: int = PCAN_PARAMETER_ON, status: int = PCAN_ERROR
 
     ``state`` is a plain attribute here on purpose. On the real ``PcanBus`` it is
     a property whose setter calls ``SetValue(PCAN_LISTEN_ONLY, ...)``, so what is
-    worth asserting is that the attribute is assigned again after construction —
+    worth asserting is that the attribute is assigned again after construction:
     python-can applies the constructor's ``state`` before ``PCANBasic.Initialize``
     and throws its return code away.
     """
@@ -155,7 +155,7 @@ def ip_json(ctrlmode: list[str] | None, *, kind: str = "can") -> str:
     """A `can` link's reading, modelled on iproute2's `iplink_can.c`.
 
     Constructed rather than recorded, and said so: a real `can` link needs a CAN
-    controller, and there is no software one — `vcan` is a different link kind
+    controller, and there is no software one: `vcan` is a different link kind
     (see IP_VCAN0, which is recorded). What is modelled is the one thing the
     parser reads, `linkinfo.info_data.ctrlmode`, which iproute2 emits as a JSON
     array of flag names with `listen-only` among them.
@@ -269,7 +269,7 @@ def test_the_link_probe_never_resolves_ip_from_path(tmp_path: Path, monkeypatch:
     """A proof read from a PATH-resolved binary is not a proof.
 
     What is asserted is the argv, not that nothing ran: a host with iproute2
-    installed — which every Linux runner is — *does* run `ip`, and running it
+    installed (which every Linux runner is) *does* run `ip`, and running it
     from `/sbin` is the whole point. Asserting that nothing ran would only hold
     on a machine without it, which is a statement about the machine rather than
     about PATH.
@@ -289,7 +289,7 @@ def test_the_link_probe_never_resolves_ip_from_path(tmp_path: Path, monkeypatch:
         raise OSError("this stand-in never answers; the argv is what is under test")
 
     # `SubprocessError` travels with the stand-in because the probe's own except
-    # clause names it — a stand-in missing it turns any raise into an
+    # clause names it: a stand-in missing it turns any raise into an
     # AttributeError from the handler instead of the answer under test.
     monkeypatch.setattr("agentic_hil.can.subprocess", SimpleNamespace(run=never_answers, SubprocessError=subprocess.SubprocessError))
 
@@ -537,7 +537,7 @@ def test_a_bridge_answering_a_non_boolean_listen_only_is_a_protocol_error(tmp_pa
 # The defect these exist for was measured, not reasoned about: a PCAN-USB channel
 # configured `listen_only: true`, whose driver had confirmed the mode at open,
 # was granted `permissions.allow_write: true` and answered `can_send` with
-# `ok: true, "CAN frame sent."`. Single node, no ACKer, controller in PASSIVE —
+# `ok: true, "CAN frame sent."`. Single node, no ACKer, controller in PASSIVE:
 # a claimed side effect nobody could have observed.
 #
 # What is asserted below is the gate, not the silicon. No test here can say what
@@ -556,7 +556,7 @@ def send_payload() -> dict[str, object]:
 def test_can_send_refuses_by_name_on_a_listen_only_bus(tmp_path: Path, adapter: str, channel: str) -> None:
     """Every adapter, one answer. `listen_only` is a property of the bus entry.
 
-    Writing is *permitted* here — `allow_write: true` — which is the whole point:
+    Writing is *permitted* here (`allow_write: true`), which is the whole point:
     the bus is what refuses, so the permission is never consulted and cannot be
     granted to make this go away. No session is started, and that is load-bearing
     too: an answer of `session_not_active` would mean the gate sits behind the
@@ -579,7 +579,7 @@ def test_can_send_refuses_by_name_on_a_listen_only_bus(tmp_path: Path, adapter: 
     assert result["listen_only"] is True
     assert result["field"] == "can_buses.bench.listen_only"
     # Refused before a driver was reached, so this is a clean no rather than an
-    # unknown — and not retry-safe, because the same call gets the same answer
+    # unknown, and not retry-safe, because the same call gets the same answer
     # until the configuration changes.
     assert result["side_effect_committed"] is False
     assert result["side_effect_status"] == "not_started"
@@ -618,7 +618,7 @@ def test_the_permission_refusal_still_fires_on_a_bus_that_is_not_listen_only(tmp
     """Pinned unchanged. The mode gate wins first; it does not replace the other.
 
     A bus with no claim on it and `allow_write: false` answers exactly what it
-    always answered, in the class it always answered in — `permission_denied` is
+    always answered, in the class it always answered in: `permission_denied` is
     a caller-scoped refusal and stays `retry_safe` once the grant is added.
     """
     config = can_config(tmp_path, "peak", "PCAN_USBBUS1", listen_only=False, allow_write=False)
@@ -692,8 +692,8 @@ def test_python_can_accepts_a_passive_transmit_without_a_word(tmp_path: Path) ->
 
     Not a fake: this drives the installed `PcanBus.send` with a stand-in
     PCANBasic and a bus whose state is `BusState.PASSIVE`. python-can 4.6.1 never
-    consults the state — it builds the message, calls `PCANBasic.Write`, and
-    raises only on a non-OK return code — so a listen-only channel's transmit is
+    consults the state: it builds the message, calls `PCANBasic.Write`, and
+    raises only on a non-OK return code, so a listen-only channel's transmit is
     accepted and reported as sent.
 
     If a future python-can starts refusing this, the assertion below fails and
@@ -728,7 +728,7 @@ def test_a_configured_listen_only_reaches_the_driver_through_the_whole_service(t
     """The decisive one: config field to driver, with nothing stubbed between.
 
     A field of this kind that is read and then dropped fails here, which is what
-    this test exists for — the defect was invisible precisely because every layer above
+    this test exists for: the defect was invisible precisely because every layer above
     the constructor still reported success.
     """
     config = can_config(tmp_path, "peak", "PCAN_USBBUS1", listen_only=True)
@@ -809,7 +809,7 @@ def test_the_reason_the_keyword_is_not_simply_passed_through() -> None:
     If a future python-can gives either backend a real `listen_only` argument,
     this fails and the per-adapter mechanism above should be reconsidered rather
     than kept out of habit. Until then, passing the keyword would be discarded by
-    `BusABC.__init__(**kwargs: object)` without a word — a silent downgrade, one
+    `BusABC.__init__(**kwargs: object)` without a word, a silent downgrade, one
     level below the one that was reported.
     """
     import inspect

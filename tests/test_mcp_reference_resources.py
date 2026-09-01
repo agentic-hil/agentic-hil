@@ -2,7 +2,7 @@
 
 Measured over two real bring-up sessions: 17 reads of the Agentic HIL
 implementation, 10 of them into the *installed* package under site-packages,
-to recover facts nobody published — which fields a debugger backend needs,
+to recover facts nobody published: which fields a debugger backend needs,
 where the programmer executable is configured, which `target_type` a board
 takes. A caller installed with `uv tool install` has no source tree at all, so
 these two channels are the only ones that can answer: the remediation a failing
@@ -315,8 +315,8 @@ def test_the_comparator_example_claims_something_on_every_medium() -> None:
 def test_a_refused_path_names_the_component_and_a_location_that_works() -> None:
     """The refusal named the field and the path and no way forward.
 
-    The refusal itself has changed — an ACL no longer decides anything, and what
-    remains is a path that is not the object it claims to be — but the property
+    The refusal itself has changed (an ACL no longer decides anything, and what
+    remains is a path that is not the object it claims to be), but the property
     that made it a defect has not: a caller told "no" has to be told what to do
     next, in the place they are already reading.
     """
@@ -652,7 +652,7 @@ def test_a_toolchain_that_confirmed_nothing_publishes_no_abort_point_to_the_refe
     A caller follows `error_type` and the resource behind it; only a reader of
     this project's source knows `backend_error_type` exists. Both of these
     branches used to publish `target_not_detected`, whose shipped entry says the
-    adapter was reached and no target answered — the one claim the branch has no
+    adapter was reached and no target answered, the one claim the branch has no
     evidence for, made in the channel a caller is told to read.
     """
     tools = AgenticHILToolService(
@@ -702,7 +702,7 @@ def test_a_partial_confirmation_is_not_described_as_an_absent_one(
     may be in the same output, and ST-Link requires all of its expected lines,
     so one of two is enough. The entry used to describe both as having reported
     nothing at all, which a caller reading it against a log that does carry a
-    marker would have found false — in the one channel it is told to trust. The
+    marker would have found false, in the one channel it is told to trust. The
     marker that did arrive is now in the result instead of being asserted away
     by the resource.
     """

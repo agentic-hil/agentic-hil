@@ -55,7 +55,7 @@ def test_correlate_com_port_requires_one_serial_match() -> None:
     """One hardware identity, the same one `select_probe_id` and the lock use.
 
     Case folds and nothing else. This used to strip punctuation as well, on the
-    theory that a correlation keys nothing — but the port it picks is written into
+    theory that a correlation keys nothing, but the port it picks is written into
     `com_ports.<name>.device` by adoption, so a probe serial `06:6A-FF30` matching
     a sole host port whose serial is really `066AFF30` puts a possibly different
     device into an entry that may already allow writes. A tie guard cannot see a
@@ -129,8 +129,8 @@ def test_target_not_detected_is_clean_bootstrap_failure(monkeypatch: pytest.Monk
 def _fixed_stlink(monkeypatch: pytest.MonkeyPatch, listing: str, *, commands: list[list[str]] | None = None) -> None:
     """The real discovery path with only the two ST-Link processes replaced.
 
-    Everything selection does — folding, refusing, choosing the enumerated
-    spelling — runs for real; a test that mocked `discover_attached_hardware`
+    Everything selection does (folding, refusing, choosing the enumerated
+    spelling) runs for real; a test that mocked `discover_attached_hardware`
     itself would be testing its own forwarding."""
     responses = iter(
         [
@@ -155,7 +155,7 @@ def test_a_requested_probe_is_matched_by_hardware_identity_not_by_spelling(monke
     A probe serial is an opaque hardware id, and every device lock key in this
     repository folds it for that reason: one ST-Link is `0669FF…` to
     STM32CubeProgrammer and `0669ff…` to udev. Exact string membership answered
-    `adapter_not_found` — "plug the board in" — for a board that is plugged in.
+    `adapter_not_found` ("plug the board in") for a board that is plugged in.
     The enumerated spelling is what goes on to the toolchain and into the file."""
     commands: list[list[str]] = []
     _fixed_stlink(monkeypatch, "ST-LINK SN : 0669FF303430\nST-LINK SN : 066AFF495451\n", commands=commands)
@@ -185,7 +185,7 @@ def test_selection_folds_exactly_what_the_lock_key_folds_and_no_more(monkeypatch
     Selection used to strip every non-alphanumeric character, while lock keys and
     the adoption mismatch check only case-fold. A request for `06-69FF303430`
     therefore selected the attached `0669FF303430`, and the HOTPLUG connect went
-    to a board the rest of the system does not think this call is about — the
+    to a board the rest of the system does not think this call is about: the
     lock taken is keyed on a different identity, and the mismatch check that
     would have caught it runs after something was already said to that board.
     """
@@ -230,7 +230,7 @@ def test_discovery_applies_project_requirements() -> None:
         "target": {"name": "demo", "controller": "stm32f446ret6"},
         # Every flag a generation can grant is granted by default now, so what a
         # profile can still say is "not this one". allow_reset below is the
-        # narrowing — it has to be a flag the default leaves *true*, or the test
+        # narrowing: it has to be a flag the default leaves *true*, or the test
         # passes without the profile being consulted at all. The version 1 read
         # grant beside it is the request that is dropped, and allow_mass_erase is
         # a profile agreeing with a default that is already false.
@@ -254,7 +254,7 @@ def test_discovery_applies_project_requirements() -> None:
     # are refused by name, so the request is satisfied by dropping it.
     assert configured["version"] == CURRENT_CONFIG_VERSION
     # Granted unless the profile said otherwise: a flag it does not name follows
-    # the generated default, and one it names is honoured — which can only
+    # the generated default, and one it names is honoured, which can only
     # narrow, because the default it would have to beat is already true wherever
     # a generation grants anything. allow_raw_debugger_commands is not named here
     # and is false, which is the generated default arriving through this path
@@ -343,7 +343,7 @@ def test_a_profile_baudrate_that_is_not_a_number_is_refused_by_name(baudrate: ob
     `ValueError` out of a generation that had already read the board. `True` is
     in the list for the opposite reason: `int(True)` is `1`, which the
     configuration schema accepts as a baudrate, so the traceback was not even the
-    worst case — a value nobody meant would have been written into the file and
+    worst case: a value nobody meant would have been written into the file and
     opened on the port."""
     template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
     profile = {
@@ -473,7 +473,7 @@ def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_pat
     The profile path is the operator's own, and the open generated default left it
     theirs: a flag a project's `agentic-hil.config.example.yaml` sets to `false`
     is honoured. What must not survive that is a summary claiming every
-    permission was granted — an operator who wrote `allow_mass_erase: false`
+    permission was granted: an operator who wrote `allow_mass_erase: false`
     would be told their own decision had been overridden."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -551,7 +551,7 @@ def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch, *, serial: str = "STLI
 
     Only the two ST-Link processes and the host port inventory are replaced, so
     enumeration, selection, the HOTPLUG connect and the COM correlation all run
-    for real — a double for `discover_attached_hardware` itself would let a caller
+    for real: a double for `discover_attached_hardware` itself would let a caller
     that never calls it pass. It answers by command rather than out of an
     iterator, because more than one caller reads this host per test, and that is
     the whole point.
@@ -597,7 +597,7 @@ def test_init_looks_for_attached_hardware_without_a_project_profile(tmp_path: Pa
     """Looking is not what a project profile decides.
 
     `init` called discovery only when the workspace held an
-    `agentic-hil.config.example.yaml`, so a fresh installation — which has none —
+    `agentic-hil.config.example.yaml`, so a fresh installation (which has none)
     got the placeholder skeleton on a machine with the board plugged in, and
     nothing in the result said that nothing had been looked for. The MCP server
     reads the same board unconditionally, which is how this arrived as "CLI
@@ -649,7 +649,7 @@ def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(
 
 
 def test_init_and_the_server_describe_one_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two paths, one machine, one answer — the test that fails if they part.
+    """Two paths, one machine, one answer: the test that fails if they part.
 
     `agentic-hil init` at a shell and `project_config_create` over MCP both write
     a workspace's authoritative configuration out of what is attached, and an
@@ -679,7 +679,7 @@ def test_a_configuration_init_wrote_leaves_adopt_hardware_nothing_to_carry(tmp_p
     """The reporter's own proof, turned round.
 
     That `agentic-hil adopt-hardware` repaired the file `init` had just written was
-    how they learned the board had been discoverable all along — one command
+    how they learned the board had been discoverable all along: one command
     walking past what the next one found. On a bench that is attached, adoption now
     has nothing to carry: every key it would fill already holds the value `init`
     read off the same board through the same function."""
@@ -777,7 +777,7 @@ def test_a_host_with_no_gdb_generates_the_null_that_autodetects(tmp_path: Path, 
 
 # The sentences that had to go. Every one was true of
 # `project_config_create`, which calls `carry_over_permissions`, and false of
-# `agentic-hil init --force`, which never has — and every one shipped.
+# `agentic-hil init --force`, which never has, and every one shipped.
 RETIRED_CARRY_OVER_CLAIMS = (
     "carries the existing grants over",
     "carries every existing grant over",
@@ -806,12 +806,12 @@ def test_init_force_names_every_narrowing_it_discarded(tmp_path: Path, monkeypat
     """The dangerous case, and the whole of what the issue asked for.
 
     Somebody narrows a bench, runs `--force` weeks later for an unrelated reason,
-    and the bench is open again with nothing saying so — the silent reopening the
+    and the bench is open again with nothing saying so: the silent reopening the
     one-way street on `project_config_set` exists to prevent. The behaviour stays
     what its name says: `--force` already discards the baudrate, the
     `resource_id`, the `state_root` and the artifact roots, and a version that
     rescued permissions but not those would be harder to predict rather than
-    easier. What it owes the operator is the list. Against master this fails —
+    easier. What it owes the operator is the list. Against master this fails:
     both permissions came back open and the result mentioned neither."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -847,7 +847,7 @@ def test_init_force_over_a_configuration_it_cannot_read_says_that_rather_than_no
 
     "Nothing was lost" and "this could not be checked" are different answers and
     only one of them is safe to act on, so an unreadable predecessor is reported
-    as itself instead of as an empty list — and the regeneration still happens."""
+    as itself instead of as an empty list, and the regeneration still happens."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
@@ -870,7 +870,7 @@ def test_init_force_replaces_a_configuration_that_is_not_utf8_at_all(tmp_path: P
 
     The alias refusal inside `secure_atomic_write_text` is the guarded open and
     never the decode, so reading the existing object as text made a file that is
-    not UTF-8 unwritable rather than replaceable — and `init --force`, the one
+    not UTF-8 unwritable rather than replaceable, and `init --force`, the one
     command whose job is to replace it, failed with a decode error instead."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -891,7 +891,7 @@ def test_init_force_restores_a_non_utf8_original_when_the_new_file_fails(tmp_pat
 
     `--force` authorises replacing the file on success, not deleting the original
     after the replacement fails. The rollback snapshot used to be the decoded
-    text, and a file that would not decode was recorded as absence — so when the
+    text, and a file that would not decode was recorded as absence, so when the
     regenerated file failed its final validation, `_restore_file_snapshots`
     removed the original it reported having restored. The
     snapshot is the exact bytes now, so the file that could not be read is the
@@ -905,7 +905,7 @@ def test_init_force_restores_a_non_utf8_original_when_the_new_file_fails(tmp_pat
     target.write_bytes(original)
 
     # The failure is the final validation, after the new file is already written
-    # over the original — the double fault the rollback path exists to survive.
+    # over the original: the double fault the rollback path exists to survive.
     def refuse_final_validation(_workspace: Path) -> object:
         raise ConfigError("config_invalid", "injected final-validation failure", {})
 
@@ -926,11 +926,11 @@ def test_first_init_refuses_a_probe_another_workspace_is_holding(tmp_path: Path,
     """The first `init` reads the board under machine-wide exclusion, lease or not.
 
     A workspace with no configuration has no `state_root` to lease against, so the
-    read goes without the audit trail — but "this project holds no lease" was
+    read goes without the audit trail, but "this project holds no lease" was
     never "nobody holds this board". Another workspace on the machine can be
     mid-HOTPLUG on the same ST-Link, and the probe lock lives under the user's
     home keyed on the device, reachable with no shared config. So the read takes
-    it in `before_connect` — the last point before the HOTPLUG connect — and a
+    it in `before_connect` (the last point before the HOTPLUG connect) and a
     held board comes back `device_busy` with nothing said to it, exactly as the
     leased path answers. Against the previous behaviour this
     connected regardless."""
@@ -983,7 +983,7 @@ def test_first_init_refuses_a_probe_another_workspace_is_holding(tmp_path: Path,
 def test_first_init_refuses_a_probe_another_workspace_holds_by_its_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The alias case round 1 left open: the holder is a real configured debugger.
 
-    The other workspace does not reach for `probe:<serial>` by hand — it holds an
+    The other workspace does not reach for `probe:<serial>` by hand: it holds an
     ordinary debugger the way any run does. That debugger names both a
     `resource_id` and the probe serial, so its primary lock is
     `physical:<resource_id>`, an alias only its own operator knows. A first `init`
@@ -1106,7 +1106,7 @@ def test_a_first_init_reports_no_discard_at_all(tmp_path: Path, monkeypatch: pyt
 def test_init_force_over_a_file_that_narrowed_nothing_reports_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The ordinary reset, where the same silence is the honest answer.
 
-    Everything else in the file is still gone — that is what `--force` is — but no
+    Everything else in the file is still gone (that is what `--force` is), but no
     permission moved, so there is no permission to name."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1131,7 +1131,7 @@ def test_the_shipped_documents_and_init_force_say_the_same_thing(tmp_path: Path,
     So the sentences and the behaviour are pinned to each other here."""
     root = Path(__file__).resolve().parents[1]
     # The three the issue named, and `cli.py`, which said it a fourth time in the
-    # docstring of `agentic-hil grant` — fifty lines below the code that reports
+    # docstring of `agentic-hil grant`, fifty lines below the code that reports
     # the discards, and missed by a sweep that had looked only at the documents.
     shipped = {
         "TROUBLESHOOTING.md": root / "TROUBLESHOOTING.md",
@@ -1157,7 +1157,7 @@ def test_the_shipped_documents_and_init_force_say_the_same_thing(tmp_path: Path,
     assert yaml.safe_load(target.read_text(encoding="utf-8"))["debuggers"]["dut"]["permissions"]["allow_flash"] is True
     # And the carrying regeneration stays `project_config_create`'s alone. A CLI
     # that starts calling it makes the retired sentences true again by the back
-    # door, which is exactly the drift this test exists to catch — so the pin is
+    # door, which is exactly the drift this test exists to catch, so the pin is
     # on the binding rather than on the word: to call it, `cli` must hold it.
     assert not hasattr(agentic_hil.cli, "carry_over_permissions")
     assert hasattr(agentic_hil.tools, "carry_over_permissions")
@@ -1166,7 +1166,7 @@ def test_the_shipped_documents_and_init_force_say_the_same_thing(tmp_path: Path,
 # held to.
 #
 # Enumerating probes and connecting in HOTPLUG mode is a hardware read whichever
-# command does it — an SWD attach halts the core. `init` did it directly: no
+# command does it: an SWD attach halts the core. `init` did it directly: no
 # `before_connect`, no coordinator, no record, while `project_config_create`
 # writes the same file from the same read under a lease. That the CLI is the
 # operator's authority does not carry the exception; `adopt-hardware` makes the
@@ -1176,12 +1176,12 @@ def test_the_shipped_documents_and_init_force_say_the_same_thing(tmp_path: Path,
 def test_init_does_not_connect_to_a_probe_another_owner_holds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`agentic-hil init --force` gets a refusal, not the board.
 
-    The holder is a stranger — an MCP server, another project's run, a test
+    The holder is a stranger: an MCP server, another project's run, a test
     reactor. It has the physical probe, which the configuration this workspace
     would replace names, so the open-run refusal answers first and the read is
     never reached. It used to be `device_busy` off the read itself, from the
     device lock taken between enumerating and connecting; the guarantee that test
-    defended is unchanged and stronger — there is now no enumeration either — and
+    defended is unchanged and stronger (there is now no enumeration either) and
     the answer names why the write stopped rather than which lock it collided
     with. The holder is still named, in `open_holds`. Rewriting this workspace's
     whole policy in the middle of somebody else's run is not something an
@@ -1207,7 +1207,7 @@ def test_init_does_not_connect_to_a_probe_another_owner_holds(tmp_path: Path, mo
     assert refused["error_type"] == "config_write_in_open_run"
     assert [item["holder"]["label"] for item in refused["open_holds"]["busy_devices"]] == ["other-bench-session"]
     # The record and the refusal name the command that ran, not the MCP tool
-    # that writes the same file — an incident has to say which one left it.
+    # that writes the same file: an incident has to say which one left it.
     assert refused["tool"] == "cli_init"
     assert not any("mode=HOTPLUG" in argument for command in commands for argument in command), commands
     assert commands == [], commands
@@ -1219,9 +1219,9 @@ def test_init_does_not_connect_to_a_probe_another_owner_holds(tmp_path: Path, mo
 #
 # The probe refusal above is incidental: it is the device lock the read takes
 # doing its job, not a rule about writing this file. Every other write of the
-# authoritative configuration has that rule — `project_config_create`,
+# authoritative configuration has that rule: `project_config_create`,
 # `project_config_adopt_hardware` and `agentic-hil grant`/`revoke` all answer
-# while a run, a lease or another terminal holds the bench — and `init --force`
+# while a run, a lease or another terminal holds the bench, and `init --force`
 # had none. A run that declared only a COM port or only a CAN bus holds no
 # probe, so nothing stood in the way at all and the regeneration replaced the
 # permissions, the baudrate and the device bindings underneath live
@@ -1232,7 +1232,7 @@ def _initialised_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, with_
     """A workspace `init` has already configured from the attached board.
 
     Returns the workspace, the written configuration, and the list this host
-    records its commands in — cleared, so anything in it afterwards was asked by
+    records its commands in, cleared, so anything in it afterwards was asked by
     the second `init` rather than by the first."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1278,7 +1278,7 @@ def test_init_force_is_refused_while_a_run_holds_only_a_com_port(tmp_path: Path,
     """A run with a COM port and no probe: the case nothing used to stop.
 
     The port is held, the probe is not, so the board read `init --force` performs
-    goes through — and behind it the whole file is replaced while a session is
+    goes through, and behind it the whole file is replaced while a session is
     reading that port under the permissions and the baudrate it names. The
     refusal is now the same one every other write of this file answers, and it is
     raised before the read rather than fallen into by it."""
@@ -1356,7 +1356,7 @@ def test_the_board_init_reads_is_written_into_the_audit_trail(tmp_path: Path, mo
 
     `init` left nothing behind at all, so a bench could be connected to with the
     audit trail showing no access. The record says which probe, which locks were
-    held for it and the state those leases actually ended in — the same record
+    held for it and the state those leases actually ended in, the same record
     `project_config_create` leaves for the same read."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1383,8 +1383,8 @@ def test_the_first_init_of_a_workspace_reads_directly_and_says_so(tmp_path: Path
     """The one case that cannot be leased, handled rather than refused.
 
     A workspace with no loadable configuration has no `state_root` to record a
-    lease under and no policy to audit against — the machinery does not exist
-    rather than being skipped — and it is also the one case where nothing on this
+    lease under and no policy to audit against (the machinery does not exist
+    rather than being skipped) and it is also the one case where nothing on this
     machine can be holding a board on this project's behalf. Refusing it would
     make a first `init` impossible, which is worse than the defect. What it must
     not be is silent: the result names the unleased read and the reason, so the

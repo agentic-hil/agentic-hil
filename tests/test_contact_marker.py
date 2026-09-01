@@ -2,7 +2,7 @@
 
 Three benches were held in one week by failures that never reached any hardware:
 a socket bind, an interface that was not there, and a serial port another program
-was already holding. Each was a gap in the same mechanism — a per-backend set of
+was already holding. Each was a gap in the same mechanism: a per-backend set of
 exception classes that *prove* no contact, with everything outside the set
 treated as an unknown board state. A set of known-innocent classes is only ever
 as complete as the last incident, which is why there was a third one.
@@ -12,7 +12,7 @@ point where contact becomes provable, and every failure handler that used to
 quarantine on "markerless" asks the marker first. The tests here pin both halves,
 and the second half is the load-bearing one:
 
-* A failure before contact refuses, whatever ended it — including an exception
+* A failure before contact refuses, whatever ended it, including an exception
   class no classifier has ever heard of. That is the property a set of classes
   cannot have.
 * A failure after contact quarantines exactly as it did before, and a failure
@@ -20,8 +20,8 @@ and the second half is the load-bearing one:
   rounded down to safe is the failure quarantine exists to prevent.
 
 The serial half also closes the case that produced the third incident: the port
-is now opened exclusively, so a port somebody else is holding fails at the open —
-a refusal — instead of succeeding into a shared line whose interleaved bytes
+is now opened exclusively, so a port somebody else is holding fails at the open
+(a refusal) instead of succeeding into a shared line whose interleaved bytes
 surface much later as an unconfirmed effect, which is a quarantine.
 """
 
@@ -169,7 +169,7 @@ def test_on_posix_the_exclusivity_is_an_advisory_lock_taken_inside_open() -> Non
 
     pyserial 3.5 does not use `TIOCEXCL`. It takes a non-blocking `flock` on the
     descriptor from inside `_reconfigure_port`, which `open()` calls, so a held
-    port fails during `open()` and `open()` unwinds its own descriptor — which is
+    port fails during `open()` and `open()` unwinds its own descriptor, which is
     what puts the failure in the refusal path rather than the quarantine path.
 
     Advisory has a consequence worth writing down rather than discovering: the
@@ -227,7 +227,7 @@ def test_a_port_another_program_holds_refuses_instead_of_quarantining(tmp_path: 
 
     A test runner outside this project had the port. Because the open was not
     exclusive it succeeded, two processes wrote down one line, and what the
-    caller eventually saw was a reply that did not answer its stimulus — an
+    caller eventually saw was a reply that did not answer its stimulus: an
     unconfirmed effect, which quarantined the bench and named the wrong cause.
     Exclusive opens move that to here, where it is a refusal that names the
     actual situation and leaves nothing to recover.
@@ -314,7 +314,7 @@ class NeverSeenBefore(BaseException):
 
     The point is not that this particular class occurs. It is that no set of
     known-innocent classes can contain it, so a failure handler that decides on
-    the class has to treat it as an unknown board state — and one that decides on
+    the class has to treat it as an unknown board state, and one that decides on
     the marker does not have to know it exists at all.
     """
 
@@ -331,7 +331,7 @@ def test_an_exotic_failure_before_the_port_is_open_refuses(tmp_path: Path, monke
     Asked of the adapter rather than through the tool dispatch on purpose. The
     dispatch keeps a last-resort net that contains *any* exception escaping any
     hardware tool, and that net has no marker to consult because the exception
-    left the adapter behind — a separate layer answering a separate question, and
+    left the adapter behind: a separate layer answering a separate question, and
     not the one this pins.
     """
     config = com_config(tmp_path)
@@ -376,7 +376,7 @@ def test_a_failure_after_contact_still_quarantines(tmp_path: Path, monkeypatch: 
     A write that failed on an open port is the case quarantine is for: the bytes
     may be on the line, the board may have acted on them, and nothing on this
     host can say. The marker changes nothing here and this test exists to prove
-    it — it passes identically before and after the inversion.
+    it: it passes identically before and after the inversion.
     """
     config = com_config(tmp_path)
     service = AgenticHILToolService(config)
@@ -398,7 +398,7 @@ def test_a_failure_after_contact_still_quarantines(tmp_path: Path, monkeypatch: 
         assert result["side_effect_status"] == "unknown"
         assert result["retry_safe"] is False
         assert "com_write_effect_unconfirmed" in result["cleanup_reasons"], result
-        # The marker is set — the port was open — and it is published, so the
+        # The marker is set (the port was open) and it is published, so the
         # release of a dead owner's devices can see that this report's
         # `not_started` would have been about a call and not about the session.
         assert result[CONTACT_MARKER_KEY], result

@@ -5,7 +5,7 @@ Real OpenOCD loads every `-f` file during its configuration stage and exits
 before `init` when one is missing, so the adapter is never opened and the
 init-stage echo never prints. This fake reproduces exactly that: it checks each
 `-f` argument against the filesystem, reports the first missing one the way
-OpenOCD 0.12 words it, and executes nothing else — in particular none of the
+OpenOCD 0.12 words it, and executes nothing else, in particular none of the
 `-c` scripts, so no stage marker and no result marker reach the output.
 """
 

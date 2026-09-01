@@ -554,7 +554,7 @@ def test_routing_reads_a_command_the_way_a_shell_would() -> None:
 
 def test_routing_lets_the_guard_overrule_the_transcript() -> None:
     # The transcript shows what the agent typed; the PATH guard records what was
-    # executed. Where they disagree, the container's evidence decides — in both
+    # executed. Where they disagree, the container's evidence decides, in both
     # directions, and absent evidence decides nothing.
     typed = {"followup": True, "raw_commands": ["openocd"], "mcp_calls": 1, "cli_calls": 0, "config_reads": 0}
     silent = {**typed, "raw_commands": []}
@@ -754,7 +754,7 @@ def test_matrix_rejects_an_unknown_reasoning_effort(tmp_path: Path) -> None:
 
 
 def test_the_same_model_at_two_efforts_is_not_a_duplicate(tmp_path: Path) -> None:
-    # Two levels of one model are two measurements, not a collision — and two
+    # Two levels of one model are two measurements, not a collision, and two
     # jobs at the same level still are one.
     matrix = _matrix_with_jobs(
         tmp_path,
@@ -1353,7 +1353,7 @@ def test_writing_a_refreshed_login_back_is_serialized() -> None:
     """Concurrent runs of one agent share one login file on this machine.
 
     A provider rotates the refresh token when it issues a new one, so two
-    write-backs racing can leave the copy here rejected — which is how a stored
+    write-backs racing can leave the copy here rejected, which is how a stored
     login was already lost once. Only the write-back is serialized; the runs are
     not.
     """
@@ -2181,7 +2181,7 @@ def test_independent_success_predicate(patch: dict[str, object], expected: bool)
     # `side_effect_status: committed` because that is what a successful effectful
     # call actually carries. The base said `none`, a value no production path
     # emits, so the unpatched case asserted that `overall_success` accepts a
-    # status that can never reach it — and the two statuses it does have to
+    # status that can never reach it, and the two statuses it does have to
     # reject are the ones patched below.
     result = {
         "ok": True,

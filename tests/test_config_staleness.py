@@ -4,12 +4,12 @@ The session behind this: an operator switched a debugger from `stlink`
 to `pyocd`, and within the same minute `agentic-hil doctor` reported `pyocd`
 while `debugger_info` over MCP reported `stlink`. Both were telling the truth
 about different documents, and neither said so. It cost two round trips, and it
-could have cost a flash sent to a backend the operator no longer configured —
+could have cost a flash sent to a backend the operator no longer configured:
 the authoritative configuration is the permission boundary, so a server quietly
 enforcing an older one is enforcing a policy nobody has chosen any more.
 
 The tests here are in three groups. The first reproduces that disagreement and
-shows it is now named. The second is about *how* the comparison is made — a
+shows it is now named. The second is about *how* the comparison is made: a
 rewrite with identical bytes is not a change, and a change hidden under an
 unchanged timestamp still is, which is the whole reason the comparison is a hash
 of the loaded bytes and not a modification time. The third is about what is
@@ -120,7 +120,7 @@ def rewrite(path: Path, edit) -> None:
 def test_debugger_info_names_the_backend_it_answers_with_and_the_file_it_came_from(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The reproduction. `stlink` is still the answer, and it now says why.
 
-    The server keeps serving what it loaded — that is the correct behaviour and
+    The server keeps serving what it loaded: that is the correct behaviour and
     is not what the issue asks to change. What it asks for is that the answer
     stop looking like a statement about the file that exists now."""
     workspace, path = bench(tmp_path, monkeypatch)
@@ -153,7 +153,7 @@ def test_doctor_publishes_what_a_running_server_has_to_be_compared_against(tmp_p
     """The other half of the disagreement.
 
     `doctor` parses the file at the moment it is asked, so it is always current
-    and can never be the one that is stale — which is exactly why it cannot
+    and can never be the one that is stale, which is exactly why it cannot
     speak for a server that started before the last edit. What it can do is
     publish the digest that makes the comparison possible, and say how."""
     workspace, path = bench(tmp_path, monkeypatch)
@@ -173,8 +173,8 @@ def test_doctor_publishes_what_a_running_server_has_to_be_compared_against(tmp_p
     # And it names both ways across. This note ended at "only restarting it
     # changes that", which stopped being true the moment a description reload
     # existed: that call is what adopts a changed `debuggers` entry into a
-    # running server, and the restart is what everything else — every permission
-    # included — still waits for. `doctor` is the last caller that made the
+    # running server, and the restart is what everything else (every permission
+    # included) still waits for. `doctor` is the last caller that made the
     # restart-only promise, and a digest mismatch is exactly where it is read.
     assert "only restarting" not in note
     assert "project_config_reload_description" in note
@@ -237,7 +237,7 @@ def test_a_file_edited_while_the_backend_answers_is_not_reported_as_unchanged(tm
 
     `backend.info()` runs the toolchain's version command and is allowed
     seconds. A status taken before it would answer `unchanged` about a file the
-    operator edited during exactly that window — a positive claim that the two
+    operator edited during exactly that window: a positive claim that the two
     documents agree, made out of a comparison that predates the divergence."""
     workspace, path = bench(tmp_path, monkeypatch)
     tools = service(workspace)
@@ -396,7 +396,7 @@ def test_a_configuration_that_was_never_read_from_a_file_claims_nothing(tmp_path
     """Unknown is not unchanged, and it is not stale either.
 
     Nothing established that the file has moved, so nothing may be reported as
-    though it had — and nothing may be reported as current either."""
+    though it had, and nothing may be reported as current either."""
     workspace, _ = bench(tmp_path, monkeypatch)
     config = load_authoritative_config(workspace)
 
@@ -703,7 +703,7 @@ def test_a_changed_file_that_will_not_load_is_still_only_a_changed_file(what: st
     """One observation, and no forecast attached to it.
 
     `changed` used to mean "a restart loads what is on disk now", and holding
-    that needed a candidate validation congruent with startup — two code paths
+    that needed a candidate validation congruent with startup: two code paths
     that must agree, where every difference is a defect, and four were found in
     four review rounds. The claim is now the digest comparison and nothing else:
     the file differs from the one this server loaded. Each document here is one
@@ -738,7 +738,7 @@ def test_reading_the_status_of_a_changed_file_puts_nothing_on_the_machine(tmp_pa
     """A status check runs per call, against a file the operator is still editing.
 
     Startup creates `state_root`. Nothing here may, because the document naming
-    it is not in force and may be rolled back a second later — one `state_root`
+    it is not in force and may be rolled back a second later: one `state_root`
     typo, repeated on every tool call, would otherwise scatter directories for
     configurations nobody chose."""
     workspace, path = bench(tmp_path, monkeypatch)
@@ -765,7 +765,7 @@ def test_a_changed_file_that_still_loads_is_reported_the_same_way(tmp_path: Path
     assert status["state"] == STATE_CHANGED
     assert status["error_type"] == CONFIG_STALE_ERROR
     assert status["reload_required"] is True
-    # And it does load, so the one state covers both — which is the point: the
+    # And it does load, so the one state covers both, which is the point: the
     # answer never had to tell them apart to be useful.
     assert load_authoritative_config(workspace).debugger.type == "pyocd"
 
@@ -774,7 +774,7 @@ def test_an_unreachable_path_is_unreadable_rather_than_missing(tmp_path: Path, m
     """"Gone" and "cannot be got at" send an operator to different places.
 
     `missing` carries restore-the-file remediation, and a stat that fails on an
-    ancestor is not evidence that the file was deleted — the file may be sitting
+    ancestor is not evidence that the file was deleted: the file may be sitting
     right there behind a directory that is no longer traversable. Asking
     `os.path.lexists` for a second opinion answered False for every such failure
     and turned all of them into `missing`."""
@@ -815,7 +815,7 @@ def test_describe_reads_the_status_and_the_document_from_one_snapshot(tmp_path: 
 
     The status was computed first and the document read after it. An edit in
     between returned `state: unchanged` beside values from a document that is not
-    the unchanged one — a caller comparing the two halves of that answer is
+    the unchanged one: a caller comparing the two halves of that answer is
     comparing two documents without being told."""
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     tools = service(workspace)
@@ -841,7 +841,7 @@ def test_describe_reads_the_status_and_the_document_from_one_snapshot(tmp_path: 
     assert len(seen) == 1, "two reads of one file can straddle an edit"
     assert described["config_status"]["current_digest"] == config_digest(seen[0])
     # Not `unchanged`, because the document the keys below came from is not the
-    # one this server loaded — which is precisely the pairing that used to be
+    # one this server loaded, which is precisely the pairing that used to be
     # reportable the wrong way round.
     assert described["config_status"]["state"] == STATE_CHANGED
     backend = next(entry for entry in described["writable_keys"] + described["locked_keys"] if entry["key"] == "debuggers.dut.executable")
@@ -853,7 +853,7 @@ def test_a_configuration_that_will_not_parse_still_gets_the_block_it_promises(tm
 
     That is what it is for, so a refusal from it has to as well. A malformed or
     non-UTF-8 file used to escape as an internal error from under the MCP layer
-    instead — on the one tool documented to answer while everything else is
+    instead, on the one tool documented to answer while everything else is
     refusing."""
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     tools = service(workspace)
@@ -905,8 +905,8 @@ def test_the_report_records_the_version_that_was_in_force_not_the_one_on_disk_af
     A report naming just the path answers nothing: the path is the same for the
     life of the project and the content is not, so an auditor holding the file
     that is there now has no way to tell whether it is the document the action
-    was permitted by. Here it provably is not — the server is enforcing `stlink`
-    and the file says `pyocd` — and the report has to say the first, plus the
+    was permitted by. Here it provably is not (the server is enforcing `stlink`
+    and the file says `pyocd`) and the report has to say the first, plus the
     fact that the two had already come apart when this ran."""
     workspace, path = bench(tmp_path, monkeypatch)
     in_force = config_digest(path.read_bytes())
@@ -960,7 +960,7 @@ def test_recommitting_a_report_does_not_restamp_the_version_it_ran_under(tmp_pat
     """A terminal lease transition writes the same report a second time.
 
     That second write happens after the action, so a fresh check there would
-    replace the one fact this record is for with a fact about the re-commit — and
+    replace the one fact this record is for with a fact about the re-commit, and
     it would do so precisely when the file moved during the call, which is the
     case that matters."""
     workspace, path = bench(tmp_path, monkeypatch)
@@ -981,7 +981,7 @@ def test_the_report_names_the_document_the_grants_came_from_after_a_reload(tmp_p
 
     A description reload moves `config_digest` onto the file it took and leaves
     every grant on the startup document. The record's own state is then
-    `unchanged` — truthfully, about the description — while the permissions this
+    `unchanged` (truthfully, about the description) while the permissions this
     action was allowed by are a document that is no longer anywhere. Naming only
     the digest there would point an auditor at the wrong file for precisely the
     half the record exists for."""

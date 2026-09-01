@@ -59,7 +59,7 @@ def read_memory(args: list[str]) -> int:
 # given, transcribed from a v2.23.0 run against a NUCLEO-F446RE. `Reset mode  :
 # Software reset` is what makes `-halt` a reset-then-halt rather than a bare
 # halt, and it is printed by the connect, so it is here for every action that
-# connects — including the ones that then fail, which is why the backend does
+# connects, including the ones that then fail, which is why the backend does
 # not read it as confirmation of anything.
 CONNECT_BANNER = """      -------------------------------------------------------------------
                        STM32CubeProgrammer v2.18.0
