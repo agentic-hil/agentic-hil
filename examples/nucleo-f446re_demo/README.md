@@ -35,7 +35,7 @@ agentic-hil doctor
 
 The project half reads the profile: where `agentic-hil agent-install` has already run for this user, `agentic-hil init` alone does the same discovery.
 
-Authoritative config stays outside the repository: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows; `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX. The profile declares requirements; the project half resolves probe, CubeProgrammer, and COM bindings without replacing existing config. Never commit host-specific copies.
+Authoritative config stays outside the repository: `%APPDATA%/agentic-hil/projects/<project-id>/config.yaml` on Windows; `${XDG_CONFIG_HOME:-~/.config}/agentic-hil/projects/<project-id>/config.yaml` on POSIX; and under `%USERPROFILE%\.agentic-hil` or `~/.agentic-hil` instead when that root cannot be written, which is where a redirected profile lands. `setup` prints the path it wrote, and a config already under the second root is the one later runs read. The profile declares requirements; the project half resolves probe, CubeProgrammer, and COM bindings without replacing existing config. Never commit host-specific copies.
 
 ## Run the loop (start here)
 

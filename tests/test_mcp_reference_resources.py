@@ -384,6 +384,87 @@ def test_the_path_table_names_every_root_a_file_can_land_under(service: AgenticH
     assert cells["device locks"] == ["`%USERPROFILE%\\.agentic-hil\\device-locks`, fixed", "`~/.agentic-hil/device-locks`, fixed"]
 
 
+def _prose_lines(text: str) -> list[str]:
+    """Every line outside a fenced block, because a fence is syntax, not a claim.
+
+    The override examples in `docs/mcp-hosts.md` spell a full configuration path
+    and are right to name one root only: they show what an operator types, not
+    where discovery looks.
+    """
+    lines, fenced = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced:
+            lines.append(line)
+    return lines
+
+
+def test_no_document_places_the_configuration_under_one_root_only() -> None:
+    """The table is one channel, and it is not the one most readers arrive at.
+
+    #362 gave `platform-paths` both roots. Four documents outside it still ended
+    the sentence at the platform default: the configuration reference, the host
+    guide, the security scope notes and the demo README. That is wrong in the
+    direction that hides a bench, because a project generated under the fallback
+    is looked for where it is not, and the reader who hits it is the one whose
+    profile forced the fallback in the first place. So every place a document
+    says where the generated configuration lives has to name the second root
+    too, and say what decides between them.
+
+    Swept rather than listed: a fifth document ending the sentence at the
+    platform default is the same defect, and it should fail here rather than on
+    a bench. One that names both roots is welcome and passes on these terms.
+    """
+    root = Path(__file__).resolve().parents[1]
+    # The fallback root's name is read from the code that owns it, so renaming it
+    # there fails here rather than leaving every document quietly wrong.
+    fallback = Path(safe_user_root()).name
+    roots = (f"%USERPROFILE%\\{fallback}", f"~/{fallback}")
+    generated = ("projects/<project-id>/config.yaml", "projects\\<project-id>\\config.yaml")
+
+    documents = {}
+    for path in sorted(root.rglob("*.md")):
+        relative = path.relative_to(root)
+        # Dot directories are tooling and virtualenvs (`.venv`, `.testenv`), and
+        # `build`/`dist` are copies `python -m build` may leave; none of them is a
+        # document a reader receives. CHANGELOG.md is excluded because it records
+        # what a release said, and a past entry is not a claim in force.
+        if any(part.startswith(".") or part in {"build", "dist"} for part in relative.parts) or relative.as_posix() == "CHANGELOG.md":
+            continue
+        documents[relative.as_posix()] = _prose_lines(path.read_text(encoding="utf-8"))
+
+    named_by_the_issue = {"docs/configuration.md", "docs/mcp-hosts.md", "SECURITY.md", "examples/nucleo-f446re_demo/README.md"}
+    # The sweep has to be able to see the documents the issue named, or an empty
+    # sweep would pass while every one of them said the wrong thing.
+    assert named_by_the_issue <= set(documents)
+
+    placed = set()
+    for name, lines in documents.items():
+        says_where = False
+        for line in lines:
+            if not any(spelling in line for spelling in generated):
+                continue
+            says_where = True
+            assert any(named in line for named in roots), f"{name} places the configuration under one root only: {line}"
+        if says_where:
+            placed.add(name)
+            assert "cannot be written" in "\n".join(lines), f"{name} names both roots without saying what decides between them"
+
+    # The other half of the canary: the detection still recognises the sentence
+    # in each of the four. A fifth document is welcome to say it and passes on
+    # the same terms, so this is a floor rather than the exact set.
+    assert named_by_the_issue <= placed, sorted(placed)
+
+    # The two documents a reader consults about the rule itself carry the part no
+    # ordering can express: a file that is already there wins over the order.
+    # Anchored to the order rather than to the word, because SECURITY.md says
+    # "outranks" of an unrelated thing (an opencode session rule) further down.
+    for name in ("docs/configuration.md", "SECURITY.md"):
+        text = "\n".join(documents[name])
+        assert "outranks the order" in text or "outranks that order" in text, f"{name} does not say an existing file outranks the order"
+
+
 def test_the_removed_trust_check_leaves_no_advice_behind_it(tmp_path: Path) -> None:
     """A catalogue entry outliving its mechanism is worse than none at all.
 
