@@ -305,7 +305,7 @@ def safe_state_root_suggestion() -> str:
 
 
 def safe_user_config_suggestion() -> str:
-    return str(Path(safe_user_root()) / "projects" / "<workspace-name>" / "config.yaml")
+    return str(Path(safe_user_root()) / "projects" / "<name>-<digest>" / "config.yaml")
 
 
 def _substitutions() -> dict[str, str]:
@@ -3634,7 +3634,7 @@ The device lock directory is not configurable and has no environment override. I
 `AGENTIC_HIL_CONFIG` and a freely chosen `state_root` are not debug switches. They are how a project binds to a configuration and a state directory the discovered defaults do not cover: a redirected profile directory, a roaming share, a volume the operator would rather keep this off.
 
 ```text
-AGENTIC_HIL_CONFIG=C:\\Users\\<user>\\.agentic-hil\\projects\\<workspace-name>\\config.yaml
+AGENTIC_HIL_CONFIG=C:\\Users\\<user>\\.agentic-hil\\projects\\<name>-<digest>\\config.yaml
 
 # inside that config.yaml
 state_root: C:\\Users\\<user>\\.agentic-hil\\state
