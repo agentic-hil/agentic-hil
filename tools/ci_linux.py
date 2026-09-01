@@ -32,11 +32,20 @@ tests at all, fails the run. Exit 0 after nothing was collected has been
 observed, and a green result for a suite that never executed is worse than no
 result at all.
 
+One run at a time per machine. Three or four full-suite containers on one
+Docker daemon starve each other until the suite dies mid-flight without a
+summary line, which the check above then correctly reports as nothing known to
+have been tested: a wasted run, a retry, and a partial line somebody may read as
+progress. A run therefore takes a lock for its whole duration and queues behind
+whoever holds it, naming the holder while it waits. ``--no-wait`` refuses
+instead of queueing.
+
 Usage:
 
     python tools/ci_linux.py                     # the whole suite
     python tools/ci_linux.py tests/test_hardening.py -x
     python tools/ci_linux.py --python 3.13       # a different interpreter
+    python tools/ci_linux.py --no-wait           # refuse if a run is in flight
 
 Everything after the recognised options is handed to pytest unchanged.
 """
@@ -44,10 +53,17 @@ Everything after the recognised options is handed to pytest unchanged.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
+import time
+from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
 
 # CI runs 3.10 through 3.13; this runs one of them. 3.12 is the newest version
@@ -61,6 +77,58 @@ EXIT_NO_DOCKER = 2
 # for different things from whoever reads the exit code.
 EXIT_CLONE_FAILED = 3
 EXIT_NO_RESULT = 4
+# A run refused because another one holds the machine is not a test failure and
+# must not read as one: a script that retries on red would otherwise retry the
+# collision it was just told about.
+EXIT_LOCKED = 5
+
+# Who reads this file: `tools/ci_linux.py`, and nothing else. It is written by
+# this script on an operator's own machine, read by the next run of this script
+# on that machine, and understood by neither the MCP server nor any other tool
+# in this repository.
+#
+# It is deliberately *not* a device lock. The bench mutex lives one level
+# further down, in `~/.agentic-hil/device-locks/`, is owned by the server, and
+# is the one `AGENTS.md` says never to delete by hand. This one holds no
+# hardware: it holds a Docker daemon's capacity, and deleting it while no
+# container of this script is running costs nothing.
+#
+# Format: one JSON object, UTF-8, indented so it can be read in a terminal.
+#
+#     {
+#       "version": 1,
+#       "owner_id": "9f2c...",      random, so a holder can recognise its own record
+#       "pid": 21044,               the process to check for liveness, on `host` only
+#       "host": "BENCH-01",         a pid from another machine cannot be judged here
+#       "started_at": "2026-09-01T09:12:33Z",
+#       "root": "C:/Users/dev/work/agentic-hil",   which checkout is running
+#       "image": "python:3.12",
+#       "pytest_args": ["-q"]
+#     }
+#
+# The absolute path is in there on purpose: the first question of somebody
+# looking at a queued run is which of their checkouts is holding it, and this
+# file never leaves the machine that wrote it.
+CI_LOCK_ROOT_NAME = ".agentic-hil"
+CI_LOCK_NAME = "ci-linux.lock"
+# Bumped when a reader of this file could otherwise misread it. An unknown
+# version is never judged stale: a newer checkout of this repository running
+# beside an older one is an ordinary day here, and the older one must queue
+# behind it rather than delete its lock.
+CI_LOCK_RECORD_VERSION = 1
+LOCK_POLL_INTERVAL_S = 2.0
+# A wait is not bounded, because the thing being waited for is a full suite and
+# a queue of three legitimately takes an hour; it is loud instead, repeating who
+# holds the lock so a wait can never be mistaken for a hang. `--no-wait` is the
+# way out for somebody who knows better.
+LOCK_NOTICE_INTERVAL_S = 60.0
+
+# Windows, where `os.kill(pid, 0)` is not a liveness probe: CPython maps every
+# signal other than the console events onto TerminateProcess, so asking that
+# question there kills the run being asked about.
+_WINDOWS_SYNCHRONIZE = 0x00100000
+_WINDOWS_WAIT_OBJECT_0 = 0x00000000
+_WINDOWS_ERROR_INVALID_PARAMETER = 87
 
 # The container prints this before it gives up on the clone. A run that dies
 # there has to go red naming the clone: relying on `set -e` alone made a broken
@@ -197,6 +265,305 @@ def evaluate_run(returncode: int, output: str) -> tuple[int, str | None]:
     return returncode, None
 
 
+def announce(text: str) -> None:
+    """Say something in this tool's own voice, on the stream reserved for it.
+
+    stderr, because stdout carries the container's output verbatim and a line
+    this script wrote about itself must stay tellable from a line pytest wrote.
+    """
+    print(f"ci_linux: {text}", file=sys.stderr, flush=True)
+
+
+def ci_lock_path() -> Path:
+    """The one file every `ci_linux.py` on this machine queues on.
+
+    `~/.agentic-hil/ci-linux.lock`: fixed, with no environment override, for the
+    same reason the device locks have none. An override is how two runs stop
+    seeing each other, and two runs that cannot see each other is the entire
+    failure this file exists to prevent. The home directory is where every
+    process of this user arrives without having to agree on a configuration or a
+    checkout first, and this script is often run from several checkouts at once.
+
+    Computing the path creates nothing; the directory appears when a lock is
+    actually taken.
+    """
+    return Path(os.path.expanduser("~")) / CI_LOCK_ROOT_NAME / CI_LOCK_NAME
+
+
+def process_is_running(pid: int) -> bool:
+    """Whether `pid` is a live process on this machine, without disturbing it.
+
+    Every uncertain answer is `True`, deliberately: this decides whether a lock
+    may be broken, and breaking one wrongly starts the second container that
+    starves the first. "I cannot tell" therefore means "leave it alone".
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_process_is_running(pid)
+    try:
+        # Signal 0 checks for the process without delivering anything. Zero and
+        # negative pids are excluded above because they address process groups.
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # PermissionError says it exists and belongs to somebody else; anything
+        # else is an answer this cannot read, and both mean "do not break it".
+        return True
+    return True
+
+
+def _windows_process_is_running(pid: int) -> bool:
+    """The same question on Windows, where `os.kill(pid, 0)` would answer it by
+    terminating the process. `WaitForSingleObject` on the process handle asks
+    without touching it: a live process is unsignalled, an exited one is
+    signalled at once. Exit codes are not consulted, because a process that
+    exited with 259 is indistinguishable from a running one through
+    `GetExitCodeProcess`, and this is the one call site where that matters."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    wait_for_object = kernel32.WaitForSingleObject
+    wait_for_object.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    wait_for_object.restype = wintypes.DWORD
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    handle = open_process(_WINDOWS_SYNCHRONIZE, False, pid)
+    if not handle:
+        # Only "no such process" is a dead process. Access denied means it is
+        # alive and owned by somebody else, which is still alive.
+        return ctypes.get_last_error() != _WINDOWS_ERROR_INVALID_PARAMETER
+    try:
+        return wait_for_object(handle, 0) != _WINDOWS_WAIT_OBJECT_0
+    finally:
+        close_handle(handle)
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def read_lock_record(path: Path) -> dict | None:
+    """The holder record in a lock file, or None if there is nothing readable.
+
+    None is a judgement about the file, not about the holder: a file that
+    carries no JSON object was written by a process that died between creating
+    it and describing itself, and nothing in it can name anybody.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def describe_holder(record: dict | None) -> str:
+    """The holder in the terms a waiting operator can act on."""
+    if not record:
+        return "a run whose lock file carries no readable record"
+    who = f"pid {record.get('pid')} on {record.get('host') or 'an unnamed host'}"
+    started_at = record.get("started_at")
+    if started_at:
+        who = f"{who}, started {started_at}"
+    root = record.get("root")
+    if root:
+        who = f"{who}, in {root}"
+    return who
+
+
+def written_on_this_machine(record: dict) -> bool:
+    """Whether this record's pid means anything here.
+
+    An exact match, so a record that names no host at all is as foreign as one
+    that names somebody else's: a home directory can be a roaming share, and a
+    pid is only a name on the machine that issued it. Nothing this tool writes
+    is missing the field, so a record without one was not written by it and is
+    not something to judge a live run by.
+    """
+    return record.get("host") == socket.gethostname()
+
+
+def holder_notice(record: dict | None) -> str:
+    """What is said about a lock this run may not take."""
+    text = f"another run holds the lock: {describe_holder(record)}"
+    if record and record.get("version") != CI_LOCK_RECORD_VERSION:
+        return f"{text}. That record was written by a different version of this tool, so its holder is not judged from here"
+    if record and not written_on_this_machine(record):
+        return f"{text}. That record was not written on this machine, so this one cannot tell whether the process is still running"
+    return text
+
+
+def stale_reason(record: dict | None, path: Path) -> str | None:
+    """Why this lock may be broken, or None if it may not be.
+
+    Three ways a lock survives its run: the file exists but carries nothing (the
+    holder died while writing it), it names no usable pid, or it names one that
+    is no longer running. Everything else is somebody else's lock, including a
+    record from another machine and a record written by a version of this tool
+    that this one does not understand.
+    """
+    if record is None:
+        return f"the lock file at {path} carries no readable holder record, so it is being removed"
+    if record.get("version") != CI_LOCK_RECORD_VERSION:
+        return None
+    if not written_on_this_machine(record):
+        return None
+    pid = record.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return f"the lock file at {path} names no usable holder pid, so it is being removed"
+    if process_is_running(pid):
+        return None
+    return f"the lock at {path} was held by pid {pid}, started {record.get('started_at')}, which is no longer running, so it is being removed"
+
+
+def wait_for_the_holder(seconds: float) -> None:
+    """The pause between two attempts on the lock.
+
+    Its own function so a test can drive the queue without spending the time,
+    which is what keeps "two runs serialize" a deterministic assertion rather
+    than a race between two sleeps.
+    """
+    time.sleep(seconds)
+
+
+class RunLockBusy(RuntimeError):
+    """Somebody else holds the machine, and the refusal names them."""
+
+    def __init__(self, record: dict | None):
+        super().__init__(holder_notice(record))
+        self.record = record
+
+
+class RunLock:
+    """One machine's permission to run a container, held for the whole run.
+
+    Ownership is the existence of the lock file, created with `O_EXCL` so two
+    runs cannot both create it, and carrying the record that lets a contender
+    name the holder or judge it dead. It is not the operating system's advisory
+    lock the bench mutex uses: this script is standalone by design, it runs from
+    checkouts that may not even be installed, and a pid in a file is a promise
+    it can keep with the standard library alone. The cost of that choice is
+    exactly one case, spelled out where it is paid: a holder that crashed and
+    whose pid has since been reused looks alive, and the next run queues instead
+    of starting. It waits; it never runs twice.
+    """
+
+    def __init__(self, *, path: Path | None = None, root: Path | None = None, image: str = "", pytest_args: list[str] | None = None):
+        self.path = ci_lock_path() if path is None else path
+        self.record = {
+            "version": CI_LOCK_RECORD_VERSION,
+            "owner_id": secrets.token_hex(8),
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "started_at": utc_now_iso(),
+            "root": "" if root is None else root.as_posix(),
+            "image": image,
+            "pytest_args": list(pytest_args or []),
+        }
+        self.held = False
+
+    def acquire(self, *, wait: bool = True) -> None:
+        """Hold the machine, queueing behind a live holder if asked to.
+
+        Raises RunLockBusy when a live holder is in the way and `wait` is false.
+        """
+        said: set[str] = set()
+        announced_at: float | None = None
+        waited_from = time.monotonic()
+        while True:
+            if self._create():
+                self.held = True
+                if announced_at is not None:
+                    announce(f"the lock is free after {round(time.monotonic() - waited_from)}s of waiting; starting")
+                return
+            record = read_lock_record(self.path)
+            if record and record.get("owner_id") == self.record["owner_id"]:
+                # This run's own record, which it can only be reading because
+                # the read that confirms a create came back empty once. The lock
+                # is ours and always was; without this, a run would queue behind
+                # itself and find a holder that stays alive as long as it waits.
+                self.held = True
+                return
+            stale = stale_reason(record, self.path)
+            if stale is not None:
+                if stale not in said:
+                    announce(stale)
+                    said.add(stale)
+                self._break()
+                continue
+            if not wait:
+                raise RunLockBusy(record)
+            now = time.monotonic()
+            if announced_at is None:
+                announce(f"{holder_notice(record)}. Waiting for it to finish; pass --no-wait to refuse instead of queueing")
+                announced_at = now
+            elif now - announced_at >= LOCK_NOTICE_INTERVAL_S:
+                announce(f"still waiting after {round(now - waited_from)}s: {describe_holder(record)}")
+                announced_at = now
+            wait_for_the_holder(LOCK_POLL_INTERVAL_S)
+
+    def release(self) -> None:
+        """Give the machine back, and only if it is still ours to give.
+
+        A lock this run no longer owns is left alone: if its record has been
+        replaced, this run was judged dead and broken by somebody who is now
+        holding the file, and deleting it would hand the machine to a third run
+        while that one is mid-container.
+        """
+        if not self.held:
+            return
+        self.held = False
+        if self._is_ours():
+            with suppress(OSError):
+                os.unlink(self.path)
+
+    def _create(self) -> bool:
+        """Try to become the holder, and confirm that this run actually did.
+
+        The confirming read is not paranoia about `O_EXCL`, which is atomic; it
+        closes the one gap breaking a stale lock opens. Two runs that both find
+        the same dead holder both remove the file and both create it, one after
+        the other, and the loser's record is the one that got overwritten. The
+        loser reads the file back, does not find itself, and goes back to
+        queueing. Nobody can lose this way twice, because the record now in the
+        file names a living process that no contender will judge stale.
+        """
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return False
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(self.record, indent=2) + "\n")
+        return self._is_ours()
+
+    def _is_ours(self) -> bool:
+        written = read_lock_record(self.path)
+        return bool(written) and written.get("owner_id") == self.record["owner_id"]
+
+    def _break(self) -> None:
+        """Remove a lock whose holder is gone.
+
+        A vanished file means a contender broke the same lock first, which is
+        the outcome this wanted anyway. Any other failure is a real one and is
+        raised: a stale lock that cannot be removed has to be said out loud, not
+        waited on forever.
+        """
+        with suppress(FileNotFoundError):
+            os.unlink(self.path)
+
+
 def run_container(command: list[str]) -> tuple[int, str]:
     """Run the container, echoing its output as it arrives and keeping a copy.
 
@@ -225,6 +592,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--python", default=DEFAULT_PYTHON, help=f"Python version for the container image (default {DEFAULT_PYTHON}).")
     parser.add_argument("--image", default=None, help="Container image, overriding --python entirely.")
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Refuse instead of queueing when another run holds this machine.",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER, help="Passed to pytest unchanged.")
     options = parser.parse_args(argv)
 
@@ -268,11 +640,27 @@ def main(argv: list[str] | None = None) -> int:
         SCRIPT_ARGV0,
         *(forwarded or ["-q"]),
     ]
-    print(f"{image}: the committed tree at {root}", flush=True)
-    returncode, output = run_container(command)
+    # Taken before the run is announced and released only after it is over, so
+    # the window the lock covers is exactly the window a container is on the
+    # daemon. Everything above it is argument handling that costs nothing and
+    # should not make a queued run wait for it.
+    lock = RunLock(root=root, image=image, pytest_args=forwarded or ["-q"])
+    try:
+        lock.acquire(wait=not options.no_wait)
+    except RunLockBusy as busy:
+        announce(f"{busy}. Refusing, because --no-wait was given")
+        return EXIT_LOCKED
+    except OSError as error:
+        announce(f"the lock at {lock.path} could not be taken: {error}")
+        return EXIT_LOCKED
+    try:
+        print(f"{image}: the committed tree at {root}", flush=True)
+        returncode, output = run_container(command)
+    finally:
+        lock.release()
     status, reason = evaluate_run(returncode, output)
     if reason is not None:
-        print(f"ci_linux: {reason}", file=sys.stderr, flush=True)
+        announce(reason)
     return status
 
 

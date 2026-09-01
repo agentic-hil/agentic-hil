@@ -81,6 +81,11 @@ It clones the committed tree into a container and runs the suite there — about
 ninety seconds, and the count matches the Linux CI job exactly. Uncommitted work
 is not covered, so commit first.
 
+One of these runs at a time per machine. Three or four full-suite containers on
+one Docker daemon starve each other until a run dies without a pytest summary
+line, so a second invocation queues behind the first and says whose run it is
+waiting for. Pass `--no-wait` to refuse instead of queueing.
+
 If you cannot run it, say in the pull request which tests you did not run.
 
 The agent review loop belongs in a container for the same reason and two more:

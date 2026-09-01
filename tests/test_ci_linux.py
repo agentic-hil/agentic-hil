@@ -13,13 +13,23 @@ returning 0 after zero tests were collected: the clone inside the container
 could not build a usable tree, and a green result came back for a suite that
 never executed.
 
-No Docker is needed for either: the command list is built before anything runs,
-and the run is judged from its output.
+The third part is the queue. Several full-suite containers on one Docker daemon
+starve each other until a run dies without a summary line, so a run holds a lock
+file for its whole duration and queues behind whoever has it. What is tested
+here is the decision, never a container and never a clock: the docker front is
+faked, the answer to "is that pid alive" is faked, and the pause between two
+attempts on the lock is the seam a test drives the queue through.
+
+No Docker is needed for any of it: the command list is built before anything
+runs, and the run is judged from its output.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +43,57 @@ import ci_linux  # noqa: E402
 
 # What a container that did its job prints last.
 PLAUSIBLE_RESULT = "1476 passed, 35 skipped in 41.23s\n"
+
+
+@pytest.fixture(autouse=True)
+def a_machine_of_this_tests_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """No test in this file may reach the machine's real run lock.
+
+    `main` takes `~/.agentic-hil/ci-linux.lock` for the length of a run, and
+    every test here calls `main`. Pointing the home directory at `tmp_path`
+    gives each test a machine of its own: nothing here can queue behind a real
+    `ci_linux.py` an operator started, delete its lock, or make it wait for a
+    test. The two environment variables are the two `os.path.expanduser` reads,
+    Windows first.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def a_lock_held_by(pid: int, **fields: object) -> Path:
+    """Leave a holder record behind, as a run that took the lock would have."""
+    record: dict[str, object] = {
+        "version": ci_linux.CI_LOCK_RECORD_VERSION,
+        "owner_id": "0123456789abcdef",
+        "pid": pid,
+        "host": socket.gethostname(),
+        "started_at": "2026-09-01T09:12:33Z",
+        "root": "/home/dev/agentic-hil",
+        "image": "python:3.12",
+        "pytest_args": ["-q"],
+    }
+    record.update(fields)
+    path = ci_linux.ci_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def only_these_are_running(monkeypatch: pytest.MonkeyPatch, *pids: int) -> None:
+    """The fake liveness: every pid not named here belongs to a process that died."""
+    monkeypatch.setattr(ci_linux, "process_is_running", lambda pid: pid in pids)
+
+
+def never_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lock nobody holds must be taken, not queued on."""
+
+    def refuse(seconds: float) -> None:
+        raise AssertionError("the run waited for a lock it was entitled to break")
+
+    monkeypatch.setattr(ci_linux, "wait_for_the_holder", refuse)
 
 
 class FakeContainer:
@@ -253,3 +314,252 @@ def test_the_container_script_keeps_the_clone_guard() -> None:
     """The guard is only worth anything if the script the container runs has it."""
     assert ci_linux.CLONE_SCRIPT in ci_linux.SCRIPT
     assert ci_linux.CLONE_FAILURE_MARKER in ci_linux.SCRIPT
+
+
+def test_the_lock_lives_in_the_one_place_every_run_looks(a_machine_of_this_tests_own: Path) -> None:
+    """Fixed under the home directory, like the device locks and for the same
+    reason: two runs that resolve the lock differently are two runs that cannot
+    see each other, which is the whole failure. Naming it also creates nothing,
+    so a run that never starts leaves no directory behind."""
+    assert ci_linux.ci_lock_path() == a_machine_of_this_tests_own / ".agentic-hil" / "ci-linux.lock"
+    assert not ci_linux.ci_lock_path().exists()
+    assert not (a_machine_of_this_tests_own / ".agentic-hil").exists()
+
+
+def test_a_second_run_waits_for_the_holder_instead_of_starting_a_container(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Two runs serialize. While a live holder has the lock, nothing is handed
+    to docker; the wait ends when the holder's lock goes away, and only then
+    does the container start. The holder finishing is scripted into the pause
+    between two attempts, so what is asserted is the order of events and not the
+    outcome of a race."""
+    lock = a_lock_held_by(4242)
+    only_these_are_running(monkeypatch, 4242)
+    captured = stub_docker(monkeypatch)
+    containers_started_while_waiting: list[int] = []
+
+    def the_holder_finishes(seconds: float) -> None:
+        containers_started_while_waiting.append(len(captured))
+        lock.unlink()
+
+    monkeypatch.setattr(ci_linux, "wait_for_the_holder", the_holder_finishes)
+
+    assert ci_linux.main([]) == 0
+
+    assert containers_started_while_waiting == [0]
+    assert len(captured) == 1
+    assert not lock.exists()
+    err = capsys.readouterr().err
+    assert "another run holds the lock: pid 4242" in err
+    assert "started 2026-09-01T09:12:33Z" in err
+    assert "--no-wait" in err
+
+
+def test_a_long_wait_keeps_saying_who_it_is_waiting_for(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A queue that goes quiet for twenty minutes cannot be told from a hang,
+    and a full suite behind two others is a wait that long. The notice repeats.
+    The clock is driven by the pause itself, so what is asserted here is the
+    interval and not the passing of real time."""
+    lock = a_lock_held_by(4242)
+    only_these_are_running(monkeypatch, 4242)
+    stub_docker(monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(ci_linux, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    def a_minute_passes(seconds: float) -> None:
+        clock[0] += ci_linux.LOCK_NOTICE_INTERVAL_S
+        if clock[0] >= 3 * ci_linux.LOCK_NOTICE_INTERVAL_S:
+            lock.unlink()
+
+    monkeypatch.setattr(ci_linux, "wait_for_the_holder", a_minute_passes)
+
+    assert ci_linux.main([]) == 0
+
+    err = capsys.readouterr().err
+    assert err.count("pid 4242") == 3
+    assert "still waiting after 120s" in err
+    assert "the lock is free after 180s of waiting" in err
+
+
+def test_the_lock_is_held_for_the_whole_container_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not for the moment before it: a lock released at the door would let the
+    second container start while the first is still on the daemon, which is the
+    starvation this exists to prevent. Asked from inside the running container,
+    a second run is refused and names this process."""
+    only_these_are_running(monkeypatch, os.getpid())
+    stub_docker(monkeypatch)
+    front = ci_linux.subprocess
+    while_the_container_runs = front.Popen
+    refusals: list[str] = []
+
+    def a_second_run_tries(command: list[str], **kwargs: object) -> object:
+        other = ci_linux.RunLock()
+        try:
+            other.acquire(wait=False)
+        except ci_linux.RunLockBusy as busy:
+            refusals.append(str(busy))
+        else:
+            other.release()
+            refusals.append("the lock was free while a container was running")
+        return while_the_container_runs(command, **kwargs)
+
+    monkeypatch.setattr(front, "Popen", a_second_run_tries)
+
+    assert ci_linux.main([]) == 0
+
+    assert refusals and f"pid {os.getpid()}" in refusals[0]
+    assert not ci_linux.ci_lock_path().exists()
+
+
+def test_the_lock_is_given_back_even_when_the_run_goes_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing suite is a finished run, and a finished run holds nothing."""
+    stub_docker(monkeypatch, output="==== 1 failed, 12 passed in 3.40s ====\n", returncode=1)
+
+    assert ci_linux.main([]) == 1
+    assert not ci_linux.ci_lock_path().exists()
+
+
+def test_a_lock_left_by_a_dead_holder_is_broken_and_the_reason_is_said(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A crashed run must not take the machine with it. The lock is removed, the
+    run starts, and the removal is stated: a lock file that disappeared without
+    a word is indistinguishable from one that was never taken."""
+    lock = a_lock_held_by(4242)
+    only_these_are_running(monkeypatch, os.getpid())
+    captured = stub_docker(monkeypatch)
+    never_waits(monkeypatch)
+
+    assert ci_linux.main([]) == 0
+
+    assert len(captured) == 1
+    assert not lock.exists()
+    err = capsys.readouterr().err
+    assert "held by pid 4242" in err
+    assert "no longer running" in err
+
+
+def test_a_lock_file_that_says_nothing_is_broken_and_the_reason_is_said(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The other way a lock outlives its run: the file was created and its
+    holder died before describing itself. There is nobody to name and nobody to
+    check, and a file in that state can only be removed."""
+    lock = ci_linux.ci_lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("", encoding="utf-8")
+    captured = stub_docker(monkeypatch)
+    never_waits(monkeypatch)
+
+    assert ci_linux.main([]) == 0
+
+    assert len(captured) == 1
+    assert "carries no readable holder record" in capsys.readouterr().err
+
+
+def test_no_wait_refuses_naming_the_holder_and_starts_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The escape for somebody who knows better: refuse, say who has it, leave
+    their lock exactly where it was, and exit with a status that is not a test
+    failure so a retrying script cannot read it as one."""
+    lock = a_lock_held_by(4242)
+    only_these_are_running(monkeypatch, 4242)
+    captured = stub_docker(monkeypatch)
+    never_waits(monkeypatch)
+
+    assert ci_linux.main(["--no-wait"]) == ci_linux.EXIT_LOCKED
+
+    assert captured == []
+    assert json.loads(lock.read_text(encoding="utf-8"))["pid"] == 4242
+    err = capsys.readouterr().err
+    assert "pid 4242" in err
+    assert "started 2026-09-01T09:12:33Z" in err
+    assert "--no-wait" in err
+
+
+def test_no_wait_is_this_tools_option_and_never_reaches_pytest(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert pytest_arguments(built_command(monkeypatch, ["--no-wait", "tests", "-x"])) == ["tests", "-x"]
+
+
+@pytest.mark.parametrize(("host", "named"), [("another-bench", "another-bench"), (None, "an unnamed host")])
+def test_a_lock_from_another_machine_is_never_judged_by_a_local_pid(
+    host: str | None, named: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A home directory can be a roaming share, and a pid means nothing outside
+    the machine that issued it. Here no process at all is running, so judging
+    the record locally would call it dead and start a second container against a
+    run that is very much alive. A record naming no machine is as foreign as one
+    naming somebody else's: this tool always writes the field, so a record
+    without it was not written by it and is nothing to judge a live run by."""
+    a_lock_held_by(4242, host=host)
+    only_these_are_running(monkeypatch)
+    captured = stub_docker(monkeypatch)
+    never_waits(monkeypatch)
+
+    assert ci_linux.main(["--no-wait"]) == ci_linux.EXIT_LOCKED
+
+    assert captured == []
+    err = capsys.readouterr().err
+    assert named in err
+    assert "not written on this machine" in err
+
+
+def test_a_lock_written_by_a_newer_version_of_this_tool_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Two checkouts at two commits on one machine is an ordinary day here. A
+    record this version cannot read belongs to a run it cannot judge, and the
+    older checkout queues behind the newer one rather than deleting its lock."""
+    a_lock_held_by(4242, version=ci_linux.CI_LOCK_RECORD_VERSION + 1)
+    only_these_are_running(monkeypatch)
+    captured = stub_docker(monkeypatch)
+    never_waits(monkeypatch)
+
+    assert ci_linux.main(["--no-wait"]) == ci_linux.EXIT_LOCKED
+
+    assert captured == []
+    assert "different version of this tool" in capsys.readouterr().err
+
+
+def test_a_run_never_queues_behind_its_own_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Taking the lock is a create followed by a read that confirms the record
+    in the file is this run's. The read is injected to fail once here, the way a
+    filesystem having a bad moment would fail it. What must not happen then is
+    the run finding its own record, judging its own pid alive, and waiting for
+    itself until somebody kills it."""
+    real_read = ci_linux.read_lock_record
+    reads: list[Path] = []
+
+    def a_read_that_comes_back_empty_once(path: Path) -> dict | None:
+        reads.append(path)
+        return None if len(reads) == 1 else real_read(path)
+
+    monkeypatch.setattr(ci_linux, "read_lock_record", a_read_that_comes_back_empty_once)
+    never_waits(monkeypatch)
+    lock = ci_linux.RunLock()
+
+    lock.acquire()
+
+    assert lock.held is True
+    lock.release()
+    assert not ci_linux.ci_lock_path().exists()
+
+
+def test_asking_whether_a_process_runs_must_not_end_it() -> None:
+    """`os.kill(pid, 0)` is a liveness probe on POSIX and a kill on Windows,
+    where CPython maps every signal but the console events onto
+    TerminateProcess. The probe is asked about a real child here, and the child
+    has to survive being asked about: a Windows implementation that reached for
+    `os.kill` would answer this question by killing the run it was asked about."""
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    try:
+        assert ci_linux.process_is_running(child.pid) is True
+        assert child.poll() is None
+    finally:
+        child.stdin.close()
+        child.kill()
+        child.wait()
