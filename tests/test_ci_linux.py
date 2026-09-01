@@ -445,40 +445,27 @@ def test_a_lock_left_by_a_dead_holder_is_broken_and_the_reason_is_said(
     assert "no longer running" in err
 
 
-def test_a_lock_file_that_says_nothing_is_broken_once_it_has_aged(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+@pytest.mark.parametrize("age_seconds", [0.0, 600.0])
+def test_an_empty_lock_file_is_never_broken_however_long_it_has_sat(
+    age_seconds: float, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """The other way a lock outlives its run: the file was created and its
-    holder died before describing itself. There is nobody to name and nobody to
-    check, and a file in that state can only be removed -- but only once it has
-    sat empty long enough to be a dead mid-write holder rather than a run still
-    publishing its record right now. Aged well past that window here, it is
-    broken at once and the reason is said."""
+    """An empty or unreadable lock file is never judged stale, at any age. It is
+    a run part way through publishing its record -- one on an older checkout that
+    creates outside this machine's guard -- or a corrupt leftover, and age cannot
+    tell those apart from a holder that died mid-write: an unguarded creator can
+    be descheduled for any length of time between publishing the path and writing
+    its record, so a file that has sat empty for ten minutes may still name a
+    live holder the instant it resumes. A current run never leaves an empty file
+    (it publishes its record whole and atomically), so this case is left for the
+    holder to finish or an operator to clear by hand. A `--no-wait` run refuses
+    rather than deleting it, whether the file is fresh or long since published,
+    and the refusal points at the one safe way out."""
     lock = ci_linux.ci_lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("", encoding="utf-8")
-    long_dead = time.time() - ci_linux.EMPTY_LOCK_GRACE_S - 60
-    os.utime(lock, (long_dead, long_dead))
-    captured = stub_docker(monkeypatch)
-    never_waits(monkeypatch)
-
-    assert ci_linux.main([]) == 0
-
-    assert len(captured) == 1
-    assert "carries no readable holder record" in capsys.readouterr().err
-
-
-def test_a_fresh_empty_lock_is_a_write_in_progress_not_a_stale_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The same empty file, but just published: a run part way through its own
-    create, seen in the instant between the path appearing and its record being
-    written. This one may not be broken -- its writer is about to name a live
-    holder -- so a `--no-wait` run refuses rather than deleting it, and the file
-    is left exactly where it was for the writer to finish."""
-    lock = ci_linux.ci_lock_path()
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text("", encoding="utf-8")  # mtime is now: a fresh publication
+    if age_seconds:
+        long_ago = time.time() - age_seconds
+        os.utime(lock, (long_ago, long_ago))
     captured = stub_docker(monkeypatch)
     never_waits(monkeypatch)
 
@@ -486,6 +473,9 @@ def test_a_fresh_empty_lock_is_a_write_in_progress_not_a_stale_one(
 
     assert captured == []
     assert lock.exists() and lock.read_text(encoding="utf-8") == ""
+    err = capsys.readouterr().err
+    assert "carries no readable holder record" in err
+    assert "remove the file by hand" in err
 
 
 def test_no_wait_refuses_naming_the_holder_and_starts_nothing(
@@ -680,128 +670,56 @@ def test_two_runs_that_both_find_a_dead_holder_yield_exactly_one_container(
     assert surviving["pid"] == os.getpid()
 
 
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="the guard's blocking take-over is POSIX flock; msvcrt retries rather than blocking, so the interleaving this forces is not the one that ships on Windows",
-)
-def test_a_partial_first_write_is_never_taken_for_a_stale_lock(
+def test_a_create_never_leaves_the_lock_file_present_and_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The publication window, run for real on two threads. A create makes the
-    lock file visible with `O_EXCL` an instant before it writes the record into
-    it. A contender that fails its own create must not read that empty file,
-    judge it stale, break it, and start a second container against a creator
-    that is about to return holding the lock.
+    """The publication window, closed at its source. A create used to make the
+    lock file visible with `O_EXCL` an instant before it wrote the record into
+    it, and a reader catching that instant saw an empty file it could not tell
+    from a dead one. The record is now written to a private staging file and
+    linked into the lock path in one step, so the path is only ever absent or
+    complete -- never present and empty.
 
-    The two roles are staged so the outcome is asserted, not raced. The creator
-    opens the file and pauses before writing the record. If it holds the guard
-    while it pauses -- what the fix guarantees -- the contender blocks at the
-    guard and cannot read the empty file at all, so the creator waits only until
-    the contender has reached the guard, then finishes; the contender goes on to
-    read a whole record and yield. If the create were *not* under the guard --
-    the bug this exists to catch -- the contender would take the free guard,
-    read the empty file, be held at the break until the creator had returned
-    holding the lock, and only then break it: two holders, which the assertions
-    reject.
-    """
-    only_these_are_running(monkeypatch, os.getpid())
-
-    creator_thread: list[threading.Thread] = []
-    creator_took_guard = threading.Event()
-    first_file_is_visible = threading.Event()
-    contender_reached_guard = threading.Event()
-    contender_about_to_break = threading.Event()
-    creator_has_returned = threading.Event()
-
-    def is_creator() -> bool:
-        return bool(creator_thread) and threading.current_thread() is creator_thread[0]
-
-    real_lock_fd = ci_linux._lock_fd_exclusive
-
-    def lock_fd_that_marks_who_is_at_the_guard(descriptor: int) -> None:
-        # Fired just before the blocking take-over of the guard, by whichever
-        # role reaches it: the creator sets a flag the pause below reads to tell
-        # the fix from the bug; the contender announces it is at the guard so the
-        # creator holding it knows the contender can only be blocked there.
-        (creator_took_guard if is_creator() else contender_reached_guard).set()
-        real_lock_fd(descriptor)
-
-    monkeypatch.setattr(ci_linux, "_lock_fd_exclusive", lock_fd_that_marks_who_is_at_the_guard)
-
+    The claim is checked from inside the create, at the exact point the old
+    window opened: the record being serialised, after a file has been opened for
+    it and before it has been published. The lock path itself must not exist yet
+    -- under the old create it would exist and be empty here -- and once the
+    create returns, the path carries a whole record and no staging file is left
+    behind. This is what lets `stale_reason` refuse to break any empty file at
+    all: a current run can never be the one that left it."""
+    lock = ci_linux.RunLock()
+    staging_glob = f"{lock.path.name}.*.new"
+    observed: dict[str, object] = {}
     real_dumps = json.dumps
 
-    def dumps_that_pauses_the_creator_mid_publish(obj: object, **kwargs: object) -> str:
-        # Called from `_create`, after `O_EXCL` has made the file visible and
-        # before its record is written: the empty publication window itself.
-        if is_creator():
-            first_file_is_visible.set()
-            if creator_took_guard.is_set():
-                # The fix: the creator holds the guard, so a contender can only
-                # block at it. Wait until it has, proving it stays blocked, then
-                # finish -- no contender ever reads the empty file.
-                contender_reached_guard.wait(timeout=10)
-            else:
-                # The bug: the create is not under the guard. Let the contender
-                # read the empty file and reach the break, then finish and return
-                # holding the lock before it breaks -- the double-acquire.
-                contender_about_to_break.wait(timeout=10)
+    def dumps_that_inspects_the_lock_path(obj: object, **kwargs: object) -> str:
+        # Called from `_create` while the record is being built for the write
+        # into the staging file -- before the link that publishes it. The old
+        # create reached this point with an empty lock file already on disk; the
+        # new one reaches it with only the staging file present.
+        observed["lock_path_exists_mid_create"] = lock.path.exists()
+        observed["a_staging_file_is_present"] = bool(list(lock.path.parent.glob(staging_glob)))
         return real_dumps(obj, **kwargs)
 
     monkeypatch.setattr(
         ci_linux,
         "json",
-        SimpleNamespace(dumps=dumps_that_pauses_the_creator_mid_publish, loads=json.loads),
+        SimpleNamespace(dumps=dumps_that_inspects_the_lock_path, loads=json.loads),
     )
+    never_waits(monkeypatch)
 
-    real_break = ci_linux.RunLock._break
+    lock.acquire(wait=False)
 
-    def break_that_waits_for_the_creator_to_return(self: ci_linux.RunLock) -> None:
-        # Only reached on the buggy path, where the contender read the empty file
-        # as stale. Holding it here until the creator has returned holding the
-        # lock is what turns the window into the two-holder outcome the assertion
-        # then rejects; the fix never lets the contender read, so this never runs.
-        if not is_creator():
-            contender_about_to_break.set()
-            creator_has_returned.wait(timeout=10)
-        real_break(self)
-
-    monkeypatch.setattr(ci_linux.RunLock, "_break", break_that_waits_for_the_creator_to_return)
-
-    verdicts: dict[str, str] = {}
-    record_verdict = threading.Lock()
-
-    def verdict_of(run: ci_linux.RunLock) -> str:
-        try:
-            run.acquire(wait=False)
-        except ci_linux.RunLockBusy:
-            return "busy"
-        return "held" if run.held else "busy"
-
-    def be_the_creator() -> None:
-        outcome = verdict_of(ci_linux.RunLock())
-        with record_verdict:
-            verdicts["creator"] = outcome
-        creator_has_returned.set()
-
-    def be_the_contender() -> None:
-        first_file_is_visible.wait(timeout=10)
-        outcome = verdict_of(ci_linux.RunLock())
-        with record_verdict:
-            verdicts["contender"] = outcome
-
-    creator = threading.Thread(target=be_the_creator, name="creator")
-    contender = threading.Thread(target=be_the_contender, name="contender")
-    creator_thread.append(creator)
-    creator.start()
-    contender.start()
-    for thread in (creator, contender):
-        thread.join(timeout=15)
-
-    assert not creator.is_alive() and not contender.is_alive()
-    assert verdicts.get("creator") == "held"
-    assert verdicts.get("contender") == "busy"
-    surviving = json.loads(ci_linux.ci_lock_path().read_text(encoding="utf-8"))
-    assert surviving["pid"] == os.getpid()
+    assert lock.held is True
+    # Mid-create the lock path did not exist; the staging file carrying the
+    # record did. There was no empty lock file for any reader to misjudge.
+    assert observed["lock_path_exists_mid_create"] is False
+    assert observed["a_staging_file_is_present"] is True
+    # Published, the lock path carries a whole record and the staging file is gone.
+    assert json.loads(lock.path.read_text(encoding="utf-8"))["owner_id"] == lock.record["owner_id"]
+    assert list(lock.path.parent.glob(staging_glob)) == []
+    lock.release()
+    assert not ci_linux.ci_lock_path().exists()
 
 
 @pytest.mark.skipif(
@@ -811,24 +729,26 @@ def test_a_partial_first_write_is_never_taken_for_a_stale_lock(
 def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The mixed-checkout form of the publication race. The machine guard only
-    serialises the runs that take it, and the lock file is shared across every
-    checkout on the machine: an older one publishes its record with `O_EXCL` and
-    a separate write without ever touching this guard. A run on this checkout
-    that reads that empty file in the instant before its record lands must not
-    judge it stale, break it, and start a second container against a creator
-    that is about to return holding the lock.
+    """The mixed-checkout form of the publication race, and specifically the one
+    a grace period only postpones. The machine guard serialises only the runs
+    that take it, and the lock file is shared across every checkout on the
+    machine: an older one publishes its record with `O_EXCL` and a separate write
+    without ever touching this guard, and can be descheduled between the two for
+    longer than any window. A run on this checkout that reads that empty file
+    must not judge it stale on age, break it, and start a second container
+    against a creator that resumes and returns holding the lock.
 
-    Staged, not raced. An unguarded creator -- standing in for the older
-    checkout -- publishes the empty file and waits until the contender has made
-    its call on it. The contender is a real run on this checkout. Under the fix
-    it reads the fresh empty file as a write in progress and refuses, and the
+    Staged, not raced, and aged well past any publication window so the file's
+    age is no help. An unguarded creator -- standing in for the older checkout --
+    publishes the empty file, backdates it, and waits until the contender has
+    made its call on it. The contender is a real run on this checkout. Under the
+    fix it reads the empty file as one it cannot judge and refuses, and the
     creator then finishes, confirms its own record and holds: exactly one
-    acquisition. Were the file's age ignored -- the bug this catches -- the
-    contender would call it stale and break it; the break is held until the
-    creator has confirmed and returned holding the lock, so it would delete a
-    live record and acquire on top of it, two holders, which the assertions
-    reject.
+    acquisition. Were an aged empty file taken for stale -- the bug this catches,
+    the one a grace period leaves open -- the contender would break it; the break
+    is held until the creator has confirmed and returned holding the lock, so it
+    would delete a live record and acquire on top of it, two holders, which the
+    assertions reject.
     """
     only_these_are_running(monkeypatch, os.getpid())
     path = ci_linux.ci_lock_path()
@@ -852,11 +772,11 @@ def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
     real_stale_reason = ci_linux.stale_reason
 
     def stale_reason_that_marks_the_contenders_call(record: dict | None, judged_path: Path) -> str | None:
-        # The contender's verdict on the empty file, whichever way it goes:
-        # `None` under the fix (a write in progress, left alone) or a reason
-        # under the bug (stale, to be broken). Announcing that the call has been
-        # made -- not which way -- lets the unguarded creator finish its write
-        # without waiting on a break the fix never performs.
+        # The contender's verdict on the aged empty file, whichever way it goes:
+        # `None` under the fix (an unreadable file, never broken) or a reason
+        # under the bug (stale on age, to be broken). Announcing that the call has
+        # been made -- not which way -- lets the unguarded creator finish its
+        # write without waiting on a break the fix never performs.
         verdict = real_stale_reason(record, judged_path)
         contender_made_its_call.set()
         return verdict
@@ -866,7 +786,7 @@ def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
     real_break = ci_linux.RunLock._break
 
     def break_that_waits_for_the_creator_to_hold(self: ci_linux.RunLock) -> None:
-        # Reached only on the buggy path, where the contender judged the fresh
+        # Reached only on the buggy path, where the contender judged the aged
         # empty file stale. Holding here until the creator has confirmed its own
         # record and returned holding the lock is what turns the window into the
         # two-holder outcome the assertion rejects; the fix never lets the
@@ -881,8 +801,13 @@ def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
 
     def be_the_unguarded_creator() -> None:
         # An older checkout's create: `O_EXCL` to publish the path, then a
-        # separate write of the record -- and never the machine guard.
+        # separate write of the record -- and never the machine guard. The empty
+        # publication is backdated well past any window a grace period allowed,
+        # so what the contender judges is a file that has "sat empty" for minutes
+        # while its unguarded creator was merely descheduled: age proves nothing.
         descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        long_ago = time.time() - 600.0
+        os.utime(path, (long_ago, long_ago))
         empty_published.set()
         contender_made_its_call.wait(timeout=10)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:

@@ -130,17 +130,6 @@ LOCK_POLL_INTERVAL_S = 2.0
 # holds the lock so a wait can never be mistaken for a hang. `--no-wait` is the
 # way out for somebody who knows better.
 LOCK_NOTICE_INTERVAL_S = 60.0
-# The longest a live run is given between publishing the lock path and writing
-# its record into it. `_create` does the two back to back, so any real gap is
-# milliseconds; the margin is wide only so a run publishing under load -- or one
-# on an older checkout that creates outside this machine's guard, where the
-# guard cannot serialise its write against another run's read -- is never
-# mistaken for a holder that died mid-write. An empty file younger than this is
-# read as a write in progress and waited on; only one that has sat empty past it
-# is judged abandoned and removed. Erring long only delays reclaiming a truly
-# dead empty lock, which no run was going to take anyway; erring short is the
-# double-acquire this whole mechanism exists to prevent.
-EMPTY_LOCK_GRACE_S = 10.0
 
 # Windows, where `os.kill(pid, 0)` is not a liveness probe: CPython maps every
 # signal other than the console events onto TerminateProcess, so asking that
@@ -413,61 +402,55 @@ def written_on_this_machine(record: dict) -> bool:
     return record.get("host") == socket.gethostname()
 
 
-def holder_notice(record: dict | None) -> str:
-    """What is said about a lock this run may not take."""
+def holder_notice(record: dict | None, path: Path | None = None) -> str:
+    """What is said about a lock this run may not take.
+
+    An unreadable record gets its own notice rather than the "another run holds
+    it" line: this run genuinely cannot tell whether a holder is still writing
+    the file or it is a corrupt leftover, and it never removes a file it cannot
+    read, so it says so and points at the one safe way out -- an operator who
+    knows no run is using the machine removing the file by hand.
+    """
+    if record is None:
+        where = f" at {path}" if path is not None else ""
+        return (
+            f"the lock file{where} carries no readable holder record. This run cannot tell a "
+            "holder still writing it -- including one on an older checkout that creates outside "
+            "this machine's guard -- from a corrupt leftover, and never removes a file it cannot "
+            "read. If you are certain no ci_linux run is using this machine, remove the file by hand"
+        )
     text = f"another run holds the lock: {describe_holder(record)}"
-    if record and record.get("version") != CI_LOCK_RECORD_VERSION:
+    if record.get("version") != CI_LOCK_RECORD_VERSION:
         return f"{text}. That record was written by a different version of this tool, so its holder is not judged from here"
-    if record and not written_on_this_machine(record):
+    if not written_on_this_machine(record):
         return f"{text}. That record was not written on this machine, so this one cannot tell whether the process is still running"
     return text
-
-
-def _empty_lock_is_still_being_written(path: Path) -> bool:
-    """Whether an empty or unreadable lock file is young enough to be a holder
-    still writing its record rather than one that died mid-write.
-
-    A create publishes the path and then writes the record into it; a reader
-    catching that instant sees no record and cannot tell a write in progress
-    from an abandoned one. The machine guard serialises this run's own create
-    against its own reads, but a run on an older checkout that creates outside
-    the guard writes where this guard does not reach, so an empty file another
-    run just published can still be read here -- and only the file's age tells
-    a live publication from a dead one. The age is read from the modification
-    time, set when the create makes the path and untouched until the record
-    lands, so the clock starts at publication rather than at this read. A file
-    already gone is not being written; a stat that fails for any other reason is
-    left alone, because treating an unreadable file as breakable is the unsafe
-    direction.
-    """
-    try:
-        published_at = path.stat().st_mtime
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    return (time.time() - published_at) < EMPTY_LOCK_GRACE_S
 
 
 def stale_reason(record: dict | None, path: Path) -> str | None:
     """Why this lock may be broken, or None if it may not be.
 
-    Three ways a lock survives its run: the file exists but carries nothing (the
-    holder died while writing it), it names no usable pid, or it names one that
-    is no longer running. Everything else is somebody else's lock, including a
-    record from another machine and a record written by a version of this tool
-    that this one does not understand.
+    A lock is broken only when this machine can prove its holder is gone: a
+    record written here, by this version of the tool, naming a pid that is no
+    longer running, or one whose pid this tool could never have written at all.
+    Everything else is left alone -- a record from another machine, one written
+    by a version this tool does not understand, and, most carefully, a file that
+    carries no readable record.
 
-    An empty or unreadable file is only judged abandoned once it has aged past
-    the publication window: a file that has just appeared may be a run -- this
-    one's or an older checkout's, guarded or not -- part way through its own
-    create, and breaking it would delete a record that is about to name a live
-    holder. That case is waited on, not removed.
+    An empty or unreadable file is never broken. Age cannot prove its writer has
+    exited and neither can a re-read: a run on an older checkout creates outside
+    this machine's guard, so it can publish the path and then be descheduled for
+    any length of time before it writes its record, and a file that has sat empty
+    for a minute may still name a live holder the instant that run resumes. A
+    current run never leaves an empty file -- `_create` publishes its record whole
+    and atomically -- so an unreadable lock here is a legacy create in flight or a
+    corrupt leftover, and both are waited on until the holder finishes or an
+    operator removes the file by hand, rather than ever being taken over from
+    here. Breaking one on age alone is the double-acquire this whole mechanism
+    exists to prevent.
     """
     if record is None:
-        if _empty_lock_is_still_being_written(path):
-            return None
-        return f"the lock file at {path} carries no readable holder record, so it is being removed"
+        return None
     if record.get("version") != CI_LOCK_RECORD_VERSION:
         return None
     if not written_on_this_machine(record):
@@ -520,16 +503,18 @@ def _lock_fd_exclusive(descriptor: int) -> None:
 def _machine_wide_guard(path: Path):
     """Hold the machine-wide guard for the length of the `with` block.
 
-    Creating the lock file, reading the holder record, judging it dead and
-    replacing it has to be one indivisible step. It is not, on its own: two runs
-    that both find the same dead holder each remove the file and each create it,
-    and the one that returns first is holding a lock the second is about to
+    Reading the holder record, judging it dead, breaking it and creating a new
+    one in its place has to be one indivisible step. It is not, on its own: two
+    runs that both find the same dead holder each remove the file and each create
+    it, and the one that returns first is holding a lock the second is about to
     delete out from under it -- two containers on one daemon, the single outcome
-    this file exists to prevent. A plain create is no safer alone: it publishes
-    the path with `O_EXCL` an instant before it writes the record, and a
-    contender that reads in that instant sees an empty file and calls it stale.
-    `O_EXCL` cannot close either window, because the loser's confirming read
-    comes after the winner has already been told it holds the lock.
+    this file exists to prevent. The create itself no longer opens a window of
+    its own: `_create` publishes its record whole and atomically, so no reader
+    ever catches the file empty and calls a write in progress a dead lock. What
+    is left for the guard is the takeover -- read, judge, break, create as one
+    unit -- which the atomic create cannot serialise on its own, because the
+    loser's break can still fall between the winner's create and the winner being
+    told it holds the lock.
 
     So the takeover runs under an OS lock that only one run on the machine can
     hold at a time. It is deliberately not the record lock grown a second job:
@@ -552,29 +537,31 @@ def _machine_wide_guard(path: Path):
 class RunLockBusy(RuntimeError):
     """Somebody else holds the machine, and the refusal names them."""
 
-    def __init__(self, record: dict | None):
-        super().__init__(holder_notice(record))
+    def __init__(self, record: dict | None, path: Path | None = None):
+        super().__init__(holder_notice(record, path))
         self.record = record
 
 
 class RunLock:
     """One machine's permission to run a container, held for the whole run.
 
-    Ownership is the existence of the lock file, created with `O_EXCL` so two
-    runs cannot both create it, and carrying the record that lets a contender
-    name the holder or judge it dead. The record is a pid in a file rather than
-    an OS lock held for the whole run, on purpose: this script is standalone by
-    design, it runs from checkouts that may not even be installed, and a run has
-    to be able to say *which* checkout is holding the machine to somebody
-    reading a queued run -- a whole-run flock names nobody. The cost of that
+    Ownership is the existence of the lock file, published whole in one atomic
+    step so two runs cannot both create it and no reader ever catches it empty,
+    and carrying the record that lets a contender name the holder or judge it
+    dead. The record is a pid in a file rather than an OS lock held for the whole
+    run, on purpose: this script is standalone by design, it runs from checkouts
+    that may not even be installed, and a run has to be able to say *which*
+    checkout is holding the machine to somebody reading a queued run -- a
+    whole-run flock names nobody. The cost of that
     choice is exactly one case, spelled out where it is paid: a holder that
     crashed and whose pid has since been reused looks alive, and the next run
     queues instead of starting. It waits; it never runs twice.
 
-    Creating the file, reading a holder, judging it dead and replacing it are
-    the steps the record cannot make atomic on its own, and they run under a
-    short-lived OS lock that the kernel releases the instant this process exits
-    (see `_machine_wide_guard`). That guard is not the bench mutex and not the
+    Reading a holder, judging it dead, breaking it and creating the next in its
+    place are the steps the record cannot make atomic on its own -- the create
+    alone now is, published whole in one step -- and they run under a short-lived
+    OS lock that the kernel releases the instant this process exits (see
+    `_machine_wide_guard`). That guard is not the bench mutex and not the
     record lock; it is held only while a run takes the lock or breaks a dead one,
     never during the run itself.
     """
@@ -606,15 +593,14 @@ class RunLock:
         waited_from = time.monotonic()
         while True:
             record = None
-            # Create, read, judge-stale and break all run under the one
-            # machine-wide guard. A create publishes the path with `O_EXCL` for
-            # the instant before it writes the record into it; taking the guard
-            # across that instant is what stops a contender from failing its own
-            # create, reading the half-made file, calling it stale, and breaking
-            # a lock whose creator is about to return holding it. No run writes
-            # this file except under the guard and no run reads it except under
-            # the guard, so a reader sees a whole record or no file, never the
-            # empty moment between a create and its write.
+            # Read, judge-stale, break and create all run under the one
+            # machine-wide guard, so two runs that both find the same dead holder
+            # cannot each break it and each create in its place: the guard admits
+            # one takeover at a time, and the loser reads the winner's live record
+            # instead of racing it. The create publishes a whole record
+            # atomically (see `_create`), so a reader never catches this file
+            # empty and mistakes a write in progress for a dead lock -- guarded or
+            # not, on this checkout or an older one.
             with _machine_wide_guard(self.guard_path):
                 if self._create():
                     self._mark_held(announced_at, waited_from)
@@ -644,10 +630,10 @@ class RunLock:
                     # recognise it as ours.
                     continue
             if not wait:
-                raise RunLockBusy(record)
+                raise RunLockBusy(record, self.path)
             now = time.monotonic()
             if announced_at is None:
-                announce(f"{holder_notice(record)}. Waiting for it to finish; pass --no-wait to refuse instead of queueing")
+                announce(f"{holder_notice(record, self.path)}. Waiting for it to finish; pass --no-wait to refuse instead of queueing")
                 announced_at = now
             elif now - announced_at >= LOCK_NOTICE_INTERVAL_S:
                 announce(f"still waiting after {round(now - waited_from)}s: {describe_holder(record)}")
@@ -676,28 +662,39 @@ class RunLock:
                 os.unlink(self.path)
 
     def _create(self) -> bool:
-        """Try to become the holder, and confirm that this run actually did.
+        """Try to become the holder by publishing a complete record atomically.
 
-        Always called under the machine-wide guard (see `acquire`), so all of it
-        -- publishing the path with `O_EXCL`, writing the record, and confirming
-        it -- is one step no other run can read into the middle of. `O_EXCL`
-        stays as the backstop it always was: the create fails rather than
-        truncating whatever a path already holds, so a run is never the one that
-        made a file some other run is using.
+        The record is written in full to a private staging file and then linked
+        into the lock path in a single step, so the lock file is never seen empty
+        -- there is no instant between the path appearing and its record landing
+        for any reader to catch. That is what lets an empty file be judged
+        unbreakable everywhere (see `stale_reason`): a current run cannot be the
+        one that left it. `os.link` fails if the lock path already exists, which
+        is how a create loses to a holder -- the fail-if-exists role `O_EXCL`
+        played when the create was a create-then-write.
 
-        The confirming read stays for the one thing the guard does not cover: a
-        filesystem that hands back the create's own descriptor and then fails
-        the read that follows. A run that cannot see its own record must not
-        report that it holds the lock; it returns False, re-reads under the
-        guard, and recognises the record as its own there.
+        The staging file is named for this run's `owner_id`, so no two runs share
+        one, and it is removed whether the link wins or loses; a crash before the
+        link leaves the staging file, never the lock, and a crash after it leaves
+        a complete record naming a pid the next run can prove dead. The confirming
+        read stays for the one thing the link does not cover: a filesystem that
+        reports the link succeeded and then fails the read that follows. A run
+        that cannot see its own record must not report that it holds the lock; it
+        returns False, re-reads under the guard, and recognises the record there.
         """
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        staging = self.path.with_name(f"{self.path.name}.{self.record['owner_id']}.new")
+        descriptor = os.open(staging, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         try:
-            descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            return False
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(self.record, indent=2) + "\n")
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(self.record, indent=2) + "\n")
+            try:
+                os.link(staging, self.path)
+            except FileExistsError:
+                return False
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(staging)
         return self._is_ours()
 
     def _is_ours(self) -> bool:
