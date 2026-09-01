@@ -3,7 +3,7 @@
   "name": "io.github.agentic-hil/agentic-hil",
   "title": "Agentic HIL",
   "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "repository": {
     "url": "https://github.com/agentic-hil/agentic-hil",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "agentic-hil",
-      "version": "0.20.0",
+      "version": "0.21.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
