@@ -10,7 +10,7 @@ first four here:
 * a placeholder configuration can be completed without hand transcription,
 * permissions do not move while that happens,
 * a value a person set is never replaced,
-* and the whole sequence — `setup` without a board, plug in, green `doctor` —
+* and the whole sequence (`setup` without a board, plug in, green `doctor`)
   runs without a person transcribing anything into the YAML. The board's own
   identity is carried with the file untouched; the one field that is not a
   board's identity, `debuggers.<name>.type`, decides which program drives the
@@ -161,7 +161,7 @@ def granted(node: object, prefix: str = "") -> dict[str, Any]:
 def test_a_placeholder_configuration_is_completed_without_transcription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The first box: the values land in the file, and nobody types them.
 
-    The call carries no value of its own — every one of the four keys below comes
+    The call carries no value of its own: every one of the four keys below comes
     out of discovery, and the tool's whole argument surface is booleans and
     names."""
     workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
@@ -203,7 +203,7 @@ def test_permissions_do_not_move_while_the_hardware_is_carried_in(tmp_path: Path
     """The second box, checked against the document rather than against the call.
 
     Every permission in the file is collected before and after, by walking what
-    is actually there — including the COM port entry this call brings into
+    is actually there, including the COM port entry this call brings into
     existence, which arrives with its permissions written by the server."""
     workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True, CONFIG_PERMISSIONS_RIGHT: True})
     attached(monkeypatch)
@@ -219,7 +219,7 @@ def test_permissions_do_not_move_while_the_hardware_is_carried_in(tmp_path: Path
     after = granted(document_of(path))
     assert not [key for key in set(before) | set(after) if before.get(key, False) != after.get(key, False)]
     # The port that did not exist before now does, and it may be read and not
-    # written — the permission block came from the server, not from this call.
+    # written: the permission block came from the server, not from this call.
     assert after["com_ports.dut_uart.permissions.allow_write"] is False
     assert applied["created_entries"] == ["com_ports.dut_uart"]
     # Even with the permissions grant open, which is the state that could have
@@ -230,7 +230,7 @@ def test_permissions_do_not_move_while_the_hardware_is_carried_in(tmp_path: Path
 def test_a_value_a_person_set_is_reported_and_never_replaced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The third box, and the one that decides whether this path is safe at all.
 
-    The board is the one this entry is configured for — the probe serials agree —
+    The board is the one this entry is configured for (the probe serials agree)
     and the file still says something else about it than the hardware does. That
     is a person's statement about their own bench, maybe a controller variant
     they know better than a HOTPLUG read does, and it is reported rather than
@@ -268,7 +268,7 @@ def test_a_different_attached_board_is_refused_whole_rather_than_partly_carried(
     The identity keys describe one board between them. With `PROBE-A` configured
     and `PROBE-B` attached, carrying only the keys that happen to be unset would
     leave a `probe_id` naming A beside B's controller, B's toolchain path and B's
-    COM device — a configuration whose debugger and UART address different
+    COM device: a configuration whose debugger and UART address different
     boards, which loads and passes `doctor`. So nothing is planned and nothing is
     written."""
     workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
@@ -354,8 +354,8 @@ def test_the_untouched_skeleton_carries_the_board_with_nobody_editing_yaml(tmp_p
     """The fourth box on the real output of `init`, with the file untouched.
 
     Not a rewritten skeleton: the bytes `init_config` wrote, adopted as they are.
-    The board's own identity — its serial, its controller, the COM device it
-    exposes — lands with nobody typing anything. The backend's executable does
+    The board's own identity (its serial, its controller, the COM device it
+    exposes) lands with nobody typing anything. The backend's executable does
     not, and says why: the skeleton's `type` is `openocd` and the attached
     toolchain is STM32CubeProgrammer, so writing that path into this entry would
     produce a file that loads and fails at the first call. `type` is not a key
@@ -401,7 +401,7 @@ def test_setup_without_a_board_then_plugging_it_in_reaches_a_green_doctor(tmp_pa
     """The fourth box end to end, with the one edit that is not a board's identity.
 
     `init` runs with nothing attached and writes the placeholder skeleton. The
-    board arrives. `agentic-hil adopt-hardware` carries it in — as the operator,
+    board arrives. `agentic-hil adopt-hardware` carries it in, as the operator,
     which is the authority `init` itself runs under, so no grant has to be edited
     into a file to make the command that fills the file work. Then `doctor` reads
     a configuration that names the probe.
@@ -446,7 +446,7 @@ def test_setup_without_a_board_then_plugging_it_in_reaches_a_green_doctor(tmp_pa
     assert checked["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
     assert checked["target"]["controller"] == "stm32f446re"
     assert checked["com_ports"]["dut_uart"]["device"] == "COM9"
-    # Green, and the check really ran — this is the whole of the open generated default in one
+    # Green, and the check really ran: this is the whole of the open generated default in one
     # assertion. The skeleton granted everything, so the board this command just
     # entered is one this bench drives, and nobody opened a YAML file between the
     # empty directory and here. Under the closed default the same run reached a
@@ -820,7 +820,7 @@ def test_without_the_description_grant_the_agent_gets_the_values_and_not_the_wri
 
     The grant belongs to the operator and this call does not argue with it. What
     it does is hand back the exact keys and values rather than a probe listing
-    somebody has to correlate by hand — which is the whole complaint,
+    somebody has to correlate by hand, which is the whole complaint,
     answered even where the write is shut."""
     workspace, path = placeholder_bench(tmp_path, monkeypatch)
     before = path.read_text(encoding="utf-8")
@@ -875,7 +875,7 @@ def test_nothing_is_read_or_written_while_this_server_holds_hardware(tmp_path: P
 # The board this reads belongs to whoever holds it.
 #
 # Enumerating probes and connecting in HOTPLUG mode is a hardware read, and a
-# read still perturbs — an SWD attach halts the core. What answers that in this
+# read still perturbs: an SWD attach halts the core. What answers that in this
 # repository is exclusivity rather than a grant, so this path has to take the
 # same machine-wide locks, prove the same audit trail and quarantine the same
 # way as every other read of a board. An MCP server that only checked its own
@@ -885,7 +885,7 @@ def test_nothing_is_read_or_written_while_this_server_holds_hardware(tmp_path: P
 def test_the_attached_probe_is_not_connected_to_while_another_owner_holds_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A second process on this machine gets `device_busy`, not the board.
 
-    The holder here is a stranger — another MCP server, another
+    The holder here is a stranger: another MCP server, another
     `agentic-hil adopt-hardware`, a test reactor run in a different project. It
     holds the physical probe, which is exactly the lock this path takes before it
     says anything to it."""
@@ -1064,7 +1064,7 @@ def test_a_release_that_fails_is_recorded_as_the_terminal_outcome(tmp_path: Path
     The read is written as an `ok: true`, `lease_state: active` report before the
     release is tried, which is right. Stopping there was not: the release then
     failed, the call returned `resource_quarantined`, and nothing rewrote the
-    record — so `get_last_report` still described a clean active discovery and
+    record, so `get_last_report` still described a clean active discovery and
     `classify_last_error` had no failure at all. Both places an operator looks
     after a refusal said the bench was fine."""
     workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
@@ -1097,7 +1097,7 @@ def test_a_discovery_that_never_said_what_it_committed_is_not_reported_as_commit
 
     `bool(discovery.get("side_effect_committed", False))` gave a discovery that
     set no marker the positive claim that nothing was committed, with
-    `side_effect_status: not_started` beside it from the same absence — the one
+    `side_effect_status: not_started` beside it from the same absence, the one
     reading that tells an operator a quarantined bench is untouched. Every
     discovery result carries the marker today, which is what makes this worth
     removing rather than relying on: the refusal is what an operator reads after
@@ -1134,7 +1134,7 @@ def test_a_partial_release_never_reports_the_aggregate_as_released(tmp_path: Pat
 
     The aggregate used to take the first non-`active` state it found. With the
     enumeration lease released and the probe lease in `cleanup_required` that was
-    `lease_state: released` beside `cleanup_required: true` — and callers are told
+    `lease_state: released` beside `cleanup_required: true`, and callers are told
     to treat anything other than null/active/released as blocking, so the one
     field they key on said the opposite of what was true about the board. The
     incident id went missing with it, leaving the refusal naming a `recover` run
@@ -1216,8 +1216,8 @@ def test_a_version_one_configuration_that_grants_probing_is_carried_in(tmp_path:
 def test_a_key_filled_while_the_probe_was_being_read_is_not_overwritten(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The fill-only rule has to survive the seconds a probe read takes.
 
-    The document is classified, then the board is read — seconds, not
-    microseconds — and only then is the write lock taken. Another CLI or MCP
+    The document is classified, then the board is read (seconds, not
+    microseconds) and only then is the write lock taken. Another CLI or MCP
     process can fill a placeholder inside that window, and a plan that carried
     only `{key, value}` would overwrite the newer choice with the older decision.
     The plan carries what it saw, and a key that has moved refuses the call."""
@@ -1256,7 +1256,7 @@ def test_an_entry_named_like_a_reserved_key_is_still_covered_by_the_document_che
     `permissions`, `provenance` and `allow_anything` are legal debugger, COM and
     CAN entry ids. The document comparison used to drop every mapping key with
     one of those names at any depth, so an entry called `permissions` was outside
-    it — and outside the per-key expectations too, which cover only the keys this
+    it, and outside the per-key expectations too, which cover only the keys this
     call sets. A concurrent repoint of that entry from one board to another was
     therefore invisible, and the first board's discovery could still be committed
     onto it. Whether the id is odd is the operator's business; whether the
@@ -1298,8 +1298,8 @@ def test_an_entry_named_like_a_reserved_key_can_still_be_adopted_into(tmp_path: 
     The test above proves a concurrent edit to `debuggers.permissions` is seen.
     This is the other half: with nothing but `allow_config_description_write`, the
     entry can actually be filled in. The permission surface read every key under
-    such an entry as a grant — `debuggers.permissions.probe_id` came back as a
-    moved permission — so adoption refused with `permission_denied` naming
+    such an entry as a grant: `debuggers.permissions.probe_id` came back as a
+    moved permission, so adoption refused with `permission_denied` naming
     `allow_config_permissions_write`, and the operator's only way out was to
     rename their board."""
     workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
@@ -1323,7 +1323,7 @@ def test_the_plan_is_a_pure_reading_of_a_document(tmp_path: Path, monkeypatch: p
     """No document, no plan: with nothing configured there is no entry to fill.
 
     The planner is the part a reviewer has to be able to reason about on its own,
-    so it takes a document and a discovery result and returns a decision — no
+    so it takes a document and a discovery result and returns a decision: no
     file, no permissions, no way to reach either."""
     plan = plan_adoption({"debuggers": {}}, {"ok": True, "backend": "stlink", "probe_id": PROBE_SERIAL})
     assert plan["ok"] is False
@@ -1487,7 +1487,7 @@ def test_a_backend_change_during_the_read_refuses_the_write(tmp_path: Path, monk
 def test_a_permission_changed_during_the_read_does_not_refuse_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The document check is on the description, and for a reason.
 
-    Nothing this path plans reads a permission — it cannot name one — so a
+    Nothing this path plans reads a permission (it cannot name one), so a
     concurrent grant must not turn a correct plan into a refusal. Comparing the
     whole document would make every unrelated write by another process a reason
     to throw a hardware read away."""
@@ -1523,7 +1523,7 @@ def test_a_per_debugger_target_is_reported_rather_than_written_to_the_wrong_one(
 
     An entry with its own `target:` block overrides the project target for
     everything that runs on that probe, so writing the detected controller into
-    the top-level block would not reach the board that was read — it would change
+    the top-level block would not reach the board that was read: it would change
     the fallback the other entries use. The closed key model has no
     `debuggers.<name>.target.*` key, so the honest answer is to say where the
     value belongs and leave both targets alone."""
@@ -1569,7 +1569,7 @@ def test_a_per_debugger_target_that_already_agrees_is_reported_as_current(tmp_pa
     Where the value cannot go is a fact about the key model; whether the value
     differs at all is a fact about the document, and the two were conflated. An
     override already naming the detected controller has nothing to do, so it
-    belongs under `already_current` — telling the operator to go and set a value
+    belongs under `already_current`: telling the operator to go and set a value
     the file already holds is advice to make no change."""
     workspace, _ = _bench_with_own_target(tmp_path, monkeypatch, "stm32f446re")
 

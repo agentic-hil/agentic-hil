@@ -360,7 +360,7 @@ def test_debug_load_failure_retains_quarantined_lease(
         assert result["lease_state"] == "cleanup_required"
         assert result.get("command_timed_out", False) is timed_out
         assert service.coordinator.blocked is True
-        # Was: the probe comes back `resource_quarantined`. It now runs — a
+        # Was: the probe comes back `resource_quarantined`. It now runs: a
         # probe is the recovery class, and refusing the call that reads what
         # state the board is in was the padlock this release removed. What this
         # test is about survives untouched and is now asserted directly: a
@@ -398,8 +398,8 @@ def test_reset_halt_policy_settles_a_failed_load_without_running_the_partial_ima
 
         assert recovered["ok"] is True, recovered
         assert service.coordinator.blocked is False
-        # Halted only. Control is never handed back to a partially written image
-        # — flashing and running it again stays an explicit, permissioned act.
+        # Halted only. Control is never handed back to a partially written image:
+        # flashing and running it again stays an explicit, permissioned act.
         assert modes == ["halt"]
     finally:
         # Teardown is clean here precisely because the incident was settled: the
@@ -1361,7 +1361,7 @@ def test_clear_breakpoints_missing_delete_does_not_poison_next_continue(tmp_path
 # The numeric string and the bool are the load-bearing pair: `float("5")` is 5.0
 # and `float(True)` is 1.0, so plain coercion accepts both without complaint, and
 # the point here is that the gate does not. `1e400` is the one the stdio JSON
-# hook does not catch — it parses to `inf` rather than firing `parse_constant` —
+# hook does not catch: it parses to `inf` rather than firing `parse_constant`,
 # so refusing it is `find_nonfinite`'s job, and the case is what says so.
 INVALID_TIMEOUT_VALUES = [
     ("non_numeric_string", "abc"),
@@ -1396,7 +1396,7 @@ def test_invalid_timeout_is_refused_as_invalid_argument(tmp_path: Path, label: s
     (the report read the swallowing coercion in `number_argument` as
     the shipped answer). The refusal comes from the schema gate in `call`,
     before `number_argument` is reached, so no unusable value ever reaches a
-    backend as a dropped `None` — which a backend cannot tell apart from the
+    backend as a dropped `None`, which a backend cannot tell apart from the
     argument having been omitted, and would answer by silently substituting the
     configured default for the cap the caller asked for.
 
@@ -1418,8 +1418,8 @@ def test_usable_timeout_is_not_refused_as_invalid_argument(tmp_path: Path) -> No
     """The positive control for the refusals above.
 
     Without it a gate that rejected every `timeout_s` would satisfy them. These
-    three still fail on their own terms — there is no session to stop, continue
-    or halt — but not for the shape of the argument. `debug_start_session` is
+    three still fail on their own terms (there is no session to stop, continue
+    or halt), but not for the shape of the argument. `debug_start_session` is
     left out on purpose: the only way it gets past this point is by starting a
     real session, which is not what this test is for.
     """
@@ -1464,7 +1464,7 @@ def test_direct_debug_call_reenters_validation_for_invalid_timeout(tmp_path: Pat
 # `debug_dump_symbol_ihex` is served on that backend too. What these pin is that
 # a caller cannot tell which backend answered: the same arguments, the same
 # refusals, the same success fields. The differences that remain are the ones
-# honesty forces — where the symbol table comes from, and that a read whose
+# honesty forces: where the symbol table comes from, and that a read whose
 # confirmation line never printed says so.
 
 
@@ -1589,9 +1589,9 @@ def test_stlink_dump_confirms_success_only_on_the_measured_read_line(tmp_path: P
     `Data read successfully` is the only line that means the bytes arrived. The
     connect banner is not a substitute: this fixture prints the ST-Link serial,
     the device name and the whole UPLOADING block, and none of that may be read
-    as a confirmed read. The result is also not allowed to call itself harmless
-    — the probe was attached to a live core and the CLI never said where it
-    stopped — so the side effect is unknown rather than not_started.
+    as a confirmed read. The result is also not allowed to call itself harmless:
+    the probe was attached to a live core and the CLI never said where it
+    stopped, so the side effect is unknown rather than not_started.
     """
     service = stlink_dump_service(tmp_path, debugger_executable=FAKE_STLINK_READ_UNCONFIRMED)
     try:
@@ -1853,7 +1853,7 @@ def test_the_backend_autodetects_from_the_loader_s_own_candidate_list() -> None:
 
 
 def test_stlink_dump_refuses_before_a_symbol_table_describes_the_target(tmp_path: Path) -> None:
-    """No flashed ELF, no answer — and the refusal says what is missing.
+    """No flashed ELF, no answer, and the refusal says what is missing.
 
     A session gets its symbol table by loading the image; this backend has no
     session, so the only image it may resolve against is the one it put on the
@@ -1933,8 +1933,8 @@ def test_remember_symbol_elf_keeps_only_the_source_still_proven_on_the_target(tm
         service._remember_symbol_elf(elf, {"ok": False, "side_effect_status": "unknown"})
         assert service._symbol_elf is None
 
-        # A flash that provably never reached the target leaves the board — and
-        # so the remembered ELF — as it was.
+        # A flash that provably never reached the target leaves the board (and
+        # so the remembered ELF) as it was.
         service._remember_symbol_elf(elf, {"ok": True})
         service._remember_symbol_elf(binary, {"ok": False, "side_effect_status": "not_started"})
         assert service._symbol_elf is elf
@@ -1974,7 +1974,7 @@ def test_flash_that_raises_drops_the_previously_trusted_symbol_source(tmp_path: 
     ``_remember_symbol_elf`` runs only on a returned result; a backend that raises
     after it may have contacted or partly written the target never reaches it. The
     coordination wrapper reports the effect as unknown, so the previously trusted
-    ELF — which a later ST-Link dump would resolve a symbol against — must not
+    ELF (which a later ST-Link dump would resolve a symbol against) must not
     survive a flash whose outcome is unproven, or a symbol could resolve against a
     build the failed flash may have replaced.
     """
@@ -2630,8 +2630,8 @@ def test_elf_symbol_table_rejects_a_string_table_size_the_file_cannot_hold(tmp_p
 
     CPython raises `OverflowError` for a `read()` size past `sys.maxsize`, and a
     smaller-but-still-enormous size can force a process-sized allocation before
-    the file is even found too short to hold it. `sh_size` is ELF-controlled — a
-    64-bit field can claim up to 2**64-1 — so the bound has to sit before the
+    the file is even found too short to hold it. `sh_size` is ELF-controlled (a
+    64-bit field can claim up to 2**64-1), so the bound has to sit before the
     read, not in the exception it would otherwise raise.
     """
     table = elf_with_symbols([("g_pfnVectors", 0x08000000, 428)], bits=64)
@@ -3420,7 +3420,7 @@ def test_a_backend_claiming_more_than_the_reads_is_narrowed_to_them() -> None:
 def test_stlink_symbol_value_refuses_while_another_owner_holds_the_probe(tmp_path: Path) -> None:
     """The machine-wide lock, taken for the read the way it is for a flash.
 
-    A stranger — another MCP server, another project's run — holds the probe, so
+    A stranger (another MCP server, another project's run) holds the probe, so
     the read must answer `device_busy` and name the holder rather than attaching
     underneath it. Before this the read reached the board with no lease at all.
     """
@@ -3474,7 +3474,7 @@ def test_stlink_symbol_value_unconfirmed_read_enters_the_incident_path(tmp_path:
     The CLI opened the probe, printed its banner and never said `Data read
     successfully`, so where the core stopped is unknown. The read now runs on a
     one-shot lease, so that unknown state raises the same incident a session read
-    would — recorded here even as it stands down, because the target's state is
+    would, recorded here even as it stands down, because the target's state is
     what the next reset into halt and probe will say. Before this the same result
     came back with no lease and no incident behind it at all.
     """

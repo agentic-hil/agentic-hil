@@ -104,7 +104,7 @@ def test_version_two_reads_without_any_grant(tmp_path: Path) -> None:
 
     com = ComPortService(config)
     try:
-        # The device does not exist, so the open fails — but on the hardware, not
+        # The device does not exist, so the open fails, but on the hardware, not
         # on a permission.
         assert com.session_start("dut_uart").get("error_type") != "permission_denied"
         assert com.list_ports()["available_com_ports"].get("error_type") != "permission_denied"
@@ -202,7 +202,7 @@ def test_a_port_can_be_opened_without_touching_the_target(tmp_path: Path, monkey
 
     Reading needs no permission now, so the way to prove an observation did not
     disturb the target is to open the port without raising the lines that reset
-    it — and the line state has to be decided before the port is open, not
+    it, and the line state has to be decided before the port is open, not
     after."""
     events: list[tuple[str, object]] = []
     inner = SimpleNamespace(is_open=False, in_waiting=0, close=lambda: None, read=lambda size: b"", reset_input_buffer=lambda: None, reset_output_buffer=lambda: None)
@@ -245,7 +245,7 @@ def test_the_shipped_template_is_born_on_the_new_model(tmp_path: Path) -> None:
     # Reading needs no grant, and since 0.8.0 the writing grants are not
     # withheld either: the skeleton states each of them, granted. The two
     # exceptions are the pair that refuses flashing while it is true, which the
-    # skeleton states false — see
+    # skeleton states false, see
     # test_generated_configurations_can_flash.py for the rule that binds them.
     assert "allow_flash: true" in DEFAULT_CONFIG_TEMPLATE
     assert "allow_mass_erase: false" in DEFAULT_CONFIG_TEMPLATE

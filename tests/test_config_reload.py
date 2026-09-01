@@ -4,7 +4,7 @@ The reported session is one sentence long: *"ich musste den
 MCP-Server auch manuell neustarten, wenn ich etwas an der Konfiguration der
 Geraete geaendert habe"*. A board was plugged in, written into the authoritative
 file, and stayed invisible to the running server until somebody restarted the
-agent host's MCP server — because a server parses its configuration once and
+agent host's MCP server, because a server parses its configuration once and
 enforces that one document until it exits.
 
 That rule was written for the **permission** half and it still holds there: the
@@ -15,7 +15,7 @@ the **description** half hostage.
 So these tests are in four groups.
 
 The first is the report: a board written into the file becomes usable without a
-restart. The second is the property the whole thing rests on — the permissions do
+restart. The second is the property the whole thing rests on: the permissions do
 not move, in either direction, and a device this server has never seen arrives
 with nothing. The third is the refusals: a held bench, an open incident, a file
 that is gone, unreadable, or will not load. The fourth is what the answers say
@@ -217,7 +217,7 @@ def test_permissions_on_disk_do_not_move_across_a_reload(tmp_path: Path, monkeyp
     The file is edited so that one grant is turned on and another turned off,
     and the description is edited in the same write so the reload definitely
     took *something*. Afterwards the permission state is compared field by field
-    against the one this server started with — not against the file."""
+    against the one this server started with, not against the file."""
     workspace, path = bench(tmp_path, monkeypatch, probe_id="DUT-0001")
     tools = service(workspace)
     try:
@@ -294,7 +294,7 @@ def test_a_device_this_server_never_saw_arrives_with_no_grant(tmp_path: Path, mo
     """Absent is denied, and the gate that denies it is the ordinary one.
 
     The file grants the new board everything. What the server holds for it is
-    nothing at all, so every mutating permission on it is false — and the checks
+    nothing at all, so every mutating permission on it is false, and the checks
     that read those flags are the same checks every other device goes through."""
     workspace, path = bench(tmp_path, monkeypatch, probe_id="DUT-0001")
     tools = service(workspace)
@@ -336,7 +336,7 @@ def test_a_renamed_entry_is_a_new_entry_and_arrives_closed(tmp_path: Path, monke
         rewrite(path, rename)
         assert tools.call(PROJECT_CONFIG_RELOAD)["ok"] is True
         assert sorted(tools.config.debuggers) == ["board"]
-        # It is the only entry, so the server binds it — and it holds nothing.
+        # It is the only entry, so the server binds it, and it holds nothing.
         assert tools.config.debugger_id == "board"
         assert tools.config.debuggers["board"].permissions.allow_flash is False
     finally:
@@ -509,7 +509,7 @@ def test_no_grant_gates_the_reload(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     """It reads and writes nothing, so a closed file must not lock a board out.
 
     A bench whose `allow_config_description_write` is false is precisely the one
-    an operator edits by hand — and it would be absurd for that choice to mean
+    an operator edits by hand, and it would be absurd for that choice to mean
     the board they just wrote down can never be picked up without a restart."""
     workspace, path = bench(tmp_path, monkeypatch)
     rewrite(
@@ -561,7 +561,7 @@ def test_a_permission_divergence_stays_visible_after_a_reload(tmp_path: Path, mo
     """The other half of the same requirement, and the one a reload could hide.
 
     Once the description in force is the file's, `config_status` reports the
-    file as unchanged — so if that were the whole answer, a file whose grants
+    file as unchanged, so if that were the whole answer, a file whose grants
     are wider than the ones being enforced would look completely settled."""
     workspace, path = bench(tmp_path, monkeypatch)
     tools = service(workspace)
@@ -594,8 +594,8 @@ def test_the_divergence_survives_the_file_going_away(tmp_path: Path, monkeypatch
     """Which document the grants came from is a fact about this process.
 
     The digest comparison needs a file and stops when there is none. This does
-    not, so the answer that matters most while the file is gone — what is being
-    enforced, and where it came from — is still there."""
+    not, so the answer that matters most while the file is gone (what is being
+    enforced, and where it came from) is still there."""
     workspace, path = bench(tmp_path, monkeypatch)
     tools = service(workspace)
     try:
@@ -636,7 +636,7 @@ def test_three_reloads_still_name_the_startup_document_as_the_permission_source(
     that moves on equality goes wrong.
 
     B was adopted as the permission source because its grants happened to match,
-    and C then carried B's digest forward — so `permissions_source` named a
+    and C then carried B's digest forward, so `permissions_source` named a
     document the permission objects never came from and paired it with the
     startup `loaded_at`. The digest has to be A's throughout: A is where the
     grants in force were parsed, and no comparison against a later file changes
@@ -655,7 +655,7 @@ def test_three_reloads_still_name_the_startup_document_as_the_permission_source(
         assert b_digest != startup_digest
         assert tools.config.permissions_digest == startup_digest
 
-        # C: now a grant differs, so the divergence has to be reported — against A.
+        # C: now a grant differs, so the divergence has to be reported, against A.
         rewrite(path, lambda document: document["debuggers"]["dut"]["permissions"].update({"allow_mass_erase": True}))
         assert tools.call(PROJECT_CONFIG_RELOAD)["ok"] is True
 
@@ -802,7 +802,7 @@ def test_merged_description_takes_nothing_but_the_four_sections(tmp_path: Path, 
     merged = merged_description(loaded, disk)
 
     # `permissions_digest` is in the exempt set because it is asserted below to
-    # be exactly the *loaded* document's — it is the one field the reload may
+    # be exactly the *loaded* document's: it is the one field the reload may
     # neither take from disk nor let drift.
     decided_by_the_reload = {
         "target",
@@ -926,7 +926,7 @@ def test_a_version_one_read_grant_that_moves_is_reported_as_a_difference(tmp_pat
     moves only one of them has permissions this server is not enforcing. The
     permission surface used to name only the write grants, so this reported an
     empty `permission_differences`, moved `permissions_digest` onto the file and
-    dropped `permissions_source` — three separate claims that the two halves
+    dropped `permissions_source`, three separate claims that the two halves
     agreed when they did not."""
     workspace, path = legacy_openocd_bench(tmp_path, monkeypatch, com_ports_yaml=COM_PORTS)
     tools = service(workspace)

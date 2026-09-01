@@ -1,8 +1,8 @@
 """Every advertised tool declares what it does, and a host receives it.
 
 None of our tools carried MCP annotations, so a host had the
-name and nothing else and blocked `project_config_reload_description` — the one
-call that re-reads the configuration and writes nothing — because it sits next
+name and nothing else and blocked `project_config_reload_description` (the one
+call that re-reads the configuration and writes nothing) because it sits next
 to two tools that do write. These tests are the gate that keeps a new tool from
 shipping without the same declaration, and they check the wire, not the table:
 an annotation that never reaches `tools/list` is not an annotation.
@@ -74,7 +74,7 @@ def test_annotations_declare_only_the_fields_the_schema_defines() -> None:
 def test_read_only_and_destructive_are_never_claimed_together() -> None:
     """`destructiveHint` and `idempotentHint` are meaningful only when
     `readOnlyHint` is false, so a read-only tool that declares either has said
-    something the schema gives no meaning to — and `destructiveHint: true` on a
+    something the schema gives no meaning to, and `destructiveHint: true` on a
     read-only tool is a flat contradiction."""
     advertised = annotations_by_tool()
 

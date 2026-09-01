@@ -3,7 +3,7 @@
 The invariant the ratchet established was that an agent can enable itself up to
 observation and never up to modification. Field-wise writes open a door in that wall
 and the owner decided the shape of it: **two** grants, not one. A single
-``allow_config_write`` would have been a master key — set to let an agent enter a
+``allow_config_write`` would have been a master key: set to let an agent enter a
 probe serial, it would have handed over, in the same motion and without saying
 so, the ability for that agent to write ``allow_flash: true`` on itself.
 
@@ -78,8 +78,8 @@ def bench(
     gets a chance to run.
 
     Device grants start false unless `device_permissions` says otherwise. That is
-    no longer what a *generated* configuration looks like — since 0.8.0 a
-    generation grants everything — but a bench a person narrowed is exactly the
+    no longer what a *generated* configuration looks like (since 0.8.0 a
+    generation grants everything), but a bench a person narrowed is exactly the
     state most of these tests are about, and a test that needs something to take
     away asks for it."""
     workspace = (tmp_path / "workspace").resolve()
@@ -303,7 +303,7 @@ def test_a_subtree_is_not_a_value_this_tool_accepts(tmp_path: Path, monkeypatch:
 
     It never gets as far as a permission check, because there is no shape of this
     request the tool takes. `value` admits a scalar and nothing else, and no key
-    that names a subtree resolves — both halves are asserted here, because either
+    that names a subtree resolves: both halves are asserted here, because either
     one alone would leave the other free to change.
     """
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
@@ -332,8 +332,8 @@ def test_the_boundary_holds_even_when_the_key_model_is_wrong(tmp_path: Path, mon
 
     The key model is a reading of the request, and a boundary defended only by a
     reading of the request is defended exactly as well as that reading is right.
-    So the model is broken here on purpose — told that a permission key belongs to
-    the description grant — and the write must still be refused, because the
+    So the model is broken here on purpose (told that a permission key belongs to
+    the description grant) and the write must still be refused, because the
     permissions actually present in the document are compared before against
     after. This is the check that closes a detour nobody has found yet.
     """
@@ -362,7 +362,7 @@ def test_the_boundary_holds_even_when_the_key_model_is_wrong(tmp_path: Path, mon
 def test_the_document_comparison_sees_a_permission_wherever_it_sits() -> None:
     """What the second check actually looks at.
 
-    Not the paths the key model can produce — every `allow_*` key at any depth,
+    Not the paths the key model can produce: every `allow_*` key at any depth,
     and every leaf of any mapping called `permissions`. A guard that only knew
     the model's own paths would be blind exactly where something that got past
     the model would land."""
@@ -396,7 +396,7 @@ def test_an_entry_id_that_looks_like_a_grant_is_read_as_the_id_it_is() -> None:
     """The one level where this walk has to know the schema.
 
     Directly under `debuggers`, `com_ports` and `can_buses` the keys are not
-    field names — they are entry ids the operator chose, and `permissions`,
+    field names: they are entry ids the operator chose, and `permissions`,
     `provenance` and `allow_anything` are all legal ones. Reading them as grant
     names made every field of such an entry a permission: repointing
     `debuggers.permissions` at another board produced the delta
@@ -631,7 +631,7 @@ def test_a_change_records_what_moved_when_and_through_which_call(tmp_path: Path,
 
     text = path.read_text(encoding="utf-8")
     # The header a person wrote survives, and exactly one line says the file has
-    # moved since — one, not one per write.
+    # moved since: one, not one per write.
     assert text.startswith("# A person wrote this bench.\n")
     assert text.count("# Changed by an agent through mcp:") == 1
 
@@ -770,7 +770,7 @@ def test_the_key_model_maps_every_key_to_exactly_one_rule() -> None:
         section_grant = resolve_config_key(grant)
         assert section_grant is not None, grant
         assert section_grant.right == "allow_config_permissions_write", grant
-    # Nothing outside the two halves is reachable, however it is spelled — and
+    # Nothing outside the two halves is reachable, however it is spelled, and
     # that still includes the list-valued neighbours of those two grants, which
     # are not scalars.
     for outside in ("workspace_root", "state_root", "version", "artifacts.allowed_roots", "artifacts.upload_directory", "debug.allowed_symbols", "debug.max_dump_size_bytes", "recovery.auto_recover", "debuggers.dut.flash_address", "com_ports.dut_uart.assert_dtr", "provenance.created_by"):
@@ -781,7 +781,7 @@ def test_an_entry_name_with_a_dot_is_read_from_the_right() -> None:
     """Entry names may contain dots, so a key is read from its last component.
 
     Field names are a closed set and contain none, which makes that reading the
-    only possible one — and keeps an entry called `a.probe_id` addressable."""
+    only possible one, and keeps an entry called `a.probe_id` addressable."""
     plain = resolve_config_key("debuggers.a.b.probe_id")
     awkward = resolve_config_key("debuggers.a.probe_id.probe_id")
     permissions = resolve_config_key("debuggers.a.permissions.permissions.allow_flash")
@@ -810,7 +810,7 @@ def test_the_can_bus_half_of_the_decision_covers_every_scalar_field_but_the_perm
     and cannot be silently left out of one either. A field whose value is a
     subtree is the exception, and is one by construction rather than by being
     remembered: this surface sets one value at a time, so an object or an array
-    would be the agent authoring structure. `shares:` is the standing case — a
+    would be the agent authoring structure. `shares:` is the standing case: a
     bus's participant views are the operator's, edited in the file."""
     entry_schema = config_schema()["properties"]["can_buses"]["additionalProperties"]["properties"]
     subtrees = {name for name, node in entry_schema.items() if str(node.get("type")) in {"object", "array"}}
@@ -835,8 +835,8 @@ def test_the_reference_describes_the_shape_of_a_configuration() -> None:
     for section in config_schema()["properties"]:
         assert f"### `{section}`" in document, section
     # Which two are required, and a case worked through rather than described.
-    assert "workspace_root` — required" in document
-    assert "state_root` — required" in document
+    assert "workspace_root` (required)" in document
+    assert "state_root` (required)" in document
     assert "## A worked example" in document
     assert "066AFF495451885087171450" in document and "stm32f446re" in document
 
@@ -848,7 +848,7 @@ def test_the_reference_says_how_to_change_a_configuration_and_what_cannot_be_don
     assert "## What deliberately cannot be done" in document
     for refusal in ("your own file tools", "subtree", "while a run is open", "deleting a key"):
         assert refusal in document, refusal
-    # The value shapes in it are the schema's, rendered — not a second list.
+    # The value shapes in it are the schema's, rendered, not a second list.
     for entry in config_key_catalogue():
         assert f"| `{entry['key']}` | `{entry['right']}` |" in document, entry["key"]
     assert "| `debuggers.<name>.probe_id` | `allow_config_description_write` | string or null, matching" in document
@@ -859,16 +859,16 @@ def test_the_reference_scopes_the_ratchet_to_the_call_it_holds_for() -> None:
     """The security claim in the live resource is the one that is true.
 
     An agent reads this before it decides what it may do, and it said the file
-    could only ever narrow — while `project_config_create` on the same surface
+    could only ever narrow, while `project_config_create` on the same surface
     can regenerate it open. The owner's decision on the generated default keeps
     regeneration outside the ratchet deliberately, so the resource has to say
     which call the direction belongs to and what the other one does."""
     document = (read_resource(CONFIG_SHAPE_URI) or {})["text"]
 
-    assert "### Permissions move one way — through `project_config_set`" in document
+    assert "### Permissions move one way: through `project_config_set`" in document
     assert "### What the ratchet does not cover" in document
     assert "the MCP permission-write path can only narrow" in document
-    # Regeneration, described as it behaves rather than as the ratchet — and at
+    # Regeneration, described as it behaves rather than as the ratchet, and at
     # the generated defaults, which are not "everything".
     assert "arrives at the generated defaults" in document
     assert "is at those same defaults" in document
@@ -880,7 +880,7 @@ def test_the_description_grant_remedy_gives_the_reason_that_is_still_true() -> N
 
     It told an agent that reopening `allow_config_description_write` through
     `project_config_set` fails because no configuration hands out
-    `allow_config_permissions_write` — and a generated configuration grants
+    `allow_config_permissions_write`, and a generated configuration grants
     exactly that. On a bench where the description grant was
     narrowed and the permissions grant is still open, the resource gave a
     factually wrong reason for a correct refusal. The reason is the false-only
@@ -972,7 +972,7 @@ def test_a_server_bound_to_a_file_that_is_not_the_authoritative_one_refuses(tmp_
 def test_the_whole_path_works_over_mcp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """What an agent actually does: ask, then write, without a failed attempt.
 
-    This is the proof the second half of the issue asks for — from "board
+    This is the proof the second half of the issue asks for: from "board
     attached" to a valid change with no round trip spent on a rejected guess."""
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     tools = service(workspace)
@@ -1533,7 +1533,7 @@ def test_setup_still_denies_the_agents_own_file_tools_on_the_configuration(tmp_p
 # The `false`-only rule, and the surface it is about.
 #
 # The owner drew this line explicitly: the rule nails the MCP surface
-# shut and nothing else. So there are two things to prove — that the MCP surface
+# shut and nothing else. So there are two things to prove: that the MCP surface
 # writes `false` and nothing else at all, including a `true` that would move
 # nothing, and that a person at the command line is not held to it.
 
@@ -1557,7 +1557,7 @@ def test_a_permission_already_true_cannot_be_sent_true_again(tmp_path: Path, mon
         refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.permissions.allow_flash", True)))
         # A truthy value the schema would not accept never gets as far as the
         # direction check: the shipped schema refuses it on the way in. Either
-        # refusal is the same outcome — nothing applied — and the point is that
+        # refusal is the same outcome (nothing applied) and the point is that
         # neither of them writes.
         coerced = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.permissions.allow_reset", 1)))
     finally:
@@ -1587,8 +1587,8 @@ def test_the_false_only_rule_does_not_reach_the_command_line(tmp_path: Path, mon
 
     The owner's own words: "we only nail the MCP shut, the
     rest is left to the user and the agent CLI". So the human actor keeps the
-    authorization check — `allow_config_permissions_write` still gates the
-    permissions half for everybody — and is not held to the direction."""
+    authorization check (`allow_config_permissions_write` still gates the
+    permissions half for everybody) and is not held to the direction."""
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True})
     assert document_of(path)["debuggers"]["dut"]["permissions"]["allow_flash"] is False
 
@@ -1637,7 +1637,7 @@ def test_the_section_grants_a_generation_writes_can_be_narrowed(tmp_path: Path, 
 
     A generation writes both `true` like every other permission. Leaving them out
     of the key model left two things a generated bench grants that an operator
-    could take back only by opening the YAML — which is the single thing
+    could take back only by opening the YAML, which is the single thing
     the ratchet exists to stop."""
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True})
     opened = document_of(path)
@@ -1677,7 +1677,7 @@ def test_a_denied_section_grant_is_explained_as_the_permission_it_is(tmp_path: P
     entry a caller reads said the change had "reached a `permissions:` block".
     Neither of these sits in one. An agent denied on `artifacts.allow_upload` was
     handed a machine-readable explanation of a request it had not made, and the
-    right conclusion — this is a permission and an operator decides it — was left
+    right conclusion (this is a permission and an operator decides it) was left
     for it to guess."""
     workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     opened = document_of(path)

@@ -1,6 +1,6 @@
 """A CAN adapter bridge that speaks protocol 2 over stdio and touches no hardware.
 
-The broker under test opens the *real* ``adapter: process`` path — the adapter
+The broker under test opens the *real* ``adapter: process`` path. The adapter
 abstraction is deliberately untouched by the broker work, so the way to keep the
 broker tests honest about it is to put a real child process behind it rather than
 a stub in the broker's own process.

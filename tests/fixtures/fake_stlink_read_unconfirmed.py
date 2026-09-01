@@ -5,7 +5,7 @@ fake_stlink_unconfirmed.py confirms nothing at all, which cannot exercise this
 branch: the symbol source is the ELF a *successful* flash put on the target, so
 a CLI that fails the flash never gets as far as a read. This one flashes for
 real and then answers `-r` the way a read that died between opening the probe
-and finishing looks — connect banner, UPLOADING block, exit 0, and no
+and finishing looks: connect banner, UPLOADING block, exit 0, and no
 `Data read successfully` anywhere. No output file is written either, because a
 read that never confirmed has nothing to promise about one.
 """

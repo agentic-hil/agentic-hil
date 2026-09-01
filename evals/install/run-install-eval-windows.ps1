@@ -3,7 +3,7 @@ param(
     [string[]]$Agents = @("codex", "opencode"),
     [string[]]$Cases = @("quickstart", "preserve-user-config", "unsafe-existing-config", "firmware-routing"),
     # The skill is always installed in a real setup, so measuring without it is
-    # not a shipped configuration — it answers one question, whether the skill
+    # not a shipped configuration: it answers one question, whether the skill
     # earns its place, and only on request.
     [switch]$WithControlArms,
     [ValidateRange(2, 20)]
@@ -42,7 +42,7 @@ param(
     # Read the guide from the remote at this commit and install from it, instead
     # of from the mounted working tree.
     [switch]$FromBranch,
-    # The guide link to hand the agents, verbatim — the one out of README.md
+    # The guide link to hand the agents, verbatim. The one out of README.md
     # measures the release the way an engineer hands it over. Whatever that
     # guide's published path installs is what gets verified.
     [string]$Guide,
@@ -266,7 +266,7 @@ $Cases = Expand-Selection `
     -Label "case"
 
 # A control arm is only meaningful beside the case it is the control for, so it
-# is derived from the selection rather than typed out — and never runs unless
+# is derived from the selection rather than typed out, and never runs unless
 # it is asked for.
 $controlArms = @($Cases | Where-Object { $_ -like "*-without-skill" })
 if ($WithControlArms) {

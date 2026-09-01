@@ -73,7 +73,7 @@ CAN_DRAIN_TIMEOUT_S = 1.0
 #
 # The three are genuinely different mechanisms, not one mechanism with three
 # names. python-can 4.6.1 accepts a `listen_only=` keyword on exactly three
-# backends — slcan, vector and nixnet — and none of them is reachable from here.
+# backends (slcan, vector and nixnet), and none of them is reachable from here.
 # Neither `pcan` nor `socketcan` takes that keyword, and neither rejects it: it
 # lands in `**kwargs`, is forwarded to `BusABC.__init__(**kwargs: object)`, and
 # is discarded without a word. That is why passing it through was never going to
@@ -134,7 +134,7 @@ class CanBusSession:
         self.process_reaped = False
         # A supplied marker is authoritative and is never written over here. One
         # caller builds a session around a bridge that refused honestly and then
-        # would not close — a live child process, and no bus contact — and a
+        # would not close (a live child process, and no bus contact), and a
         # constructor that "helpfully" recorded contact for it would put a time
         # into that report for something that never happened.
         #
@@ -246,7 +246,7 @@ class CanBusService:
                 opened = open_adapter(self.config, bus_id, bus_config, False, contact)
         except BaseException as error:
             # An interrupt that lands before the adapter joined the bus has
-            # nothing to contain, and the marker is what says so — including for
+            # nothing to contain, and the marker is what says so, including for
             # a bridge, which answers "cannot tell" rather than "no" and keeps
             # its quarantine on that basis. A release that will not confirm is an
             # unknown of its own and quarantines too.
@@ -365,7 +365,7 @@ class CanBusService:
         # Mode before permission, and the order is the contract rather than an
         # accident of layout. `allow_write: true` on a `listen_only: true` bus is
         # a configuration that says two incompatible things, and answering it
-        # with `permission_denied` would name the half that is not the problem —
+        # with `permission_denied` would name the half that is not the problem:
         # the reader would grant the permission it already has. So the bus's own
         # claim is settled first and the permission is never reached.
         mode = listen_only_send_refusal(bus_id, bus["bus_config"])
@@ -489,7 +489,7 @@ class CanBusService:
         result.update(socketcan_bitrate_honesty_fields(bus_config))
         # Only for a brokered bus. A bus with no `shares:` is the single-owner bus
         # this tool has always described, and it keeps describing it in exactly
-        # the same words — the participant vocabulary appears where participants
+        # the same words: the participant vocabulary appears where participants
         # exist and nowhere else.
         if bus_config.shares:
             from agentic_hil.canbroker import listen_only_proof, share_view
@@ -599,8 +599,8 @@ class CanBusService:
             session.lease.quarantine("can_effect_unconfirmed")
         if session is not None:
             # Published on every report this session writes, not only on the one
-            # that opened it, because the reader that needs it — the release of a
-            # dead owner's devices — sees whichever report was committed last.
+            # that opened it, because the reader that needs it (the release of a
+            # dead owner's devices) sees whichever report was committed last.
             prepared = {**prepared, **session.contact.report_fields(), **session.lease.status()}
         written = write_report(self.config, prepared)
         if session is not None and written.get("audit_ok") is False:
@@ -632,7 +632,7 @@ def listen_only_send_refusal(bus_id: str, bus_config: CanBusConfig, tool: str = 
     is a property of the bus entry, so the answer cannot differ between PEAK,
     SocketCAN and the process bridge without the flag meaning three things; and
     the layer that has the `CanBusConfig` in hand is the only one that can refuse
-    *before* a driver is called, which is the requirement — a refusal produced by
+    *before* a driver is called, which is the requirement: a refusal produced by
     an adapter would already have handed the frame over.
 
     It also does not lean on the adapter to fail the send, because the installed
@@ -658,13 +658,13 @@ def listen_only_send_refusal(bus_id: str, bus_config: CanBusConfig, tool: str = 
         "listen_only": True,
         "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT[effective_can_adapter(bus_config)],
         "summary": (
-            f"CAN bus {bus_id} is configured `listen_only: true` — the claim that observing it sends nothing — so a "
+            f"CAN bus {bus_id} is configured `listen_only: true` (the claim that observing it sends nothing), so a "
             "transmit on it is refused before any driver is called, whatever permissions.allow_write says. To "
             "transmit, add a second can_buses entry for this channel with `listen_only: false` and send on that one, "
             f"or set `can_buses.{bus_id}.listen_only: false` if this bus may be transmitted on after all."
         ),
         # About this call, and true of every adapter: nothing was handed to a
-        # driver, so no frame can be in any transmit queue. Not `retry_safe` —
+        # driver, so no frame can be in any transmit queue. Not `retry_safe`:
         # the same call gets the same answer until the configuration changes,
         # and calling it again is not the remedy.
         "side_effect_committed": False,
@@ -677,8 +677,8 @@ def listen_only_send_refusal(bus_id: str, bus_config: CanBusConfig, tool: str = 
 def open_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanBusConfig, clear_rx_queue: bool, contact: ContactMarker | None = None) -> JsonObject:
     """Open the configured adapter, recording contact into ``contact``.
 
-    The marker is optional so that a caller with no interest in it — and every
-    direct call in a test — still gets a working open; the caller that decides
+    The marker is optional so that a caller with no interest in it (and every
+    direct call in a test) still gets a working open; the caller that decides
     between a refusal and a quarantine passes its own and reads it afterwards.
     """
     marker = contact if contact is not None else ContactMarker()
@@ -708,7 +708,7 @@ class PythonCanAdapterSession:
         Worth being exact about, because the layer above turns this into "CAN
         frame sent." On PEAK, ``PcanBus.send()`` in the installed python-can
         (4.6.1) builds a TPCANMsg, calls ``PCANBasic.Write()``, and raises only
-        when the return code is not ``PCAN_ERROR_OK`` — a code that reports the
+        when the return code is not ``PCAN_ERROR_OK``: a code that reports the
         frame was taken into the controller's transmit queue. It says nothing
         about arbitration, about an ACK, or about any node having seen it.
 
@@ -748,7 +748,7 @@ class PythonCanAdapterSession:
             # recv() transmits nothing: a failed direct-adapter read proves no
             # frame was sent by this call, so it refuses instead of reporting
             # an unknown bus effect. The process-bridge adapter
-            # stays markerless — a broken bridge process is an unknown.
+            # stays markerless: a broken bridge process is an unknown.
             return {"ok": False, "error_type": "can_read_failed", "summary": "CAN adapter failed to read frames.", "backend_error": str(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
 
     def close(self) -> JsonObject:
@@ -823,7 +823,7 @@ def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: C
     `ENODEV` there means the kernel has no such netdev: the bind never happened,
     no controller was addressed, and contact was not merely unproven but
     impossible. That is a refusal about the host's configuration, in the same
-    class as a missing toolchain — the bench stays in service.
+    class as a missing toolchain: the bench stays in service.
 
     Not widened past the constructor, and not past this one number. `ENETDOWN`
     on a bound socket is an interface that exists and went down under a session
@@ -833,10 +833,10 @@ def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: C
 
     Why this exists at all: the SocketCAN classifier above admits
     only `CanInitializationError` as proof of no contact, and python-can never
-    raises that class for a failed bind — 4.6.1 re-raises the bare `OSError`, and
+    raises that class for a failed bind: 4.6.1 re-raises the bare `OSError`, and
     the wrapper it uses elsewhere is `CanOperationError`, which is not a subclass
-    of it. So the one failure that is provably harmless — a `can0` that is simply
-    not there after a re-enumeration — quarantined a bench that nothing had
+    of it. So the one failure that is provably harmless (a `can0` that is simply
+    not there after a re-enumeration) quarantined a bench that nothing had
     touched.
 
     A `peak` bus reaches here too, and is excluded on the same terms as any
@@ -908,7 +908,7 @@ def pcan_illegal_handle_text() -> str | None:
 
     ``PcanBus`` builds its initialization exception out of
     ``PCANBasic.GetErrorText(status, 0x9)`` and carries the text and nothing
-    else — the status code is not copied onto the exception, so the text is the
+    else: the status code is not copied onto the exception, so the text is the
     only thing a classifier has to work with. Rather than hard-coding the
     sentence the bench happened to see, this asks the same function, in the same
     language, for the same code, and the comparison is against the library.
@@ -1074,8 +1074,8 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
 
     What the marker means on this backend: the successful return of
     ``can.Bus()``. Everything a python-can backend does to join a bus happens
-    inside that constructor — SocketCAN creates and binds its raw socket there,
-    PCAN runs `PCANBasic.Initialize` and its follow-up `SetValue` calls there —
+    inside that constructor (SocketCAN creates and binds its raw socket there,
+    PCAN runs `PCANBasic.Initialize` and its follow-up `SetValue` calls there),
     so a constructor that returned is a controller that is on the bus, ACKing.
     Nothing before it has addressed a controller at all.
 
@@ -1174,7 +1174,7 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
         if initialization_errors and isinstance(error, initialization_errors):
             # Provably never on the bus: refuse, do not quarantine. Every other
             # exception class, and every failure on a backend that is not in
-            # `initialization_errors`, keeps the markerless result — a
+            # `initialization_errors`, keeps the markerless result: a
             # partially initialized channel participates on the bus (it ACKs
             # and can emit error frames at a wrong bitrate), and nothing here
             # can disprove one was left behind.
@@ -1313,7 +1313,7 @@ def listen_only_precondition(can_module: object, interface: str, bus_id: str, bu
 def listen_only_unconfirmed(can_module: object, interface: str, bus: object, bus_id: str, bus_config: CanBusConfig) -> JsonObject | None:
     """Whether an opened adapter failed to confirm the listen-only it was asked for.
 
-    Returns ``None`` when there is nothing to answer for — the flag is off, or
+    Returns ``None`` when there is nothing to answer for: the flag is off, or
     the backend settled it before the bus existed.
     """
     if not bus_config.listen_only or interface != "pcan":
@@ -1455,8 +1455,8 @@ class ProcessCanAdapterSession(ProcessBridgeSession):
 # handed to the child: nothing came back (`timeout`), or something came back that
 # this protocol cannot read (`invalid_response`). The bridge may have acted on the
 # request in either case, and nothing that arrived says whether it did. The two
-# raised before the write — `can_adapter_process_exited`,
-# `can_adapter_invalid_request` — are deliberately absent: they prove the bridge
+# raised before the write (`can_adapter_process_exited`,
+# `can_adapter_invalid_request`) are deliberately absent: they prove the bridge
 # was never asked, which is what lets a refusal say the bus was not touched.
 BRIDGE_OPEN_UNANSWERED = frozenset({"can_adapter_timeout", "can_adapter_invalid_response"})
 
@@ -1472,7 +1472,7 @@ def bridge_opened_before_failing(opened: JsonObject) -> bool:
     error type:
 
     Protocol v2 is one request and one response, so there is no separate open
-    acknowledgment for a later failure to arrive after — everything the bridge
+    acknowledgment for a later failure to arrive after: everything the bridge
     has to say about a failed `open` is in that one error object. A bridge that
     never got a channel and a bridge that opened one and then failed at a later
     step of its own initialization answer in the same envelope, and the error
@@ -1480,10 +1480,10 @@ def bridge_opened_before_failing(opened: JsonObject) -> bool:
     string the bridge chose. So the bridge is asked to say which of the two it
     is, in the first person, about the only thing it alone can know.
 
-    ``channel_open: true`` is that statement. Anything else — the field absent,
-    ``false``, or not a boolean — leaves the failure where it has always been: a
+    ``channel_open: true`` is that statement. Anything else (the field absent,
+    ``false``, or not a boolean) leaves the failure where it has always been: a
     refusal that says the bus was not touched and is safe to retry. That keeps
-    the most common bridge failure of all unchanged — a mistyped channel, `open`
+    the most common bridge failure of all unchanged: a mistyped channel, `open`
     refused cleanly before anything was opened, which is a bad config and not a
     bench incident. A field on the error response and not a version bump, the
     same way `listen_only` was added to the success response: a bridge that does
@@ -1494,8 +1494,8 @@ def bridge_opened_before_failing(opened: JsonObject) -> bool:
     `side_effect_committed: false` over a bridge that is sitting on the bus hands
     back a bench that is still being driven. Only a positive statement moves it.
 
-    The two failures raised before the request was written —
-    `can_adapter_process_exited`, `can_adapter_invalid_request` — cannot acquire
+    The two failures raised before the request was written
+    (`can_adapter_process_exited`, `can_adapter_invalid_request`) cannot acquire
     the field by accident: the transport synthesizes those itself and never sets
     it. A bridge that spells one of those error types *and* claims an open
     channel has answered, and is taken at its word in the safe direction.
@@ -1508,7 +1508,7 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
 
     What the marker means on this backend: the bridge answered its open request
     with ``ok: true``. That is the bridge's own claim to be on the bus, and it is
-    the only evidence available — this is code the project did not write, and
+    the only evidence available: this is code the project did not write, and
     forwarding a request proves nothing about what the far side did with it.
 
     The two unanswered outcomes get the third state instead. A request that was
@@ -1518,7 +1518,7 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
     what would give a bench back while a bridge is sitting on the bus.
 
     A bridge's own ``ok: false`` gets the third state too, but only where the
-    bridge says its channel was already open when it failed — see
+    bridge says its channel was already open when it failed. See
     ``bridge_opened_before_failing`` for where that boundary runs. A clean
     refusal of `open` keeps saying the bus was not touched.
     """
@@ -1564,7 +1564,7 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
     # `listen_only`; a bridge that dropped it answered `ok` all the same, and the
     # caller was told a bus was being observed passively by a node that ACKed.
     # So the confirmation is required from the response, and only where the
-    # guarantee was actually asked for — a bridge that never sees
+    # guarantee was actually asked for: a bridge that never sees
     # `listen_only: true` is unaffected.
     listen_only_confirmed = not bus_config.listen_only or opened.get("listen_only") is True
     if not valid_open or not listen_only_confirmed:
@@ -1572,8 +1572,8 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
         # bus, and this path makes it only where something backs it: a bridge's
         # own `ok: false` that does not report an open channel, or a failure
         # raised before its open request was sent. A bridge that answered
-        # `ok: true` has opened, whatever disqualified the response afterwards —
-        # its shape, or a listen-only it did not confirm — a request that was
+        # `ok: true` has opened, whatever disqualified the response afterwards
+        # (its shape, or a listen-only it did not confirm). A request that was
         # delivered and then not answered leaves the far side's state to the far
         # side, and a bridge that refused while reporting `channel_open: true`
         # failed with its channel already on the bus. Those withhold the marker

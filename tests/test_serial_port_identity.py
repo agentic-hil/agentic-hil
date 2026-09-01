@@ -2,7 +2,7 @@
 
 `/dev/ttyACM0` and `COM7` say which device the host happened to enumerate first.
 Attaching a second ST-Link renumbers them, and the failure that matters is not
-the run that breaks — it is the run that keeps working against the wrong board,
+the run that breaks: it is the run that keeps working against the wrong board,
 because an unchanged configuration now names hardware nobody meant.
 
 Everything here fakes the platform: the host inventory, the udev directory and
@@ -55,7 +55,7 @@ BOARD_A = "0669FF534948717867012345"
 BOARD_B = "0670FF534948717867054321"
 # What the bench's own adopt log carries for the ST-Link behind those boards:
 # `"vid": 1155, "pid": 14159`, which is `VID:PID=0483:374F` in the same record's
-# `hwid`. The CH340 is the other half of the identity check — a different vendor, and
+# `hwid`. The CH340 is the other half of the identity check: a different vendor, and
 # an adapter that often publishes no serial number at all.
 STLINK_VID, STLINK_PID = 1155, 14159
 CH340_VID, CH340_PID = 0x1A86, 0x7523
@@ -91,7 +91,7 @@ def inventory(*ports: dict) -> dict:
 
 
 def fake_host(monkeypatch: pytest.MonkeyPatch, result: dict) -> None:
-    """Replace the host inventory — the one place this code asks the platform."""
+    """Replace the host inventory, the one place this code asks the platform."""
     monkeypatch.setattr(comports, "list_available_com_ports", lambda tool="com_ports_available": result)
 
 
@@ -210,7 +210,7 @@ def test_the_lock_key_follows_the_serial_and_not_the_kernel_name(tmp_path: Path)
 
 
 def test_a_port_serial_folds_case_on_every_platform(tmp_path: Path) -> None:
-    """It is a hardware id, like a probe serial — not a path.
+    """It is a hardware id, like a probe serial, not a path.
 
     Asserted without asking the host what it would do: `os.path.normcase` folds
     on Windows and does nothing on POSIX, so a suite that lets the platform
@@ -348,7 +348,7 @@ def test_a_second_board_under_the_first_ones_name_is_refused_not_opened(tmp_path
 def test_the_refusal_also_protects_a_configuration_that_still_holds_a_kernel_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The bench in the report has not been re-adopted yet, and is protected anyway.
 
-    Its port entry names no serial of its own — it shares the probe's
+    Its port entry names no serial of its own: it shares the probe's
     `resource_id`, which is the operator saying the two are one unit."""
     config = config_for(
         tmp_path,
@@ -407,7 +407,7 @@ def test_a_declared_identity_that_cannot_be_checked_is_refused_not_guessed(tmp_p
     a refusal returned before the port is opened.
 
     A pseudo-terminal, a port that reports no serial, and a host whose serial
-    backend is missing are all "unknown" — and for an entry that named a board so
+    backend is missing are all "unknown", and for an entry that named a board so
     its name would be proved to still reach it before use, unknown is not
     permission to open. Reporting the gap in the result does not
     protect the hardware once the connection has already been allowed. The port
@@ -443,7 +443,7 @@ def test_a_declared_port_is_not_opened_when_its_identity_cannot_be_checked(tmp_p
     The value of failing closed is only real if nothing is contacted first: a
     result that says "the check did not run" is no protection once the port is
     already open. So `session_start` returns the refusal before it ever reaches
-    `_open_serial` — here the host cannot enumerate the port at all."""
+    `_open_serial`: here the host cannot enumerate the port at all."""
     config = config_for(tmp_path, com_ports_yaml=com_ports_yaml(device="/dev/ttyACM0", serial_number=BOARD_A))
     fake_host(monkeypatch, {"ok": False, "tool": "com_ports_available", "error_type": "serial_backend_not_available", "summary": "pyserial is not installed."})
     service = ComPortService(config)
@@ -499,7 +499,7 @@ def test_adoption_re_spells_an_existing_kernel_name_instead_of_keeping_it(tmp_pa
     """The repair path for the bench in the report.
 
     A configured `/dev/ttyACM0` is a value somebody set, and adoption does not
-    replace those — but this is not a replacement. It is the same port, written
+    replace those, but this is not a replacement. It is the same port, written
     down so it survives the next replug, and recognising that is what lets an
     existing bench be fixed by running `adopt-hardware` rather than by editing
     YAML."""
@@ -536,7 +536,7 @@ def test_a_port_a_person_pointed_somewhere_else_is_still_left_alone(tmp_path: Pa
     """The carve-out is exactly one port wide.
 
     An entry naming a device that is *not* the discovered port is somebody's
-    decision, and it stays `kept` — the stable-name rewrite must not become a
+    decision, and it stays `kept`: the stable-name rewrite must not become a
     licence to repoint entries."""
     document = {
         "debuggers": {"dut": {"type": "stlink", "probe_id": BOARD_A, "executable": None}},
@@ -549,7 +549,7 @@ def test_a_port_a_person_pointed_somewhere_else_is_still_left_alone(tmp_path: Pa
     assert planned["kept"][0]["configured_value"] == "/dev/ttyUSB3"
 
     # And it is an upgrade, never a normalisation: with no durable spelling to
-    # move to — every Windows name is an enumeration order — the name a person
+    # move to (every Windows name is an enumeration order), the name a person
     # wrote stays exactly as they wrote it, and `serial_number` carries the
     # identity by itself.
     windows = {
@@ -619,7 +619,7 @@ def test_a_matching_serial_under_a_foreign_device_type_is_refused(tmp_path: Path
     """The core of the vid/pid check: serials are vendor-scoped, not global.
 
     The entry names board A's serial and the adapter behind the name reports
-    exactly that serial — and is a CH340 rather than the ST-Link the entry was
+    exactly that serial, and is a CH340 rather than the ST-Link the entry was
     written for. Comparing the serial alone opens it, because the one thing
     checked agrees."""
     config = config_for(
@@ -798,7 +798,7 @@ def test_doctor_says_what_a_type_only_entry_is_and_stays_quiet_about_the_rest(tm
     """The warning tracks what the identity actually buys.
 
     A `serial_number` is the strong anchor, and adding the ids to it changes
-    nothing an operator has to act on — so no new noise. An entry identified by
+    nothing an operator has to act on, so no new noise. An entry identified by
     the ids alone has half the problem solved and half of it provably unsolvable,
     which is a different sentence rather than the old one repeated."""
     typed = tmp_path / "typed"
@@ -833,8 +833,8 @@ def test_doctor_says_what_a_type_only_entry_is_and_stays_quiet_about_the_rest(tm
 # ---------------------------------------------------------------------------
 # Configuration version 3: the warning above, turned into a property of the file.
 #
-# Everything before this point is a runtime answer — `doctor` reports it, the
-# open-time check acts on it — and a bench nobody runs `doctor` on keeps
+# Everything before this point is a runtime answer (`doctor` reports it, the
+# open-time check acts on it), and a bench nobody runs `doctor` on keeps
 # identifying a board by an enumeration order. Version 3 is where a file has to
 # have said which hardware each port is. The rule is decidable from the document
 # alone, because a configuration is read on hosts with nothing attached: an entry
@@ -846,7 +846,7 @@ def test_a_version_three_entry_that_names_its_board_loads(tmp_path: Path) -> Non
     """The three self-standing identities, and the two declared exceptions.
 
     Each is a whole file that loads, so this pins what version 3 *permits* rather
-    than only what it refuses — the half a ratchet is easiest to get wrong."""
+    than only what it refuses, the half a ratchet is easiest to get wrong."""
     identified = config_for(
         tmp_path / "serial",
         config_version=IDENTIFIED_COM_PORT_CONFIG_VERSION,
@@ -891,7 +891,7 @@ def test_a_version_three_entry_that_names_its_board_loads(tmp_path: Path) -> Non
 def test_a_version_three_entry_identified_by_nothing_is_refused_naming_adopt(tmp_path: Path) -> None:
     """The refusal, and what it has to contain to be actionable.
 
-    A bare `device:` is an enumeration order — which board the host saw first —
+    A bare `device:` is an enumeration order (which board the host saw first),
     so it is exactly the entry this version exists to stop. The refusal names the
     entry, names the command that fills the identity in from the attached adapter,
     and says in which order to run it, because that command loads this file and
@@ -958,7 +958,7 @@ def test_versions_one_and_two_keep_loading_an_entry_that_names_no_hardware(tmp_p
 def test_the_shipped_schema_declares_the_version_and_the_declaration(tmp_path: Path) -> None:
     """The schema an operator exports is the schema the loader validates against.
 
-    Two documents describe this file — the JSON Schema and the loader — and a
+    Two documents describe this file (the JSON Schema and the loader), and a
     version the loader reads but the schema refuses is a file that cannot be
     written. So the enum and the declared values are checked against the
     constants, and a document carrying both is put back through the loader."""
@@ -1028,7 +1028,7 @@ def test_adoption_records_the_exception_for_an_adapter_that_publishes_no_serial(
 
     "This adapter has no serial number" and "nobody filled it in" are the same
     file. `adopt-hardware` has just asked the adapter, so it is the thing that
-    can write the difference down — which is what makes the refusal's advice
+    can write the difference down, which is what makes the refusal's advice
     actionable rather than an instruction to hand-edit YAML."""
     document = {"debuggers": {"dut": {"type": "stlink", "probe_id": None, "executable": None}}, "com_ports": {}}
 

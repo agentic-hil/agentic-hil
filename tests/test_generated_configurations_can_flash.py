@@ -5,14 +5,14 @@ A generation opens every permission a configuration declares. The
 flash interlock refuses `flash_firmware` while `allow_raw_debugger_commands` or
 `allow_mass_erase` is true on the probe. Each was tested on its own and each
 passed on its own, and together they meant that a freshly generated bench could
-not flash at all — the interlock was written when the pair defaulted to false, so
+not flash at all: the interlock was written when the pair defaulted to false, so
 "both on" was a state somebody had chosen, and the inversion made it the shipped
 state without either rule being edited.
 
 So the assertions here are deliberately *crossings*: a generation on one side, the
 interlock's own constant on the other. A test that only read the template would
 have missed it too, because the template is not where a bench with a board
-attached gets its permissions — `bootstrap` and `grant_every_permission` each
+attached gets its permissions: `bootstrap` and `grant_every_permission` each
 write them again, and each used to decide the default for itself.
 
 What settles which side gives way, and why this is not a narrowing: neither flag
@@ -68,7 +68,7 @@ def from_template() -> dict:
 
 
 def from_hardware_discovery() -> dict:
-    """`agentic-hil init` with a board attached — the path a real bench takes."""
+    """`agentic-hil init` with a board attached, the path a real bench takes."""
     return apply_discovery_to_template(skeleton(), DEFAULT_PROJECT_PROFILE, DISCOVERY)
 
 
@@ -145,7 +145,7 @@ def test_the_interlock_and_the_generated_default_name_the_same_permissions() -> 
     The backends name the flags they refuse flashing on as literals in the call
     that builds the refusal. If a flag joins that list without joining
     `EXCLUSIVE_FLASH_PERMISSIONS`, generation keeps writing it true and the bench
-    stops flashing — which is the defect, exactly, and this is the assertion that
+    stops flashing, which is the defect, exactly, and this is the assertion that
     would have caught it before it shipped."""
     refused: set[str] = set()
     for source in sorted(BACKENDS.glob("*.py")):
@@ -160,7 +160,7 @@ def test_neither_interlocked_permission_is_a_capability_anything_grants() -> Non
 
     Every read of these two under `src/` refuses something. None of them is a
     gate an action passes *through*, so a bench that leaves both false has given
-    nothing up — if that ever stops being true, the trade this fix made needs
+    nothing up: if that ever stops being true, the trade this fix made needs
     revisiting and this test is where that surfaces."""
     source_root = BACKENDS.parent
     granting: list[str] = []
@@ -170,7 +170,7 @@ def test_neither_interlocked_permission_is_a_capability_anything_grants() -> Non
             for flag in EXCLUSIVE_FLASH_PERMISSIONS:
                 # A read that gates an action on the flag being *true* would look
                 # like `if not permissions.<flag>` or `require(... <flag>)`. The
-                # deny sites all read `if permissions.<flag>:` — the flag being
+                # deny sites all read `if permissions.<flag>:`: the flag being
                 # true is the refusal, never the permission.
                 if re.search(rf"not\s+\w+(?:\.\w+)*\.{flag}\b", code) or re.search(rf"require\w*\([^)]*\b{flag}\b", code):
                     granting.append(f"{source.relative_to(source_root)}:{number}: {line.strip()}")
@@ -186,7 +186,7 @@ KNOWLEDGE_SOURCE = REPO_ROOT / "src" / "agentic_hil" / "knowledge.py"
 
 # The two halves of the actual reason: these permissions can act on flash outside
 # the path this server validates, so a flash report's claim about device state
-# stops being one this server can stand behind. Both halves are required —
+# stops being one this server can stand behind. Both halves are required:
 # "outside the validated path" alone does not say what it costs the caller, and
 # "cannot be trusted" alone does not say why.
 REASON_HALVES = ("outside the path this server validates", "stand behind")
@@ -225,7 +225,7 @@ def exclusion_statements() -> dict[str, str]:
         KNOWLEDGE_SOURCE, "**generated with every permission true**"
     )
     for flag in EXCLUSIVE_FLASH_PERMISSIONS:
-        # The refusal itself, rendered — the one an operator meets on a first
+        # The refusal itself, rendered, the one an operator meets on a first
         # flash, from all four backends.
         statements[f"knowledge.py: the refusal on {flag}"] = exclusive_permission_summary("Flashing", flag, "dut")
     return statements
@@ -235,8 +235,8 @@ def exclusion_statements() -> dict[str, str]:
 def test_every_statement_of_the_interlock_gives_its_reason(where: str) -> None:
     """"Mutually exclusive policies" restates the rule; it does not give it.
 
-    Neither flag grants anything — there is no MCP tool for raw debugger commands
-    and none for mass erase — so the pair withholds flashing rather than granting
+    Neither flag grants anything (there is no MCP tool for raw debugger commands
+    and none for mass erase), so the pair withholds flashing rather than granting
     a tool, and a reader told only "mutually exclusive" has no way to work that
     out. The one who reaches for the named flag to make flashing work makes the
     one change that keeps it refused. The reason is that both can act on flash

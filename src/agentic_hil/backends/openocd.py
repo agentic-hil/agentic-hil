@@ -55,8 +55,8 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     # branch read nothing out of OpenOCD's words, so it gets a public error_type
     # of its own rather than the classification the words would have produced:
     # `target_not_detected` is OpenOCD's report that it reached the adapter and
-    # nothing answered — which the shipped catalogue entry says in as many words
-    # — and publishing that here would make the abort-point claim this branch
+    # nothing answered (which the shipped catalogue entry says in as many words),
+    # and publishing that here would make the abort-point claim this branch
     # exists to withhold. See READ_ONLY_PRE_CONTACT_BACKEND_ERRORS.
     "probe_unconfirmed": "target_state_unconfirmed",
     "flash_unconfirmed": "flash_failed",
@@ -114,7 +114,7 @@ class OpenOCDBackend:
         # `allow_raw_debugger_commands` is read the way `_debug_permission_failure`
         # reads it: a debug session is refused *while* raw commands are allowed,
         # so a config that turns that grant on is one an open session may not
-        # outlive. An unbound config has no session to authorize at all — the
+        # outlive. An unbound config has no session to authorize at all: the
         # service replaces this object rather than reconfiguring it in that case,
         # and reading a permission off `None` here would raise before it could.
         debug_permission_revoked = not config.probe_allowed() or config.debugger is None or config.debugger.permissions.allow_raw_debugger_commands
@@ -196,7 +196,7 @@ class OpenOCDBackend:
         marker = OPENOCD_SUCCESS_MARKERS["flash_firmware"]
         reset_command = " reset" if reset_after_flash else ""
         # `program` runs `init` itself, so the explicit prefix changes nothing
-        # about the flash — `init` guards against running twice. What it adds is
+        # about the flash: `init` guards against running twice. What it adds is
         # the stage echo: a failure whose output lacks the init marker provably
         # stopped before adapter_init opened the probe, which is what lets a
         # missing config script or an absent adapter refuse instead of
@@ -375,7 +375,7 @@ class OpenOCDBackend:
                 return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, completed, rejected, init_reached=init_reached), audit_error)
             if success_marker is not None and success_marker not in output:
                 # Only the success marker decides this branch, so the init-stage
-                # marker may well be in the output beside it — a run that
+                # marker may well be in the output beside it: a run that
                 # completed `init`, examined the core and then lost the second
                 # echo. The result carries which of the two were printed so a
                 # caller reads this run's evidence rather than inferring the
@@ -408,7 +408,7 @@ class OpenOCDBackend:
     # first opened by adapter_init inside `init`; an adapter that could not be
     # opened is the other face of the same boundary. Each of these may be read
     # as "never reached the bench" ONLY together with the absent init-stage
-    # marker (see _failure_result) — the classification alone is string
+    # marker (see _failure_result): the classification alone is string
     # matching, and the marker is what makes it a proof. Nothing here covers the
     # timeout, which is the deadline killing the process before it could say
     # where it stopped.
@@ -420,16 +420,16 @@ class OpenOCDBackend:
     # selected transport, which is what the error catalogue's
     # `target_not_detected:openocd` entry means by it. A target that never
     # answered was never brought under debug control, and with the init-stage
-    # marker absent `init` is the only thing that could have addressed it at all
-    # — `targets` lists and `shutdown` ends. `flash_firmware` and `reset_target`
+    # marker absent `init` is the only thing that could have addressed it at all:
+    # `targets` lists and `shutdown` ends. `flash_firmware` and `reset_target`
     # are deliberately not here: their command strings drive the target
     # themselves, so the same words also fit a target that stopped answering
     # while it was being driven, and the safe reading of an ambiguity is the one
     # that keeps the bench contained.
     #
     # Only a `target_not_detected` the classifier read out of OpenOCD's own
-    # output qualifies. `probe_unconfirmed` — an exit of 0 with the success
-    # marker missing — stays out, because it is the absence of a report rather
+    # output qualifies. `probe_unconfirmed` (an exit of 0 with the success
+    # marker missing) stays out, because it is the absence of a report rather
     # than a report that nothing answered: OpenOCD may have completed `init`,
     # halted the core and then lost the success marker, with or without the
     # stage marker beside it, and that board's run state is unknown either way. It carries `target_state_unconfirmed` to the caller for the same
@@ -479,7 +479,7 @@ class OpenOCDBackend:
             # OpenOCD named a failure that left the target untouched (a config
             # script it could not load, an adapter it could not open, a target
             # that did not answer), and the init-stage marker never printed, so
-            # `init` never completed — adapter_init never had a probe to drive,
+            # `init` never completed: adapter_init never had a probe to drive,
             # or target examine never brought a core under debug control. The
             # board is exactly as the last call that did reach it left it, and a
             # quarantine here would demand a physical inspection of hardware

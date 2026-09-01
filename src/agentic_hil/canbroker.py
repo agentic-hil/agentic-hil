@@ -11,14 +11,14 @@ for it, and nothing here is on its path.
 **The broker holds the same lock everybody else would have held.** It takes
 ``can:<adapter>:<channel>`` through the ordinary :class:`~agentic_hil.bench.BenchMutex`
 and holds it for its whole life, so every exclusivity the single-owner model
-enforced keeps being enforced — by one process, exactly once — and a single-owner
+enforced keeps being enforced (by one process, exactly once), and a single-owner
 run on the same bench is refused by the bus being busy, as before. Participants
 take *logical* locks ``<bus-key>#<name>``, so two runs may not share one
 participant name while any number of distinctly named participants proceed in
 parallel.
 
 **Attaching proves the peer owns the bus, rather than asking it.** A broker's
-claim to hold the lock is worth nothing on its own — a stale endpoint or an
+claim to hold the lock is worth nothing on its own: a stale endpoint or an
 impostor listener says the same words. So the attaching participant probes the
 lock itself: it reads the holder record, checks that the pid there is the pid the
 peer announced, and then *tries to take the bus lock*. Success is the refusal:
@@ -62,9 +62,9 @@ from multiprocessing.connection import AuthenticationError, Client, Connection, 
 from pathlib import Path
 
 # `_LifetimeLock` is reached for by name on purpose. The probe below has to take
-# the bus lock and put it straight back without leaving a holder record behind —
-# a probe that recorded itself as an owner would be read by the next contender as
-# one — and `BenchMutex` maintains exactly that record.
+# the bus lock and put it straight back without leaving a holder record behind
+# (a probe that recorded itself as an owner would be read by the next contender
+# as one), and `BenchMutex` maintains exactly that record.
 from agentic_hil.bench import (
     BenchMutex,
     DeviceBusyError,
@@ -95,7 +95,7 @@ PROTOCOL_VERSION = 1
 
 # The message surface itself, as data. The digest below is taken over it, so a
 # field added, removed or renamed here changes what a cross-release peer is
-# compared against — the digest cannot drift from the surface it describes,
+# compared against: the digest cannot drift from the surface it describes,
 # because it is computed from it rather than maintained beside it.
 MESSAGE_SURFACE: dict[str, tuple[str, ...]] = {
     "attach": ("protocol_version", "protocol_digest", "expected_counter", "bus_key", "participant", "requires_listen_only", "client_pid"),
@@ -159,7 +159,7 @@ def _broker_home(lock_root: Path) -> Path:
     """Where a broker publishes itself: beside the device locks it holds.
 
     Derived from the lock root rather than from the home directory again, so a
-    broker and the lock it takes cannot end up in two different places — which is
+    broker and the lock it takes cannot end up in two different places, which is
     the split ``bench.device_lock_root`` exists to prevent for locks."""
     return safe_directory(lock_root.parent / BROKER_DIRECTORY_NAME)
 
@@ -192,7 +192,7 @@ def _abstract_sockets_supported() -> bool:
     """Whether this host has the Linux abstract socket namespace.
 
     An abstract socket lives in no directory, so its length cannot be grown by a
-    long ``TMPDIR`` or a long home-derived lock root — it is the one address
+    long ``TMPDIR`` or a long home-derived lock root: it is the one address
     guaranteed to fit wherever it exists. The authkey handshake is the boundary
     for it exactly as it is for a filesystem socket; what it gives up is the
     owner-only directory, which was defence in depth, not the defence."""
@@ -229,7 +229,7 @@ def endpoint_address(bus_key: str, lock_root: Path) -> str:
     Short by construction, and validated to fit ``sockaddr_un`` before it is ever
     bound. An ``AF_UNIX`` path is capped near 108 bytes by the kernel, and both
     the lock root (which follows the user's home) and ``TMPDIR`` can be long
-    enough on a supported host — a test sandbox, a long profile — that a socket
+    enough on a supported host (a test sandbox, a long profile) that a socket
     under either simply cannot be bound. So a filesystem path under a short,
     per-user, owner-only directory is tried first, and where even that does not
     fit the address falls back to a Linux abstract socket, which lives in no
@@ -338,7 +338,7 @@ def _write_authkey(path: Path, key: bytes) -> None:
     """Write the HMAC key owner-only, replacing whatever was there.
 
     ``os.open`` with an explicit mode rather than a text write, because the mode
-    has to be on the file from the moment it exists — a chmod afterwards is a
+    has to be on the file from the moment it exists: a chmod afterwards is a
     window. On Windows the mode bits are advisory; what protects the file there
     is that it lives under the user's own profile, the same argument the device
     locks beside it rest on."""
@@ -368,7 +368,7 @@ def probe_bus_lock(bus_key: str, expected_pid: int, lock_root: Path) -> JsonObje
     """Whether the process at ``expected_pid`` really holds this bus lock.
 
     Three questions, and the third is the one that cannot be faked. The holder
-    record must exist and name that pid on this host — but the record is
+    record must exist and name that pid on this host, but the record is
     advisory, so an impostor could have written it. The lock itself is not: a
     lock this process can take is a lock nobody holds. So the probe *tries to
     acquire* the bus lock non-blocking, and treats success as the refusal.
@@ -460,7 +460,7 @@ def filter_accepts(share: CanShareConfig, frame_id: int, extended: bool) -> bool
 
     A term's ``extended`` is part of the term, not a decoration: a standard 0x123
     and an extended 0x123 are two different frames on the wire, so a term matches
-    only when its frame type matches too — otherwise a view configured for
+    only when its frame type matches too. Otherwise a view configured for
     standard frames would carry (and let its participant send) an extended frame
     of the same masked number, and vice versa. No filter is every identifier of
     either type."""
@@ -548,9 +548,9 @@ class CanBroker:
         safe_append_text(self.bus_frame_log, "")
         adapter_config = self.bus_config
         if self.bus_config.listen_only and self.bus_config.listen_only_enforcement == "service":
-            # `service` listen-only is the broker declining to forward writes —
-            # `_listen_only_conflict` already refuses any participant that may
-            # transmit onto a listen-only bus, whatever the enforcement — not the
+            # `service` listen-only is the broker declining to forward writes
+            # (`_listen_only_conflict` already refuses any participant that may
+            # transmit onto a listen-only bus, whatever the enforcement), not the
             # controller's own mode. Opening the adapter must not demand the
             # controller listen-only that `controller` enforcement proves, or a
             # bench configured for the documented weaker mode would fail to open
@@ -642,8 +642,8 @@ class CanBroker:
         """Log the stop and wake the serve loop; the guarded flag flip is done.
 
         Split from `stop` so the last-participant path in `_detach` can flip
-        `_stopping` inside the critical section that removed the participant —
-        closing the attach window — and still run this outside the guard, where
+        `_stopping` inside the critical section that removed the participant
+        (closing the attach window) and still run this outside the guard, where
         the throwaway connection's I/O belongs."""
         self._log_bus({"event": "broker_stop", "bus_id": self.bus_id, "reason": reason, "frames_seen": self.frame_seq})
         # `accept()` is blocked in the serve loop; a throwaway connection is what
@@ -791,7 +791,7 @@ class CanBroker:
         """Listen-only is a property of the bus, so the two kinds cannot coexist.
 
         The flag stands for a controller-level proof, and a controller has one
-        state for the whole medium — not one per acceptance filter. So a
+        state for the whole medium, not one per acceptance filter. So a
         participant that needs the bus silent and a participant that transmits
         are refused against each other rather than both being seated and one of
         them being quietly wrong. The enforcement level is named in the refusal
@@ -909,7 +909,7 @@ class CanBroker:
         from agentic_hil.can import CanFrame, listen_only_send_refusal
 
         # The same bus-level gate the single-owner `can_send` applies, in the
-        # same order — mode first, then this participant's permission. Reaching
+        # same order: mode first, then this participant's permission. Reaching
         # it means `_listen_only_conflict` let a writer onto a listen-only bus at
         # attach, which it does not; the line is here so that the property being
         # enforced belongs to the bus rather than to one check in the attach
@@ -920,7 +920,7 @@ class CanBroker:
         if mode is not None:
             # `listen_only_enforcement` means the adapter's capability in the
             # single-owner refusal and the configured enforcement level here, so
-            # it is restated in this bus's vocabulary rather than forwarded — the
+            # it is restated in this bus's vocabulary rather than forwarded, the
             # same renaming `_bus_status` performs, and for the same reason: a
             # `driver_verified` printed above a `software_filter` proof reads as
             # a controller state nobody put the controller into.
@@ -958,7 +958,7 @@ class CanBroker:
         except BaseException as error:
             # The adapter itself raised: that is the bus, not this participant.
             # The frame was already handed to the controller, so the effect is
-            # unknown — not the `side_effect_committed: false` a raise used to
+            # unknown, not the `side_effect_committed: false` a raise used to
             # claim. Allocate the sequence and log the attempted transmit first,
             # exactly as the returned-failure path does: the participant records
             # this send under the `frame_seq` the incident carries back, so the
@@ -1041,8 +1041,8 @@ class CanBroker:
                     if not item.share.permissions.allow_read or not filter_accepts(item.share, wire["id"], wire["extended"]):
                         continue
                     if item.abort is not None:
-                        # Already aborted — a spent budget, an earlier overflow, a
-                        # bus incident — so it will never drain, and growing its
+                        # Already aborted (a spent budget, an earlier overflow, a
+                        # bus incident), so it will never drain, and growing its
                         # queue is the very leak this bound exists to close.
                         continue
                     bound = self._receive_queue_bound(item)
@@ -1065,7 +1065,7 @@ class CanBroker:
         buffering past what remains of it is dead weight; and never above the
         bus's ``max_buffer_frames`` either. Bounding here is what stops an idle
         participant's queue from growing without limit while another draws the
-        medium continuously — the broker would otherwise hold every matching
+        medium continuously: the broker would otherwise hold every matching
         frame for a participant that reads none of them."""
         return max(1, min(attached.share.max_frames - attached.frames_used, self.bus_config.max_buffer_frames))
 
@@ -1076,7 +1076,7 @@ class CanBroker:
         it cannot answer the overflowed participant directly: it records the same
         shape of participant-scoped abort a spent budget does, and the
         participant learns of it on its next call or ``poll_incident``. The bus
-        and every other participant keep running — an unconsumed queue is this
+        and every other participant keep running: an unconsumed queue is this
         participant's problem, not the medium's."""
         if attached.abort is not None:
             return
@@ -1115,8 +1115,8 @@ class CanBroker:
             self._log_bus({"event": "incident", "bus_id": self.bus_id, "scope": "bus", "reason": reason, "reported_by": "broker", "aborted_participants": aborted, "bus_gated": True})
         result = {"ok": False, "error_type": "can_bus_incident", "summary": "A physical CAN bus incident aborted every participant's run and gated the bus.", "bus_id": self.bus_id, "abort": abort, "aborted_participants": aborted, "bus_gated": True, "retry_safe": False}
         # A read incident (the default) transmitted nothing, so it says nothing
-        # was committed. A send incident passes its own effect — `side_effect_status:
-        # unknown`, and no `side_effect_committed` — because a frame handed to a
+        # was committed. A send incident passes its own effect (`side_effect_status:
+        # unknown`, and no `side_effect_committed`) because a frame handed to a
         # controller that then failed may already be on the wire.
         result.update(extra if extra is not None else {"side_effect_committed": False})
         return result
@@ -1145,7 +1145,7 @@ class Participant:
 
     Keeps its own view of the traffic beside the broker's whole-bus log. Both
     carry the broker's frame sequence number, so a frame this participant sent is
-    the same frame in the bus log — attributable from either end without either
+    the same frame in the bus log, attributable from either end without either
     log having to be trusted about the other."""
 
     def __init__(self, config: AgenticHILConfig, bus_id: str, name: str, connection: Connection, attached: JsonObject, mutex: BenchMutex, lock_key: str, *, broker_process: subprocess.Popen | None = None):
@@ -1246,7 +1246,7 @@ def attach_participant(
     Order matters and is the point. The participant lock is taken *first*, so a
     second run claiming the same name is refused by the ordinary bench mutex
     before any broker is spoken to and whether or not one is running. Then the
-    broker is found or started, and only then is the peer believed — after the
+    broker is found or started, and only then is the peer believed, after the
     lock probe says it is the process holding the bus."""
     bus_config = config.can_buses.get(bus_id)
     if bus_config is None:
@@ -1299,7 +1299,7 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
                 # Refusing here would let one hard-killed broker brick the bus
                 # until somebody deleted a file by hand. Removing the corpse is
                 # safe precisely because the probe already failed: the endpoint
-                # behind it owns nothing, so nothing is taken from anybody — and
+                # behind it owns nothing, so nothing is taken from anybody, and
                 # an impostor's planted descriptor gets the same treatment,
                 # having never been spoken to. When starting a broker is not
                 # allowed there is nothing to replace it with, so the refusal
@@ -1328,7 +1328,7 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
             # immediate, structured refusal. It is derived *only* on this branch:
             # a broker that already published a bindable endpoint is reached
             # through its descriptor above and answers on the address it chose, so
-            # this client's own — possibly unusable — derivation never gates
+            # this client's own (possibly unusable) derivation never gates
             # attaching to one, and with `allow_start` false the branch is
             # unreachable and no address is derived at all.
             try:
@@ -1404,12 +1404,12 @@ def _spawn_broker(config: AgenticHILConfig, bus_id: str, bus_key: str, lock_root
     ``spawn_managed_process``, and the difference is the whole reason the broker
     is spawned through the detached name: a managed child joins a kill-on-close
     Job Object owned by this run, and a broker that died with whichever run
-    happened to attach first would not be a shared bus — the second participant
+    happened to attach first would not be a shared bus: the second participant
     would lose the medium because the first one's run ended. The broker's
     lifetime is bounded by its own rules instead: the last participant
     detaching, and the first-attach deadline below.
 
-    Losing the race for the bus lock is a clean exit, not an error — the
+    Losing the race for the bus lock is a clean exit, not an error: the
     winner's descriptor is what the loser's client then finds.
 
     The first-attach deadline travels on the command line rather than being read

@@ -2,8 +2,8 @@
 
 `coordination.status()` adopted any exited owner whose project
 record still said `active` as a quarantine, without ever asking what the dead
-session had done. The reclassification of 0.8.0 — a quarantine needs the
-*possibility* of an effect — had been applied to call failures and never to the
+session had done. The reclassification of 0.8.0 (a quarantine needs the
+*possibility* of an effect) had been applied to call failures and never to the
 owner's death, so a `pkill` of a runner whose last call ended before any hardware
 contact cost an operator a walk to the bench and a `recover --confirm-safe-state`.
 
@@ -281,7 +281,7 @@ def test_a_session_that_opened_its_port_is_not_released_as_no_contact(tmp_path: 
     `side_effect_committed: false` is a truthful claim about the call that wrote
     the report, and a session start writes several. One that opened the port and
     then failed on the reader thread, or on a receive buffer that would not
-    clear, closes the port again and reports its own failure as never begun —
+    clear, closes the port again and reports its own failure as never begun,
     while the open that preceded it drove DTR and RTS, and on a board that wires
     DTR to reset, reset it.
 
@@ -312,7 +312,7 @@ def test_a_session_that_opened_its_port_is_not_released_as_no_contact(tmp_path: 
 
 def test_the_release_names_the_contact_question_it_asked(tmp_path: Path) -> None:
     """A release is signed evidence, so it has to say which questions were put to
-    the report — including the one whose answer was an absence."""
+    the report, including the one whose answer was an absence."""
     config = leave_dead_owner(tmp_path)
     observer = HardwareCoordinator(config, "second-coordinator")
 

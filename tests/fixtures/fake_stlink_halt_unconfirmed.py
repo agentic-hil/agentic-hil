@@ -2,8 +2,8 @@
 """An STM32_Programmer_CLI whose `-halt` connects and never reports the halt.
 
 The failure shape of the mode `halt` confirmation, and the reason the connect
-banner is not part of it. The banner is printed in full here — `Reset mode  :
-Software reset` included — because connect happens before the halt is
+banner is not part of it. The banner is printed in full here (`Reset mode  :
+Software reset` included) because connect happens before the halt is
 attempted, so a run that connected and then failed to stop the core prints
 exactly this. Everything the banner asserts is true and the outcome is still
 unstated, which is what the backend has to answer `reset_unconfirmed` to: the
@@ -11,7 +11,7 @@ core may be halted, may be running, and nothing on the host knows which.
 
 Exits 0 with no failure text on purpose. A CLI that says `Error:` is classified
 from its own words and is a different result; this is the case where there are
-no words at all — a wrapper that swallowed the last line, or a version that
+no words at all: a wrapper that swallowed the last line, or a version that
 words it differently.
 """
 

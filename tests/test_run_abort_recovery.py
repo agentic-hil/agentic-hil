@@ -1,8 +1,8 @@
 """A failed run aborts, and the abort recovers the bench.
 
 The model these tests hold: when something goes wrong during a run, the run
-stops and its result is "failed" — that is the verdict and nothing here softens
-it — and then a recovery action runs so the next run has a board to start on.
+stops and its result is "failed" (that is the verdict and nothing here softens
+it) and then a recovery action runs so the next run has a board to start on.
 What used to happen instead was a padlock: an incident that refused every
 hardware call, including the reset that would have settled it, until a person
 came to a shell and signed for it.
@@ -63,7 +63,7 @@ PERIPHERAL_CLEANUP_REASONS = (
 class FakeBackend:
     """A probe that records what was driven and can be told to refuse.
 
-    Deliberately not a mock of the recovery seam — the whole question these
+    Deliberately not a mock of the recovery seam: the whole question these
     tests ask is whether a reset actually reached a target, so the double is at
     the hardware boundary and the assertions read its log."""
 
@@ -226,7 +226,7 @@ def test_a_failed_run_aborts_into_a_recovery_action(tmp_path: Path) -> None:
     reset-into-halt reaches the board without anybody being asked for anything.
 
     `ok` is asserted false in the same breath as the recovery, because that is
-    the pairing the whole design turns on — the bench is usable again and the
+    the pairing the whole design turns on: the bench is usable again and the
     test still failed."""
     config = config_for(tmp_path)
     backend = FakeBackend(flash_ok=False)
@@ -267,7 +267,7 @@ def test_a_passing_run_is_left_alone(tmp_path: Path) -> None:
 
 def test_the_run_result_names_a_withheld_recovery_and_why(tmp_path: Path) -> None:
     """A bench that forbids reset does not get the recovery for free, and the
-    result says which setting made that choice — otherwise the operator of a
+    result says which setting made that choice, otherwise the operator of a
     bench that quietly never recovers has nothing to read."""
     config = config_for(tmp_path, allow_reset=False)
     backend = FakeBackend(flash_ok=False)
@@ -388,8 +388,8 @@ def test_a_peripheral_cleanup_incident_is_not_settled_by_a_target_reset(tmp_path
     A reset driven into halt and a probe re-read speak for the target and nothing
     else: a serial handle that may still be open holding modem lines, the reader
     thread behind it, a CAN adapter that may still be on the bus, are not theirs
-    to attest. So the recovery action still runs — the next run wants a defined
-    board — but the incident keeps the operator's route rather than being cleared
+    to attest. So the recovery action still runs (the next run wants a defined
+    board), but the incident keeps the operator's route rather than being cleared
     without the evidence its name asks for. Admitting it by a negative name test
     is exactly what handed a still-busy peripheral back to service.
     """
@@ -456,7 +456,7 @@ def test_an_audit_broken_incident_is_not_settled_by_any_action(tmp_path: Path) -
 
 def test_a_recovery_whose_lease_release_cannot_be_confirmed_does_not_report_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Clearing the reason is not the whole of it: the leases still have to be
-    given back, and a release that cannot persist its own record fails closed —
+    given back, and a release that cannot persist its own record fails closed:
     it re-quarantines the bench under a fresh `lease_release_unconfirmed`
     incident. A result that stamped `incident_resolved: true` regardless would
     tell a caller to continue on a bench `hardware_lease_status` still shows as
@@ -502,7 +502,7 @@ def test_a_recovery_class_call_does_not_force_cleared_when_lease_release_fails(t
     """The second settlement path: a recovery-class call that clears its incident
     forces `cleanup_required` and `quarantined` to false on the envelope it
     returns. It must not do that when giving the lease back could not be
-    confirmed and a fresh incident re-quarantined the bench — the call's own
+    confirmed and a fresh incident re-quarantined the bench: the call's own
     answer survives, but the stamped success does not."""
     config = config_for(tmp_path)
     service = AgenticHILToolService(config, backend=FakeBackend())
@@ -541,7 +541,7 @@ def test_a_recovery_class_call_does_not_force_cleared_when_lease_release_fails(t
 @pytest.mark.parametrize("tool", ["probe_target", "reset_target", "flash_firmware"])
 def test_the_recovery_class_runs_during_an_incident(tmp_path: Path, tool: str) -> None:
     """These are the remedy, not a use of the bench. Refusing them was what made
-    an incident a padlock whose only key was a person at a shell — for a
+    an incident a padlock whose only key was a person at a shell, for a
     condition a reset settles."""
     config = config_for(tmp_path)
     firmware = tmp_path / "build" / "app.elf"
@@ -618,7 +618,7 @@ def test_a_reset_during_an_incident_resolves_it(tmp_path: Path) -> None:
 def test_a_read_only_probe_does_not_settle_what_only_a_reset_can(tmp_path: Path) -> None:
     """A probe that answers says the probe answers. It does not say the core is
     halted, so it cannot settle a reason that names a target which may be
-    running — the distinction the acquire path already draws between its two
+    running, the distinction the acquire path already draws between its two
     predicates, held here too.
 
     `readonly` policy so the automatic attempt at the gate cannot drive a reset
@@ -644,7 +644,7 @@ def test_a_read_only_probe_does_not_settle_what_only_a_reset_can(tmp_path: Path)
 
 def test_a_follow_up_run_starts_without_a_ritual(tmp_path: Path) -> None:
     """What the change is for. A run fails, recovery clears what it raised, and
-    the next run declares its devices and starts — no operator, no command line,
+    the next run declares its devices and starts: no operator, no command line,
     no state files deleted."""
     config = config_for(tmp_path)
     service = AgenticHILToolService(config, backend=FakeBackend())
@@ -663,7 +663,7 @@ def test_a_follow_up_run_starts_without_a_ritual(tmp_path: Path) -> None:
 def test_bench_run_stop_recovers_an_interactive_run_that_failed(tmp_path: Path) -> None:
     """The second caller of the same seam. An interactive run has no step list to
     read a verdict off, so the trigger is an incident still standing once the
-    devices are back — which is the same statement in the form this call sees."""
+    devices are back, which is the same statement in the form this call sees."""
     config = config_for(tmp_path)
     backend = FakeBackend()
     service = AgenticHILToolService(config, backend=backend)

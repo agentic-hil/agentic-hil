@@ -54,7 +54,7 @@ def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
 
 # An agent that stops to ask before touching user-level state is behaving well,
 # and a one-shot prompt scores that as a failure to install. A real engineer
-# answers, so the harness answers — as the operator, in a fresh session that has
+# answers, so the harness answers, as the operator, in a fresh session that has
 # never seen the guide, addressing what agents have actually asked about rather
 # than any one model's wording.
 OPERATOR_REPLY = (
@@ -62,7 +62,7 @@ OPERATOR_REPLY = (
     "weighing: the guide is at {guide}; the user-level MCP registration and the skill file are both "
     "intended, and I want them for every project on this machine; this is a disposable container of "
     "mine, so nothing here is precious; any agent login files you find under /run or /tmp are the test "
-    "rig's, not the package's. If something still blocks you, name it and stop — but if it was only "
+    "rig's, not the package's. If something still blocks you, name it and stop, but if it was only "
     "the scope, this is my decision and it is made."
 )
 # Two, because the reply is generic and a third round of the same words teaches

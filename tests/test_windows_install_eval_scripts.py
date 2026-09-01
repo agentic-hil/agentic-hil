@@ -232,7 +232,7 @@ def test_a_control_arm_runs_only_when_it_is_asked_for() -> None:
     """A real setup always installs the skill.
 
     Measuring without it is not a shipped configuration, so it answers one
-    question on request rather than doubling every run — and a control named on
+    question on request rather than doubling every run, and a control named on
     its own, without the treatment it is the control for, answers nothing.
     """
     source = LOOP_SCRIPT.read_text(encoding="utf-8")

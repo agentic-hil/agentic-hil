@@ -126,8 +126,8 @@ def test_relative_state_root_is_rejected(tmp_path: Path) -> None:
 # The Windows ACL walk and the POSIX mode/sticky-bit walk are gone:
 # they only ever defended against a different account on the same machine, which
 # was never a requirement here, and they could not defend against the operator's
-# own processes, which own these objects. What survives is structural — a path
-# must be what it claims to be — plus detection, which is the digest.
+# own processes, which own these objects. What survives is structural (a path
+# must be what it claims to be) plus detection, which is the digest.
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode semantics")
@@ -135,7 +135,7 @@ def test_a_group_writable_state_root_is_no_longer_a_refusal(tmp_path: Path) -> N
     """The measured cost of the removed rule, from the other side.
 
     A umask-002 / private-group home produced a `unsafe_configured_path` refusal
-    on a directory the operator owns and can rewrite regardless — 509 failures in
+    on a directory the operator owns and can rewrite regardless: 509 failures in
     one suite run on one developer machine, and `agentic-hil init` refusing in an
     empty directory. The mode says nothing this project needs, so it is not read.
     """
@@ -209,7 +209,7 @@ def test_an_existing_unwritable_state_root_is_refused_at_load(tmp_path: Path) ->
 
     `safe_directory` opens read-only and suppresses `FileExistsError`, so an
     existing directory that cannot be written loaded clean and failed at the
-    first lease, report or log write — somewhere with far less context than
+    first lease, report or log write, somewhere with far less context than
     here. This is function, not trust: it asks whether *this* process can create
     in the directory, not who else could."""
     path = write_config(tmp_path)
@@ -258,8 +258,8 @@ def test_an_existing_undeniably_unwritable_windows_state_root_is_refused_at_load
 def test_a_configuration_that_still_carries_the_removed_key_is_refused_by_name(tmp_path: Path) -> None:
     """Silently ignoring it would leave the key looking like it still selects a policy.
 
-    0.8.0 was never released, so no file in the field carries `windows_path_trust`
-    — which is why removing it cost no migration. A file that does carry it was
+    0.8.0 was never released, so no file in the field carries `windows_path_trust`,
+    which is why removing it cost no migration. A file that does carry it was
     written against a pre-release, and the refusal has to say what went and what
     took its place rather than report an unknown field.
     """
@@ -292,7 +292,7 @@ def test_the_suite_does_not_divert_its_own_scaffolding_into_the_real_profile(iso
     """Where the suite writes, which is not the operator's own configuration.
 
     `tests/conftest.py` and `tests/support.py` once diverted into the real Local
-    AppData because the removed trust check refused the standard per-user Temp —
+    AppData because the removed trust check refused the standard per-user Temp:
     the strongest single argument against that check was that the tool's own tests
     had to evade its rule. The launcher stays under the real home, because the
     MCP executable check still walks its parent chain.
@@ -2100,8 +2100,8 @@ def test_an_openocd_entry_with_a_real_toolchain_is_validated_whatever_its_script
 ) -> None:
     """Both skeleton script names plus a real executable is a driving entry.
 
-    The placeholder exemption used to key on exactly this shape — an OpenOCD
-    entry still holding `interface/stlink.cfg` and `target/stm32f4x.cfg` — and so
+    The placeholder exemption used to key on exactly this shape (an OpenOCD
+    entry still holding `interface/stlink.cfg` and `target/stm32f4x.cfg`) and so
     let an entry with a real program behind it and every permission granted skip
     script validation and `doctor` alike. What the entry can drive is what
     decides now, and this one can: the two search names are fine, and the script
@@ -2131,7 +2131,7 @@ def test_the_starter_entry_does_not_pick_up_a_toolchain_from_path(tmp_path: Path
     `openocd` off PATH for the starter entry too, so on such a host `agentic-hil
     init` left behind an entry that granted everything, had a real
     program behind it, and drove a board with the skeleton's two relative script
-    names — exempt from validation and skipped by `doctor`, because both keyed on
+    names, exempt from validation and skipped by `doctor`, because both keyed on
     it being the starter entry. It names no toolchain and nothing finds it one."""
     workspace = tmp_path / "workspace"
     write_authoritative_config(
@@ -2216,7 +2216,7 @@ def test_a_configured_openocd_entry_resolves_from_path_and_is_validated(tmp_path
 
     The starter exemption used to ask only about the type, the two skeleton
     script names and the absent executable, so a bench somebody had identified
-    with a probe serial — the shape the served worked example shows — was called
+    with a probe serial (the shape the served worked example shows) was called
     untouched on a host that has OpenOCD: no PATH candidate was tried, the entry
     took the disabled marker, and `doctor` skipped a fully configured bench. An
     entry that names a board is not the shipped skeleton."""
@@ -2295,7 +2295,7 @@ def test_the_served_worked_example_is_not_an_inert_starter(tmp_path: Path, monke
 
     It shows an identified OpenOCD bench with `executable: null`, so under the
     corrected starter predicate it resolves from PATH and its scripts are
-    validated — which means the example's own scripts must be absolute paths
+    validated, which means the example's own scripts must be absolute paths
     outside the workspace, or the file it teaches people to write is one config
     load refuses."""
     example = yaml.safe_load(CONFIG_WORKED_EXAMPLE)
@@ -2325,7 +2325,7 @@ def test_the_served_worked_example_is_not_an_inert_starter(tmp_path: Path, monke
     monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: str(FAKE_OPENOCD) if "openocd" in str(name).lower() else None)
 
     # The example's own scripts do not exist on this host, so the failure it must
-    # not produce is the starter one — a disabled marker and a skipped bench.
+    # not produce is the starter one: a disabled marker and a skipped bench.
     # Whatever load says, it says it about a resolved toolchain.
     try:
         config = load_authoritative_config(workspace)
@@ -3137,7 +3137,7 @@ def test_report_api_surfaces_canonical_audit_evidence(tmp_path: Path) -> None:
 
 def test_unbound_debugger_refusal_does_not_demand_an_impossible_argument(tmp_path: Path) -> None:
     # No MCP tool schema carries a probe name, so a refusal telling the caller to
-    # "name the debugger" would ask for something the protocol cannot express —
+    # "name the debugger" would ask for something the protocol cannot express:
     # the shape of refusal this codebase records as having driven a model to
     # reach for st-flash instead.
     config = load_test_config(
@@ -3181,7 +3181,7 @@ def test_zero_debugger_refusal_does_not_claim_several_are_configured(tmp_path: P
 
 def test_staging_refusal_before_any_backend_call_does_not_quarantine_the_lease(tmp_path: Path) -> None:
     # require_existing_file: false lets validation pass on a file that is not
-    # there yet, so nothing about those bytes was checked. Staging must refuse —
+    # there yet, so nothing about those bytes was checked. Staging must refuse,
     # but the refusal happened before the backend ran, so it must not be
     # recorded as an unconfirmed hardware effect and poison the bench.
     config_path = write_config(tmp_path)
@@ -3403,8 +3403,8 @@ def test_multi_probe_discovery_fails_when_any_probe_fails(tmp_path: Path, monkey
 
 
 def test_debug_load_refusal_names_the_permission_that_fired(tmp_path: Path) -> None:
-    # Preflight is the only diagnosis on this path — the backend's per-flag
-    # messages are never reached — so it must not point at a flag the operator
+    # Preflight is the only diagnosis on this path (the backend's per-flag
+    # messages are never reached), so it must not point at a flag the operator
     # can see is false.
     from agentic_hil.test_reactor import TestConfig, TestReactor, TestStep
 
@@ -3680,7 +3680,7 @@ def test_an_artifact_anywhere_in_the_workspace_is_accepted(tmp_path: Path) -> No
 
 def test_the_whole_workspace_is_still_only_the_workspace(tmp_path: Path) -> None:
     # With the root list at its widest *and* switched off, containment is the
-    # only thing left holding — which is the claim this change rests on.
+    # only thing left holding, which is the claim this change rests on.
     workspace = tmp_path / "ws"
     config_path = _without_the_root_check(write_config(workspace, allowed_roots=["."]))
     outside = tmp_path / "elsewhere.elf"

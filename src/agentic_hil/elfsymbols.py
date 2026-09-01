@@ -253,7 +253,7 @@ def _read_at(handle, offset: int, size: int, file_size: int) -> bytes | None:
     # `size` and `offset` both come from ELF-controlled fields (a section's
     # `sh_offset`/`sh_size`, an index into the section table): bounding both
     # against the file's own length, checked once, is what keeps a hostile
-    # value — up to 2**64-1 for a 64-bit `sh_size` — from ever reaching
+    # value (up to 2**64-1 for a 64-bit `sh_size`) from ever reaching
     # `read()`, where CPython raises `OverflowError` past `sys.maxsize` and can
     # attempt a process-sized allocation for smaller enormous values.
     if offset < 0 or size < 0 or offset + size > file_size:

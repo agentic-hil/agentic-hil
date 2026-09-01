@@ -1,7 +1,7 @@
 """Devices as a base class, and the run boundary that closes over MCP.
 
-The tests here are about the promise in decision 0018 — every device a run names
-is locked for the run's duration — reaching the agent path, and about the four
+The tests here are about the promise in decision 0018 (every device a run names
+is locked for the run's duration) reaching the agent path, and about the four
 properties that make locking a *set* of devices safe rather than merely
 plausible: hardware identity, up-front and complete acquisition, a fixed order,
 and nothing left behind on a partial acquisition.
@@ -63,7 +63,7 @@ TWO_NAMES_ONE_PORT = """com_ports:
 # case rule is the host's: derived here rather than spelled out, because what
 # the tests below pin is the collapse of two names to one key, not the platform
 # they happen to run on. The case rules themselves are pinned, without deferring
-# to the host, under "identity folds case the same way everywhere" — a test that
+# to the host, under "identity folds case the same way everywhere": a test that
 # passes on one platform for the wrong reason is what let this drift in.
 ONE_PORT_KEY = f"com:{os.path.normcase('COM_TEST')}"
 
@@ -240,7 +240,7 @@ def test_a_debugger_action_is_refused_by_a_service_bound_to_another_probe(tmp_pa
 def test_two_config_entries_on_one_physical_unit_collapse_to_one_lock(tmp_path: Path) -> None:
     """A board reachable under two names is still one board.
 
-    Locking per config entry would take the same unit twice, and — worse — would
+    Locking per config entry would take the same unit twice, and (worse) would
     let a second run believe a board is free because it asked under the other
     name."""
     config = config_for(tmp_path, com_ports_yaml=TWO_NAMES_ONE_PORT)
@@ -268,7 +268,7 @@ def test_two_config_entries_on_one_physical_unit_collapse_to_one_lock(tmp_path: 
 def test_a_probe_and_its_virtual_com_port_are_one_lock(tmp_path: Path) -> None:
     """Across kinds, too: only resource_id can say two entries are one unit.
 
-    The two entries collapse onto one primary key — the shared `resource_id` —
+    The two entries collapse onto one primary key (the shared `resource_id`),
     so the set is one lock's worth of identity, not two. The probe half also
     names a serial, and the collapsed unit keeps it: `resource_id` is this
     operator's own alias, but the serial is what another workspace's first `init`
@@ -281,7 +281,7 @@ def test_a_probe_and_its_virtual_com_port_are_one_lock(tmp_path: Path) -> None:
 
     # One identity: the primary key is the shared resource_id on both halves.
     assert probe.lock_key == vcp.lock_key == "physical:usb-stlink-0669"
-    # One unit, held under every name either half of it answers to — and the
+    # One unit, held under every name either half of it answers to, and the
     # serial survives whichever order the two are declared in, so a plan naming
     # the port first cannot drop the probe's serial.
     assert DeviceSet.of([probe, vcp]).lock_keys == ["physical:usb-stlink-0669", "probe:0669ff-vcp"]
@@ -355,7 +355,7 @@ def test_a_hand_written_name_reaches_the_same_lock_as_the_device_it_names(tmp_pa
     for one board: the run holds `physical:board-a`, a caller asking for
     `physical:BOARD-A` is told it is free, and both then believe they have the
     board. A `resource_id` is an opaque hardware id, so this one has no platform
-    branch — the two spellings are one board on every host."""
+    branch: the two spellings are one board on every host."""
     config = config_for(tmp_path, com_ports_yaml=FOUR_PORTS)
     device = uart_device(config, "port_a")
     assert device.lock_key == "physical:board-a"
@@ -393,8 +393,8 @@ def test_a_hand_written_probe_serial_reaches_the_same_lock_on_every_host(tmp_pat
 
     `fold_resource_name` treated every `probe:` name as a host
     path, and a host path is left untouched on POSIX. A configured
-    `probe_id: STLINK123` locks `probe:stlink123` — `DebuggerDevice.lock_key`
-    builds it with `fold_hardware_id`, which casefolds everywhere — while a
+    `probe_id: STLINK123` locks `probe:stlink123` (`DebuggerDevice.lock_key`
+    builds it with `fold_hardware_id`, which casefolds everywhere) while a
     hand-written `acquire("probe:STLINK123")` stayed uppercase and split into a
     second lock file for one probe. Unlike a serial device name, a probe serial
     has no per-host reading: it is one probe on Windows and on Linux alike, so
@@ -404,7 +404,7 @@ def test_a_hand_written_probe_serial_reaches_the_same_lock_on_every_host(tmp_pat
     device = debugger_device(config, "dut")
     assert device.lock_key == "probe:stlink123"
     # The operator's own uppercase spelling folds onto that exact key, here and
-    # on POSIX, with no `os.name` branch — the split this fixes.
+    # on POSIX, with no `os.name` branch, the split this fixes.
     assert lock_keys(["probe:STLINK123"]) == [device.lock_key] == ["probe:stlink123"]
 
     coordinator = HardwareCoordinator(config, "owner")
@@ -417,7 +417,7 @@ def test_a_hand_written_probe_serial_reaches_the_same_lock_on_every_host(tmp_pat
             assert lease.resources == [device.lock_key]
         finally:
             lease.release()
-        # And the machine-wide hold answers to either spelling — the lock file
+        # And the machine-wide hold answers to either spelling: the lock file
         # two keys would have split in two on POSIX.
         stranger = BenchMutex(frontend="stranger")
         with pytest.raises(DeviceBusyError):
@@ -432,11 +432,11 @@ def test_an_executable_debugger_holds_its_legacy_probe_key_too(tmp_path: Path) -
 
     Moving the executable from `probe:<path>` to `probe-exe:<path>` gave `probe:`
     an unambiguous fold, but it also split the new key from the one a process
-    still on the old build — or a caller handing an already-derived name — keeps
+    still on the old build (or a caller handing an already-derived name) keeps
     taking. An executable-identified debugger therefore holds both: its
     `probe-exe:` key and the legacy `probe:<path>`. `fold_resource_name` keeps a
     path-shaped `probe:` a host path, so the legacy spelling lands on one lock
-    rather than casefolding into a name nothing else takes — shown here with an
+    rather than casefolding into a name nothing else takes, shown here with an
     uppercase POSIX path, which is exactly where the fold change would otherwise
     make the two diverge."""
     exe = "/opt/Tools/OpenOCD"
@@ -449,8 +449,8 @@ def test_an_executable_debugger_holds_its_legacy_probe_key_too(tmp_path: Path) -
     assert set(device.lock_keys) == {device.lock_key, legacy}
     # Both names a stranger might arrive under fold onto keys the device holds:
     # the new prefix, and the legacy path preserved rather than casefolded. A
-    # probe *serial* under `probe:` still casefolds — the separator is the whole
-    # distinction — so the round-1 fix stands beside this one.
+    # probe *serial* under `probe:` still casefolds (the separator is the whole
+    # distinction), so the round-1 fix stands beside this one.
     assert lock_keys([device.lock_key]) == [device.lock_key]
     assert lock_keys([f"probe:{exe}"]) == [legacy]
     assert lock_keys(["probe:STLINK123"]) == ["probe:stlink123"]
@@ -465,8 +465,8 @@ def test_a_raw_or_pre_upgrade_caller_cannot_bypass_an_executable_debugger(tmp_pa
 
     A run holding the executable debugger holds both its keys. Anyone else
     reaching the same probe collides on one of them: a caller passing the
-    already-derived `probe:<path>` (a raw legacy caller), and — the upgrade window
-    — a process still on the old build that derived that same legacy key, whether
+    already-derived `probe:<path>` (a raw legacy caller), and (the upgrade window)
+    a process still on the old build that derived that same legacy key, whether
     it arrives before or after the current run. Before the fix the new
     `probe-exe:` key and the old `probe:<path>` were two different locks, so both
     sides took the one debugger and each believed it was alone."""
@@ -504,7 +504,7 @@ def test_a_raw_or_pre_upgrade_caller_cannot_bypass_an_executable_debugger(tmp_pa
 def test_config_load_refuses_one_resource_id_spelled_in_two_cases(tmp_path: Path) -> None:
     """Folding must never merge two units behind the operator's back.
 
-    An identical resource_id on two entries is the feature — it is how an
+    An identical resource_id on two entries is the feature: it is how an
     ST-Link and its virtual COM port are declared one unit. Two spellings of one
     id are either a typo or an operator distinguishing two boards by case alone,
     and since the key folds everywhere the second reading would silently become
@@ -745,7 +745,7 @@ def test_a_declaration_mixing_devices_and_names_is_refused(tmp_path: Path) -> No
 
     The acquisition picks its branch on whether any Device is present, so one
     Device sends the whole declaration down the device branch and every
-    hand-written name beside it is never taken — while the declared set covers
+    hand-written name beside it is never taken, while the declared set covers
     both and every later answer names them as held. A foreign BenchMutex could
     then take the named board out from under a run counting it as its own, which
     is invisible from inside the run. No caller needs the mixed form, so it is
@@ -769,7 +769,7 @@ def test_a_declaration_mixing_devices_and_names_is_refused(tmp_path: Path) -> No
         # not left locked by a run that never began.
         assert coordinator.run_active is False
         assert coordinator.bench.held_resources() == frozenset()
-        # Neither board is claimed, which is the honest state — the failure being
+        # Neither board is claimed, which is the honest state: the failure being
         # refused here is a board that is reported as held and never locked.
         stranger = BenchMutex(frontend="stranger")
         try:
@@ -931,7 +931,7 @@ def test_a_lost_client_releases_the_run_when_the_service_closes(tmp_path: Path) 
 
     The stdio server closes its service on EOF, and closing releases an open run,
     so a client that walks away does not hold the bench until the process is
-    reaped. If the process itself dies, the operating system drops the lock —
+    reaped. If the process itself dies, the operating system drops the lock:
     that is the layer below this one."""
     config = four_device_config(tmp_path)
     service = AgenticHILToolService(config, frontend="mcp")
@@ -1001,7 +1001,7 @@ def test_the_coordination_helpers_and_the_devices_agree(tmp_path: Path) -> None:
 
 def test_config_validation_and_the_device_layer_derive_the_same_probe_identity(tmp_path: Path) -> None:
     """Config load refuses two debuggers that resolve to one lock, using its own
-    copy of the derivation. The two must not drift — case included, since the
+    copy of the derivation. The two must not drift, case included, since the
     two branches that survive here fold by different rules."""
     from agentic_hil.config import debugger_resource_identity
 

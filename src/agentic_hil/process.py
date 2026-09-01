@@ -50,7 +50,7 @@ def spawn_managed_process(args: Any, **kwargs: Any) -> subprocess.Popen:
     Spawning, containment and resumption are one call because they were once
     three, and two of them were optional-looking. On Windows the child is born
     suspended so that no instruction of it executes before it is inside a
-    kill-on-close Job Object — which is the only way a descendant that outlives
+    kill-on-close Job Object, which is the only way a descendant that outlives
     its parent still dies with this run. A caller that took the creation flags
     and skipped the containment got a child frozen forever: alive, silent, no
     output to read and no exit code to classify. That is not a mistake a
@@ -88,14 +88,14 @@ def spawn_detached_process(args: Any, **kwargs: Any) -> subprocess.Popen:
     so a Ctrl-C in the starting run's console does not take it out, and on
     Windows no console of its own, since nobody is at a terminal for it. It is
     not born suspended, it joins no Job Object, and it is not in this run's
-    managed records — so no cleanup sweep reaps it when the run that happened to
+    managed records, so no cleanup sweep reaps it when the run that happened to
     start it ends.
 
     That is what a shared broker needs: one that died with the handle of
     whichever run attached first would not be a shared bus, because the second
     participant would lose the medium when the first one's run ended. A child
     spawned here is bounded by its own rules instead, and owning those rules is
-    the caller's job — nothing in this module will end it.
+    the caller's job: nothing in this module will end it.
     """
     _reject_creation_kwargs("spawn_detached_process", kwargs)
     return subprocess.Popen(args, **kwargs, **_detached_process_kwargs())
@@ -135,7 +135,7 @@ def _process_group_kwargs() -> dict[str, object]:
     """Creation flags for a contained child: own group, and born suspended on Windows.
 
     Private, and callable in practice only by :func:`spawn_managed_process`,
-    because ``CREATE_SUSPENDED`` (0x4) is an obligation rather than an option —
+    because ``CREATE_SUSPENDED`` (0x4) is an obligation rather than an option:
     whoever spawns with it owes the child a resume, and the resume lives in
     :func:`_register_process_group`.
     """

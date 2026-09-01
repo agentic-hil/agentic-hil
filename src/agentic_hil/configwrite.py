@@ -2,8 +2,8 @@
 
 The one-time provisioning path let an agent generate a configuration it
 could not find, and the file it generated refused every further write. That kept
-the invariant — an agent enables itself up to observation, never up to
-modification — and it left every later correction as hand work on YAML. In the
+the invariant (an agent enables itself up to observation, never up to
+modification), and it left every later correction as hand work on YAML. In the
 session that produced this module, that ended with an agent printing a
 24-character probe serial for a human to retype.
 
@@ -11,7 +11,7 @@ So there is a door now, and three things make it one that can be left open:
 
 **It is field-wise.** The agent does not author this file. It names keys from a
 closed set and supplies scalars, each checked against the shipped JSON schema.
-There is no way to send a document, and — because ``value`` is a scalar — no way
+There is no way to send a document, and (because ``value`` is a scalar) no way
 to send a subtree that could carry a ``permissions:`` block inside it.
 
 **It is two grants, not one.** ``allow_config_description_write`` reaches what
@@ -21,7 +21,7 @@ same motion and without being told, handed over the permissions block.
 
 **The split is enforced twice.** Once by the key model, which never maps a
 ``permissions`` key onto the description grant. And once by comparing the
-permissions actually present in the document before and against after — a check
+permissions actually present in the document before and against after: a check
 that reads the document rather than the request, so it holds even where the
 first one would be wrong. That second check is the one that closes a detour: not
 because a detour is known to exist, but because a boundary defended only by a
@@ -33,8 +33,8 @@ refuse flashing while they are true, because the closed
 one cost this project's owner a working day of hand-edited YAML and bought
 nothing an agent with a shell could not already reach. What replaces it is the
 direction. ``permission_widening`` refuses any write that turns a permission on
-— one this server never touched, and one it set to ``false`` itself a moment
-earlier — so the invariant behind the provisioning path and this one survives read
+(one this server never touched, and one it set to ``false`` itself a moment
+earlier), so the invariant behind the provisioning path and this one survives read
 from the other side:
 **an agent can only ever reduce its own authority.** It is the only one left,
 which is why it is enforced on the same before/after surfaces rather than on the
@@ -45,8 +45,8 @@ the result of that call says so: what stands frozen, that the caller cannot undo
 it, and the command a person reopens the file with.
 
 **And there is a gate on the one-way street.** Everything above
-answers the reopen question for a file that does not exist yet — a generation
-opens everything — and answered nothing for one that does. `init --force` does
+answers the reopen question for a file that does not exist yet (a generation
+opens everything) and answered nothing for one that does. `init --force` does
 reopen it, because it is the full regeneration and writes the open skeleton over
 whatever was there; it costs the baudrate, the `resource_id`, the `state_root`
 and every artifact root the operator set, which is the same bill deleting the
@@ -115,7 +115,7 @@ PROJECT_CONFIG_DESCRIBE = "project_config_describe"
 
 # Who is changing the file, in `provenance`'s own two words. Not a decoration:
 # the description grant exists to gate *the agent*, and a person at the CLI is
-# the one that grant belongs to — `agentic-hil init` consults no permission
+# the one that grant belongs to: `agentic-hil init` consults no permission
 # either, and `init --force` rewrites the whole file including every grant in it.
 # So the actor decides whether the description grant is consulted, and it is
 # recorded so the file says which of the two moved it.
@@ -123,7 +123,7 @@ PROJECT_CONFIG_DESCRIBE = "project_config_describe"
 # The *authorization* on the permissions half is waived for nobody: the
 # before/after comparison further down reads the document rather than the request
 # and refuses a permission that moved without `allow_config_permissions_write`,
-# whoever asked. The *direction* rule is narrower on purpose —
+# whoever asked. The *direction* rule is narrower on purpose:
 # it nails the MCP surface shut, so only the agent actor is held to writing
 # `false` and nothing else. What an operator does to their own configuration from
 # their own shell is theirs.
@@ -134,7 +134,7 @@ ACTOR_PHRASES = {ACTOR_AGENT: "an agent", ACTOR_HUMAN: "a person"}
 # One comment line, rewritten rather than appended, so a file changed a hundred
 # times does not grow a hundred lines of banner. It sits in the header because
 # the header is what a person reads first, and a generated header states which
-# permissions below are true — which was so when it was written, and is exactly
+# permissions below are true, which was so when it was written, and is exactly
 # what a narrowing since then has stopped being. A reader must not go on
 # believing the header without being told the file has moved.
 CHANGE_MARKER_PREFIX = "# Changed by "
@@ -156,7 +156,7 @@ def permission_surface(node: object, prefix: str = "", *, entry_ids: bool = Fals
 
     The one place it has to know the schema is the level directly under
     ``debuggers``, ``com_ports`` and ``can_buses``, because that level is not
-    field names at all — it is operator-chosen entry ids, and ``permissions``,
+    field names at all: it is operator-chosen entry ids, and ``permissions``,
     ``provenance`` and ``allow_anything`` are all legal ones. Reading them as
     grant names made every field of such an entry a permission: repointing
     ``debuggers.permissions`` at another board produced a permission delta and
@@ -167,7 +167,7 @@ def permission_surface(node: object, prefix: str = "", *, entry_ids: bool = Fals
 
     A *scalar* under an id level is still read as a grant. An entry is a mapping
     in every section here, so a scalar there is not an entry that happens to be
-    called ``allow_flash`` — it is the shape this walk exists to catch, and it
+    called ``allow_flash``: it is the shape this walk exists to catch, and it
     keeps catching it.
     """
     found: dict[str, Any] = {}
@@ -203,15 +203,15 @@ def permission_widening(before: dict[str, Any], after: dict[str, Any]) -> list[s
     every write an agent makes over MCP. A generated configuration now grants
     everything it can, so the property left to defend is the direction: an
     agent writes ``false`` into a permission and never ``true``, which means it
-    can only ever reduce its own authority. It says nothing about creation — a
+    can only ever reduce its own authority. It says nothing about creation (a
     regeneration writes the skeleton at its defaults and is the operator's
-    call, not a permissions write — and nothing about what a person does at the
+    call, not a permissions write) and nothing about what a person does at the
     command line.
 
     Read off ``permission_delta``, so the two answers cannot disagree about what
     moved, and truthiness rather than ``is True`` decides which way. That is
-    deliberately fail-closed: a value the schema would refuse anyway — ``1``,
-    ``"false"``, a non-empty string — counts as opening, so a widening cannot
+    deliberately fail-closed: a value the schema would refuse anyway (``1``,
+    ``"false"``, a non-empty string) counts as opening, so a widening cannot
     arrive dressed as a type error and be sorted out by a later layer that is not
     looking for it. A path missing before counts as closed, which is what makes a
     permission appearing on a newly named entry a widening rather than a
@@ -221,7 +221,7 @@ def permission_widening(before: dict[str, Any], after: dict[str, Any]) -> list[s
 
 # Where the schema puts a grant, and nowhere else. `permission_surface` above is
 # name-driven at every depth but one, because its job is to *find* a grant
-# wherever one got in. This is the opposite job — deciding what to *drop* — and a
+# wherever one got in. This is the opposite job (deciding what to *drop*), and a
 # name-driven rule there removes real description. Both stop at the same place
 # and for the same reason: `debuggers`, `com_ports` and `can_buses`
 # (`CONFIG_NAMED_SECTIONS`) are keyed by operator-chosen entry ids, and
@@ -239,7 +239,7 @@ _TOP_LEVEL_NON_DESCRIPTION = ("permissions", "provenance")
 def description_view(node: object) -> object:
     """A document with everything that grants anything removed.
 
-    The mirror of ``permission_surface``, and — unlike it — schema-aware. Two
+    The mirror of ``permission_surface``, and (unlike it) schema-aware. Two
     callers depend on what survives: the compare-and-swap against
     ``expect_document``, and the check for whether a change needs
     `allow_config_description_write`. Both read a *removal* as "nothing there
@@ -247,14 +247,14 @@ def description_view(node: object) -> object:
 
     That is what a name-driven rule did. It dropped every mapping key called
     `permissions` or `provenance`, and every key starting with `allow_`, at every
-    depth — and those are legal entry ids. A debugger an operator named
+    depth, and those are legal entry ids. A debugger an operator named
     `permissions` had its whole entry deleted from this view, so its `probe_id`
     and `type` were outside the CAS *and* outside the description-right check: a
     concurrent repoint of that entry from board A to board B was invisible, and
     discovery from A could still be committed onto it.
 
     So the drops here are the schema's grant locations, spelled out. A grant that
-    turns up anywhere else is still caught — by ``permission_surface``, which
+    turns up anywhere else is still caught: by ``permission_surface``, which
     finds it, and now by this view too, which keeps it and therefore reports it
     as a description change. Both rights, rather than neither."""
     if not isinstance(node, dict):
@@ -287,7 +287,7 @@ def deny_all_permissions(section: str) -> JsonObject:
     away, and creating an entry is a write.
 
     So a device named through `project_config_set` arrives closed, and opening it
-    is ``agentic-hil init --force`` — the same command that reopens anything else
+    is ``agentic-hil init --force``: the same command that reopens anything else
     in this file, and a person's."""
     return dict.fromkeys(GENERATED_WRITE_PERMISSIONS.get(section, ()), False)
 
@@ -301,7 +301,7 @@ def authoritative_write_target(workspace: Path, existing: AgenticHILConfig) -> P
 
     Two rules have to agree: this workspace's authoritative location, and the
     file this server actually loaded its policy from. If they differ, the server
-    is serving a configuration that is not the one in force here — and writing
+    is serving a configuration that is not the one in force here, and writing
     either of them would be wrong. Changing the authoritative file would move a
     policy this server is not running under; changing the loaded one would move a
     file nothing reads. "Validate before replacing" is worth nothing if the thing
@@ -323,7 +323,7 @@ def config_document_snapshot(target_path: Path) -> tuple[bytes | None, Exception
     ``None, None`` means the file is not there, which is a different answer from
     every failure and is the one case a caller may have a policy for. Everything
     else arrives as the original exception so the caller decides what to say
-    about it — and, for the tool documented to report the configuration's state
+    about it, and, for the tool documented to report the configuration's state
     even while refusing, so that one read serves both the state and the document.
 
     That separation rests on the read refusing rather than answering absence for a
@@ -412,11 +412,11 @@ def _header(text: str) -> str:
 def _marked_header(text: str, timestamp: str, actor: str, via: str) -> str:
     """The header, with exactly one line saying the file has been changed since.
 
-    One line, and it replaces the previous one rather than following it — a file
+    One line, and it replaces the previous one rather than following it: a file
     changed a hundred times must not grow a hundred banners. It matters because a
     generated header states which permissions below are true, which was so when
     it was written and is the kind of thing a later reader keeps believing unless
-    something in front of them says the file has moved — and a narrowing is
+    something in front of them says the file has moved, and a narrowing is
     precisely the change that makes it wrong. It names the actor because "an agent
     changed this" and "you changed this" are different things to read at the top
     of a policy file."""
@@ -439,7 +439,7 @@ def granted_rights(existing: AgenticHILConfig, document: JsonObject) -> dict[str
     """Which configuration grants hold right now.
 
     Both sides have to agree. ``existing`` is the policy this server loaded and
-    is bound by — the same rule the provisioning path follows, so a file removed
+    is bound by: the same rule the provisioning path follows, so a file removed
     or widened underneath a running server cannot turn its own refusal into a
     fresh start. The document on disk is checked too, so a grant an operator
     revoked since startup takes effect on the next call rather than at the next
@@ -473,7 +473,7 @@ def _only_false_allowed(requested: list[str], path: Path) -> JsonObject:
     ``true`` moves nothing, and a rule that only watched for movement would let
     that through, rewrite the file and stamp its provenance for a write this
     surface is not allowed to make. The same error type as a widening, because
-    for a caller it is the same fact — nothing here turns a permission on."""
+    for a caller it is the same fact: nothing here turns a permission on."""
     return {
         "ok": False,
         "tool": PROJECT_CONFIG_SET,
@@ -481,7 +481,7 @@ def _only_false_allowed(requested: list[str], path: Path) -> JsonObject:
         "summary": (
             f"{len(requested)} permission change(s) in this call carried a value other than false, and false is the only "
             "value this surface writes into a permission. A configuration is generated with every permission granted but "
-            "the two that refuse flashing while they are true, so an agent can narrow one and never open one — "
+            "the two that refuse flashing while they are true, so an agent can narrow one and never open one, "
             "including one that is already open, which this call would not have changed. Nothing was written."
         ),
         "widened_keys": sorted(requested),
@@ -585,8 +585,8 @@ def project_config_set(
     it: ``set_permission`` below, which is ``agentic-hil grant`` and
     ``agentic-hil revoke``. It is not part of any tool schema and no MCP path
     reaches it. The grant is otherwise consulted for everybody including
-    ``ACTOR_HUMAN`` — a bench that closed the permissions half is closed to
-    `project_config_set` from every direction — and that is what made the closing
+    ``ACTOR_HUMAN`` (a bench that closed the permissions half is closed to
+    `project_config_set` from every direction), and that is what made the closing
     a move with no way back. What reopens it is not a
     wider `project_config_set`; it is a command that writes one named permission,
     under the authority the same shell already has in `agentic-hil init --force`,
@@ -601,8 +601,8 @@ def project_config_set(
     document as it is now, so a mismatch refuses the whole call.
 
     ``expect_document`` is the whole document the caller planned against. Not
-    every input to a plan is a key this tool can set — a debugger's ``type``, the
-    set of entries a document has — so a per-key expectation cannot cover them,
+    every input to a plan is a key this tool can set (a debugger's ``type``, the
+    set of entries a document has), so a per-key expectation cannot cover them,
     and a plan invalidated by one of those is exactly as wrong as one invalidated
     by a carried key. Compared on its description, so a permissions change or a
     provenance bump by another writer does not refuse a change it cannot affect."""
@@ -665,7 +665,7 @@ def _project_config_set(
         # so it is not consulted for them; the permissions grant is consulted for
         # everybody, and layer 3 below enforces that from the document itself.
         # The one exception is the pair of commands that exist to move a single
-        # named permission — see `waive_permissions_grant` on the caller above.
+        # named permission. See `waive_permissions_grant` on the caller above.
         rights = {
             **rights,
             CONFIG_DESCRIPTION_RIGHT: rights[CONFIG_DESCRIPTION_RIGHT] or actor == ACTOR_HUMAN,
@@ -689,7 +689,7 @@ def _project_config_set(
         #     permission that is already `true` moves nothing, so it produces no
         #     delta to catch, and the file would be rewritten and its provenance
         #     stamped for a write the rule does not allow to be made at all. A
-        #     value the schema would coerce — `1`, `"false"` — is refused here for
+        #     value the schema would coerce (`1`, `"false"`) is refused here for
         #     the same reason, before anything is applied.
         #
         #     A person at the command line is not held to it. That is the owner's
@@ -743,7 +743,7 @@ def _project_config_set(
             return _permission_denied(PROJECT_CONFIG_SET, CONFIG_PERMISSIONS_RIGHT, moved, target_path)
         # 2b. And the direction again, read from the document rather than from
         #     the request. 1b above refuses the value an agent sent; this refuses
-        #     a permission that came *on* however it got there — under a key the
+        #     a permission that came *on* however it got there: under a key the
         #     key model resolved somewhere else, on an entry a change created, in
         #     a shape a path parser would not have recognised. Extending the
         #     comparison that was already here rather than replacing it is the
@@ -777,7 +777,7 @@ def _project_config_set(
     # configuration it loaded, because swapping a policy under a live session is
     # not something a tool call may do behind its back. `reload_required` is read
     # off the staleness check rather than asserted here, so that this result and
-    # the block every later answer carries are one statement made once — an
+    # the block every later answer carries are one statement made once: an
     # operator must never get "restart needed" from the write and "no change"
     # from the next tool call.
     status = config_status(existing)
@@ -818,8 +818,8 @@ def _project_config_set(
 def _stale_expectations(document: JsonObject, requested: list[tuple[ResolvedConfigKey, Any]], expect: dict[str, Any] | None) -> list[JsonObject]:
     """Keys whose current value is no longer the one the caller planned against.
 
-    A caller that classifies a document, then does something slow — reading a
-    probe takes seconds — and then writes has a window in which another CLI or
+    A caller that classifies a document, then does something slow (reading a
+    probe takes seconds) and then writes has a window in which another CLI or
     MCP process can fill the very placeholder it decided was free. The document
     is re-read inside this lock anyway; comparing it against what the caller saw
     is what turns "fill only what is unset" into a promise rather than a hope."""
@@ -873,7 +873,7 @@ def _document_changed_underneath(target_path: Path) -> JsonObject:
         "summary": (
             "The description of the bench in this configuration is no longer the one this change was planned against, "
             "so somebody else wrote this file in the meantime and nothing was written here. The plan was decided by "
-            "more than the keys it would have set — which entries exist, which backend an entry names — and any of "
+            "more than the keys it would have set (which entries exist, which backend an entry names), and any of "
             "those moving makes it a plan for a document that is gone."
         ),
         "document_changed": True,
@@ -994,7 +994,7 @@ def _deny_new_entries(document: JsonObject, created_entries: list[str]) -> None:
 
     Written by the server, never inferred from the request: a device an agent
     adds must not be able to arrive already allowed to be flashed. A flag the
-    call did set explicitly is left alone — it went through the permissions grant
+    call did set explicitly is left alone: it went through the permissions grant
     and through the before/after comparison like any other, and quietly undoing
     it would make the result say something the file does not. Setting one to
     `true` there is refused a few lines later as the widening it is, so what
@@ -1012,7 +1012,7 @@ def _missing_required_fields(document: JsonObject, created_entries: list[str]) -
     """Keys a newly named entry still needs, read from the shipped schema.
 
     An entry created halfway would be caught by validation anyway, and the file
-    would survive it — but "com_ports.probe_uart requires device" is an answer,
+    would survive it, but "com_ports.probe_uart requires device" is an answer,
     and a schema violation on a document the caller never saw is a puzzle."""
     schema = config_schema()
     missing: list[str] = []
@@ -1252,7 +1252,7 @@ def _open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> Jso
 # revoke` settle.
 #
 # `carry_over_permissions` is the regeneration that keeps a narrowing, and it is
-# the MCP path's — `project_config_create`, where the caller is an agent and the
+# the MCP path's: `project_config_create`, where the caller is an agent and the
 # grants come from the configuration that server loaded rather than from the
 # request. `init --force` is the operator's reset and deliberately carries
 # nothing; `agentic-hil adopt-hardware` is the command that
@@ -1261,7 +1261,7 @@ def _open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> Jso
 # So this is the gate on the one-way street, and it is deliberately the narrowest
 # thing that opens it: the same closed key set `project_config_set` names, one
 # permission per name, written through that same function. Not a second write
-# path — everything below ends in `project_config_set` — and not an MCP tool: it
+# path (everything below ends in `project_config_set`) and not an MCP tool: it
 # is reachable from `agentic-hil` and from nowhere else, so the ratchet on the
 # MCP surface is exactly as it was.
 
@@ -1289,7 +1289,7 @@ def resolve_permission_key(key: str) -> tuple[ResolvedConfigKey | None, str | No
     so it can never shadow a real key: a description key resolves and is refused
     below for being a description key, and only a spelling that names nothing at
     all is rewritten. The rewrite is the exact inverse of the key model's own
-    right-to-left reading — field names contain no dot, so the last component is
+    right-to-left reading: field names contain no dot, so the last component is
     the field and everything before it is the entry, whatever dots the operator
     put in the entry name.
 
@@ -1318,7 +1318,7 @@ def _permission_key_refusal(command: str, rejected: list[JsonObject], path: Path
     because `can_buses.<name>.permissions.allow_write` is not something anybody
     can type: an operator needs the entry names their own bench has. This is the
     whole of the discoverability answer, and it is why there is no wildcard and
-    no section form — a name has to be read before it can be typed, and the
+    no section form: a name has to be read before it can be typed, and the
     refusal is where it is read."""
     return {
         "ok": False,
@@ -1347,7 +1347,7 @@ def _permission_open_run_refusal(existing: AgenticHILConfig, command: str, open_
 
     The same rule as `config_write_in_open_run`: what is held
     was taken under the permissions this file states. Its own error type because
-    the holder here is another process — an MCP server, another terminal — and
+    the holder here is another process (an MCP server, another terminal), and
     "close your run" is not advice this caller can act on."""
     return {
         "ok": False,
@@ -1388,7 +1388,7 @@ def set_permission(
 
     * A section form would be defined by a moving target. `can_buses.dut` means
       the fields `config_rule_fields` reads out of the shipped schema *at the
-      moment it runs* — so a permission added to the schema in a later release
+      moment it runs*, so a permission added to the schema in a later release
       silently joins every section form an operator ever learned to type. A named
       key means the same thing forever, and a group named in this module would
       drift the same way for the same reason.
@@ -1398,7 +1398,7 @@ def set_permission(
       worth much less on the side that opens.
     * The convenience is available without the blast radius: several keys in one
       command are applied together or not at all, so opening a whole entry is
-      still one line — one that names what it opened, and whose result lists
+      still one line: one that names what it opened, and whose result lists
       exactly those keys.
     * The whole-file form already exists. `agentic-hil init --force` returns the
       whole file to the generated defaults, and the gap left over
@@ -1460,7 +1460,7 @@ def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: li
 
     # The document was read outside the write lock, so every value this decision
     # rests on travels with the call and is compared again inside it. A
-    # concurrent write between the two refuses rather than overwrites — and it
+    # concurrent write between the two refuses rather than overwrites, and it
     # is what makes "already open, so nothing was written" a statement about the
     # file rather than about a document that has since moved.
     written = project_config_set(
@@ -1483,7 +1483,7 @@ def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: li
     if written.get("ok") is not True:
         # Carried through as the write path stated it, with `command` added so a
         # reader knows which of the two asked. The refusals worth reaching this
-        # way are its own — a permission on an entry that does not exist, a
+        # way are its own: a permission on an entry that does not exist, a
         # document somebody else moved in between, a file that stopped loading.
         return {**written, "command": f"agentic-hil {command}"}
     return _permission_change_result(command, value, written, unchanged, existing)
@@ -1492,7 +1492,7 @@ def _set_permission(workspace: Path, existing: AgenticHILConfig | None, keys: li
 def _nothing_to_change(command: str, value: bool, unchanged: list[JsonObject], existing: AgenticHILConfig) -> JsonObject:
     """Every named permission already stood where it was asked to stand.
 
-    Not an error — asking for what is already so is how an operator makes sure —
+    Not an error (asking for what is already so is how an operator makes sure)
     and not a change either. Nothing is written, which means no provenance entry
     and no change marker in the header for a call that moved nothing, and the
     result says so in those words rather than reporting a write."""
@@ -1501,7 +1501,7 @@ def _nothing_to_change(command: str, value: bool, unchanged: list[JsonObject], e
         "command": f"agentic-hil {command}",
         "summary": (
             f"Nothing was written: all {len(unchanged)} permission(s) named are already {str(value).lower()} in this "
-            "configuration. This was a no-op, not a change — the file, its `provenance` and its header are exactly as "
+            "configuration. This was a no-op, not a change: the file, its `provenance` and its header are exactly as "
             "they were."
         ),
         "changed": [],
@@ -1549,7 +1549,7 @@ def _permission_change_result(command: str, value: bool, written: JsonObject, un
         # will not take this. The word an operator needs is the stronger one.
         "restart_required": True,
         "next_steps": [
-            "Restart the MCP server for this workspace — the agent host's, not this command line. A server parses "
+            "Restart the MCP server for this workspace: the agent host's, not this command line. A server parses "
             "permissions once at startup and `project_config_reload_description` re-reads none of them, so until then "
             "it keeps enforcing the value that was there before.",
             f"`agentic-hil doctor` reads this file fresh and reports what it now grants; `agentic-hil "
@@ -1584,7 +1584,7 @@ def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None,
     target_path = authoritative_write_target(workspace, existing)
     # One read, and both halves of the answer come out of it. This tool needs no
     # permission, so it is also the answer to "is what this server enforces still
-    # what the file says" — and a status taken from one read beside a document
+    # what the file says", and a status taken from one read beside a document
     # taken from another can describe two versions of the file in one response:
     # `state: unchanged` next to values from a document that is not the unchanged
     # one, or a status saying the file is there next to `loaded_policy`.
@@ -1600,7 +1600,7 @@ def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None,
     if raw is not None:
         # The file this server loaded is gone, and refusing with
         # `config_file_not_found` would say the wrong thing twice: this workspace
-        # is not unconfigured — this server holds a policy and is enforcing it —
+        # is not unconfigured (this server holds a policy and is enforcing it),
         # and that error sends a caller to `project_config_create`, which is
         # refused here and would replace the operator's settings with a
         # generated skeleton if it were not. Nothing else exposes the
@@ -1682,8 +1682,8 @@ def _project_config_describe(workspace: Path, existing: AgenticHILConfig | None,
 def _describe_unreadable(existing: AgenticHILConfig, error: ConfigError, status: JsonObject) -> JsonObject:
     """A configuration that is there and will not parse, said in this tool's terms.
 
-    `project_config_describe` carries `config_status` whatever the state is —
-    that is what it is for — so a refusal from it must too. And it still reports
+    `project_config_describe` carries `config_status` whatever the state is
+    (that is what it is for), so a refusal from it must too. And it still reports
     `permissions_in_force`: the policy this server is enforcing is not affected
     by the file having been made unreadable, and it is the half a caller cannot
     get any other way once the document is unusable.
@@ -1790,7 +1790,7 @@ def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], op
             "`locked_keys` are empty and no value here can be compared against a document: everything below comes "
             "from what this process parsed at startup. `permissions_in_force` is the policy still being enforced. "
             "Ask the operator to put the file back at `config_status.path`, or to confirm the removal was intended, "
-            "and then to restart the MCP server. Do not call `project_config_create` to replace it — it is refused, "
+            "and then to restart the MCP server. Do not call `project_config_create` to replace it: it is refused, "
             "and it would write the generated skeleton over the operator's settings if it were not."
         )
     elif config_stale(status):
@@ -1799,7 +1799,7 @@ def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], op
             "documents: the keys and values below are read from disk, and the three configuration-write grants "
             "under `rights` are the narrower of what this server loaded and what the file now says. One of those "
             "revoked since startup is already in force here; one added since startup is not, and will not be until "
-            "the MCP server is restarted — a server bound to a policy does not widen itself from a file that "
+            "the MCP server is restarted: a server bound to a policy does not widen itself from a file that "
             "changed underneath it. `permissions_in_force` is the whole loaded policy and is not intersected with "
             "the file: every hardware and per-device grant, and the section-level `debug.allow_all_symbols` and "
             "`artifacts.allow_upload`, keeps enforcing what startup parsed in either direction until a restart."
@@ -1824,8 +1824,8 @@ def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], op
             f"Permissions here can be narrowed and never widened through `{PROJECT_CONFIG_SET}`: a change may write "
             "`false` into one and never `true`, whichever key it names. Closing "
             f"{_right_key(CONFIG_PERMISSIONS_RIGHT)} is the last permission change this call can make, after which "
-            f"`{CONFIG_REOPEN_COMMAND}` — or a regeneration through `project_config_create`, while "
-            "`permissions.allow_config_write` is still true — is what writes permissions into this file again."
+            f"`{CONFIG_REOPEN_COMMAND}` (or a regeneration through `project_config_create`, while "
+            "`permissions.allow_config_write` is still true) is what writes permissions into this file again."
         )
     steps.append(f"{CONFIG_SHAPE_URI} describes what a configuration looks like and what deliberately cannot be changed over MCP.")
     return steps

@@ -109,7 +109,7 @@ def test_init_config_writes_a_deterministic_external_config_that_grants_everythi
     config_text = config_path.read_text(encoding="utf-8")
     assert f"workspace_root: {json.dumps(str(workspace.resolve()))}" in config_text
     # Born on the read-free model: reading has no key to set, so every
-    # permission line a fresh config carries is about writing — and since
+    # permission line a fresh config carries is about writing, and since
     # 0.8.0 every one of them that grants a capability is granted, so the
     # bench this writes is workable without anybody opening it.
     assert f"version: {CURRENT_CONFIG_VERSION}\n" in config_text
@@ -917,7 +917,7 @@ def test_removing_only_pycache_leaves_the_stale_import_succeeding(tmp_path: Path
 
     A `pip uninstall` that leaves `__pycache__` behind leaves an
     `agentic_hil` directory with nothing else in it. Removing only that
-    `__pycache__` — what `next_step` used to say was the whole fix — leaves the
+    `__pycache__` (what `next_step` used to say was the whole fix) leaves the
     directory itself, and Python still imports that as a PEP 420 namespace
     package: `import agentic_hil` succeeds with `__spec__.origin` of `None`.
     """
@@ -937,8 +937,8 @@ def test_removing_only_pycache_leaves_the_stale_import_succeeding(tmp_path: Path
 def test_pycache_then_rmdir_together_finish_what_next_step_now_advises(tmp_path: Path) -> None:
     """The complete `next_step` instruction, proven to actually stop the import.
 
-    Following it to the end — remove `__pycache__`, then `rmdir` the now-empty
-    `agentic_hil` directory itself — leaves nothing for a namespace package to
+    Following it to the end (remove `__pycache__`, then `rmdir` the now-empty
+    `agentic_hil` directory itself) leaves nothing for a namespace package to
     form around, so the stale `import agentic_hil` this whole hint exists for
     fails instead of quietly continuing to succeed.
     """
@@ -1296,7 +1296,7 @@ def test_installed_extras_names_only_the_extras_whose_requirements_are_present()
 
     `can` is a requirement of this suite, so it must be reported. `pyocd` is what
     tells the two apart on the canonical development environment, which does not
-    install it — but an environment that does is legitimate, and is the only one
+    install it, but an environment that does is legitimate, and is the only one
     where the pyOCD phrase tests run at all, so pinning its absence outright
     would make installing the extra fail the suite. What is pinned instead is
     that the answer tracks what is installed, asked here through the import
@@ -1378,7 +1378,7 @@ def test_a_reused_parent_pid_does_not_hide_a_process_holding_the_installation(
     """A pid is reused once its process exits, and the walk must not follow it.
 
     Here pid 200 is younger than the process that claims it as a parent, so it
-    cannot be the launcher this run came through — it is a different Agentic HIL
+    cannot be the launcher this run came through: it is a different Agentic HIL
     process that inherited the number, and hiding it is what would destroy the
     installation.
     """
@@ -1457,7 +1457,7 @@ def test_upgrade_refuses_before_removing_anything_when_the_installation_is_in_us
     assert result["held_by"] == [holder]
     assert result["held_by_count"] == 1
     assert "Nothing was changed." in result["summary"]
-    # The refusal has to say what to do, or it reads as an obstacle to clear —
+    # The refusal has to say what to do, or it reads as an obstacle to clear,
     # and the wrong way through is the command that destroys the installation.
     assert any("Close the agent host" in step for step in result["remediation"])
     assert any("uv tool install --upgrade" in step for step in result["do_not"])
@@ -1559,7 +1559,7 @@ def _refuse_the_config_location(workspace: Path, monkeypatch: pytest.MonkeyPatch
     config's own location fails the ancestor trust check before anything is
     written. The ACL is not reproducible in a test on either platform; a
     location the config rules refuse outright is, and it refuses at the same
-    point for the same reason — the location, not the content.
+    point for the same reason: the location, not the content.
     """
     monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(workspace / "in-the-repo.yaml"))
 
@@ -1571,7 +1571,7 @@ def test_agent_install_needs_no_workspace_and_writes_nothing_project_local(
     """The user-wide half is user state and nothing else.
 
     It has to run before any project exists, so it may not read a config, and it
-    may not create one — nor the state root a config would have to name.
+    may not create one, nor the state root a config would have to name.
     """
     elsewhere = tmp_path / "not-a-project"
     elsewhere.mkdir()
@@ -2224,7 +2224,7 @@ def test_a_failed_claude_project_half_rolls_back_the_external_project_record_it_
     """A rollback that claims the project half went back must include the record it wrote.
 
     For a project `AGENTIC_HIL_CONFIG` binds outside the projects directory, the
-    restriction step writes `external-projects.json` first — the one file on disk
+    restriction step writes `external-projects.json` first, the one file on disk
     that says the project exists. If a late failure rolls the project half back
     while that record stays, the run reports its changes reversed and leaves a
     stale entry standing, which a later refresh reads as a configuration gone
@@ -2600,8 +2600,8 @@ def test_the_mcp_command_refusal_says_what_each_candidate_was_rejected_for(monke
 
     The refusal that ends the search recommends a persistent installation, so
     the operator it reaches is the one who already has one and cannot use it.
-    What the underlying refusal knew — which component stopped the walk, its
-    mode and its owner — now travels with the candidate it condemned.
+    What the underlying refusal knew (which component stopped the walk, its
+    mode and its owner) now travels with the candidate it condemned.
     """
     directory_refusal = ConfigError(
         "mcp_command_untrusted",
@@ -3108,7 +3108,7 @@ def test_setup_asks_the_agent_to_refuse_writing_the_policy_files(
 
     setup has to create the authoritative config; afterwards nothing but the
     operator may change it. A small model rewrote it with a yaml script to grant
-    itself allow_flash, so the restriction is written last — and it constrains
+    itself allow_flash, so the restriction is written last, and it constrains
     the agent's own tools, not a path, because a path rule would also stop
     `agentic-hil mcp-stdio` from reading the file it protects.
     """
@@ -3185,7 +3185,7 @@ def test_the_claude_deny_rules_use_only_the_form_that_host_evaluates(
     permissions against `Edit(path)` and `Read(path)` rules only", a `Write(...)`
     path rule is "accepted but never consulted" and warned about at every start,
     and a single leading slash "anchors at the settings source, not the
-    filesystem root" — which in user settings is `~/.claude`, not `/`.
+    filesystem root", which in user settings is `~/.claude`, not `/`.
 
     Both halves were written from expectation once already, so
     the absence of the `Write` form is asserted explicitly rather than implied.
@@ -3250,7 +3250,7 @@ def test_the_deny_rule_cleanup_leaves_an_operators_own_write_rule_alone(
     """Ours is identified by its exact text, never by its shape.
 
     A `Write(...)` rule of the operator's is inert for the same reason ours was,
-    but it is not this tool's to delete — including one that covers a tree of
+    but it is not this tool's to delete, including one that covers a tree of
     ours from further up.
     """
     _isolated_workspace(tmp_path, monkeypatch)
@@ -3903,7 +3903,7 @@ def test_uninstall_still_names_an_externally_bound_configuration_and_its_state_r
     `state_root` it points to on a volume that is not this tool's own, are trees
     the uninstall deliberately keeps. The walk over the projects directory never
     comes across either, and the record that did is removed with the rules it
-    explained — so unless `kept` reads that record before it goes, both trees drop
+    explained, so unless `kept` reads that record before it goes, both trees drop
     out of the accounting the contract promises. They are read first, and named.
     """
     _isolated_workspace(tmp_path, monkeypatch)
@@ -4026,7 +4026,7 @@ def test_uninstall_names_rmdir_to_finish_the_pycache_cleanup(
 
     Removing `__pycache__` leaves an empty directory Python still imports as a
     namespace package (proven in `test_pycache_then_rmdir_together_finish_what_next_step_now_advises`),
-    so `next_step` must also name the `rmdir` step that actually stops it —
+    so `next_step` must also name the `rmdir` step that actually stops it:
     non-recursive, so it only succeeds once nothing else is left in the
     directory. Pinned to the POSIX branch of `empty_directory_removal_command`
     so this assertion holds on whichever host the suite runs on; the platform
@@ -4267,7 +4267,7 @@ def test_setup_writes_no_opencode_restriction_and_says_so(
     On opencode a single "always" answer adds a session `allow` for pattern `*`
     that outranks anything written here, so a rule from setup would be a lock one
     click removes. Agentic HIL writes none, leaves the file untouched, and names
-    the file the operator sets this in — a silent no-op would read as protection.
+    the file the operator sets this in: a silent no-op would read as protection.
     """
     _isolated_workspace(tmp_path, monkeypatch)
     home = _isolated_home(tmp_path, monkeypatch)
@@ -4291,7 +4291,7 @@ def test_a_repeat_setup_takes_back_the_inert_opencode_patterns(
 ) -> None:
     """What earlier releases wrote has to go, now that nothing replaces it.
 
-    Left alone those patterns read as protection and are none — the silent half
+    Left alone those patterns read as protection and are none: the silent half
     of the same defect on a second host. An operator's own pattern over one of these
     trees is not ours to drop, and neither is one of ours they have since set to
     something other than `deny`.
@@ -4446,7 +4446,7 @@ def _table_column(text: str, header: str) -> list[str]:
 def _skill_routing_table(text: str) -> list[str]:
     """The tools the skill declares, read out of the routing table's tool column.
 
-    The skill names tools in one defined place — that column — and names error
+    The skill names tools in one defined place (that column) and names error
     types, result fields, permissions and configuration sections in prose, in
     the same backticks, because that is how all of them are written. A scan of
     the whole document cannot tell the two apart, so it took every underscored
@@ -4464,7 +4464,7 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
 
     Checked in both directions on purpose. Prose is out of scope by
     construction, and that costs no coverage only while the table names every
-    tool there is — so a tool this server gains without a row here fails as
+    tool there is, so a tool this server gains without a row here fails as
     loudly as a row naming one it does not serve.
     """
     contract = Path(__file__).resolve().parents[1] / "evals" / "install" / "tools.list.expected"
@@ -4482,7 +4482,7 @@ def test_skill_only_names_tools_the_server_exposes() -> None:
 def test_the_skill_tool_check_reads_the_table_and_not_the_prose() -> None:
     """Both directions of the routing-table contract, against the shipped document.
 
-    Prose is out of scope whatever an identifier there is called — a result
+    Prose is out of scope whatever an identifier there is called: a result
     field, and equally a name shaped like a tool, which is the deliberate half
     of the trade the test above pays for by holding the whole table. A name in
     the tool column is caught even when it reads like one of ours.
@@ -4516,7 +4516,7 @@ AGENTS_CONFIG_COLUMN = "Call"
 AGENTS_CONFIG_FAMILY = "project_config_"
 # The one configuration tool that table leaves out on purpose: it creates a
 # configuration rather than changing an existing one, and both documents make
-# that split — the inventory gives it a "Project setup" row of its own, apart
+# that split: the inventory gives it a "Project setup" row of its own, apart
 # from the "Project config" group. Excluded from the table, not from the
 # document: the check below still requires AGENTS.md to name it somewhere.
 AGENTS_CONFIG_TABLE_OMITS = frozenset({"project_config_create"})
@@ -4568,7 +4568,7 @@ def test_tool_inventory_table_spells_out_every_tool_rather_than_a_prefix() -> No
     """No wildcards in that column: `debug_*` stood for eleven tools and checked none.
 
     Expanding a prefix against the contract would have passed today and left the
-    completeness direction blind exactly where the wildcard sits — a twelfth
+    completeness direction blind exactly where the wildcard sits: a twelfth
     session tool would be absorbed by `debug_*` and the inventory would never
     have to mention it, which is the drift this check exists to catch. Spelling
     the names out costs one long cell and holds all 38.
@@ -4612,7 +4612,7 @@ def test_the_document_tool_tables_fail_in_both_directions() -> None:
     """The proof the inventory contract asks for, run against the shipped documents.
 
     A tool added to the contract fails until the documents name it, and a name
-    in a document the server does not serve fails too — for the whole inventory
+    in a document the server does not serve fails too, for the whole inventory
     in docs/mcp-tools.md and for the configuration family in AGENTS.md.
     """
     exposed = _repository_tool_contract()
@@ -4953,8 +4953,8 @@ def test_trusted_persistent_executable_rejects_symlink_target_in_forbidden_root(
 def _directory_stat(mode: int, uid: int) -> SimpleNamespace:
     """A stat of an opened directory, as the POSIX ancestor walk sees one.
 
-    The walk itself cannot run on Windows — it needs `os.geteuid`, `O_DIRECTORY`
-    and `dir_fd` — so the decision it makes per component is a named function
+    The walk itself cannot run on Windows (it needs `os.geteuid`, `O_DIRECTORY`
+    and `dir_fd`), so the decision it makes per component is a named function
     and this is what that function is asked about, on every host.
     """
     return SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=uid)
@@ -4970,7 +4970,7 @@ def test_a_launcher_ancestor_is_no_longer_untrusted_for_who_else_may_write_it(mo
     them: on such a host `mcp-config` rejected every candidate and then
     recommended installing with the user-level tool installer that had written
     the layout it was refusing. Group and other write are no longer read, sticky
-    or not, at any depth — the same detect-rather-than-prevent line Windows has
+    or not, at any depth: the same detect-rather-than-prevent line Windows has
     held since its ACL walk was removed in 0.8.0.
     """
     assert untrusted_launcher_directory(_directory_stat(mode, 1000), final=final, trusted_uids=frozenset({0, 1000})) is None
@@ -4981,7 +4981,7 @@ def test_the_launchers_own_parent_must_still_belong_to_root_or_this_user() -> No
 
     A directory a third account owns can have the validated file renamed out of
     it between the check and the registration, and no mode expresses that. Only
-    the launcher's own parent is asked — an ancestor further up owned by another
+    the launcher's own parent is asked: an ancestor further up owned by another
     user is how every `/home/<user>` chain looks.
     """
     foreign = _directory_stat(0o755, 4242)
@@ -5105,7 +5105,7 @@ def test_setup_leaves_configured_path_modes_exactly_as_it_found_them(
     of `state_root`, the authoritative config and the agent's policy file,
     because the configured-path trust check refused those directories for their
     mode. That check was removed whole and the mutation outlived
-    it — invisible on Windows, where the tightening is a no-op, and a real loss
+    it, invisible on Windows, where the tightening is a no-op, and a real loss
     of access on POSIX for a validator that no longer exists. Setup succeeds on
     the same tree it used to rewrite, and rewrites none of it."""
     workspace = tmp_path / "workspace"
@@ -5733,7 +5733,7 @@ def test_stlink_confirms_each_reset_mode_on_the_lines_its_own_command_prints(tmp
     """Mode `halt` can report success at all, and mode `run` is untouched by that.
 
     `halt` sends `-halt`, which prints neither line `-rst` prints, and the
-    backend asked for the `-rst` pair whichever mode was requested — so a halt
+    backend asked for the `-rst` pair whichever mode was requested, so a halt
     that did exactly what was asked came back `reset_failed` /
     `reset_unconfirmed`, quarantining the bench over a correct call (#142).
     Confirmation is still all-or-nothing; what changed is which set is
@@ -5761,7 +5761,7 @@ def test_a_halt_that_never_reported_the_core_stays_unconfirmed_however_much_the_
     """The connect banner is not a marker, and this is why.
 
     This CLI connects, prints the whole banner including `Reset mode  :
-    Software reset` — the line that says mode `halt` resets before it halts —
+    Software reset` (the line that says mode `halt` resets before it halts)
     and then never reports stopping the core. Connect runs before the halt is
     attempted, so every line here is one a failed halt prints too; reading any
     of them as confirmation would have confirmed exactly the run nobody can
@@ -6418,7 +6418,7 @@ def grandchild_pid_after_spawner_exit(function: str, pid_file: Path) -> int:
     Two details are the difference between a proof and a hang. The grandchild's
     standard streams go to ``DEVNULL``, because on POSIX a child inherits its
     parent's fds 0-2 and would hold the write end of any pipe open for its whole
-    life — leaving this reader blocked on an EOF that only arrives once the
+    life, leaving this reader blocked on an EOF that only arrives once the
     process it is asking about has died. It is the same reason
     :func:`agentic_hil.canbroker._spawn_broker` hands the broker a log file
     rather than a pipe. And the pid travels through a file rather than that
@@ -6456,7 +6456,7 @@ def test_managed_spawn_hands_back_a_child_that_is_already_running(tmp_path: Path
     """The regression this surface exists for: the caller owes no second call.
 
     On Windows the child is born suspended, so a spawn that forgot to resume it
-    would sit here until the wait timed out — alive, silent, nothing to read.
+    would sit here until the wait timed out: alive, silent, nothing to read.
     """
     marker = tmp_path / "ran"
     child = spawn_managed_process([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('ran')", str(marker)])

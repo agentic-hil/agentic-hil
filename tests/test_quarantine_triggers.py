@@ -1,8 +1,8 @@
 """Quarantine is the answer to "I do not know what state the hardware is in".
 
 It is not the answer to "something went wrong". Quarantine is
-the one state a human must physically resolve — walk to the bench, inspect,
-type `agentic-hil recover --confirm-safe-state` — so every trigger has to pass
+the one state a human must physically resolve (walk to the bench, inspect,
+type `agentic-hil recover --confirm-safe-state`), so every trigger has to pass
 one test: can the failure prove it never reached the hardware (or that the
 hardware provably ended where a normal call would leave it)?
 
@@ -11,7 +11,7 @@ hardware provably ended where a normal call would leave it)?
 * Failures that cannot prove their abort point keep quarantining. That is the
   feature, and the tests here pin that direction too.
 * A justified quarantine now tells the signer what was attempted, what is
-  confirmed, what remains unknown, and what to check on the physical board —
+  confirmed, what remains unknown, and what to check on the physical board,
   out of the one catalogue in knowledge.py.
 """
 
@@ -70,7 +70,7 @@ def coordination_record_states(config) -> set[str]:
 
 def assert_no_quarantine_record(config) -> None:
     """The DoD's own check: a provably-not-contacted failure writes no
-    quarantine record — nothing an operator would ever have to recover."""
+    quarantine record: nothing an operator would ever have to recover."""
     blocking = coordination_record_states(config) & {"cleanup_required", "quarantined", "recovery_pending"}
     assert not blocking, blocking
 
@@ -616,8 +616,8 @@ def failing_serial_module(handle) -> SimpleNamespace:
 
 
 def test_an_unopenable_com_port_refuses_and_frees_the_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The dominant serial failure — device absent, port busy, adapter
-    unplugged — used to hold the bench for a physical recovery."""
+    """The dominant serial failure (device absent, port busy, adapter
+    unplugged) used to hold the bench for a physical recovery."""
     config = com_config(tmp_path)
     service = AgenticHILToolService(config)
     handle = SimpleNamespace(is_open=False)
@@ -911,7 +911,7 @@ def test_a_probe_read_killed_at_the_deadline_names_the_target_state_reason(tmp_p
 
     OpenOCD's and ST-Link's timeout branches report `timeout` and nothing about
     where the call stopped, and the process was killed rather than allowed to run
-    the `shutdown` in its own command string — so a run that had got through
+    the `shutdown` in its own command string, so a run that had got through
     `init` leaves the core halted with nothing to resume it. Reaping the child
     proves no *future* action; it is not a statement about the target, and
     treating the absent side-effect fields as "unchanged" released a board that
@@ -969,7 +969,7 @@ def test_a_timed_out_probe_is_not_cleared_by_a_successful_re_read(tmp_path: Path
         second = service.call("probe_target")
 
         # Was: the re-read is refused with `resource_quarantined`. A probe is
-        # the recovery class now and runs during an incident — but running is
+        # the recovery class now and runs during an incident, but running is
         # not settling, and this test's tooth is the second half. The read-only
         # re-read still cannot answer a reason about the core's run state, so
         # the incident is exactly where it was.
@@ -1027,7 +1027,7 @@ def test_an_stlink_probe_that_confirms_nothing_names_the_target_state_reason(tmp
     STM32CubeProgrammer exits 0 with output that confirms no connection: the run
     is over, its child is reaped, and none of that says whether the ST-Link
     attached to the target on the way. `probe_unconfirmed` names no abort point,
-    so the board's run state is unknown and containment is the answer — where
+    so the board's run state is unknown and containment is the answer, where
     `No STM32 target found` from the same CLI is a claim, and refuses."""
     config = config_for(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK_UNCONFIRMED)
     service = AgenticHILToolService(config)
@@ -1054,7 +1054,7 @@ def test_an_openocd_probe_that_confirms_nothing_names_the_target_state_reason(tm
     target answered: `init` may have completed, examined the core and halted it,
     and then lost both echoes. The backend used to answer this branch with the
     classification `target_not_detected`, which is exactly the string the
-    read-only pre-contact rule accepts — so a run that confirmed nothing was
+    read-only pre-contact rule accepts, so a run that confirmed nothing was
     released with `hardware_state: unchanged` on the strength of a verdict
     OpenOCD never gave. It now answers `probe_unconfirmed`, which no evidence
     rule accepts, and the reason is one a re-read may not settle."""
@@ -1065,8 +1065,8 @@ def test_an_openocd_probe_that_confirms_nothing_names_the_target_state_reason(tm
 
         assert result["backend_error_type"] == "probe_unconfirmed"
         # And the public error_type withholds the claim too. `target_not_detected`
-        # is OpenOCD's report that it reached the adapter and nothing answered —
-        # its catalogue entry says exactly that — so a caller reading only the
+        # is OpenOCD's report that it reached the adapter and nothing answered
+        # (its catalogue entry says exactly that), so a caller reading only the
         # public field off this branch would have been handed the abort point the
         # backend field refuses to give it.
         assert result["error_type"] == "target_state_unconfirmed"
@@ -1128,7 +1128,7 @@ def test_a_probe_enumeration_timeout_that_names_its_abort_point_still_refuses(tm
         assert_refused_without_quarantine(result, config)
         assert service.coordinator.blocked is False
         # The rule itself, on the fields that carry it: the backend's claim
-        # settles the call, and half a claim — or none — does not.
+        # settles the call, and half a claim (or none) does not.
         timed_out = {"ok": False, "error_type": "timeout", "summary": "Debugger command timed out."}
         named = {**timed_out, "target_contacted": False, "side_effect_status": "not_started"}
         assert service._readonly_failure_is_settled(named) is True

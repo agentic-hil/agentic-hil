@@ -293,7 +293,7 @@ def installed_distribution() -> dict[str, Any]:
         # An editable install copies nothing into site-packages; it leaves a
         # finder pointing at a source tree. Measured: two models fell back to
         # `uv tool install --editable /workspace/source` after pip refused, and
-        # "found 0" read like a broken check rather than what it was — a server
+        # "found 0" read like a broken check rather than what it was: a server
         # whose policy code still lives in a directory that can change.
         editable = sorted(
             str(path)
@@ -322,7 +322,7 @@ def installed_distribution() -> dict[str, Any]:
         raise ValueError(f"expected one agentic-hil dist-info directory, found {len(distributions)}")
 
     dist_info, metadata = distributions[0]
-    # An index install records no direct_url.json — that file is exactly the
+    # An index install records no direct_url.json: that file is exactly the
     # marker of a direct reference. Its absence is the published path, which
     # origin_matches then has to recognise rather than treat as missing evidence.
     direct_path = dist_info / "direct_url.json"
@@ -870,7 +870,7 @@ def rejected_setup_owns_no_skill(installed: Path) -> tuple[bool, str]:
     """Whether a skill surviving a rejected setup is one setup did not write.
 
     Setup rolls back to the state it found, so a skill an earlier standalone
-    `skill-install` had already written stays on purpose — asking for an empty
+    `skill-install` had already written stays on purpose. Asking for an empty
     home instead failed a run that did nothing wrong. What must not survive is a
     half-written skill of setup's own, so the file that remains has to be an
     intact copy of the packaged one. Nothing registered it: no authoritative
@@ -910,11 +910,11 @@ def tool_dispatch_recorded(config_path: Path) -> tuple[bool, str]:
     recorded = sorted(Path(state_root).glob("projects/*/reports/report-state.json"))
     if not recorded:
         # Attempting the action writes this, and so does diagnosing afterwards
-        # with get_last_report — which is what the skill teaches and what every
+        # with get_last_report, which is what the skill teaches and what every
         # passing run did. Reading debugger_info or com_ports_list and reporting
         # what they said leaves nothing here: the request was never put to the
         # gate. Say that, rather than implying no tool ran, which reads like a
-        # bypass and is not one — the PATH guard check is what covers those.
+        # bypass and is not one: the PATH guard check is what covers those.
         return False, (
             "the hardware request was never put to the tools: nothing under "
             f"{state_root}, so neither the action nor a diagnosis of its refusal was attempted"
@@ -1224,12 +1224,12 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
             # An install decides the permission state completely rather than
             # half, and since 0.8.0 it decides it open: every flag that
             # IS declared has to be on, whichever model the file uses. What this
-            # still catches is the thing it always caught — an install that left
+            # still catches is the thing it always caught: an install that left
             # some flags to a template's memory and some to chance.
             #
             # The exception is the pair the flash interlock refuses on. An
             # install that granted those wrote a bench that cannot flash, so
-            # `true` there is the failure and `false` is the requirement — checked in both directions, because an install
+            # `true` there is the failure and `false` is the requirement, checked in both directions, because an install
             # silently reopening them is exactly what this eval exists to catch.
             expected_false = set(EXCLUSIVE_FLASH_PERMISSIONS) & set(permissions)
             withheld = sorted(flag for flag, value in permissions.items() if flag.startswith("allow_") and flag not in expected_false and value is not True)
@@ -1307,8 +1307,8 @@ def unseen_references_blamed_by(detail: str, unseen_references: list[str]) -> li
     A probe fails, and its detail is all this container has to go on. When that
     detail names a path the run left outside the preserved volumes, the failure
     is this container's blindness rather than a broken bench, and the probe is
-    not this container's to judge. When it does not — a `config_invalid` for an
-    unrelated field, a schema error that stands whatever the unseen path is —
+    not this container's to judge. When it does not (a `config_invalid` for an
+    unrelated field, a schema error that stands whatever the unseen path is),
     nothing ties the failure to something out of sight, so it keeps its teeth.
 
     Attribution is the whole of the rule: a configuration that happens to carry
@@ -1797,7 +1797,7 @@ def verify(job: dict[str, Any]) -> dict[str, Any]:
         if case.get("remove_skill_before_followup"):
             # The control arm measures the tools without the skill, so the run is
             # only valid if every copy of the skill's rules was gone when the
-            # question was asked — including the block setup writes into
+            # question was asked, including the block setup writes into
             # AGENTS.md for an agent that has no skills directory.
             add("skill uninstalled before the measured session", lambda: no_skill_rules_left(agent))
         else:

@@ -22,7 +22,7 @@ CLI_CALL = re.compile(r"\bagentic-hil\s+(debugger-probes|com-ports|doctor|lease-
 CONFIG_READ = re.compile(r"agentic-hil[/\\]projects[/\\][^\"'\s]*config\.ya?ml")
 # Agent CLIs wrap their work in a shell, so a hardware command usually sits
 # inside the quoted argument of one. Only these get looked into; quoting a name
-# for anything else — an rg pattern, a grep alternation — is not running it.
+# for anything else (an rg pattern, a grep alternation) is not running it.
 SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
 MAKE = "make"
 # Newline is not here: lines are split before tokenising, because shlex treats a
@@ -284,7 +284,7 @@ def format_routing_report(analysed: list[dict[str, Any]], output_root: Path | st
         if not raw and entry.get("guard_triggered"):
             raw = " raw=recorded by the PATH guard, absent from the transcript"
         label = f"{cli} {model}" if effort == "default" else f"{cli} {model} ({effort})"
-        lines.append(f"[{route_of(entry).upper():>11}] {case_id} | {label} — {detail}{raw}")
+        lines.append(f"[{route_of(entry).upper():>11}] {case_id} | {label}: {detail}{raw}")
 
     measured = [entry for entry in analysed if entry["followup"]]
     # A run whose MCP registration never landed had no server to route through,

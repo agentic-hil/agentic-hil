@@ -292,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     image = options.image or IMAGE.format(version=options.python)
     # `--` separates our options from pytest's, and argparse.REMAINDER keeps it,
     # so drop the leading one and nothing else: pytest uses a `--` of its own to
-    # end its option parsing, and a filter over the whole list ate that too — so
+    # end its option parsing, and a filter over the whole list ate that too, so
     # `ci_linux.py -- tests -- -x` reached pytest as `tests -x`, which is not
     # "everything after the options, unchanged".
     forwarded = list(options.pytest_args)

@@ -67,7 +67,7 @@ def build_agent_command(
 
     An isolated session ignores the agent CLI's user configuration, which keeps
     the installation phase hermetic. A session that has to exercise what setup
-    registered — the MCP server and the skill — must read that configuration,
+    registered (the MCP server and the skill) must read that configuration,
     so it runs without the isolating flags.
 
     The reasoning effort is deliberately outside those conditionals: both

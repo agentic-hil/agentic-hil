@@ -222,7 +222,7 @@ shell is one copy away once you have read what is in them.
 
 ## Platforms and debugger backends
 
-Linux, macOS, and Windows (CI-tested on Python 3.10–3.13). Debugger backends: OpenOCD, pyOCD (`agentic-hil[pyocd]`: covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debuggers.<name>.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
+Linux, macOS, and Windows (CI-tested on Python 3.10 to 3.13). Debugger backends: OpenOCD, pyOCD (`agentic-hil[pyocd]`: covers most ARM Cortex-M targets via CMSIS packs and CMSIS-DAP/ST-Link/J-Link probes, set `debuggers.<name>.target_type`), and STM32CubeProgrammer CLI (auto-discovered on Windows). Direct CAN requires `agentic-hil[can]` (python-can); CAN also supports a configured `process` bridge backend.
 
 Installing pyOCD is not enough to reach an STM32 part. Most vendor target types, the whole STM32F4 family included, come from a CMSIS device-family pack rather than pyOCD's built-in list, so they need a second, deliberate step:
 

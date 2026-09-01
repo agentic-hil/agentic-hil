@@ -1,10 +1,10 @@
 # The demo loop, declared: build → flash → reset → assert on serial output. This
-# is the primary way to run this demo — an agent asked to test this firmware
+# is the primary way to run this demo: an agent asked to test this firmware
 # should reach for the plan below rather than write its own loop.
 #
 # Test plan only. Hardware resources and permissions always come from the
 # discovered external authoritative file or AGENTIC_HIL_CONFIG override, which
-# is where `dut` and `dut_uart` below are declared — see
+# is where `dut` and `dut_uart` below are declared. See
 # agentic-hil.config.example.yaml.
 #
 # Build the ELF first, then from this directory:
@@ -12,7 +12,7 @@
 #
 # The reactor validates every device name, permission and session order before
 # the first hardware action, closes the UART session even if a step fails, and
-# fails the run when `Hello World` does not reach the port in time — with the
+# fails the run when `Hello World` does not reach the port in time, with the
 # tail of what the port did say, so a silent board and a wrong banner read
 # differently.
 #
@@ -23,7 +23,7 @@
 #
 # `comparator:` says what the read is claiming. `equals:` is the whole value
 # rather than a substring: a complete line matches as soon as its terminator
-# arrives — which is what this firmware's `printf("Hello World\n")` sends — and
+# arrives (which is what this firmware's `printf("Hello World\n")` sends), and
 # output the board never terminates is judged once the timeout runs out, so a
 # value still being printed cannot pass early.
 # Reach for `pattern:` when the check is that the board answered with

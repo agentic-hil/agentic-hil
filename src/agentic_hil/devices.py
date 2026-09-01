@@ -1,4 +1,4 @@
-"""Devices — what drives the DUT, and what the mutex locks.
+"""Devices: what drives the DUT, and what the mutex locks.
 
 The DUT is what a test *examines*; it holds nothing and locks nothing. A device
 is what *reaches* it: the debug probe, the serial line, the CAN adapter, and
@@ -6,14 +6,14 @@ whatever comes after them. Everything those three have in common lives here
 instead of once per backend:
 
 **One identity, derived from hardware.** ``lock_key`` is the name the machine-wide
-mutex locks, and it is built from what the config says about the *unit* — a
-``resource_id``, a probe serial, a serial device, an adapter and channel — never
+mutex locks, and it is built from what the config says about the *unit* (a
+``resource_id``, a probe serial, a serial device, an adapter and channel), never
 from the name of the config entry. Two entries describing one physical unit
 therefore produce one key and collapse to one lock, which is the whole point: a
 board reachable as ``dut_uart`` and as ``bootloader_uart`` is still one board.
 Case follows what the component *is*, not what the host happens to do with it:
 opaque hardware ids fold identically everywhere and path-like values fold as
-their own filesystem does — see ``types.fold_hardware_id`` and
+their own filesystem does. See ``types.fold_hardware_id`` and
 ``types.fold_device_path``, which say why that distinction is load-bearing.
 
 **One mutex.** ``Device.acquire`` / ``DeviceSet.acquire`` are the only way a
@@ -62,19 +62,19 @@ UNIDENTIFIED_DEBUGGER_WARNING = (
 # serial port falls back to a name that moves the moment a second adapter is
 # attached. Named once for the same reason as above.
 VOLATILE_SERIAL_DEVICE_WARNING = (
-    "This COM port names no serial_number and no resource_id, so its identity is the kernel name in `device` "
-    "— and a kernel name is an enumeration order, not hardware: attaching a second adapter can hand this "
+    "This COM port names no serial_number and no resource_id, so its identity is the kernel name in `device`, "
+    "and a kernel name is an enumeration order, not hardware: attaching a second adapter can hand this "
     "entry another board, at which point the lock protects a name rather than a board and nothing refuses "
     "the wrong one. Run `agentic-hil adopt-hardware` to record the port's serial_number (and, on Linux, its "
     "/dev/serial/by-id/... name), or give the entry the resource_id its probe already carries. An adapter "
-    "that publishes no serial at all — the cheap CH340 clones — can still name `vid`/`pid`, which refuses at "
+    "that publishes no serial at all (the cheap CH340 clones) can still name `vid`/`pid`, which refuses at "
     "least a different kind of adapter under this name."
 )
 
 # The middle ground the vid/pid keys create: an entry that names a device *type*
 # and no unit. Weaker than the two warnings above rather than a variant of them,
-# because half the problem is genuinely solved — a CH340 answering to a name
-# written for an ST-Link is refused at open — and the other half provably cannot
+# because half the problem is genuinely solved (a CH340 answering to a name
+# written for an ST-Link is refused at open), and the other half provably cannot
 # be, since two identical adapters publish identical ids.
 TYPE_ONLY_SERIAL_DEVICE_WARNING = (
     "This COM port is identified by `vid`/`pid` and a kernel name: the type check refuses a different kind of "
@@ -132,14 +132,14 @@ class Device:
     def lock_keys(self) -> tuple[str, ...]:
         """Every machine-wide name that must be held to hold this unit.
 
-        ``lock_key`` is the one canonical identity — what a set dedups on, what a
+        ``lock_key`` is the one canonical identity: what a set dedups on, what a
         refusal names, what config validation mirrors. This is the set the mutex
         actually takes, and for most devices it is just that one key. It is more
         than one only where a single physical unit answers to two names that no
         other owner can be made to agree on from its own side: a debugger known by
         both an operator ``resource_id`` and a probe serial, so that a first
-        `init` in another workspace — which can derive the serial from enumeration
-        but not the operator's alias — still collides on the serial, and an
+        `init` in another workspace (which can derive the serial from enumeration
+        but not the operator's alias) still collides on the serial, and an
         executable-identified debugger, which must also hold the legacy
         ``probe:<path>`` an unupgraded process or a raw caller still takes. See
         ``DebuggerDevice.lock_keys``."""
@@ -173,7 +173,7 @@ class Device:
         """Take this device machine-wide. True when this call newly took a key.
 
         Every name in ``lock_keys`` goes into one all-or-nothing acquire, so a
-        unit with a second exclusion key is taken whole or not at all — the same
+        unit with a second exclusion key is taken whole or not at all: the same
         property ``DeviceSet.acquire`` gives a declared set, here for one device."""
         return bool(bench.acquire(list(self.lock_keys), wait_s=wait_s))
 
@@ -241,7 +241,7 @@ class DebuggerDevice(Device):
 
     Identity prefers the operator-declared ``resource_id`` (the only field that
     can say "these two entries are one unit"), then the probe serial. The
-    remaining fallbacks name a toolchain, not a board — see
+    remaining fallbacks name a toolchain, not a board. See
     ``identity_warning``."""
 
     kind: ClassVar[str] = "debugger"
@@ -302,7 +302,7 @@ class DebuggerDevice(Device):
         first `init` in another workspace cannot know it. What that workspace
         *can* derive, from enumerating the attached ST-Link, is the probe serial.
         A debugger that carries both therefore holds both, so the two workspaces
-        collide on the serial even though only one of them knows the alias —
+        collide on the serial even though only one of them knows the alias:
         without it a run here holding ``physical:<resource_id>`` and a bootstrap
         read there taking ``probe:<serial>`` would each believe it had the probe.
 
@@ -362,7 +362,7 @@ class UartDevice(Device):
 
     Identity prefers the operator-declared ``resource_id``, then the adapter's
     own USB serial, and falls back to the device name only when the entry says
-    nothing about hardware — see ``identity_warning`` for why that fallback is a
+    nothing about hardware. See ``identity_warning`` for why that fallback is a
     hazard rather than a default."""
 
     kind: ClassVar[str] = "uart"
@@ -392,15 +392,15 @@ class UartDevice(Device):
             #
             # Its own prefix rather than the probe's. One ST-Link is a debug
             # probe and a virtual COM port carrying one serial, and the two are
-            # independently usable — flashing while watching the UART is the
-            # normal shape of a HIL run — so collapsing `probe:<serial>` and this
+            # independently usable (flashing while watching the UART is the
+            # normal shape of a HIL run), so collapsing `probe:<serial>` and this
             # key on the strength of an equal serial would deadlock every
             # single-board bench. Saying that two entries *are* one unit stays
             # what it has always been: an equal `resource_id`, which folds them
             # both into `physical:`.
             #
             # An adapter exposing two ports under one serial does over-collapse
-            # here — two independent lines, one lock. That is the direction this
+            # here: two independent lines, one lock. That is the direction this
             # repository already chose for hardware identity (see
             # types.fold_hardware_id): an over-collapse costs concurrency and
             # announces itself as a wait naming its holder, while an
@@ -416,7 +416,7 @@ class UartDevice(Device):
 
         Every value is the name of the key (or keys) that carries the identity,
         strongest first, so the answer is something an operator can go and read.
-        ``vid_pid`` — or ``vid``/``pid`` alone, when only one is set — is the
+        ``vid_pid`` (or ``vid``/``pid`` alone, when only one is set) is the
         honest name for the type check: it says the entry names a kind of
         adapter and not a unit, which is exactly what those keys are.
 
@@ -432,8 +432,8 @@ class UartDevice(Device):
 
         A ``/dev/serial/by-id/...`` name is exempt: udev builds it out of the
         vendor, the product and the device's own serial, so a lock key derived
-        from it already follows the board. Every other device name — ``COM7``,
-        ``/dev/ttyACM0`` — is an enumeration order.
+        from it already follows the board. Every other device name (``COM7``,
+        ``/dev/ttyACM0``) is an enumeration order.
 
         The key is deliberately *not* rewritten to the hardware behind such a
         name. A lock key is a pure function of the configuration, asked on hosts
@@ -445,7 +445,7 @@ class UartDevice(Device):
         An entry identified by `vid`/`pid` is not silent and not sound either:
         it names a type, the lock still follows the kernel name, and saying so is
         a different sentence rather than the same one. A `serial_number` without
-        them is complete and warns about nothing — the serial is the anchor and
+        them is complete and warns about nothing: the serial is the anchor and
         the ids only narrow it."""
         if com_port_carries_hardware_identity(self.port):
             return None
@@ -502,7 +502,7 @@ class DeviceSet:
         for device in devices:
             # Collapsed on the primary key, which is what the mutex dedups on and
             # is identical for two entries naming one unit. When both carry that
-            # key the richer identity is retained — a probe and its virtual COM
+            # key the richer identity is retained: a probe and its virtual COM
             # port share a `resource_id`, but only the probe half also names the
             # serial, and dropping it would leave the collapsed unit locking one
             # name where its two entries between them name two. A
@@ -537,7 +537,7 @@ class DeviceSet:
         The whole set goes into one ``BenchMutex.acquire`` on purpose. That is
         where the mechanism lives: it walks the keys in sorted order under one
         deadline and unwinds everything it already took when one of them is busy.
-        Taking them here one device at a time would rebuild both, worse — and a
+        Taking them here one device at a time would rebuild both, worse, and a
         partially acquired set is exactly what must never escape."""
         self.require_lockable()
         return bench.acquire(self.lock_keys, wait_s=wait_s)

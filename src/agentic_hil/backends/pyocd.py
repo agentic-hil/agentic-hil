@@ -82,7 +82,7 @@ _TARGET_TYPE_NAME_CHARS = frozenset(string.ascii_letters + string.digits + "_")
 # and from pyocd/board/board.py, not from memory: 0.45.1 emits "Target type
 # <name> not recognized. Use 'pyocd list --targets' to see currently available
 # target types. See <https://pyocd.io/docs/target_support.html> for how to
-# install additional target support." — which none of the first three phrases
+# install additional target support.", which none of the first three phrases
 # matched, so the whole remediation was unreachable on the one message that
 # should produce it.
 #
@@ -231,8 +231,8 @@ class PyOCDBackend:
         may grant without granting probe discovery.
 
         `pyocd json --probes --no-config` enumerates USB probes and never
-        connects to a target, so every failure of it — including the timeout,
-        whose child spawn_command reaped before returning — is a failed call
+        connects to a target, so every failure of it (including the timeout,
+        whose child spawn_command reaped before returning) is a failed call
         with the bench untouched, and carries the markers that say so."""
         resolved = self._resolve_executable()
         if not resolved["ok"]:
@@ -469,9 +469,9 @@ class PyOCDBackend:
         Three answers, and keeping them apart is the whole point. `unsupported`
         is a fact about this host: pyOCD enumerated its target types and the
         configured one is not among them, so no flash can work and the pack
-        command is the fix. `undetermined` means this host could not answer —
-        pyOCD is not installed, the enumeration failed, the output was not
-        readable — which says nothing about the configuration and must not turn
+        command is the fix. `undetermined` means this host could not answer
+        (pyOCD is not installed, the enumeration failed, the output was not
+        readable), which says nothing about the configuration and must not turn
         a healthy `doctor` red. A check that conflated the two would fail every
         bench that has no toolchain installed yet, and `setup` rolls back on a
         red `doctor`.
@@ -563,7 +563,7 @@ class PyOCDBackend:
 
         pyOCD reports a bad target type as prose on stderr and exits 1 like every
         other error, so the classifier above has to match text, and text changes
-        between releases — it already did, which is how this stayed invisible.
+        between releases: it already did, which is how this stayed invisible.
         `pyocd json --targets` answers the same question in a machine-readable
         form, so a failure nothing else explains is checked against it once.
 
@@ -732,7 +732,7 @@ class PyOCDBackend:
         two different values can select one board. Enumerating and then passing
         the full UID is the only way a configured name means one probe.
 
-        Config load cannot do this — it must work with no hardware attached —
+        Config load cannot do this (it must work with no hardware attached),
         so it happens here, once per bound probe, before anything is driven.
 
         Enumerating also lets this catch what config load provably cannot: two
@@ -895,7 +895,7 @@ class PyOCDBackend:
             # or could not open one is the report that the channel never existed;
             # an unresolvable target type is refused while the session is being
             # built, before anything is driven; and a connect sequence pyOCD says
-            # failed — no ACK, not responding, unable to connect — never brought
+            # failed (no ACK, not responding, unable to connect) never brought
             # a core under debug control. A failed call over a channel that never
             # carried anything must refuse, not quarantine. All
             # three are pyOCD's own words about its own run, which is what makes

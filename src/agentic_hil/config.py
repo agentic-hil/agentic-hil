@@ -122,7 +122,7 @@ def config_digest(data: bytes) -> str:
 
     The content and nothing else. A modification time is the cheaper comparison
     and it is wrong in both directions here: a file rewritten with the same
-    bytes — a `git checkout`, an editor's save-on-close, a re-run of `init` — did
+    bytes (a `git checkout`, an editor's save-on-close, a re-run of `init`) did
     not change the policy and must not be reported as if it had, and two writes
     inside one timestamp tick are invisible to it, on filesystems whose
     granularity is a whole second or two. A hash answers the only question that
@@ -179,8 +179,8 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
     """Every load-blocking check that is a pure function of the document.
 
     The startup loader's first half. A schema-valid file can still be a file no
-    server can load — ``workspace_root: relative``, two debuggers resolving to
-    one probe, a ``resource_id`` spelled in two cases — and each of those is
+    server can load (``workspace_root: relative``, two debuggers resolving to
+    one probe, a ``resource_id`` spelled in two cases), and each of those is
     decidable from the text with no question put to the machine.
 
     Excluded, deliberately: everything that asks the machine rather than the
@@ -222,7 +222,7 @@ def validate_config_document(raw: Any, config_path: str) -> ValidatedDocument:
     validate_debuggers(debuggers)
     # After parsing rather than on the raw mapping, unlike the version 2 read
     # permission ratchet: what identifies a port is decided by normalised values
-    # — `vid: "0483"` and `vid: 1155` are one fact — so the check reads the parsed
+    # (`vid: "0483"` and `vid: 1155` are one fact), so the check reads the parsed
     # entry and cannot disagree with what the server goes on to use.
     validate_com_port_identity_declarations(com_ports, config_path)
     reject_unidentified_com_ports(com_ports, config_path, config_version)
@@ -366,8 +366,8 @@ def assembled_config(raw: Any, document: ValidatedDocument, resolved_config_path
 def bind_debugger(config: AgenticHILConfig, debugger_id: str) -> AgenticHILConfig:
     """Return the config bound to one named probe.
 
-    Everything downstream — the backend, the coordination resource, the audit
-    report — acts on a single probe. Resolving the name here once means a wrong
+    Everything downstream (the backend, the coordination resource, the audit
+    report) acts on a single probe. Resolving the name here once means a wrong
     or unknown name fails before any hardware is touched."""
     debugger = config.debuggers.get(debugger_id)
     if debugger is None:
@@ -431,7 +431,7 @@ def load_authoritative_config(expected_workspace: str | Path | None = None) -> A
 def validate_pinned_probe_ownership(config: AgenticHILConfig) -> AgenticHILConfig:
     # Re-run the probe rules on the pinned config. Pinning rewrites executables
     # and script paths, not probe_id or resource_id, so today this cannot find
-    # anything validate_debuggers did not already reject at parse time — it is
+    # anything validate_debuggers did not already reject at parse time: it is
     # here so that a future pinning step which does touch those fields cannot
     # quietly hand two names one probe.
     validate_debuggers(config.debuggers, after_pinning=True)
@@ -467,13 +467,13 @@ def validate_resource_ids(
     resolved from the text: either it is a typo for one unit, or the operator
     is distinguishing two units by case alone. A lock key folds an opaque
     hardware id on every platform (``types.fold_hardware_id``), so the second
-    reading would quietly become the first — two boards sharing one lock,
+    reading would quietly become the first: two boards sharing one lock,
     serialised against each other with nothing anywhere saying why. Refuse the
     pair and let the operator say which they meant: identical if it is one unit,
     distinct by more than case if it is two.
 
-    Pinning cannot introduce such a pair — it rewrites executables and script
-    paths, never resource_id — so unlike validate_debuggers this runs once."""
+    Pinning cannot introduce such a pair (it rewrites executables and script
+    paths, never resource_id), so unlike validate_debuggers this runs once."""
     first_spelling: dict[str, tuple[str, str]] = {}
     entries: list[tuple[str, str | None]] = [(f"debuggers.{name}", entry.resource_id) for name, entry in debuggers.items()]
     entries += [(f"com_ports.{name}", entry.resource_id) for name, entry in com_ports.items()]
@@ -504,7 +504,7 @@ def validate_debuggers(debuggers: dict[str, DebuggerConfig], *, after_pinning: b
     `mcp-stdio` and every test load a config with no probe attached. It rejects
     what is decidable from the text alone. Whether a selector actually resolves
     to exactly one connected probe is enforced at the hardware boundary, where
-    enumeration is possible — see PyOCDBackend._resolve_probe_selector."""
+    enumeration is possible. See PyOCDBackend._resolve_probe_selector."""
     # probe_id decides the hardware, so it is checked on its own. The identity
     # pass below cannot stand in for this: debugger_resource_identity() prefers
     # resource_id and never looks at probe_id in that branch, so two entries
@@ -660,8 +660,8 @@ def ensure_safe_state_root() -> list[str]:
     """Create the default state directory, or fail here rather than later.
 
     ``init`` runs this before it writes anything, so a state root that cannot be
-    created — a component that is a file, a symlinked chain, a device that is not
-    there — is reported while nothing has been changed, instead of at the first
+    created (a component that is a file, a symlinked chain, a device that is not
+    there) is reported while nothing has been changed, instead of at the first
     lease of the first run. It changes no permissions on anything that already
     exists, and returns the list of changes it made for the caller to report:
     always empty, kept as a list because the caller publishes the field."""
@@ -722,7 +722,7 @@ def validated_state_root_paths(value: str, workspace: Path, config_path: str) ->
     """What the two configured roots say about each other, from the text alone.
 
     Split from ``validated_state_root`` so ``validate_config_document`` can run it
-    without creating a directory — the answer is the same on every host, which is
+    without creating a directory: the answer is the same on every host, which is
     what makes it safe to run from a document-only check."""
     requested = Path(value).expanduser()
     if not requested.is_absolute():
@@ -739,7 +739,7 @@ def validated_state_root(value: str, workspace: Path, config_path: str) -> Path:
     Reachability and writability, which is function rather than trust: a server
     that cannot create this directory fails later, at the first lease or report,
     somewhere with much less context than here. Who else on the machine could
-    write it is not asked — the operator's own processes always can, so an answer
+    write it is not asked: the operator's own processes always can, so an answer
     to that question never bound anything."""
     lexical = validated_state_root_paths(value, workspace, config_path)
     return safe_writable_directory(lexical, field="state_root", config_path=config_path)
@@ -809,7 +809,7 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
 
         configured = find_stm32_programmer_cli()
     # Everything else resolves as it always did, including the entry an operator
-    # has typed but not yet given an executable — that is the documented first
+    # has typed but not yet given an executable: that is the documented first
     # edit of `init`, plug the board in, adopt. What changed is when the answer
     # is read: whether this entry drives hardware is decided from the *pinned*
     # executable, so an entry that acquired a toolchain here is validated whole
@@ -822,7 +822,7 @@ def pin_one_debugger(config: AgenticHILConfig, debugger: DebuggerConfig, field_p
     # `doctor` uses, so the set that is checked and the set that was validated
     # stay one set. Not by the mutation grants: under version 2 reading needs no
     # grant at all, so an entry with allow_probe, allow_flash and allow_reset all
-    # false still runs `probe_target` — a real OpenOCD, started on scripts nothing
+    # false still runs `probe_target`: a real OpenOCD, started on scripts nothing
     # had looked at, resolved out of OPENOCD_SCRIPTS and the per-user script
     # directories. "Nothing can drive this entry" has to mean nothing, reads
     # included, before validation may be skipped.
@@ -862,7 +862,7 @@ def revalidate_permission_dependent_pinning(config: AgenticHILConfig) -> Agentic
     check when it is loaded, and drivable again the moment wider permissions from
     another document are put behind it. Running this on the object that is about
     to be enforced is what keeps "this entry is exempt from validation" and
-    "nothing can drive this entry" one set — the rule ``pin_one_debugger``
+    "nothing can drive this entry" one set: the rule ``pin_one_debugger``
     states and the only one that makes the exemption safe.
 
     Raises ``ConfigError`` exactly as loading would, so a composition that cannot
@@ -906,7 +906,7 @@ def pin_configured_executables(config: AgenticHILConfig) -> AgenticHILConfig:
     }
     # Every named debugger MUST be pinned and validated: a named entry could
     # otherwise point a backend at an unvalidated executable. An entry whose
-    # toolchain does not resolve is not a load failure — a generated
+    # toolchain does not resolve is not a load failure: a generated
     # configuration grants everything it can, so that would refuse to
     # load on any host that has not installed the backend yet. It becomes the
     # placeholder instead: `doctor` says the check was skipped and names why, and
@@ -976,8 +976,8 @@ def configured_executable(
 
 # What pinning writes in place of an executable that resolved to nothing and did
 # not have to. The name is the record: a path with this prefix is not a toolchain
-# somebody configured, and `executable_is_disabled` is how a later reader — a
-# `doctor` run, `debugger_is_placeholder` — knows the difference on a config that
+# somebody configured, and `executable_is_disabled` is how a later reader (a
+# `doctor` run, `debugger_is_placeholder`) knows the difference on a config that
 # has already been pinned.
 DISABLED_EXECUTABLE_PREFIX = ".agentic-hil-disabled-"
 
@@ -1185,7 +1185,7 @@ def safe_writable_directory(directory: str | Path, *, field: str, config_path: s
     """``safe_directory``, plus proof that this process can create inside it.
 
     ``safe_directory`` opens read-only and lets an existing directory through
-    untouched — ``mkdir`` is suppressed on ``FileExistsError`` on POSIX and
+    untouched: ``mkdir`` is suppressed on ``FileExistsError`` on POSIX and
     skipped entirely on Windows, and the Windows handle asks for list and
     read-attribute access only. So a directory that already exists and cannot be
     written loads clean and fails at the first lease, report or log write,
@@ -1346,7 +1346,7 @@ def secure_atomic_write_bytes(file_path: str | Path, data: bytes) -> None:
     """Atomically replace one user file with exact owner-only bytes.
 
     The byte twin of ``secure_atomic_write_text``, for a rollback that has to put
-    the original back exactly — bytes that are not UTF-8 text included, which a
+    the original back exactly: bytes that are not UTF-8 text included, which a
     text write cannot express and which ``agentic-hil init --force`` must restore
     rather than delete when a regenerated file fails its final validation."""
     path = absolute_without_symlinks(Path(file_path))
@@ -1408,14 +1408,14 @@ def secure_user_file_lock(file_path: str | Path) -> Iterator[None]:
         # Validate the object created/opened by safe_file_lock before trusting the
         # lock: it must still be the single-link regular file that was opened.
         # Windows opens this sidecar without read sharing, so reopening it there
-        # fails even though the lock itself is valid — and ``safe_file_lock`` has
+        # fails even though the lock itself is valid, and ``safe_file_lock`` has
         # already validated the handle it holds, so nothing is left to re-check.
         if os.name != "nt":
             secure_optional_read_text(lock_path)
         yield
 
 
-# The skeleton every generated configuration starts from — `agentic-hil init` on
+# The skeleton every generated configuration starts from: `agentic-hil init` on
 # the CLI and the one-time agent provisioning path over MCP write the same file.
 # It lives here rather than beside either caller because a second skeleton is a
 # second set of defaults, and defaults are the thing this file exists to keep
@@ -1441,7 +1441,7 @@ DEFAULT_CONFIG_TEMPLATE = """# Version 3, which is two things.
 #
 # And version 3's own rule: every com_ports entry below must say which hardware
 # it is. A `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device
-# name is one; an entry with none of those must declare `identity_source` —
+# name is one; an entry with none of those must declare `identity_source`:
 # `vid_pid` for an adapter that publishes USB ids but no serial number, `device`
 # to state deliberately that a kernel name like COM7 or /dev/ttyACM0 is all this
 # port has. That name is an enumeration order rather than a board, so attaching a
@@ -1453,14 +1453,14 @@ version: 3
 # What may be done to this project, beside its hardware. All start true, so an
 # agent can describe the bench, regenerate it from hardware discovery, clear an
 # incident nothing physical was part of, narrow any permission here on your
-# say-so, and lift this installation onto the current release — without you
+# say-so, and lift this installation onto the current release, without you
 # opening YAML first.
 #
 # Over MCP an agent can only ever narrow. `project_config_set` writes `false`
 # into a permission and no other value, so every one of these can go from true to
 # false and none of them back through that call.
 # allow_config_permissions_write is therefore the last one it can close: after
-# that it cannot change any permission again. Regenerating is yours —
+# that it cannot change any permission again. Regenerating is yours:
 # `agentic-hil init --force` writes this file again at the defaults below.
 #
 # allow_recover is not about this file. It lets an agent clear a quarantine over
@@ -1490,7 +1490,7 @@ target:
   controller: "unknown-controller"
 
 # Every debug probe is a named entry, and each carries its own permissions,
-# scoped to that probe alone — narrowing one board does not narrow a second that
+# scoped to that probe alone: narrowing one board does not narrow a second that
 # shares this file. Test-reactor plan steps address a probe by that name. The MCP
 # tools drive one probe: with exactly one entry it is bound automatically, and
 # with several they refuse rather than pick a board, so multi-board work runs
@@ -1526,8 +1526,8 @@ debuggers:
       # they shipped true the two rules collided and a freshly generated bench
       # could not flash at all.
       #
-      # Nothing is withheld by this. Neither flag grants a tool — there is no MCP
-      # call for raw debugger commands and none for mass erase — so turning
+      # Nothing is withheld by this. Neither flag grants a tool (there is no MCP
+      # call for raw debugger commands and none for mass erase), so turning
       # either on subtracts flashing and adds nothing. A mass erase also cannot
       # be taken back: whatever was on the board is gone and no later setting
       # returns it. Set one true only if something outside these tools needs the
@@ -1543,8 +1543,8 @@ debug:
 
 artifacts:
   # "." is the whole workspace, recursively: firmware may be flashed from any
-  # directory under workspace_root. Build layouts differ per toolchain —
-  # cmake-build-debug, .pio/build/<env>, out, Debug, zephyr/build — and
+  # directory under workspace_root. Build layouts differ per toolchain
+  # (cmake-build-debug, .pio/build/<env>, out, Debug, zephyr/build), and
   # enumerating them here restricts a project against its own operator, not
   # against an attacker: containment in workspace_root, the extension list and
   # the format check are what actually refuse a foreign artifact, and none of
@@ -1581,7 +1581,7 @@ logs:
 # quarantines. "off" always defers to the operator. "readonly" may reap
 # leftover debugger processes and re-read the probe, which touches nothing
 # physical. "reset_halt" may additionally drive a reset-into-halt, which is
-# what settles an unconfirmed flash or reset without a person — set
+# what settles an unconfirmed flash or reset without a person. Set
 # "readonly" instead if anything on this bench reacts to a target reset.
 recovery:
   auto_recover: "reset_halt"
@@ -1610,7 +1610,7 @@ recovery:
 # Deleting the configuration out of band therefore lets an agent generate a fresh
 # one. Under the closed default that was a downgrade; under this one it restores
 # what a generation grants, and the honest thing to say about it is that an agent
-# with a shell was never held back by the file's contents — the deny rules
+# with a shell was never held back by the file's contents: the deny rules
 # `setup` writes into the agent host are what keep its own file tools off this
 # path, and they are untouched. What the generation still cannot do is produce
 # content of its own choosing: it is this fixed skeleton filled from hardware
@@ -1619,8 +1619,8 @@ recovery:
 # surface deletes or moves a configuration.
 #
 # An external record was tried and removed. It could not be a place the same OS
-# user cannot write — that needs a second principal, the compromise 0018 refused
-# — so against an agent with a shell it was a second thing to delete rather than
+# user cannot write (that needs a second principal, the compromise 0018 refused),
+# so against an agent with a shell it was a second thing to delete rather than
 # a boundary, while it moved part of the effective policy out of the file an
 # operator reads and blocked an operator who deliberately deletes a
 # configuration to start over.
@@ -1643,7 +1643,7 @@ def generated_permissions(section: str) -> dict[str, bool]:
     behind it, so every read of either is a deny site, and leaving them true only
     withheld flashing.
 
-    Every generation path goes through here — the skeleton above states the same
+    Every generation path goes through here: the skeleton above states the same
     values in YAML, and `bootstrap` and `grant_every_permission` ask this rather
     than each deciding for itself. That is deliberate: the defect this closes was
     three paths that agreed by coincidence until one of them was edited."""
@@ -1652,12 +1652,12 @@ def generated_permissions(section: str) -> dict[str, bool]:
 # a regenerated one carries every one over: whichever list is short is the one
 # that hands out a grant nobody set or drops one somebody did. Three of them are
 # about this file; `allow_recover` is about this bench's incidents and
-# `allow_upgrade` about the installation serving it — both here because they are
+# `allow_upgrade` about the installation serving it: both here because they are
 # scoped to the project rather than to a device.
 GENERATED_PROJECT_PERMISSIONS = ("allow_config_write", "allow_config_description_write", "allow_config_permissions_write", "allow_recover", "allow_upgrade")
 # The two grants the schema puts directly on a fixed section rather than inside a
 # `permissions` block. A generation writes both true, so they belong in every
-# list that claims to say what a generated configuration grants — and in the key
+# list that claims to say what a generated configuration grants, and in the key
 # model, or an operator could take them back only by opening the file.
 GENERATED_SECTION_PERMISSIONS = {"debug": ("allow_all_symbols",), "artifacts": ("allow_upload",)}
 
@@ -1670,7 +1670,7 @@ def permission_summary(config: AgenticHILConfig) -> JsonObject:
     configuration was removed underneath it still enforces what it loaded, and
     this is the only shape in which an operator can be shown what that is.
 
-    Complete, including the two section-level grants — a summary that leaves a
+    Complete, including the two section-level grants: a summary that leaves a
     grant out is one an operator reads as "not granted".
 
     The version 1 read grants are in it whenever they decide anything.
@@ -1678,7 +1678,7 @@ def permission_summary(config: AgenticHILConfig) -> JsonObject:
     file is version 2, where there is no read permission at all; a version 1 file
     still gates probing and COM/CAN reads on ``allow_probe``/``allow_read``, so a
     summary built from the generation lists alone silently dropped every read
-    grant a legacy bench runs under — including from ``configreload``'s
+    grant a legacy bench runs under, including from ``configreload``'s
     permission comparison, which then reported two documents as agreeing while
     one of them granted a read the other refused. They are omitted under version
     2 rather than reported false, because there the key is refused by the schema
@@ -1797,7 +1797,7 @@ def provisionable_state_root(workspace: Path) -> Path:
 def grant_every_permission(document: JsonObject) -> JsonObject:
     """Set every permission in a generated document to its generated value.
 
-    Which is true for all but the `EXCLUSIVE_FLASH_PERMISSIONS` pair — see
+    Which is true for all but the `EXCLUSIVE_FLASH_PERMISSIONS` pair. See
     `generated_permissions`, which is where that is decided for every path that
     generates. This function used to write `True` across the board and so had its
     own opinion; that is what let the skeleton be corrected without the two paths
@@ -1840,13 +1840,13 @@ def carry_over_permissions(document: JsonObject, existing: AgenticHILConfig) -> 
     caller rather than dropped in silence.
 
     ``existing`` is the configuration its caller is bound to, which on the MCP
-    path is the one that server parsed at startup — not a fresh read of the file.
+    path is the one that server parsed at startup, not a fresh read of the file.
     Servers do not reload, by decision, so a `project_config_set` narrowing made
     since startup is on disk and not in this object, and a regeneration in that
     same session puts the loaded grant back. That is accepted: regeneration is
     creation and belongs to the operator, and the ratchet it is not
     bound by is the MCP *write* path. Restarting the server onto the narrowed file
-    is what makes the narrowing bind here too — and it is the same restart a
+    is what makes the narrowing bind here too, and it is the same restart a
     `config_stale` result already asks for.
 
     So this is not a promise that regeneration cannot widen. It is that the values
@@ -1873,21 +1873,21 @@ def carry_over_permissions(document: JsonObject, existing: AgenticHILConfig) -> 
         artifacts["allow_upload"] = existing.artifacts.allow_upload
         # Where firmware may be flashed from belongs to the operator exactly as a
         # grant does. The skeleton names the whole workspace, so a regeneration
-        # that kept the skeleton's value would widen a file that had narrowed it
-        # — silently, on a path a person opened for a hardware refresh. Config
+        # that kept the skeleton's value would widen a file that had narrowed it,
+        # silently, on a path a person opened for a hardware refresh. Config
         # load pins these to absolute paths; write them back as they were read.
         artifacts["allowed_roots"] = [display_path(existing, root) for root in existing.artifacts.allowed_roots]
         # And which formats may reach a backend, for the same reason and more
         # sharply: with the roots naming the whole workspace, the extension list
         # is one of the checks that still refuse a foreign artifact. A bench
         # narrowed to [".bin"] would come back out of a hardware refresh
-        # accepting .elf and .hex again — three format parsers where its owner
+        # accepting .elf and .hex again: three format parsers where its owner
         # had permitted one.
         #
         # upload_directory and max_upload_size_mb are deliberately not here.
         # They place a directory and size a payload rather than say what may be
         # flashed, and regeneration re-derives placement from the environment on
-        # purpose — state_root above is recomputed the same way. debug carries
+        # purpose: state_root above is recomputed the same way. debug carries
         # allowed_symbols and leaves max_dump_size_bytes beside it alone; this
         # is that line, in the section next to it.
         artifacts["allowed_extensions"] = list(existing.artifacts.allowed_extensions)
@@ -1927,8 +1927,8 @@ def untrusted_launcher_directory(info: os.stat_result, *, final: bool, trusted_u
     ``umask 002`` with per-user groups: ``~`` and ``~/.local`` at ``0775`` were
     enough to have `mcp-config` reject every candidate and then recommend the
     user-level tool installer that had produced exactly that layout. The rule
-    could only ever defend against a different account on the same machine —
-    never a guarantee of this project — and it could not defend against the
+    could only ever defend against a different account on the same machine
+    (never a guarantee of this project), and it could not defend against the
     operator's own processes, which own these directories and can rewrite them
     regardless of their mode. Windows dropped the equivalent ACL walk in 0.8.0
     and holds the chain open instead; this is that line, on POSIX.
@@ -1992,7 +1992,7 @@ def trusted_persistent_executable(
         # delete of any component for the duration, which is what stops the
         # command that gets written into an agent's configuration from being a
         # different object than the one that was checked. Who else the ACLs let
-        # write it is no longer asked — that check was removed in 0.8.0.
+        # write it is no longer asked: that check was removed in 0.8.0.
         handles = _windows_hold_directory_chain(path.parent)
         try:
             with safe_open_binary(path):
@@ -2842,7 +2842,7 @@ def debugger_resource_identity(debugger: DebuggerConfig) -> str:
     if debugger.executable:
         # `probe-exe:`, not `probe:`: the executable is the one path-like
         # component, and it keeps its own prefix so `probe:` stays a hardware id
-        # that folds identically raw or derived — see DebuggerDevice.lock_key.
+        # that folds identically raw or derived. See DebuggerDevice.lock_key.
         return f"probe-exe:{fold_device_path(debugger.executable)}"
     return f"probe:{fold_hardware_id(debugger.type)}"
 
@@ -2978,7 +2978,7 @@ def debugger_is_starter_entry(debugger: DebuggerConfig) -> bool:
 
     Untouched has to mean untouched, identity included. The predicate once asked
     only about the type, the two script names and the absent executable, and
-    called an entry with `probe_id: "066AFF49..."` in it a starter — so a bench
+    called an entry with `probe_id: "066AFF49..."` in it a starter, so a bench
     somebody had identified, on a host with OpenOCD on PATH, resolved no
     executable, took the disabled marker instead, and was skipped by `doctor` for
     looking untouched. An entry that names a board is not the shipped skeleton
@@ -2986,7 +2986,7 @@ def debugger_is_starter_entry(debugger: DebuggerConfig) -> bool:
     are validated with everything else's, each for what it is: a search name
     OpenOCD will resolve, or a path that has to exist outside the workspace.
 
-    An entry an operator has typed is outside this in the same way — `type:
+    An entry an operator has typed is outside this in the same way: `type:
     stlink` on the skeleton, the documented first edit of `init`, plug the board
     in, adopt, and its script fields are read by no backend at all.
     """
@@ -3052,7 +3052,7 @@ def debugger_drives_hardware(config: AgenticHILConfig, debugger: DebuggerConfig)
     """Whether this entry can reach a board: a toolchain behind it and a way in.
 
     The single answer config load and `doctor` share, so the set `doctor` checks
-    stays exactly the set config load validated — for OpenOCD that means its
+    stays exactly the set config load validated: for OpenOCD that means its
     scripts had to be absolute files outside the workspace. Asked of the pinned
     entry, because pinning is where an executable is resolved."""
     return debugger_can_reach_hardware(config, debugger) and not debugger_is_placeholder(debugger)
@@ -3133,7 +3133,7 @@ RESERVED_SHARE_NAMES = ("permissions", "provenance")
 # And the same argument for that walk's other name-driven arm. It reads any key
 # beginning with `allow_` as a grant, and suppresses that reading only one level
 # below a named section, where the schema says the keys are operator-chosen entry
-# ids. A share name is operator-chosen too, but it sits two levels down — so
+# ids. A share name is operator-chosen too, but it sits two levels down, so
 # `shares.allow_writes` would be collected as a grant whose value is the whole
 # share mapping, and the ratchet would be comparing a subtree against a boolean.
 # Teaching the walker about a third id level would be a second place that has to
@@ -3257,13 +3257,13 @@ REMOVED_SECTIONS: dict[str, tuple[str, JsonObject]] = {
     ),
     "debugger": (
         "The single top-level debugger block was removed. Every debug probe is now a named entry under debuggers.",
-        {"debugger": "debuggers.<name> — pick any name; test plans and tool calls address the probe by it"},
+        {"debugger": "debuggers.<name> (pick any name; test plans and tool calls address the probe by it)"},
     ),
     "devices": (
         "The devices block was removed. Debug probes, COM ports, and CAN buses are addressed by their own names.",
         {
-            "devices.<name>.debugger": "debuggers.<name> — the debugger name IS the routing key",
-            "devices.<name>.uart": "com_ports.<name> — test steps and tool calls name the port directly",
+            "devices.<name>.debugger": "debuggers.<name> (the debugger name IS the routing key)",
+            "devices.<name>.uart": "com_ports.<name> (test steps and tool calls name the port directly)",
             "devices.<name>.target": "debuggers.<name>.target",
         },
     ),
@@ -3352,7 +3352,7 @@ def reject_removed_keys(raw: JsonObject, config_path: str) -> None:
 
     Ignoring it silently would leave an operator believing a policy is still
     being selected by a line that nothing reads. 0.8.0 is unreleased, so no file
-    in the field carries this — which is exactly why the removal is free now."""
+    in the field carries this, which is exactly why the removal is free now."""
     for key, (summary, migration) in REMOVED_KEYS.items():
         if key in raw:
             raise ConfigError("config_invalid", summary, {"path": config_path, "field": key, "migration": migration})
@@ -3362,8 +3362,8 @@ def reject_empty_allowed_roots(raw: JsonObject, config_path: str) -> None:
     """Refuse an empty ``artifacts.allowed_roots``, because it reads both ways.
 
     An empty list is one obvious way to write "no restriction" and equally the
-    obvious way to write "nothing at all". Here it has always meant the second —
-    ``debug.allowed_symbols: []`` denies every symbol — so a reader who writes it
+    obvious way to write "nothing at all". Here it has always meant the second
+    (``debug.allowed_symbols: []`` denies every symbol), so a reader who writes it
     meaning the first gets the exact opposite in silence. There is one spelling
     for the whole workspace and this is not it; say so by name rather than let
     the two readings share a key."""
@@ -3449,7 +3449,7 @@ def validate_com_port_identity_declarations(com_ports: dict[str, ComPortConfig],
     identifies a port is decided by ``serial_number``, ``resource_id`` and
     ``vid``/``pid``, exactly as before, and this says out loud which of them the
     operator meant. So a declaration that disagrees with those keys is refused
-    rather than believed — `identity_source: serial_number` on an entry with no
+    rather than believed: `identity_source: serial_number` on an entry with no
     serial would otherwise be a file that satisfies version 3's requirement by
     asserting something untrue, which is worse than the warning it replaces.
 
@@ -3474,7 +3474,7 @@ def validate_com_port_identity_declarations(com_ports: dict[str, ComPortConfig],
                 "actual_identity_source": derived,
                 "migration": {
                     "declare": f"Set com_ports.{name}.identity_source to `{derived}`, which is what this entry's keys say.",
-                    "or_identify": f"Set the key you meant — `serial_number`, `resource_id`, or `vid` and `pid` — or run `{ADOPT_HARDWARE_COMMAND}` to fill it in from the attached adapter.",
+                    "or_identify": f"Set the key you meant (`serial_number`, `resource_id`, or `vid` and `pid`), or run `{ADOPT_HARDWARE_COMMAND}` to fill it in from the attached adapter.",
                     "allowed_values": list(COM_PORT_IDENTITY_SOURCES),
                 },
             },
@@ -3486,7 +3486,7 @@ def reject_unidentified_com_ports(com_ports: dict[str, ComPortConfig], config_pa
 
     The requirement version 3 adds, and the only one. `serial_number`, `vid` and
     `pid` have shipped beside `device` for a while, `adopt-hardware` and `init`
-    write them, and `doctor` warns about an entry carrying none of them — but a
+    write them, and `doctor` warns about an entry carrying none of them, but a
     warning is not a property of the file, and a bench nobody runs `doctor` on
     keeps identifying a board by an enumeration order. Under version 3 it is a
     property of the file.
@@ -3505,7 +3505,7 @@ def reject_unidentified_com_ports(com_ports: dict[str, ComPortConfig], config_pa
 
     Versions 1 and 2 are untouched: an entry with a bare `device:` loads there
     exactly as it always has, and moving a bench to version 3 is the operator's
-    edit — the same shape as version 2's read-permission removal."""
+    edit: the same shape as version 2's read-permission removal."""
     if version < IDENTIFIED_COM_PORT_CONFIG_VERSION:
         return
     for name, port in com_ports.items():
@@ -3538,7 +3538,7 @@ def reject_unidentified_com_ports(com_ports: dict[str, ComPortConfig], config_pa
                     ),
                     "order": (
                         f"That command loads this configuration, so run it while the file still says `version: "
-                        f"{READ_FREE_CONFIG_VERSION}` and set `version: {IDENTIFIED_COM_PORT_CONFIG_VERSION}` afterwards — the same one-edit migration "
+                        f"{READ_FREE_CONFIG_VERSION}` and set `version: {IDENTIFIED_COM_PORT_CONFIG_VERSION}` afterwards: the same one-edit migration "
                         f"version {READ_FREE_CONFIG_VERSION} needed."
                     ),
                     "by_hand": (
@@ -3607,8 +3607,8 @@ def positive_integer_config(value: Any, default_value: int, field: str) -> int:
 # operator transcribing hex into decimal by hand at exactly the moment they are
 # writing down which board a write may reach.
 #
-# The rule is one line and has no middle: a number in the file is decimal — the
-# spelling `adopt-hardware` writes — and a *quoted* value is hex, with or
+# The rule is one line and has no middle: a number in the file is decimal (the
+# spelling `adopt-hardware` writes), and a *quoted* value is hex, with or
 # without the `0x` marker. A file therefore cannot say `0483` unquoted and mean
 # 1155, and it does not have to: YAML would already read a leading zero as
 # something else. Both normalise to the integer here, so nothing downstream sees
@@ -3654,7 +3654,7 @@ def positive_timeout_config(value: Any, default_value: float, field: str) -> flo
     """A timeout the loader itself refuses at zero, not only the schema.
 
     The shipped schema says `exclusiveMinimum: 0`, and every documented load
-    path validates against it — but the bound has to hold where the value is
+    path validates against it, but the bound has to hold where the value is
     turned into the number a backend waits on, or it is a bound on the file
     rather than on the configuration. Zero is the case worth naming: it passes
     a `>= 0` check, reaches `communicate(timeout=...)` already expired, and

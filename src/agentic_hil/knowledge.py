@@ -68,7 +68,7 @@ PLAN_FEATURE_VERSION_KEY = "x-since-version"
 PLAN_ROUTE_KEYS: tuple[str, ...] = ("device", "debugger", "port_id", "bus_id")
 
 # The loaded configuration and the file it came from have come apart. Not a
-# refusal — every tool still works — but it is carried like one, because what a
+# refusal (every tool still works) but it is carried like one, because what a
 # caller has to do about it is the same kind of thing as a refusal: report it,
 # name the file, and let the operator decide.
 CONFIG_STALE_ERROR = "config_stale"
@@ -86,7 +86,7 @@ CONFIG_REOPEN_COMMAND = "agentic-hil init --force"
 # file to the generated defaults by rewriting it from hardware discovery, which on a
 # bench somebody grew is not a repair but a loss: baudrate, `resource_id`,
 # `state_root` and the artifact roots go with it. These two name one permission
-# and move that one. Both directions ship together on purpose — a command that
+# and move that one. Both directions ship together on purpose: a command that
 # only opened would be the next one-way street, in the other direction.
 CONFIG_GRANT_COMMAND = "agentic-hil grant"
 CONFIG_REVOKE_COMMAND = "agentic-hil revoke"
@@ -98,9 +98,9 @@ CONFIG_REVOKE_COMMAND = "agentic-hil revoke"
 # holds the bench, and what an operator does about that is find out whose it is.
 PERMISSION_CHANGE_IN_OPEN_RUN = "permission_change_in_open_run"
 
-# Both of these act on flash outside the path this server validates — a raw
+# Both of these act on flash outside the path this server validates (a raw
 # debugger command writes whatever it is given, a mass erase clears whatever a
-# flash has just written — so once either is allowed, a flash report's claim
+# flash has just written), so once either is allowed, a flash report's claim
 # about what is on the device is no longer one this server can stand behind.
 # That is what makes validated flashing and unrestricted debugger access
 # mutually exclusive policies (docs/security-design.md): while either of these is
@@ -125,14 +125,14 @@ PERMISSION_CHANGE_IN_OPEN_RUN = "permission_change_in_open_run"
 #
 # This tuple is the single source of truth for that. `config.py` derives the
 # generated value of every debugger permission from it, so the template, the
-# hardware-discovery path and `project_config_create` cannot drift apart again —
+# hardware-discovery path and `project_config_create` cannot drift apart again,
 # which is exactly how they came to disagree in the first place.
 EXCLUSIVE_FLASH_PERMISSIONS = ("allow_raw_debugger_commands", "allow_mass_erase")
 
 # `can_buses.<name>.listen_only: true` is the one configuration flag whose entire
 # value is that it is a proof rather than a preference, so the two ways it can
 # fail to be one are named separately. `unsupported` is settled
-# before the bus is touched — the adapter has no such mode on this host, so the
+# before the bus is touched: the adapter has no such mode on this host, so the
 # refusal is clean and `retry_safe`. `unconfirmed` is settled after: the adapter
 # was asked, was already on the bus by the time it could answer, and did not
 # confirm; it is closed again and the exposure named. Silently downgrading either
@@ -143,7 +143,7 @@ LISTEN_ONLY_UNCONFIRMED_ERROR = "can_listen_only_unconfirmed"
 # `permission_denied`, and the distinction is the whole point: permission is
 # about what this caller may do on a bus that can carry the frame, while this is
 # about a bus that was declared to carry none. So the mode is settled first and
-# `allow_write` never gets to speak — a bus is not made transmit-capable by
+# `allow_write` never gets to speak: a bus is not made transmit-capable by
 # granting a permission on it, and answering "denied" would have invited exactly
 # that fix. The two gates coexist in that order and only in that order.
 LISTEN_ONLY_MODE_ERROR = "can_listen_only_mode"
@@ -188,7 +188,7 @@ CAN_FD_FRAME_LENGTH_INVALID_ERROR = "can_fd_frame_length_invalid"
 # same reason as the one above: the open was refused by the operating system
 # before this session had a handle, so the port kept whatever the other holder is
 # doing with it and this bench was not touched. It also answers a question
-# `com_port_open_failed` cannot — that the remedy is a process on this host and
+# `com_port_open_failed` cannot: that the remedy is a process on this host and
 # not a cable, a driver or a configuration entry.
 COM_PORT_BUSY_ERROR = "com_port_busy"
 # What `hardware_recover` answers when the incident needs somebody at the bench
@@ -219,7 +219,7 @@ def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | 
 
     It gives the reason rather than restating the rule. "Mutually exclusive
     policies" on its own reads as an arbitrary interlock, and an operator who
-    takes it that way reaches for the flag it names — which is the one move that
+    takes it that way reaches for the flag it names, which is the one move that
     keeps flashing refused."""
     entry = f"debuggers.{debugger_id or '<name>'}.permissions.{blocking}"
     return (
@@ -227,8 +227,8 @@ def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | 
         f"outside the path this server validates, so while it is allowed a flash report's claim about what is on the "
         f"device is no longer one this server can stand behind. That is what makes validated flashing and unrestricted "
         f"debugger access mutually exclusive policies, and why a generated configuration leaves both false. Something "
-        f"on this bench set `{entry}` to true since. Set it back to false — with `project_config_set`, or by asking "
-        "the operator — and this works. Nothing here can set it back to true afterwards, and no tool here is behind "
+        f"on this bench set `{entry}` to true since. Set it back to false (with `project_config_set`, or by asking "
+        "the operator) and this works. Nothing here can set it back to true afterwards, and no tool here is behind "
         "that flag, so nothing becomes unavailable by turning it off."
     )
 # The scope that separates "this project has no configuration", which
@@ -248,7 +248,7 @@ GDB_NOT_CONFIGURED_SCOPE = "not_configured"
 # remediation for a GDB nobody configured that was there and is not now.
 GDB_AUTODETECTED_MISSING_SCOPE = "autodetected_missing"
 # Said by `doctor`, which parses the file at the moment it is asked and is
-# therefore always current — which is exactly why it cannot speak for a server
+# therefore always current, which is exactly why it cannot speak for a server
 # that has been running since before the last edit. It names both ways across,
 # because since `project_config_reload_description` a restart is no longer the
 # only one, and this is the last place that said it was.
@@ -258,7 +258,7 @@ RUNNING_SERVER_COMPARISON = (
     "`config_status.loaded_digest` in that server's `debugger_info`. If they differ, that server is enforcing an older "
     "configuration. Two things change that, and which one depends on what moved: `project_config_reload_description` "
     "on that server adopts a changed `target`, `debuggers`, `com_ports` or `can_buses` without a restart, and a "
-    "restart adopts everything else — every `permissions:` block included, which that call never re-reads in either "
+    "restart adopts everything else: every `permissions:` block included, which that call never re-reads in either "
     "direction. `agentic-hil config-reload` previews what that call would take from this file and lists the sections "
     "it would leave for a restart."
 )
@@ -294,7 +294,7 @@ def safe_user_root() -> str:
     """The per-user root this tool creates for itself on either platform.
 
     Named in remediation as somewhere a configuration or a ``state_root`` can be
-    put when the discovered default cannot be used — a redirected profile
+    put when the discovered default cannot be used: a redirected profile
     directory, a roaming share, a location the operator would rather not use.
     """
     return str(_home() / ".agentic-hil")
@@ -355,29 +355,29 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`project_config_reload_description` (`description_reloaded_at`, and `loaded_digest` is that document's) "
             "while the permissions still came from startup (`loaded_at`). Nothing failed; what an answer says and what "
             "the file says have come apart, and the file is the one an operator reads. This says the two digests differ "
-            "and nothing more — not what the file now contains, and not what a restart onto it would produce."
+            "and nothing more: not what the file now contains, and not what a restart onto it would produce."
         ),
         remediation=(
-            "If what changed is the description of the bench — `target`, a `debuggers`, `com_ports` or `can_buses` "
-            "entry, a probe id, a COM device, a baudrate — call `project_config_reload_description`. It re-reads those "
+            "If what changed is the description of the bench (`target`, a `debuggers`, `com_ports` or `can_buses` "
+            "entry, a probe id, a COM device, a baudrate), call `project_config_reload_description`. It re-reads those "
             "four sections and clears this, without a restart and without touching a single permission. Its result "
             "names anything in the file it did not take.",
             "Otherwise, ask the operator to restart the MCP server, then repeat the call. Say which server: the one "
             "the agent host started for this workspace, not the `agentic-hil` command line, which reads the file fresh "
             "every time and is already current. A restart is what adopts a changed permission, a changed `version`, "
             "and every section outside those four.",
-            "If the restart does not come up, the startup refusal names what is wrong with the file — that is the "
+            "If the restart does not come up, the startup refusal names what is wrong with the file. That is the "
             "message to report, and repairing the file is what the restart was waiting for. `agentic-hil doctor` "
             "reads the file fresh and produces the same refusal without stopping anything.",
             "Until one of the two has happened, treat what this server says about the bench as the older file's "
-            "answer. Do not reconcile the difference by guessing which of the two is right — `config_status.path` "
+            "answer. Do not reconcile the difference by guessing which of the two is right: `config_status.path` "
             "names the file and `loaded_digest` versus `current_digest` says they differ.",
             "If the change was made through `project_config_set` or `project_config_create` in this session, this is "
             "the same fact those results reported as `reload_required`, not a second problem.",
         ),
         do_not=(
             "Do not carry on flashing, resetting or driving devices on the assumption that the new file is in force. "
-            "It is not, and the permissions in force are the older ones — which may be wider than what the operator "
+            "It is not, and the permissions in force are the older ones, which may be wider than what the operator "
             "has just written.",
             "Do not expect `project_config_reload_description` to take a permission. It re-reads the description and "
             "nothing else, in either direction, and there is no argument that changes that; a permission the file now "
@@ -403,7 +403,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not call `project_config_create` to replace it. A server bound to a configuration is gated by the "
-            "permissions it loaded even when the file is gone, so that call is refused — and if it were not, it would "
+            "permissions it loaded even when the file is gone, so that call is refused, and if it were not, it would "
             "replace every narrowing an operator had asked for with the generated skeleton.",
         ),
     ),
@@ -414,8 +414,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "enforcing the version it loaded."
         ),
         remediation=(
-            "Report `config_status.backend_error`: it names what the read failed on — a permission on the file or a "
-            "directory above it, a path component that is no longer a directory, bytes that are no longer UTF-8.",
+            "Report `config_status.backend_error`: it names what the read failed on (a permission on the file or a "
+            "directory above it, a path component that is no longer a directory, bytes that are no longer UTF-8).",
             "Ask the operator to make the file readable again and restart the MCP server, so that what is enforced and "
             "what can be read are the same document.",
         ),
@@ -432,7 +432,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Close the agent host. It starts the Agentic HIL MCP server itself, so that server runs for as long as "
-            "the host does — which is why a working setup is exactly the state this fails in.",
+            "the host does, which is why a working setup is exactly the state this fails in.",
             "Run `agentic-hil upgrade` again, then start the host, which picks up the new server.",
             "If no host is open, the refusal names each holding process by pid and image path. End those processes, "
             "then run the upgrade again.",
@@ -556,19 +556,19 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "upgrade_blocked_by_pin": ErrorRemedy(
         meaning=(
             "The package manager holds this installation at one exact version, so the upgrade command it was given "
-            "cannot move it and did not. `uv tool upgrade` reports that as success — exit code 0 with the reason on "
-            "stderr — because for it, nothing to do is not a failure. The version this installation runs is unchanged; "
+            "cannot move it and did not. `uv tool upgrade` reports that as success (exit code 0 with the reason on "
+            "stderr) because for it, nothing to do is not a failure. The version this installation runs is unchanged; "
             "`previous_version` and `version` on this result are the same number, and that is what makes this a "
             "refusal rather than an upgrade. The pin comes from the requirement the installation was created with: "
             "`uv tool install \"agentic-hil==X.Y.Z\"` records `==X.Y.Z` and every later `uv tool upgrade` honours it."
         ),
         remediation=(
             "Close the agent host first. The command below reinstalls the environment, which on Windows means deleting "
-            "it, and that delete fails while the MCP server the host started is still running out of it — the failure "
+            "it, and that delete fails while the MCP server the host started is still running out of it: the failure "
             "`installation_in_use` exists to prevent, and this command has no such check of its own.",
             "Run the command in `reinstall_command` on this result. It is the one that clears the pin *and* keeps this "
             "installation's extras: `installed_extras` says which ones were found, and reinstalling without them "
-            "removes what they installed — on a bench with `can`, that silently takes CAN support away. The hint `uv` "
+            "removes what they installed. On a bench with `can`, that silently takes CAN support away. The hint `uv` "
             "prints names the bare distribution and would do exactly that, so use ours and not that one.",
             "Then run `agentic-hil --version` to confirm the number moved, and start the agent host, which loads the "
             "new server. Nothing was restarted or reloaded by this attempt; there is nothing new to load yet.",
@@ -605,7 +605,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not run `uv tool upgrade`, `pipx upgrade` or `pip install --upgrade` through a shell instead. This is "
-            "the same action the configuration just refused, taken where the operator cannot see or audit it — and "
+            "the same action the configuration just refused, taken where the operator cannot see or audit it, and "
             "the bare forms of those commands drop the extras this bench was installed with.",
             "Do not ask for `allow_upgrade` to be turned on as a precondition for the work in hand. Whatever was "
             "being done is not blocked by the version; if it genuinely is, say which behaviour you need and let the "
@@ -617,7 +617,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`server_upgrade` was called while something holds this bench: a declared run, an open COM or CAN "
             "session, a debug session, or another process on this machine. Those holds were taken under the release "
             "this server is running, and replacing the code underneath them would move the rules during the run they "
-            "govern — the same objection as changing a permission mid-run. Nothing was replaced and the holder was "
+            "govern: the same objection as changing a permission mid-run. Nothing was replaced and the holder was "
             "not disturbed."
         ),
         remediation=(
@@ -639,7 +639,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "upgrade_cli_only_on_host": ErrorRemedy(
         meaning=(
             "This host is Windows, where the operating system refuses to delete a file that is mapped as a running "
-            "image — and this server is running out of the very installation an upgrade would replace. A package "
+            "image, and this server is running out of the very installation an upgrade would replace. A package "
             "manager that removes the environment before rebuilding it fails on that delete part way through and "
             "leaves neither the old installation nor the new one, so nothing was attempted. The alternative, a helper "
             "that swaps the files after this server exits, was rejected: it outlives the result that announced it, so "
@@ -672,7 +672,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`allow_raw_debugger_commands` and `allow_mass_erase`, which it writes false so that flashing works, so "
             "the bench is workable from the file it produces without anyone editing YAML.",
             "On the command line a person runs `agentic-hil init` from the project root, which does the same thing.",
-            "Then report what it granted — flashing and resetting among them — and ask the operator which of those "
+            "Then report what it granted (flashing and resetting among them) and ask the operator which of those "
             "this bench should not have. You can write `false` into any of them with `project_config_set`; you can "
             "never write `true`. Raw debugger commands and mass erase are already false and no tool here reads "
             "either as permission to do anything, so do not report them as missing.",
@@ -687,7 +687,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "permission_denied:allow_config_description_write": ErrorRemedy(
         meaning=(
-            "A field-wise configuration change reached a description key — what the bench is — and "
+            "A field-wise configuration change reached a description key (what the bench is), and "
             "`permissions.allow_config_description_write` is false in the authoritative configuration. `denied_keys` "
             "lists exactly which keys were refused. Nothing was written."
         ),
@@ -702,13 +702,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not edit the configuration with your own file tools. `agentic-hil setup` writes host deny rules "
             "against exactly that, and this refusal is the reason they exist.",
             "Do not set the grant through `project_config_set` either. It is a permission, and that call writes only "
-            "`false` into a permission — never `true`, whatever `allow_config_permissions_write` says. A generated "
+            "`false` into a permission, never `true`, whatever `allow_config_permissions_write` says. A generated "
             "configuration grants that key, so it is very likely open here and still not a way back to this one.",
         ),
     ),
     "permission_denied:allow_config_permissions_write": ErrorRemedy(
         meaning=(
-            "A field-wise configuration change reached a permission — what the bench may be told to do — and "
+            "A field-wise configuration change reached a permission (what the bench may be told to do), and "
             "`permissions.allow_config_permissions_write` is false. That right gates every permission key in the file, "
             "not only the ones inside a `permissions:` block: the project block, each entry's own block under "
             "`debuggers`, `com_ports` and `can_buses`, and the two grants that sit directly on a section, "
@@ -723,7 +723,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`project_config_describe` says which ones are open.",
         ),
         do_not=(
-            "Do not route the change through another key to reach a permission — a whole subtree, a differently "
+            "Do not route the change through another key to reach a permission: a whole subtree, a differently "
             "spelled path. Values are scalars only and the permissions present in the document are compared before "
             "and after every write, so it fails, and it is the thing this grant exists to prevent.",
             "Do not carry out the action the permission would have allowed by another route. A debugger, serial "
@@ -738,7 +738,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "a person's business, and the refusal is that decision working."
         ),
         remediation=(
-            "Relay `operator_command` to the operator — it is the whole line, with this incident's id already in it — "
+            "Relay `operator_command` to the operator (it is the whole line, with this incident's id already in it) "
             "together with the `quarantine_guidance` from `get_last_report` or the refusal that quarantined the bench: "
             "what was attempted, what is confirmed, what is unknown, and what to check on the board.",
             "Read the incident out with `get_last_report` and `classify_last_error` while you wait. Explaining what "
@@ -785,27 +785,27 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     RECOVERY_PHYSICAL_CHECK_ERROR: ErrorRemedy(
         meaning=(
             "`hardware_recover` was allowed to run and refused on the class of the incident, not on a permission. At "
-            "least one reason this bench is quarantined for names a physical state — a flash whose outcome was never "
-            "confirmed, a session that died mid-call, cleanup nobody could verify — and clearing it means saying that "
+            "least one reason this bench is quarantined for names a physical state (a flash whose outcome was never "
+            "confirmed, a session that died mid-call, cleanup nobody could verify), and clearing it means saying that "
             "the board is still and holds the firmware somebody expects. That is a claim about the world, and only a "
             "person can make it. You cannot make it; you can ask for it and carry it. Pass what the operator answers "
             "as `operator_statement` and it goes into the recovery ledger as their words, relayed by you. "
             "`physical_check_reasons` names the reasons that need one, `agent_clearable_reasons` the ones that clear "
             "with no arguments at all. No grant on any bench moves that line, which is why the argument is a sentence "
             "and not a flag: a flag you could set for yourself, and a confirmation one gives oneself is not one. A "
-            "reason this bench's `recovery.auto_recover` policy could settle needs neither — the automatic path runs "
+            "reason this bench's `recovery.auto_recover` policy could settle needs neither: the automatic path runs "
             "its predicate against the board on the next hardware call. `auto_recoverable` says which case this is."
         ),
         remediation=(
             "Read `auto_recoverable` first. When it is true this bench's own recovery policy can settle the incident "
-            "by running a predicate against the board — a re-read of the probe, or a verified reset into halt — and it "
+            "by running a predicate against the board (a re-read of the probe, or a verified reset into halt), and it "
             "does that on the next hardware call, not here: this tool runs no predicate, so it will not assert an "
             "unconfirmed board is fine. Retry the hardware call once and read the result.",
             "Otherwise ask the operator, in chat, and show them `quarantine_guidance` while you ask: what was "
             "attempted, what is still confirmed, what nobody on this host can know, and the `physical_check` to "
             "perform on the board. A statement about a claim the speaker was never shown is worth nothing.",
             "Call `hardware_recover` again with `operator_statement` set to what they answered, in their words. Do "
-            "not compress it into a verdict — the ledger keeps the sentence, and a sentence can be audited in a way "
+            "not compress it into a verdict: the ledger keeps the sentence, and a sentence can be audited in a way "
             "that 'the operator confirmed' cannot.",
             "When there is nobody to ask, relay `operator_command` verbatim instead. It is the exact command, with "
             "this incident's `quarantine_id` already in it, and it is what the operator runs at the bench. Say "
@@ -829,12 +829,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "generated configuration starts with every permission granted but the two that refuse flashing while they "
             "are true, and the one direction `project_config_set` "
             "leaves is narrowing, so an agent writes `false` into a permission and never `true`. Two cases share this "
-            "error because for a caller they are one fact — nothing here turns a permission on. Either the request "
+            "error because for a caller they are one fact: nothing here turns a permission on. Either the request "
             "carried a permission value that was not `false`, and `widened_keys` names those keys as the request spelled "
             "them, including a `true` sent to a permission that is already `true` and would have moved nothing; or the "
             "resulting document would have granted more than the current one, and `widened_keys` names the paths that "
             "would have opened, read out of the document before and after rather than out of the request. Nothing was "
-            "written in either case, including the parts of the same call that were narrowings — a change is applied "
+            "written in either case, including the parts of the same call that were narrowings: a change is applied "
             "whole or not at all."
         ),
         remediation=(
@@ -913,8 +913,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "is to find out whose it is rather than to close a run this caller has."
         ),
         remediation=(
-            "`agentic-hil lease-status` names the holder — which devices are held, which frontend took them and under "
-            "which process — and `open_holds` in this refusal carries the same.",
+            "`agentic-hil lease-status` names the holder (which devices are held, which frontend took them and under "
+            "which process), and `open_holds` in this refusal carries the same.",
             "Let the run finish, or ask whoever holds it to close it: `bench_run_stop` for a declared run, "
             "`com_session_stop` / `can_session_stop` for a session, `debug_stop_session` for a debug session. Then "
             "repeat the command.",
@@ -932,7 +932,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "`project_config_reload_description` was called while this server holds hardware: a declared run, an open "
             "COM or CAN session, or a debug session. Those holds name devices by their configuration entry, and the "
-            "description on disk decides which physical unit each of those names means — so re-reading it mid-run could "
+            "description on disk decides which physical unit each of those names means, so re-reading it mid-run could "
             "point a held name at another board. Nothing was re-read, nothing was written, and the run is untouched. "
             "The same rule as `config_write_in_open_run` and the same remedy; it is a separate error type only because "
             "this call writes nothing, and a caller should not be told it did."
@@ -966,7 +966,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "chain finds nothing: no reparse point, no symlink, link count 1, and samestat holds, because the "
             "indirection lives in name resolution alone. "
             "This is about what the path *is*, not about who else on the machine holds rights on it. That second "
-            "question used to be asked — a Windows ACL walk and a POSIX mode/sticky-bit walk over every ancestor — and "
+            "question used to be asked (a Windows ACL walk and a POSIX mode/sticky-bit walk over every ancestor), and "
             "it was removed in 0.8.0: it could only ever defend against a different account on the same "
             "machine, which was never a requirement here, and it could never defend against the operator's own "
             "processes, which own these objects and can rewrite them regardless of any ACL."
@@ -1016,7 +1016,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "The device name in a COM port entry currently leads to different hardware than the entry says it belongs "
             "to. `expected_serial_number` is what the configuration names and where it says so (`expected_from`); "
             "`found_serial_number` is the adapter actually behind `configured_device` right now. The port was not "
-            "opened and nothing was written to it. A device name — `COM7`, `/dev/ttyACM0` — is an enumeration order "
+            "opened and nothing was written to it. A device name (`COM7`, `/dev/ttyACM0`) is an enumeration order "
             "rather than an identity, so attaching a second adapter or replugging in another order can hand one entry "
             "another board; this refusal is that having happened. `expected_vid`/`expected_pid` and "
             "`found_vid`/`found_pid` are the same comparison one level up, and they are present when the entry names "
@@ -1044,11 +1044,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "The serial device named by `com_ports.<name>.device` is already held by another program, so the session "
             "was refused where the operating system refused the open: no handle was created, nothing was written, and "
             "the port kept doing whatever the other holder is doing with it. `configured_device` is the device name "
-            "that was tried. This is a refusal about which process owns the port right now, not a quarantine — the "
+            "that was tried. This is a refusal about which process owns the port right now, not a quarantine: the "
             "bench was not touched and no incident was opened.\n\n"
             "The session asks for the port exclusively rather than sharing it. Sharing was never a mode this could "
             "work in: two writers on one line interleave their bytes, and the failure then surfaces much later as a "
-            "response that does not match the stimulus — which is an unknown board state, and an unknown board state "
+            "response that does not match the stimulus, which is an unknown board state, and an unknown board state "
             "is a quarantine. Failing at the open turns that into this refusal."
         ),
         remediation=(
@@ -1095,14 +1095,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     # The most common refusal on this surface, and for a long time the one that
     # carried nothing: every other entry here explains a bench, a policy or a
     # backend, and this one explains the caller's own payload. It is deliberately
-    # general — the concrete fact is always in the result's own `field` — because
+    # general (the concrete fact is always in the result's own `field`) because
     # a per-argument entry would be a second copy of the input schemas that
     # nothing keeps in step with them.
     "invalid_argument": ErrorRemedy(
         meaning=(
             "The call was refused on its arguments alone, before anything was locked, opened, or driven. Nothing was "
             "reached and there is nothing to clean up. What was wrong is in the result rather than here: `field` names "
-            "the argument — dotted for a nested one, `$` for the object itself — and `validator` names the rule it "
+            "the argument (dotted for a nested one, `$` for the object itself), and `validator` names the rule it "
             "broke where a schema decided it (`type`, `minimum`, `maximum`, `required`, `enum`, "
             "`additionalProperties`, `finite`). `allowed_values` appears when the rule was an enumeration, and `value` "
             "when the refusal came from a configuration or profile document rather than from a tool argument. This "
@@ -1117,7 +1117,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Types are checked as written and never coerced, so a value that means something other than what it would "
             "convert to cannot pass as the converted one: `wait_s: true` and `wait_s: \"5\"` are both refused where "
             "`wait_s: 5` is taken.",
-            "When `field` names a configuration or profile key — `com_ports.<name>.baudrate` and the like — the fix is "
+            "When `field` names a configuration or profile key (`com_ports.<name>.baudrate` and the like), the fix is "
             "in the document the refusal names and not in the call. `agentic-hil://reference/config-shape` gives the "
             "expected shape of each key; correct it there, then repeat the call.",
         ),
@@ -1126,7 +1126,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "refused the same way every time.",
             "Do not drop a refused optional argument and let its default stand unless the default is what was meant. A "
             "wait that is refused and then omitted becomes no wait at all, and the call fails on `device_busy` "
-            "instead — the same request failing one layer later for a reason that is not the real one.",
+            "instead: the same request failing one layer later for a reason that is not the real one.",
             "Do not read this as a hardware or a permission problem. Nothing was contacted, so there is no state to "
             "recover and no permission to ask the operator for.",
         ),
@@ -1176,15 +1176,15 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     # error_type rather than another `target_not_detected`: those say the adapter
     # was reached and nothing answered behind it, which places the abort point
     # before the target and is why they refuse retry-safe. A toolchain that exited
-    # without confirming what it did places it nowhere — whether it printed part of
-    # the confirmation or none of it — so the same public error_type would have
+    # without confirming what it did places it nowhere (whether it printed part of
+    # the confirmation or none of it), so the same public error_type would have
     # published exactly the claim this branch cannot make.
     "target_state_unconfirmed:openocd": ErrorRemedy(
         meaning=(
             "OpenOCD exited successfully without the tool's own success marker, so its account of this run is "
             "incomplete rather than negative. Which part is missing is in this result and not in this entry: "
-            "`operation_result.expected_success_text` lists both markers the backend `echo`es — the stage marker after "
-            "`init` and the success marker at the end of the command — and `matched_success_text` names the ones "
+            "`operation_result.expected_success_text` lists both markers the backend `echo`es (the stage marker after "
+            "`init` and the success marker at the end of the command), and `matched_success_text` names the ones "
             "OpenOCD printed, which may be neither of them or the stage marker alone. Either way the outcome went "
             "unreported, and that is the absence of a verdict rather than a verdict that no target answered: `init` "
             "may have completed, examined the core and halted it. The board's run state is unknown, which is why this "
@@ -1200,7 +1200,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Confirm `debuggers.<name>.executable` is OpenOCD itself and not a wrapper or launcher script: anything "
             "that discards the child's stdout and stderr produces this result out of a run that worked.",
             "If the log does contain the success marker `matched_success_text` reports as missing, this is a defect in "
-            "this backend rather than a fault on the bench — report it with that log.",
+            "this backend rather than a fault on the bench. Report it with that log.",
         ),
         do_not=(
             "Do not read this as `target_not_detected`. That is OpenOCD's own report that it reached the adapter and "
@@ -1212,8 +1212,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "target_state_unconfirmed:stlink": ErrorRemedy(
         meaning=(
-            "STM32CubeProgrammer exited successfully without every line that confirms the operation — for a read, the "
-            "ST-Link serial number and the device name — so its account of this run is incomplete rather than "
+            "STM32CubeProgrammer exited successfully without every line that confirms the operation (for a read, the "
+            "ST-Link serial number and the device name), so its account of this run is incomplete rather than "
             "negative. Which lines are missing is in this result and not in this entry: "
             "`operation_result.expected_success_text` lists the ones that were looked for and `matched_success_text` "
             "the ones the CLI printed, which may be none of them or only some. A confirmation that stops short is not "
@@ -1663,7 +1663,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "The SocketCAN interface named by `can_buses.<name>.channel` does not exist on this host. The session was "
             "refused where the socket would have been bound, so no CAN controller was addressed and nothing was put on "
-            "any bus — this is a refusal about the host's network configuration, not a quarantine. The usual cause is "
+            "any bus: this is a refusal about the host's network configuration, not a quarantine. The usual cause is "
             "that the interface was never brought up, or that a USB adapter was re-enumerated and its `canN` name "
             "moved."
         ),
@@ -1679,7 +1679,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "opened.",
         ),
         do_not=(
-            "Do not run `recover --confirm-safe-state` over this. There is nothing to recover — no lease was "
+            "Do not run `recover --confirm-safe-state` over this. There is nothing to recover: no lease was "
             "quarantined, and signing for a physical state nobody disturbed teaches the signature to mean nothing.",
             "Do not point the entry at whichever `canN` happens to be up. That is the wrong-bus mistake the channel "
             "name exists to prevent; confirm which interface belongs to this bench first.",
@@ -1825,7 +1825,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "If the bus really must not be disturbed, put the interface into listen-only outside Agentic HIL and start "
             "the session again. On SocketCAN that is `sudo ip link set <dev> down`, then `sudo ip link set <dev> type "
             "can bitrate <bitrate> listen-only on`, then `sudo ip link set <dev> up`.",
-            "If the bus may be ACKed — a bench nobody else is driving, a rig where this is the only participant — set "
+            "If the bus may be ACKed (a bench nobody else is driving, a rig where this is the only participant), set "
             "`listen_only: false` on that entry. That is an honest configuration, and the refusal goes away because "
             "nothing is being claimed any more.",
             "`can_buses_list` reports `listen_only` and `listen_only_enforcement` for every configured bus, so which "
@@ -1841,9 +1841,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     f"{LISTEN_ONLY_UNSUPPORTED_ERROR}:socketcan": ErrorRemedy(
         meaning=(
             "SocketCAN's listen-only is a control mode on the kernel's CAN device, set when the interface is "
-            "configured and owned by the netdev — not by the socket this process opens. python-can's SocketCAN backend "
+            "configured and owned by the netdev, not by the socket this process opens. python-can's SocketCAN backend "
             "accepts a `listen_only` keyword and discards it, so there is nothing here that could apply the mode. It "
-            "is read instead, and this interface is not in it — or its control mode could not be read at all, which is "
+            "is read instead, and this interface is not in it, or its control mode could not be read at all, which is "
             "the same refusal, because the flag exists to be a proof."
         ),
         remediation=(
@@ -1861,14 +1861,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         do_not=(
             "Do not bring the interface up listen-only from inside a test run. The mode holds for everything on that "
-            "netdev, and an interface reconfigured mid-run is itself a change to the bus — which is what was being "
+            "netdev, and an interface reconfigured mid-run is itself a change to the bus, which is what was being "
             "avoided.",
         ),
     ),
     LISTEN_ONLY_UNCONFIRMED_ERROR: ErrorRemedy(
         meaning=(
             "`listen_only: true` was requested, the adapter was asked for it, and it did not confirm the mode. The "
-            "adapter was closed again, so the exposure is the open rather than a whole session — but it was on the bus "
+            "adapter was closed again, so the exposure is the open rather than a whole session, but it was on the bus "
             "for that long, and this result says so instead of implying otherwise. An unconfirmed listen-only is "
             "treated as no listen-only, because the value of the flag is the proof and not the request."
         ),
@@ -1876,7 +1876,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Read `driver_state` on the result: it names what came back, which is what has to change.",
             "Check that the adapter has a listen-only mode at all. Not every CAN interface does; one that does not "
             "cannot be made to, and such a bus has to be observed with different hardware.",
-            "`can_buses_list` reports `listen_only_enforcement` per adapter — what evidence would back the claim "
+            "`can_buses_list` reports `listen_only_enforcement` per adapter: what evidence would back the claim "
             "there.",
             "If the bus may be ACKed, set `listen_only: false` on that entry rather than leaving a claim nothing "
             "supports.",
@@ -1891,8 +1891,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         meaning=(
             "PCAN expresses listen-only as `PCAN_LISTEN_ONLY`, which python-can sets through `BusState.PASSIVE` and "
             "not through any `listen_only` argument. Agentic HIL sets it, re-asserts it once the channel is "
-            "initialized — python-can applies it before `PCANBasic.Initialize` and discards the `SetValue` return "
-            "code, so the constructor's request alone proves nothing — and then reads the parameter back. This channel "
+            "initialized (python-can applies it before `PCANBasic.Initialize` and discards the `SetValue` return "
+            "code, so the constructor's request alone proves nothing), and then reads the parameter back. This channel "
             "did not read back as listen-only, so it was closed."
         ),
         remediation=(
@@ -1900,14 +1900,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "not being readable means the measurement failed rather than the mode.",
             "Confirm the PCAN hardware supports listen-only. PCAN-USB and PCAN-USB FD do; some OEM and older channels "
             "report the parameter as unsupported, and those cannot observe a bus without ACKing.",
-            "Check that the PCANBasic driver and python-can are current — `python -m pip install --upgrade "
-            "\"agentic-hil[can]\"` — since both the mode and the read-back go through PCANBasic.",
+            "Check that the PCANBasic driver and python-can are current (`python -m pip install --upgrade "
+            "\"agentic-hil[can]\"`), since both the mode and the read-back go through PCANBasic.",
             "If the bench may be ACKed, set `listen_only: false` on that entry. Nothing else about the session "
             "changes.",
         ),
         do_not=(
             "Do not work around this by dropping `listen_only` and reading anyway on a bus carrying somebody else's "
-            "traffic — a vehicle, a rig, hardware that is not yours. That is the exact case the flag is for.",
+            "traffic: a vehicle, a rig, hardware that is not yours. That is the exact case the flag is for.",
         ),
     ),
     f"{LISTEN_ONLY_UNCONFIRMED_ERROR}:process": ErrorRemedy(
@@ -1921,7 +1921,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "controller into listen-only. That field is what turns a forwarded request into a confirmation. The bridge "
             "protocol version does not change, and a bridge that is never asked for the mode is unaffected.",
             "If the bridge cannot provide listen-only on its hardware, it should return an error from `open` rather "
-            "than a success without the field — the refusal then names the bridge's own reason instead of this one.",
+            "than a success without the field: the refusal then names the bridge's own reason instead of this one.",
             "If the bus may be ACKed, set `listen_only: false` on that entry; the request stops carrying the flag and "
             "the bridge is not asked to confirm anything.",
         ),
@@ -1933,18 +1933,18 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     LISTEN_ONLY_MODE_ERROR: ErrorRemedy(
         meaning=(
             "A transmit was asked for on a CAN bus configured `can_buses.<name>.listen_only: true`, and was refused "
-            "before the frame reached any driver. `listen_only` is a bus-level claim — that observing this bus sends "
-            "nothing — and a controller held to it emits no dominant bit, so the frame could not have left it. This is "
+            "before the frame reached any driver. `listen_only` is a bus-level claim (that observing this bus sends "
+            "nothing), and a controller held to it emits no dominant bit, so the frame could not have left it. This is "
             "not a permission: `permissions.allow_write` is never consulted, because a bus is not made "
             "transmit-capable by granting a permission on it. The refusal is the same on every adapter and through "
-            "every route — the direct tool, a test plan's `can_send` step, a broker participant — because the flag "
+            "every route (the direct tool, a test plan's `can_send` step, a broker participant) because the flag "
             "describes the medium rather than the caller."
         ),
         remediation=(
             "If this bench really must not be disturbed, the send is the thing that is wrong. Drop it, or read the "
             "bus instead: `can_read` is what a `listen_only` bus is for.",
             "If some traffic must be transmitted and some observed, declare a second `can_buses` entry for the "
-            "transmitting side — its own name, `listen_only: false` — and send on that one. Two entries make the two "
+            "transmitting side (its own name, `listen_only: false`) and send on that one. Two entries make the two "
             "intentions separately readable, which one entry with a flag flipped mid-run never does.",
             "If the bus may be transmitted on after all, set `listen_only: false` on that entry. That is an honest "
             "configuration and the refusal goes away, because nothing is being claimed any more.",
@@ -1954,8 +1954,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not grant `permissions.allow_write` in the hope of clearing this. The mode is settled first and the "
             "permission is never read; adding it only widens what the config allows without changing this answer.",
-            "Do not flip `listen_only: false` on a bus carrying somebody else's traffic — a vehicle, a rig, hardware "
-            "that is not yours — merely to get one frame out. That is the exact case the flag is for, and the "
+            "Do not flip `listen_only: false` on a bus carrying somebody else's traffic (a vehicle, a rig, hardware "
+            "that is not yours) merely to get one frame out. That is the exact case the flag is for, and the "
             "controller would begin ACKing every frame on the medium, not only the one being sent.",
             "Do not reach past Agentic HIL to a python-can script or `cansend` to transmit anyway. On PEAK, "
             "python-can's `send()` does not consult the bus state at all: it hands the frame to `PCANBasic.Write` and "
@@ -1991,21 +1991,21 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "can_adapter_invalid_response": ErrorRemedy(
         meaning=(
-            "The CAN adapter answered a `send`, `read` or `open` request with a payload this server cannot read — a "
+            "The CAN adapter answered a `send`, `read` or `open` request with a payload this server cannot read: a "
             "result outside the closed field set for that method, a wrong type where the protocol fixes one, or frame "
             "data that does not decode. Because the request was delivered before the answer came back, whether the "
             "bridge acted on it is unknown: the result carries `side_effect_status: unknown` and "
             "`cleanup_required: true`, and a frame may or may not have reached the bus."
         ),
         remediation=(
-            "Read the bus state from the target itself before sending anything else — the pending frame may have gone "
+            "Read the bus state from the target itself before sending anything else: the pending frame may have gone "
             "out. The refusal deliberately does not guess.",
             "Close the session with `can_session_stop` and open it again. A bridge that answered one request "
             "unreadably has no state this server can rely on for the next.",
             "Fix the bridge's response shape: `send` answers `ok`, and optionally `backend` and `summary` as strings; "
             "`read` adds `frames` as a list, each frame carrying `id`, `extended`, `rtr`, `data_hex` and a `dlc` that "
             "matches the decoded byte count.",
-            "If the adapter is not a bridge, the malformed frames came from the CAN library itself — check the "
+            "If the adapter is not a bridge, the malformed frames came from the CAN library itself. Check the "
             "adapter's driver and firmware version against what `can_buses_list` reports for that bus.",
         ),
         do_not=(
@@ -2055,9 +2055,9 @@ def catalogue_entry(key: str) -> JsonObject | None:
     if scope:
         entry["scope"] = scope
     # `meaning` is substituted like the steps are. What a refusal *means* can turn
-    # on the machine as much as what to do about it does — whether the discovered
+    # on the machine as much as what to do about it does (whether the discovered
     # default under %APPDATA% is itself the case being described depends on this
-    # host's join state — and a placeholder that reached a reader verbatim would be
+    # host's join state), and a placeholder that reached a reader verbatim would be
     # worse than the flat claim it replaced.
     entry["meaning"] = remedy.meaning.format(**values)
     entry["remediation"] = [step.format(**values) for step in remedy.remediation]
@@ -2085,7 +2085,7 @@ class QuarantineReasonGuide:
 
     ``attempted`` is the action whose outcome was lost, ``confirmed`` what is
     still known to hold, ``unknown`` the exact gap that makes a machine answer
-    impossible — the justification for needing a human at all — and
+    impossible (the justification for needing a human at all), and
     ``physical_check`` what that human verifies on the bench before running
     `agentic-hil recover --confirm-safe-state`.
     """
@@ -2110,13 +2110,13 @@ _AUDIT_CONFIRMED = (
     "evidence, not a report of damage."
 )
 _AUDIT_UNKNOWN = (
-    "Whether the actions since the last committed record reached the device, and in what order — the evidence channel "
+    "Whether the actions since the last committed record reached the device, and in what order: the evidence channel "
     "itself is what broke, so no later record can answer this."
 )
 _AUDIT_PHYSICAL_CHECK = (
     "Fix the audit destination first (free disk space, permissions on the reports and logs directories under "
     "state_root), read the last committed report with `agentic-hil` `get_last_report`, confirm the board matches what "
-    "it describes — firmware, running/halted, wiring — and only then sign."
+    "it describes (firmware, running/halted, wiring), and only then sign."
 )
 
 
@@ -2151,7 +2151,7 @@ def _terminal_audit_guide(tool: str) -> QuarantineReasonGuide:
     return QuarantineReasonGuide(
         attempted=f"`{tool}` read the attached probe, released its leases cleanly, and then could not commit the record saying so.",
         confirmed="The probe read completed and every lock was handed back; the hardware itself finished in the state the read left it.",
-        unknown="Nothing about the board — what is missing is the durable record; until it exists, later readers cannot distinguish this from a read that ended badly.",
+        unknown="Nothing about the board: what is missing is the durable record; until it exists, later readers cannot distinguish this from a read that ended badly.",
         physical_check="Restore the audit destination (disk space, permissions under state_root); no board inspection is required beyond confirming the probe is idle, then sign.",
     )
 
@@ -2173,7 +2173,7 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
     "safe_state_unconfirmed": QuarantineReasonGuide(
         attempted="A hardware lease was released without its holder confirming the device reached a safe state.",
         confirmed="The release itself was recorded; the device is no longer being driven.",
-        unknown="Whether the device is in the state the last operation intended — the holder explicitly declined to confirm it.",
+        unknown="Whether the device is in the state the last operation intended: the holder explicitly declined to confirm it.",
         physical_check="Inspect the board for the state the last report describes (firmware, run/halt, outputs), drive it to a known state by its own controls, then sign.",
     ),
     "process_reap_unconfirmed": QuarantineReasonGuide(
@@ -2200,7 +2200,7 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
         physical_check="Treat the board as holding the original incident: reset it by its own controls, confirm the expected firmware state, then sign.",
     ),
     "run_recovery_failed": QuarantineReasonGuide(
-        attempted="A run failed, and the recovery action its abort calls — process reap, a reset into halt where the policy and the probe's grants allow it, then a probe re-read — raised instead of finishing.",
+        attempted="A run failed, and the recovery action its abort calls (process reap, a reset into halt where the policy and the probe's grants allow it, then a probe re-read) raised instead of finishing.",
         confirmed="The run's own verdict stands and its reports are written. Nothing after the raise touched the device.",
         unknown="How far the recovery got: whether the reset reached the target before it failed, and therefore whether the board is halted, running the code the failed run left on it, or somewhere between.",
         physical_check="Treat the board as the failed run left it. Reset it by its own controls, confirm it holds the firmware you expect, then sign.",
@@ -2216,15 +2216,15 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
     "lease_release_report_audit_broken": _audit_guide("A one-shot debugger call released its lease and the final report of that release could not be persisted."),
     # -- Debugger one-shots and sessions ---------------------------------------
     "debugger_readonly_result_unconfirmed": QuarantineReasonGuide(
-        attempted="A read-only probe call (probe discovery or probe_target) named an abort point before the target and still returned a result the host could not settle — an unknown or partial side effect, or cleanup left outstanding.",
+        attempted="A read-only probe call (probe discovery or probe_target) named an abort point before the target and still returned a result the host could not settle: an unknown or partial side effect, or cleanup left outstanding.",
         confirmed="The backend's own report says the target was never contacted (`target_contacted: false`), so the board keeps the state the last effectful call left.",
         unknown="Why a call that never reached the target reported an effect at all; a read-only re-read settles it, which is why this reason is machine-recoverable.",
-        physical_check="Normally none — the next hardware call re-reads the probe and clears this itself. If the probe stays unreachable, reseat it, then sign.",
+        physical_check="Normally none: the next hardware call re-reads the probe and clears this itself. If the probe stays unreachable, reseat it, then sign.",
     ),
     "debugger_readonly_target_state_unconfirmed": QuarantineReasonGuide(
         attempted="A read-only probe call (probe discovery or probe_target) failed without naming where it stopped: the backend was killed at its deadline, or it reported a failure that does not place the abort point before the target.",
         confirmed="The toolchain child process was reaped, so nothing from this call can still act on the board.",
-        unknown="Whether the read reached the target before it stopped. A read on this bench is not passive — an SWD attach halts the core — and a process killed at its deadline never ran the shutdown in its own command string, so the core may be sitting halted with nothing to resume it.",
+        unknown="Whether the read reached the target before it stopped. A read on this bench is not passive (an SWD attach halts the core), and a process killed at its deadline never ran the shutdown in its own command string, so the core may be sitting halted with nothing to resume it.",
         physical_check="Establish the run state rather than the reachability: reset the board by its own controls and confirm the firmware runs, then sign. Under `recovery.auto_recover: reset_halt` the service settles this itself with a verified reset into halt; a bare re-read cannot, and does not clear it.",
     ),
     "debugger_result_unconfirmed": QuarantineReasonGuide(
@@ -2236,7 +2236,7 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
     "debugger_call_exception": QuarantineReasonGuide(
         attempted="A debugger call raised an exception instead of returning a result.",
         confirmed="The lease was captured before anything ran; no later call has driven the probe.",
-        unknown="Whether the toolchain child process was reaped and what it sent before the exception — a returned result would have proven the child was terminated, an exception proves nothing.",
+        unknown="Whether the toolchain child process was reaped and what it sent before the exception: a returned result would have proven the child was terminated, an exception proves nothing.",
         physical_check="Check for leftover debugger processes holding the probe, confirm the target's firmware state, then sign.",
     ),
     "debug_session_start_unconfirmed": QuarantineReasonGuide(
@@ -2254,7 +2254,7 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
     "debug_breakpoint_cleanup_unconfirmed": QuarantineReasonGuide(
         attempted="Setting or clearing breakpoints could not be confirmed against the backend.",
         confirmed="The session log records every breakpoint command issued.",
-        unknown="Whether hardware breakpoints remain armed on the target — firmware run under a leftover breakpoint stops where nobody expects.",
+        unknown="Whether hardware breakpoints remain armed on the target: firmware run under a leftover breakpoint stops where nobody expects.",
         physical_check="A successful debug_clear_breakpoints reconciled against the backend clears this without an operator; otherwise power-cycle the target so the debug unit forgets its breakpoints, then sign.",
     ),
     "debug_target_state_unconfirmed": QuarantineReasonGuide(
@@ -2287,7 +2287,7 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
     "com_open_interrupted": QuarantineReasonGuide(
         attempted="com_session_start was interrupted (for example by Ctrl-C) while opening the serial port.",
         confirmed="No stimulus was written: the session never reached a writable state.",
-        unknown="Whether the OS handle was left open and whether the modem lines (DTR/RTS) were left asserted — on a board that wires DTR to reset, that holds the target in reset.",
+        unknown="Whether the OS handle was left open and whether the modem lines (DTR/RTS) were left asserted: on a board that wires DTR to reset, that holds the target in reset.",
         physical_check="Confirm no process holds the port, that the target is not held in reset (its firmware runs), then sign.",
     ),
     "com_open_cleanup_unconfirmed": QuarantineReasonGuide(
@@ -2299,7 +2299,7 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
     "com_write_effect_unconfirmed": QuarantineReasonGuide(
         attempted="com_write raised while writing stimulus to the port.",
         confirmed="Everything before this write is in the COM log; reads are unaffected.",
-        unknown="How many of the requested bytes reached the wire — the target may have received a truncated command.",
+        unknown="How many of the requested bytes reached the wire: the target may have received a truncated command.",
         physical_check="Check the device console/behavior for a partially applied command, bring the device to a known state by its own controls, then sign.",
     ),
     "com_buffer_clear_unconfirmed": QuarantineReasonGuide(
@@ -2334,7 +2334,7 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
     "can_open_cleanup_unconfirmed": QuarantineReasonGuide(
         attempted="can_session_start failed and could not confirm the partially opened adapter was shut down.",
         confirmed="No frame was sent by this session.",
-        unknown="Whether the adapter channel is still initialized — a channel brought up at the wrong bitrate disturbs the bus just by listening.",
+        unknown="Whether the adapter channel is still initialized: a channel brought up at the wrong bitrate disturbs the bus just by listening.",
         physical_check="Confirm the adapter is free and the bus shows normal traffic at the expected bitrate, then sign.",
     ),
     "can_session_setup_cleanup_unconfirmed": QuarantineReasonGuide(
@@ -2346,7 +2346,7 @@ QUARANTINE_REASON_GUIDES: dict[str, QuarantineReasonGuide] = {
     "can_send_effect_unconfirmed": QuarantineReasonGuide(
         attempted="can_send raised while transmitting a frame.",
         confirmed="Every earlier frame is in the CAN log.",
-        unknown="Whether the frame reached the bus — receivers may have acted on it.",
+        unknown="Whether the frame reached the bus: receivers may have acted on it.",
         physical_check="Check the devices on the bus for the effect of the possibly-sent frame, bring them to a known state, then sign.",
     ),
     "can_read_effect_unconfirmed": QuarantineReasonGuide(
@@ -2581,7 +2581,7 @@ def config_schema_document() -> JsonObject:
 
     Cached because resolving a key reads it, and a change set resolves many; the
     file is packaged data that cannot change while the process runs. Callers that
-    hand a node onward copy it — ``config_key_schema`` does — so nothing that
+    hand a node onward copy it (``config_key_schema`` does), so nothing that
     escapes into a result can write back into the cache."""
     document = json.loads(config_schema_text())
     if not isinstance(document, dict):  # pragma: no cover - the shipped schema is an object
@@ -2621,8 +2621,8 @@ def plan_schema_document() -> JsonObject:
 # over, in the same motion and without being told, the ability for that agent to
 # write `allow_flash: false` on a bench somebody else was about to flash.
 #
-#   description  what the bench IS   — target, probe identity, port parameters
-#   permissions  what the bench MAY  — every permission key in the file: each
+#   description  what the bench IS:    target, probe identity, port parameters
+#   permissions  what the bench MAY:   every permission key in the file: each
 #                                      permissions: block, and the two grants
 #                                      that sit directly on a section,
 #                                      artifacts.allow_upload and
@@ -2670,7 +2670,7 @@ def permissions_frozen_notice(closed_key: str, frozen: JsonObject, path: str) ->
     could have read beforehand is not where this belongs: whoever writes
     ``allow_config_permissions_write: false`` loses the way back in the same
     instant, and if the result does not say so, an agent nails the bench shut in
-    passing and the operator is in front of a file they have to open by hand —
+    passing and the operator is in front of a file they have to open by hand:
     the exact state the open generated default exists to end.
 
     Three things, because three are what a reader needs: what stands frozen now,
@@ -2678,7 +2678,7 @@ def permissions_frozen_notice(closed_key: str, frozen: JsonObject, path: str) ->
 
     Said about `project_config_set` and about nothing else, because that is the
     whole of what this closes. Regeneration is a different call under a
-    different grant and it is creation rather than a permissions write — the
+    different grant and it is creation rather than a permissions write: the
     owner's decision behind the open generated default keeps it out of the
     ratchet deliberately. A notice that claimed the whole file was sealed would
     be describing a rule this project does not have.
@@ -2695,11 +2695,11 @@ def permissions_frozen_notice(closed_key: str, frozen: JsonObject, path: str) ->
         ),
         "next_steps": [
             "Report this before anything else. The operator has to know the bench's permissions are now fixed, and "
-            "which of them were left granted — `frozen_permissions` is that list, read out of the file as written.",
+            "which of them were left granted: `frozen_permissions` is that list, read out of the file as written.",
             f"You cannot undo it with `{PROJECT_CONFIG_SET_TOOL}` and there is no permission that would let you. Do not "
             "call it on a permission again.",
-            f"A person opens one permission again with `{CONFIG_GRANT_COMMAND} <key>` in the project root — including "
-            f"`{CONFIG_GRANT_COMMAND} permissions.{CONFIG_PERMISSIONS_RIGHT}`, which is what unfreezes this — and it "
+            f"A person opens one permission again with `{CONFIG_GRANT_COMMAND} <key>` in the project root (including "
+            f"`{CONFIG_GRANT_COMMAND} permissions.{CONFIG_PERMISSIONS_RIGHT}`, which is what unfreezes this), and it "
             f"changes that key and nothing else in the file. `{CONFIG_REOPEN_COMMAND}` is the other way and a much "
             "larger one: it regenerates the whole file from attached hardware, so everything else in it is rewritten "
             "too. Ask for whichever fits rather than looking for a way around this; both are the operator's call, not "
@@ -2715,7 +2715,7 @@ class ConfigKeyRule:
     ``fields`` empty means "every field the schema declares for this section
     except its permissions", which is how the decision phrases ``can_buses.<n>.*``
     and ``target.*``. Derived rather than listed, so a field added to the schema
-    does not need a second edit here to become settable — and cannot be silently
+    does not need a second edit here to become settable, and cannot be silently
     forgotten either.
     """
 
@@ -2777,8 +2777,8 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # entry is rather than what may be done to it. `vid`/`pid` come off the same
     # enumeration record and say which *kind* of device it is, which is what
     # makes the serial mean a unit at all. `identity_source` is in it because it
-    # is decided by those three and by nothing else — it grants nothing, and a
-    # value disagreeing with them is refused at load — and because
+    # is decided by those three and by nothing else (it grants nothing, and a
+    # value disagreeing with them is refused at load), and because
     # `adopt-hardware` has to be able to write it: whether an adapter publishes a
     # serial number at all is a fact only a read of the hardware settles, and
     # version 3 requires the file to state it.
@@ -2810,7 +2810,7 @@ CONFIG_KEY_RULES: tuple[ConfigKeyRule, ...] = (
     # inside a `permissions` block. A generation writes both true like every
     # other permission, so leaving them out of the key model left two things a
     # generated bench grants that an operator could only take back by opening the
-    # YAML — the one thing the ratchet exists to stop. Only the grant of each
+    # YAML: the one thing the ratchet exists to stop. Only the grant of each
     # section is settable; `debug.allowed_symbols` and `artifacts.allowed_roots`
     # are lists, and this surface writes scalars.
     ConfigKeyRule("debug", named=False, under_permissions=False, right=CONFIG_PERMISSIONS_RIGHT, fields=("allow_all_symbols",)),
@@ -2872,7 +2872,7 @@ def _writes_a_scalar(schema: JsonObject, node: object) -> bool:
     """Whether this schema node holds a value one ``project_config_set`` can carry.
 
     An object or an array is a subtree, and a subtree set through this surface is
-    content the agent authored rather than a value an operator chose — which is
+    content the agent authored rather than a value an operator chose, which is
     the one thing the key model exists to prevent. The rules below used to keep
     that promise by hand, listing ``fields`` explicitly wherever a section had
     grown a list; a section that grew one later simply became settable, silently.
@@ -2888,9 +2888,9 @@ def config_rule_fields(rule: ConfigKeyRule) -> tuple[str, ...]:
 
     An explicit subset is returned as written. A rule that names none covers
     everything the schema declares for that node except ``permissions`` (which
-    belongs to the other right), except keys the schema marks deprecated —
-    ``allow_probe`` and ``allow_read`` exist only for version 1 files and are
-    refused outright in a version 2 one — and except values that are not
+    belongs to the other right), except keys the schema marks deprecated
+    (``allow_probe`` and ``allow_read`` exist only for version 1 files and are
+    refused outright in a version 2 one) and except values that are not
     scalars, because this surface sets one value at a time and a subtree is not
     one. ``can_buses.<name>.shares`` is the standing example: participant views
     are an operator's structure, edited in the file, not a key an agent sets."""
@@ -2932,7 +2932,7 @@ def resolve_config_key(key: str) -> ResolvedConfigKey | None:
 
     Entry names may contain dots (the schema allows ``[A-Za-z0-9_.-]+``), so the
     key is read from the right: field names are a closed set and contain no dot,
-    which makes the last component — or the last ``.permissions.<flag>`` pair —
+    which makes the last component (or the last ``.permissions.<flag>`` pair)
     the only possible reading. ``debuggers.a.b.probe_id`` is therefore the entry
     named ``a.b``, unambiguously, and an entry named ``a.probe_id`` is still
     reachable as ``debuggers.a.probe_id.probe_id``."""
@@ -2984,8 +2984,8 @@ def config_permission_keys() -> tuple[str, ...]:
 # `config-schema` already serves the shipped JSON Schema byte for byte. A schema
 # says what is *valid*; it does not say what the sections are for, which of them
 # a bench actually needs, or what a real one looks like filled in. Without that,
-# the write path below is operable only by guessing — write, be refused, guess
-# the next key — and every guess costs a round trip.
+# the write path below is operable only by guessing (write, be refused, guess
+# the next key), and every guess costs a round trip.
 #
 # So this document explains, and takes every value shape from the schema at read
 # time. Two descriptions of one permission boundary drift, and the configuration
@@ -2993,7 +2993,7 @@ def config_permission_keys() -> tuple[str, ...]:
 
 # What the schema cannot say about a section: why it is there, and which other
 # resource already answers the per-field questions in depth. Keyed by section and
-# merged with the schema's own description rather than replacing it — where the
+# merged with the schema's own description rather than replacing it. Where the
 # schema says nothing about a field, this document says nothing either, because
 # the alternative is a second description of the same field.
 _SECTION_PURPOSE: dict[str, str] = {
@@ -3010,7 +3010,7 @@ _SECTION_PURPOSE: dict[str, str] = {
         f"`{CONFIG_DESCRIPTION_RIGHT}`; `allow_all_symbols` is a grant and belongs to the other right."
     ),
     "artifacts": "Which firmware files may be flashed, from where, and how large.",
-    "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is — name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. From `version: 3` on an entry must say which of them identifies it: a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else an explicit `identity_source` — `vid_pid` for an adapter publishing USB ids but no serial, `device` for one publishing neither. Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
+    "com_ports": "The serial lines. `device` is how a port is opened and `serial_number` is which board it is. Name both, because a kernel name like `/dev/ttyACM0` or `COM7` is an enumeration order and moves when another adapter is attached. `vid`/`pid` name which kind of adapter it is, which is what makes a serial mean a unit at all and is the only identity an adapter that publishes no serial can have. From `version: 3` on an entry must say which of them identifies it: a `serial_number`, a `resource_id` or a `/dev/serial/by-id/...` device name, or else an explicit `identity_source` (`vid_pid` for an adapter publishing USB ids but no serial, `device` for one publishing neither). Reading needs no permission; `assert_dtr`/`assert_rts` decide whether opening one restarts the target.",
     "can_buses": (
         "The CAN buses. `listen_only: true` is how a bus is observed without sending ACK bits, and it is enforced per "
         "adapter rather than assumed: `peak` sets the mode and reads it back from the driver, `socketcan` reads the "
@@ -3039,7 +3039,7 @@ permissions:
   allow_config_write: false
   # Also still true: the agent may clear an incident that names no hardware
   # contact with no argument, and may clear one that needs somebody at the board
-  # only by relaying an operator_statement a person gave it — never invented.
+  # only by relaying an operator_statement a person gave it, never invented.
   allow_recover: true
 
 target:
@@ -3073,7 +3073,7 @@ com_ports:
   dut_uart:
     device: "COM7"              # the ST-Link virtual COM port: how it is opened
     # Which board it is. Version 3 requires this, a resource_id, or a
-    # /dev/serial/by-id/... device name — COM7 is an enumeration order, so it can
+    # /dev/serial/by-id/... device name: COM7 is an enumeration order, so it can
     # come to mean the other adapter. An adapter that publishes no serial says so
     # instead, with identity_source: vid_pid, or identity_source: device when it
     # publishes nothing at all. `agentic-hil adopt-hardware --apply` writes it.
@@ -3116,7 +3116,7 @@ def _schema_type_label(node: JsonObject) -> str:
         label = "any"
     enum = node.get("enum")
     if isinstance(enum, list) and enum:
-        label += " — one of " + ", ".join(f"`{json.dumps(item)}`" for item in enum)
+        label += ", one of " + ", ".join(f"`{json.dumps(item)}`" for item in enum)
     pattern = node.get("pattern")
     if isinstance(pattern, str):
         label += f", matching `{pattern}`"
@@ -3134,7 +3134,7 @@ def _schema_field_rows(schema: JsonObject, node: JsonObject) -> list[str]:
     rows: list[str] = []
     for name, raw in properties.items():
         field = _dereference(schema, raw)
-        default = f"`{json.dumps(field['default'])}`" if "default" in field else ("**required**" if name in required else "—")
+        default = f"`{json.dumps(field['default'])}`" if "default" in field else ("**required**" if name in required else "-")
         description = str(field.get("description", "")).replace("\n", " ").replace("|", "\\|")
         if field.get("deprecated") is True:
             description = "**Deprecated.** " + description
@@ -3157,7 +3157,7 @@ def _config_section_documents(schema: JsonObject) -> list[str]:
         node = _dereference(schema, raw)
         purpose = _SECTION_PURPOSE.get(name, "")
         schema_description = str(node.get("description", "")).replace("\n", " ")
-        heading = f"### `{name}`" + (" — required" if name in required else "")
+        heading = f"### `{name}`" + (" (required)" if name in required else "")
         lines = [heading, ""]
         if purpose:
             lines.append(purpose)
@@ -3194,13 +3194,13 @@ def config_shape_document() -> str:
     rights = "\n".join(f"| `permissions.{name}` | {purpose} |" for name, purpose in CONFIG_RIGHTS.items())
     return f"""# The shape of an Agentic HIL configuration, and how to change it
 
-`{CONFIG_SCHEMA_URI}` serves the JSON Schema this file is validated against. A schema says what is **valid**; it does not say what a section is for, which ones a bench actually needs, or what a real one looks like filled in. This document is that, and it takes every value shape from the same schema at read time — there is no second list of types anywhere.
+`{CONFIG_SCHEMA_URI}` serves the JSON Schema this file is validated against. A schema says what is **valid**; it does not say what a section is for, which ones a bench actually needs, or what a real one looks like filled in. This document is that, and it takes every value shape from the same schema at read time: there is no second list of types anywhere.
 
 ## Where the file is
 
 One authoritative file per project, **outside** the workspace, so repository content can never rewrite policy. The server discovers it; `AGENTIC_HIL_CONFIG` may override the location with an absolute path. `{PLATFORM_PATHS_URI}` has the location rules.
 
-`workspace_root` and `state_root` are the only two required keys. Everything else has a default, and a configuration that names only those two is valid — it just describes a bench with no hardware on it.
+`workspace_root` and `state_root` are the only two required keys. Everything else has a default, and a configuration that names only those two is valid: it just describes a bench with no hardware on it.
 
 ## The sections
 
@@ -3208,7 +3208,7 @@ One authoritative file per project, **outside** the workspace, so repository con
 
 ## A worked example
 
-A Nucleo-F446RE on ST-Link, flashed through OpenOCD, talking over the probe's own virtual COM port. It was generated with every permission true but the two that refuse flashing while they are true; what you see beyond those is what the operator asked an agent to take back afterwards — no regeneration of this file from hardware discovery:
+A Nucleo-F446RE on ST-Link, flashed through OpenOCD, talking over the probe's own virtual COM port. It was generated with every permission true but the two that refuse flashing while they are true; what you see beyond those is what the operator asked an agent to take back afterwards (no regeneration of this file from hardware discovery):
 
 ```yaml
 {CONFIG_WORKED_EXAMPLE}```
@@ -3217,7 +3217,7 @@ A Nucleo-F446RE on ST-Link, flashed through OpenOCD, talking over the probe's ow
 
 ## Changing it over MCP
 
-These calls are the only door. The file itself is protected by deny rules `agentic-hil setup` writes into the host, so an agent's own file tools cannot touch it — that is the precondition for this door, not a contradiction of it.
+These calls are the only door. The file itself is protected by deny rules `agentic-hil setup` writes into the host, so an agent's own file tools cannot touch it: that is the precondition for this door, not a contradiction of it.
 
 | Call | Does |
 |---|---|
@@ -3227,36 +3227,36 @@ These calls are the only door. The file itself is protected by deny rules `agent
 | `project_config_create` | regenerates the whole file from hardware discovery when `permissions.allow_config_write` is set. It authors no permission value of its own, but it is a generation and not a narrowing: see below. |
 | `project_config_reload_description` | makes a changed **description** the one this running server answers out of, without a restart. Re-reads nothing else. See "Picking up a changed description without a restart". |
 
-### Permissions move one way — through `project_config_set`
+### Permissions move one way: through `project_config_set`
 
-A configuration is **generated with every permission true** — flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*` grants — **except `allow_raw_debugger_commands` and `allow_mass_erase`, which are generated false**. Both of those act on flash outside the path this server validates — a raw debugger command writes whatever it is given, a mass erase clears whatever a flash has just written — so once either is allowed, a flash report's claim about what is on the device is no longer one this server can stand behind. That is the mutual exclusion between validated flashing and unrestricted debugger access: while either of those is true, `flash_firmware` on that probe is refused. Neither has a tool behind it here, so setting one true withholds flashing rather than granting anything, and leaving them false costs nothing and is what makes the bench flashable. The bench is workable from the moment the file exists, flashing included, and nobody has to open an editor to make it so.
+A configuration is **generated with every permission true** (flashing, reset, COM and CAN writes, and all three `permissions.allow_config_*` grants) **except `allow_raw_debugger_commands` and `allow_mass_erase`, which are generated false**. Both of those act on flash outside the path this server validates (a raw debugger command writes whatever it is given, a mass erase clears whatever a flash has just written), so once either is allowed, a flash report's claim about what is on the device is no longer one this server can stand behind. That is the mutual exclusion between validated flashing and unrestricted debugger access: while either of those is true, `flash_firmware` on that probe is refused. Neither has a tool behind it here, so setting one true withholds flashing rather than granting anything, and leaving them false costs nothing and is what makes the bench flashable. The bench is workable from the moment the file exists, flashing included, and nobody has to open an editor to make it so.
 
 What holds instead of a closed start is the direction of the one call that writes a permission field-wise:
 
 ```text
 Generation                  every permission true, but the two flashing is interlocked against
 Through project_config_set  write false into a permission
-                            never true — not even into one you set to false yourself
+                            never true, not even into one you set to false yourself
 Last move there             permissions.{CONFIG_PERMISSIONS_RIGHT}: false
 After that                  no permission changes through project_config_set at all
-Reopened by a person        `{CONFIG_GRANT_COMMAND} <key>` — one named permission, nothing else in the file
+Reopened by a person        `{CONFIG_GRANT_COMMAND} <key>`: one named permission, nothing else in the file
 ```
 
-A change that would turn any permission on is refused as `{CONFIG_WIDENING_ERROR}`, and the check reads the permissions present in the document before and after the write rather than the keys the request named — so there is no spelling of it that gets through. Report the refusal and stop; granting is the operator's.
+A change that would turn any permission on is refused as `{CONFIG_WIDENING_ERROR}`, and the check reads the permissions present in the document before and after the write rather than the keys the request named, so there is no spelling of it that gets through. Report the refusal and stop; granting is the operator's.
 
-Closing `permissions.{CONFIG_PERMISSIONS_RIGHT}` freezes the permissions for this call: after it, no permission here can be changed again through `project_config_set`. That call says so in its own result — which permissions stand frozen, that you cannot undo it, and the commands a person reopens it with. Do not make that call in passing.
+Closing `permissions.{CONFIG_PERMISSIONS_RIGHT}` freezes the permissions for this call: after it, no permission here can be changed again through `project_config_set`. That call says so in its own result: which permissions stand frozen, that you cannot undo it, and the commands a person reopens it with. Do not make that call in passing.
 
 ### What the ratchet does not cover
 
 The two commands a person has are a separate door, and it is honest to say so rather than to promise more than holds:
 
-* `{CONFIG_GRANT_COMMAND} <key>` at a person's shell opens one named permission in the file as it stands and changes nothing else in it; `{CONFIG_REVOKE_COMMAND} <key>` closes one again. That is the surgical reopen path, it is the operator's, and it is the one to name when a permission is what is missing — with the key. Neither is an MCP tool.
+* `{CONFIG_GRANT_COMMAND} <key>` at a person's shell opens one named permission in the file as it stands and changes nothing else in it; `{CONFIG_REVOKE_COMMAND} <key>` closes one again. That is the surgical reopen path, it is the operator's, and it is the one to name when a permission is what is missing, with the key. Neither is an MCP tool.
 * `{CONFIG_REOPEN_COMMAND}` at the same shell rewrites this whole file from attached hardware at the generated defaults. That is the wide reopen path and it is also the operator's; ask for it only when the bench itself has to be rebuilt.
 * `project_config_create` over MCP is the same generation under `permissions.allow_config_write`. Entries already in the file keep the permissions this server loaded for them; an entry the discovery finds for the first time arrives at the generated defaults; an entry the discovery no longer finds is dropped; and if the configuration has been deleted in the meantime, the file that comes back is at those same defaults. Its result names what it wrote.
-* **"This server loaded" is literal, and it is the sharpest edge of that door.** A server parses the configuration once, at startup, and does not reload. A permission narrowed with `project_config_set` is on disk and is *not* in what the server holds, so a `project_config_create` in that same session writes the older, wider value back. A narrowing binds this path only once the server has been restarted onto the narrowed file — the same restart a `config_stale` result asks for, and that includes closing `permissions.allow_config_write` itself, which is checked against the loaded configuration like every other permission this server enforces. What closes the door for good is an operator setting it false in the file and the server being restarted onto it.
+* **"This server loaded" is literal, and it is the sharpest edge of that door.** A server parses the configuration once, at startup, and does not reload. A permission narrowed with `project_config_set` is on disk and is *not* in what the server holds, so a `project_config_create` in that same session writes the older, wider value back. A narrowing binds this path only once the server has been restarted onto the narrowed file, the same restart a `config_stale` result asks for, and that includes closing `permissions.allow_config_write` itself, which is checked against the loaded configuration like every other permission this server enforces. What closes the door for good is an operator setting it false in the file and the server being restarted onto it.
 * Anything a person does at the command line, including editing the file, is theirs. Nothing here binds them.
 
-So the claim is exactly this and no larger: **the MCP permission-write path can only narrow.** An operator who wants the whole file to stop moving from the agent side sets `permissions.allow_config_write` to false as well — that closes the regeneration door, and like every other permission here it can be closed from this surface and not reopened from it, taking effect for a running server once it is restarted onto the closed file.
+So the claim is exactly this and no larger: **the MCP permission-write path can only narrow.** An operator who wants the whole file to stop moving from the agent side sets `permissions.allow_config_write` to false as well. That closes the regeneration door, and like every other permission here it can be closed from this surface and not reopened from it, taking effect for a running server once it is restarted onto the closed file.
 
 ### The two rights
 
@@ -3272,7 +3272,7 @@ The split is the point. Somebody who opens the file so an agent can enter a prob
 |---|---|---|
 {keys}
 
-`<name>` is an entry name you choose. A `debuggers`/`com_ports`/`can_buses` entry that does not exist yet is created by setting a key under it — always with every permission false, written by the server. A generation grants; a write only ever takes away, and adding an entry is a write, so a device named this way arrives closed and `{CONFIG_GRANT_COMMAND} <key>` at a person's shell is what opens it, one permission at a time.
+`<name>` is an entry name you choose. A `debuggers`/`com_ports`/`can_buses` entry that does not exist yet is created by setting a key under it, always with every permission false, written by the server. A generation grants; a write only ever takes away, and adding an entry is a write, so a device named this way arrives closed and `{CONFIG_GRANT_COMMAND} <key>` at a person's shell is what opens it, one permission at a time.
 
 Entry names may contain dots. Keys are therefore read from the right: the field name is the last component, so `debuggers.a.b.probe_id` is the entry named `a.b`.
 
@@ -3294,19 +3294,19 @@ The write is recorded in `provenance`: `last_modified_by`, `last_modified_via`, 
 | Not possible | Why |
 |---|---|
 | writing the file with your own file tools | `setup` writes host deny rules against exactly that. One door, audited, locked by a grant inside the file. |
-| sending a whole document, or a whole `debuggers.dut` subtree | the agent does not author this file. `value` accepts a string, number, boolean or null and nothing else, so no subtree — and no `permissions:` block inside one — can arrive as a value. |
-| turning any permission on through `project_config_set`, with any grant | refused as `{CONFIG_WIDENING_ERROR}`, both for a value other than `false` and for a document that would end up granting more than it did. The permissions actually present in the document are compared before and after the change, so it holds whatever the key was called and whichever grant the caller holds. Regenerating the file is the other door and a different grant — see "What the ratchet does not cover". |
+| sending a whole document, or a whole `debuggers.dut` subtree | the agent does not author this file. `value` accepts a string, number, boolean or null and nothing else, so no subtree (and no `permissions:` block inside one) can arrive as a value. |
+| turning any permission on through `project_config_set`, with any grant | refused as `{CONFIG_WIDENING_ERROR}`, both for a value other than `false` and for a document that would end up granting more than it did. The permissions actually present in the document are compared before and after the change, so it holds whatever the key was called and whichever grant the caller holds. Regenerating the file is the other door and a different grant. See "What the ratchet does not cover". |
 | reaching a permission with only the description grant | refused twice over: the key does not resolve to the description grant, and the same before/after comparison catches a permission that moved without `{CONFIG_PERMISSIONS_RIGHT}`. |
 | changing anything while a run is open | a run holds devices under the policy this file states. Changing the policy underneath it is refused; close the run with `bench_run_stop` first. |
 | deleting a key, an entry, or the file | nothing on this surface removes configuration. Regenerating one costs an operator their settings. |
 | `version`, `workspace_root`, `state_root`, `validation`, `recovery`, and every key of `artifacts` and `debug` except the two grants below | not settable over MCP at all. These decide where trusted state lives, which files may be flashed and how far the machine may recover itself. They are an operator's to write. |
-| widening `artifacts.allow_upload` or `debug.allow_all_symbols` | those two are the exception to the row above: a generation grants them like every other permission, so `{CONFIG_PERMISSIONS_RIGHT}` reaches them and `false` is the only value that may be written into either. Their list and path neighbours — `artifacts.allowed_roots`, `debug.allowed_symbols`, `upload_directory` — stay operator-only, so narrowing here is the scalar grant and nothing else. |
+| widening `artifacts.allow_upload` or `debug.allow_all_symbols` | those two are the exception to the row above: a generation grants them like every other permission, so `{CONFIG_PERMISSIONS_RIGHT}` reaches them and `false` is the only value that may be written into either. Their list and path neighbours (`artifacts.allowed_roots`, `debug.allowed_symbols`, `upload_directory`) stay operator-only, so narrowing here is the scalar grant and nothing else. |
 
 A refused write names the grant that is missing and the key in this file that carries it. If the answer is `permission_denied`, that **is** the answer: report it and stop. The configuration belongs to the operator.
 
 ## A board plugged in after this file was written
 
-`agentic-hil setup` discovers hardware once. Run with nothing attached, it writes placeholders — `probe_id: null`, `executable: null`, `controller: "unknown-controller"`, no `com_ports` entry — and that is the common case, because installing the tool and connecting the board are two separate moments.
+`agentic-hil setup` discovers hardware once. Run with nothing attached, it writes placeholders (`probe_id: null`, `executable: null`, `controller: "unknown-controller"`, no `com_ports` entry), and that is the common case, because installing the tool and connecting the board are two separate moments.
 
 `project_config_adopt_hardware` is the way back in. It reads what is attached and fills in what the file has nothing for.
 
@@ -3316,7 +3316,7 @@ A refused write names the grant that is missing and the key in this file that ca
 
 | Property | Rule |
 |---|---|
-| what it carries | `debuggers.<name>.probe_id`, `debuggers.<name>.executable`, `target.controller`, `com_ports.<name>.device`. Identity, and only identity — what an attached probe hands you. |
+| what it carries | `debuggers.<name>.probe_id`, `debuggers.<name>.executable`, `target.controller`, `com_ports.<name>.device`. Identity, and only identity: what an attached probe hands you. |
 | where the values come from | hardware discovery on this machine. The arguments *select* (`probe_id`, `debugger_id`, `com_port_id`) and never supply, so nothing of yours can reach the file through it. |
 | what counts as unset | absent, `null`, empty, or exactly the placeholder the shipped skeleton writes. Anything else is a value somebody chose: it comes back under `kept`, with what the hardware says beside it, and is not replaced. |
 | what it writes through | `project_config_set`, so the same grants, the same schema check, the same validate-before-replace, the same `provenance` record. Without `apply` it writes nothing at all. |
@@ -3330,7 +3330,7 @@ A refused write names the grant that is missing and the key in this file that ca
 
 ## Picking up a changed description without a restart
 
-A server parses this file once and enforces that document until it exits. That rule is about the **permissions**: they were taken as a whole, and a document that turned up underneath a running server may not widen them. It used to hold the **description** hostage too — a board plugged in and written down after the server started was invisible to it, and the only way across was a restart of the agent's MCP server.
+A server parses this file once and enforces that document until it exits. That rule is about the **permissions**: they were taken as a whole, and a document that turned up underneath a running server may not widen them. It used to hold the **description** hostage too: a board plugged in and written down after the server started was invisible to it, and the only way across was a restart of the agent's MCP server.
 
 `project_config_reload_description` is the way across. It takes no arguments.
 
@@ -3340,13 +3340,13 @@ A server parses this file once and enforces that document until it exits. That r
 
 | Property | Rule |
 |---|---|
-| what it re-reads | `target`, `debuggers`, `com_ports`, `can_buses` — minus each entry's `permissions:` block. That is the whole list. |
+| what it re-reads | `target`, `debuggers`, `com_ports`, `can_buses` (minus each entry's `permissions:` block). That is the whole list. |
 | what it does not | **every permission, in either direction.** Not narrowed, not compared, not adopted. The grants in force after a reload are byte for byte the ones parsed at startup. |
-| a device that is new to this server | arrives with **no grant at all**. It can be probed and read — from `version: 2` on, reading needs no grant; exclusivity is what protects it — and flashing, reset, mass erase and COM/CAN writes are denied on it until an operator restarts the server onto the file that grants them. |
+| a device that is new to this server | arrives with **no grant at all**. It can be probed and read (from `version: 2` on, reading needs no grant; exclusivity is what protects it), and flashing, reset, mass erase and COM/CAN writes are denied on it until an operator restarts the server onto the file that grants them. |
 | a device renamed on disk | the new name is a device this server has never seen, so it arrives closed, and the old name is gone. Renaming an entry costs its grants until a restart. |
 | which board is bound | the name this server already drives, wherever it still exists. A second entry appearing does not repoint a bound server; a bench that configured no debugger at all binds the first one that appears, because there is exactly one board it could mean. |
 | refused while | a run, a COM/CAN session or a debug session holds this bench (`config_reload_in_open_run`), or an incident on it is unresolved (`resource_quarantined`). Both because a held name has to keep meaning the same physical board. |
-| refused when | the file is missing, unreadable, or does not load — `config_file_not_found`, `config_unreadable`, `config_invalid`, the same three states `config_status` reports. Nothing changes on any of them. |
+| refused when | the file is missing, unreadable, or does not load: `config_file_not_found`, `config_unreadable`, `config_invalid`, the same three states `config_status` reports. Nothing changes on any of them. |
 | what it writes | nothing. It reads the file, so no grant gates it; a bench whose `permissions.{CONFIG_DESCRIPTION_RIGHT}` is false can still pick up a board somebody plugged in. |
 
 ### What still needs a restart, by name
@@ -3368,14 +3368,14 @@ These are refused by name rather than quietly skipped, because each of them is e
 
 `config_status` compares the file against the description now in force, so a reload that just took the file's description does **not** leave `config_stale: true` behind for it. What does not disappear is the other half: when the file's permissions differ from the ones being enforced, the status carries `permissions_source`, which says the grants came from the document parsed at startup and that a restart is what adopts the file's. The reload's own result lists them under `permission_differences`, taken at the moment both documents were in hand.
 
-At a shell the same operation is `agentic-hil config-reload`, which loads this file the way a server does and reports what a running server's reload would take from it and what it would leave — the pre-flight for asking an agent to make the call.
+At a shell the same operation is `agentic-hil config-reload`, which loads this file the way a server does and reports what a running server's reload would take from it and what it would leave: the pre-flight for asking an agent to make the call.
 
 ## Getting from "board attached" to a valid change
 
-1. `project_config_describe` — what may this caller change right now.
-2. `project_config_adopt_hardware` — what is attached, and which keys it would fill in. Nothing is written yet.
+1. `project_config_describe`: what may this caller change right now.
+2. `project_config_adopt_hardware`: what is attached, and which keys it would fill in. Nothing is written yet.
 3. The same call with `{{"apply": true}}`, or `project_config_set` for a key it left alone.
-4. `project_config_reload_description` — make what was just written the description this server answers out of. The write's `reload_required` is about that, and this is what clears it for the four device sections. A permission the write changed still waits for a restart.
+4. `project_config_reload_description`: make what was just written the description this server answers out of. The write's `reload_required` is about that, and this is what clears it for the four device sections. A permission the write changed still waits for a restart.
 """
 
 
@@ -3387,20 +3387,20 @@ Two different things guard the hardware, and they live in two different places.
 
 **The lease** is per configuration, lives under `state_root`, and records what a call did and whether the hardware was left in a confirmed state. It survives process exit; that is what makes an abandoned incident visible instead of forgotten.
 
-A third thing *describes* the hardware contact and guards nothing. Every tool in `tools/list` carries MCP `annotations` — `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` — set from what the tool demonstrably does, on the same line this document already draws for hardware contact. `project_config_reload_description`, `com_read`, `can_read`, `bench_run_status` and `project_config_describe` change nothing and say so; `flash_firmware` and `debug_start_session` — whose `load` mode programs flash, which is why it needs `allow_flash` — are declared destructive; `probe_target` is deliberately *not* read-only, because an SWD attach halts the core. They exist so a host can tell a harmless call from an irreversible one instead of judging by the tool's name. They are hints in the protocol's sense and this server enforces nothing by them: what a call may do is decided by the configuration's permissions and by the exclusivity below, exactly as before. A `readOnlyHint: true` is not a grant, and a `destructiveHint: false` is not a promise that a call will be allowed.
+A third thing *describes* the hardware contact and guards nothing. Every tool in `tools/list` carries MCP `annotations` (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) set from what the tool demonstrably does, on the same line this document already draws for hardware contact. `project_config_reload_description`, `com_read`, `can_read`, `bench_run_status` and `project_config_describe` change nothing and say so; `flash_firmware` and `debug_start_session` (whose `load` mode programs flash, which is why it needs `allow_flash`) are declared destructive; `probe_target` is deliberately *not* read-only, because an SWD attach halts the core. They exist so a host can tell a harmless call from an irreversible one instead of judging by the tool's name. They are hints in the protocol's sense and this server enforces nothing by them: what a call may do is decided by the configuration's permissions and by the exclusivity below, exactly as before. A `readOnlyHint: true` is not a grant, and a `destructiveHint: false` is not a promise that a call will be allowed.
 
 ## Device exclusivity
 
 | Property | Rule |
 |---|---|
 | what is locked | the physical device: `physical:<resource_id>`, `probe:<serial>`, `probe-exe:<executable>`, `com:serial:<serial_number>`, `com:<device>`, `can:<adapter>:<channel>` |
-| case | a name for hardware — `resource_id`, a probe serial, a port's `serial_number`, a CAN channel — folds case on every platform, because `0669FF` and `0669ff` are one unit wherever the bench runs. A host path — a debugger executable, a serial device — folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
-| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order — attaching a second adapter can hand one entry another board — so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so — and from `version: 3` on that warning is a property of the file instead: such an entry must declare what identifies it with `identity_source` or the configuration is refused at load, naming `agentic-hil adopt-hardware --apply`. `vid`/`pid` sit beside the serial and name the device *type* rather than a unit, so they are never a lock key: a USB serial is unique only within its vendor, so a serial matching under a foreign vid/pid is refused too, and an adapter that publishes no serial at all is compared on the type alone — which separates a CH340 from an ST-Link and not one CH340 from another, and `identity_source: vid_pid` says exactly that. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all — no serial backend, not enumerated exactly once, no serial reported, or no USB ids reported where the entry names them — is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
-| where | `~/.agentic-hil/device-locks`, one agreed place per machine, never under `state_root` — a lock kept per configuration is not a bench lock |
+| case | a name for hardware (`resource_id`, a probe serial, a port's `serial_number`, a CAN channel) folds case on every platform, because `0669FF` and `0669ff` are one unit wherever the bench runs. A host path (a debugger executable, a serial device) folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
+| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order (attaching a second adapter can hand one entry another board), so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so, and from `version: 3` on that warning is a property of the file instead: such an entry must declare what identifies it with `identity_source` or the configuration is refused at load, naming `agentic-hil adopt-hardware --apply`. `vid`/`pid` sit beside the serial and name the device *type* rather than a unit, so they are never a lock key: a USB serial is unique only within its vendor, so a serial matching under a foreign vid/pid is refused too, and an adapter that publishes no serial at all is compared on the type alone, which separates a CH340 from an ST-Link and not one CH340 from another, and `identity_source: vid_pid` says exactly that. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all (no serial backend, not enumerated exactly once, no serial reported, or no USB ids reported where the entry names them) is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
+| where | `~/.agentic-hil/device-locks`, one agreed place per machine, never under `state_root`: a lock kept per configuration is not a bench lock |
 | how long | the whole run, from the declaration to its end; the lease each call takes borrows that hold |
 | what may be touched | only what the test description declares; anything else is refused with `undeclared_device` |
 | contention | refused with `device_busy`, naming the holder; waiting happens only when the caller asked for it with `wait_s`, and stays bounded |
-| a crashed owner | the operating system drops the lock when the process dies, so the device is free immediately — no quarantine, no `recover`, no waiting |
+| a crashed owner | the operating system drops the lock when the process dies, so the device is free immediately: no quarantine, no `recover`, no waiting |
 
 A call outside a declared run still takes the device for the length of the call, so a lone observation is refused while a run holds the board and works when none does.
 
@@ -3442,17 +3442,17 @@ Nothing times a run out, and that is deliberate: dropping a device that may be m
 | the client disconnects | stdin reaches EOF, the server shuts its service down, and an open run is released on the way out |
 | the server process dies | the operating system drops the advisory lock it held; the next owner takes the device and its result carries `reclaimed` with reason `owner_process_exited_without_release` |
 
-So an abandoned run costs nothing beyond the life of the server process. While it lasts, a contender's `device_busy` refusal carries `heartbeat_age_s` and, past four heartbeat intervals, `holder_heartbeat_stale: true` — an idle holder is visible rather than merely obstructive. Call `bench_run_status` if you are unsure whether you still hold the bench, and `bench_run_stop` to be sure you do not.
+So an abandoned run costs nothing beyond the life of the server process. While it lasts, a contender's `device_busy` refusal carries `heartbeat_age_s` and, past four heartbeat intervals, `holder_heartbeat_stale: true`. An idle holder is visible rather than merely obstructive. Call `bench_run_status` if you are unsure whether you still hold the bench, and `bench_run_stop` to be sure you do not.
 
 One case is outside this: a server process left running with its stdin never closed, by a host that leaked the pipe. It sees no disconnect and holds the run. Ending that process is the answer; never delete a lock file under `~/.agentic-hil/device-locks`.
 
 ### Two config entries, one board
 
-The lock is keyed on the hardware, not on the name of the config entry. Two entries that describe one physical unit — a debug probe and its virtual COM port sharing a `resource_id`, or the same serial device configured twice — resolve to one lock key and are taken once. Declaring both is not an error and does not double-lock anything.
+The lock is keyed on the hardware, not on the name of the config entry. Two entries that describe one physical unit (a debug probe and its virtual COM port sharing a `resource_id`, or the same serial device configured twice) resolve to one lock key and are taken once. Declaring both is not an error and does not double-lock anything.
 
 The one identity that is *not* hardware-derived: a debugger entry with neither `resource_id` nor `probe_id` falls back to the backend toolchain. Two boards driven by the same backend would then share one lock, and one board reached through two backends would take two. `bench_run_start` returns a `warnings` entry when a declared device is in that state; the fix is a `probe_id`, or a `resource_id` shared by every entry naming that unit.
 
-Reading can still perturb a target — an SWD attach halts the core, a CAN controller outside `listen_only` sends dominant ACK bits, opening a serial port raises DTR on boards that wire it to reset. That is why the passive modes stay available: `can_buses.<name>.listen_only: true` and `com_ports.<name>.assert_dtr: false` / `assert_rts: false` are how a target is observed provably undisturbed. They are no longer a precondition for access; they are the way to prove a reading did not touch anything.
+Reading can still perturb a target: an SWD attach halts the core, a CAN controller outside `listen_only` sends dominant ACK bits, opening a serial port raises DTR on boards that wire it to reset. That is why the passive modes stay available: `can_buses.<name>.listen_only: true` and `com_ports.<name>.assert_dtr: false` / `assert_rts: false` are how a target is observed provably undisturbed. They are no longer a precondition for access; they are the way to prove a reading did not touch anything.
 
 What `listen_only: true` is worth is what the adapter can be held to, and that differs by adapter, so it is enforced rather than assumed.
 
@@ -3503,15 +3503,15 @@ A *standing* quarantine answers a narrower one still: "is the missing proof one 
 
 | Failure | Outcome |
 |---|---|
-| toolchain executable not found (OpenOCD, pyOCD, STM32CubeProgrammer CLI, the debug server, GDB) | refusal — no process ever existed |
-| OpenOCD rejected the command before `init`, or a `-f` script failed to load, or the adapter could not be opened, or no target answered, with the init-stage marker absent | refusal — `init` never completed, so nothing was brought under debug control |
-| pyOCD found no probe / could not open it, refused the configured `target_type`, or reported its connect sequence failed | refusal — no core came under debug control |
-| ST-Link probe absent (`no ST-LINK detected`) or no target behind it (`No STM32 target found`) | refusal — the channel carried nothing |
+| toolchain executable not found (OpenOCD, pyOCD, STM32CubeProgrammer CLI, the debug server, GDB) | refusal: no process ever existed |
+| OpenOCD rejected the command before `init`, or a `-f` script failed to load, or the adapter could not be opened, or no target answered, with the init-stage marker absent | refusal: `init` never completed, so nothing was brought under debug control |
+| pyOCD found no probe / could not open it, refused the configured `target_type`, or reported its connect sequence failed | refusal: no core came under debug control |
+| ST-Link probe absent (`no ST-LINK detected`) or no target behind it (`No STM32 target found`) | refusal: the channel carried nothing |
 | `probe_target` / `debugger_probes_list` failed and the backend named no abort point (a timeout that killed it mid-call (`timeout`), an exit whose output does not carry the confirmation the tool asks for (`target_state_unconfirmed`)) | **incident** (`debugger_readonly_target_state_unconfirmed`): being read-only is not being passive, an SWD attach halts the core, and a killed process never ran its own `shutdown`. Settled by a verified reset-into-halt, never by a re-read. The `error_type` is its own, never `target_not_detected`: that one is the backend's report that the adapter was reached and nothing answered, which is a row above and refuses |
-| COM port could not be opened and the handle is verifiably closed | refusal — the port never carried a byte of the session |
-| CAN adapter never initialized on SocketCAN (python-can `CanInitializationError`) | refusal — `SocketcanBus()` only creates and binds a socket; the controller is brought up out of band |
+| COM port could not be opened and the handle is verifiably closed | refusal: the port never carried a byte of the session |
+| CAN adapter never initialized on SocketCAN (python-can `CanInitializationError`) | refusal: `SocketcanBus()` only creates and binds a socket; the controller is brought up out of band |
 | CAN adapter never initialized on PCAN (`PcanCanInitializationError`) | **recorded event** (`can_open_cleanup_unconfirmed`): python-can raises it from four `SetValue` calls that run after `PCANBasic.Initialize` succeeded, and the class carries no phase marker, so an initialized channel that is already ACKing on the bus looks the same. The refusal names it and carries its guidance; the bus is not held for it, because the next `can_session_start` is what settles an adapter either way |
-| a direct CAN read failed | refusal — `recv()` transmits nothing |
+| a direct CAN read failed | refusal: `recv()` transmits nothing |
 | a peripheral cleanup that did not confirm (a serial handle or reader that would not close, a CAN adapter that would not shut down) | recorded event with the same reason and the same guidance, and no incident: the next open is the proof, and a handle that is really stuck makes it fail through the operating system |
 | anything else whose abort point cannot be proven (an unconfirmed flash or reset, an exception mid-call, an owner that died holding a lease) | incident for the length of the call: the recovery action runs, and what it does not settle stands down rather than standing |
 | a broken audit trail (`*_audit_broken`) | **standing quarantine**; that is the feature, and it is the only one left. No reset writes a report that was never written |
@@ -3589,7 +3589,7 @@ Agentic HIL keeps three things outside the workspace: the authoritative configur
 
 ## What is checked about a path, and what is not
 
-A configured path is opened component by component without following links, and every component of the chain is held open while the operation runs — on Windows without `FILE_SHARE_DELETE`, which blocks a rename or a delete of any of them for the duration. So a path is refused when it *is not what it claims to be*: a symlinked component, a file where a directory is needed, a final object that is not a single-link regular file. That refusal carries `error_type: unsafe_configured_path` and names the component that stopped the walk.
+A configured path is opened component by component without following links, and every component of the chain is held open while the operation runs (on Windows without `FILE_SHARE_DELETE`, which blocks a rename or a delete of any of them for the duration). So a path is refused when it *is not what it claims to be*: a symlinked component, a file where a directory is needed, a final object that is not a single-link regular file. That refusal carries `error_type: unsafe_configured_path` and names the component that stopped the walk.
 
 What is **not** asked is who else on this machine could write the path. A Windows ACL walk and a POSIX mode/sticky-bit walk over every ancestor used to ask exactly that, and both were removed in 0.8.0. Two reasons, and the second is the one that decides it:
 
@@ -3627,7 +3627,7 @@ Each half owns its rollback set. A project step that fails leaves the installed 
 
 Two roots wherever a row names two, best first: the platform default, then `~/.agentic-hil`, which is the walk `agentic-hil init` runs and the root every path refusal already recommends. `else` is meant literally, the second root is taken when the first cannot be written, checked as a write rather than as merely existing, which is what a redirected profile or a packaged host does to the default. The configuration adds one rule on top of that order, that an existing file wins over it: a configuration already written under the fallback is this workspace's authoritative one, every later load finds it there, and `init --force` rewrites it where it is rather than generating a second beside the default. The record is the row spelled `and`, because both of its files can hold entries at once; the `AGENTIC_HIL_CONFIG` bullet below says how they are read and which one a write lands in.
 
-The device lock directory is not configurable and has no environment override. It is the one place every process on this machine agrees to look for who holds a board, and an override is how two sessions stop seeing each other — which is the failure it exists to prevent. The home directory is chosen because every process of one user reaches it without having to agree on a configuration first.
+The device lock directory is not configurable and has no environment override. It is the one place every process on this machine agrees to look for who holds a board, and an override is how two sessions stop seeing each other, which is the failure it exists to prevent. The home directory is chosen because every process of one user reaches it without having to agree on a configuration first.
 
 ## Choosing another location
 
@@ -3640,7 +3640,7 @@ AGENTIC_HIL_CONFIG=C:\\Users\\<user>\\.agentic-hil\\projects\\<name>-<digest>\\c
 state_root: C:\\Users\\<user>\\.agentic-hil\\state
 ```
 
-Using them costs nothing else: `state_root` has no fixed location beyond being absolute and not overlapping `workspace_root`, and a configuration selected by `AGENTIC_HIL_CONFIG` is read exactly like a discovered one — same schema, same validation, same permissions. Nothing about a project is second class for having taken this route.
+Using them costs nothing else: `state_root` has no fixed location beyond being absolute and not overlapping `workspace_root`, and a configuration selected by `AGENTIC_HIL_CONFIG` is read exactly like a discovered one: same schema, same validation, same permissions. Nothing about a project is second class for having taken this route.
 
 The one rule that does not bend: set `AGENTIC_HIL_CONFIG` in the host's user-level, managed, or parent-process environment, **never** in a repository-controlled file (`.vscode/mcp.json`, `.mcp.json`, `.codex/config.toml`, `opencode.json`). An agent that can edit the file that selects the configuration can select a configuration it wrote.
 
@@ -3650,7 +3650,7 @@ Rules that hold on both platforms:
 - `agentic-hil init --agent <agent>` writes the location of a configuration bound this way into `external-projects.json` beside the projects directory, and it holds nothing but locations. Two spellings exist, one beside each projects root (the platform default and `~/.agentic-hil`), and both may hold a record at once: an unpackaged host leaves one beside the default, a virtualized profile writes beside the fallback. Readers union both, so no project goes missing whichever file holds it; a write lands in the one root the profile can actually write (checked as a write, not merely as existing) and converges the union into it, while an unwritable record is read but never targeted. `agentic-hil uninstall` removes what it can and reports a record it cannot remove under `left_alone` with the reason, rather than aborting after the deny rules are already taken back. The write refusals that run leaves in the agent's own settings are refreshed on every later run, and a project whose configuration the projects directory does not hold would otherwise be read there as a bench that is gone, so its rule would be taken back while the bench still wanted it. A recorded configuration that cannot be read leaves that question open and no rule is taken back at all; `agentic-hil uninstall` takes the record back together with the rules it explains.
 - `workspace_root` and `state_root` are both mandatory and absolute, and must not overlap in either direction.
 - The discovered default configuration path is derived from the workspace path, so it is canonical per workspace; a config found elsewhere is only accepted through `AGENTIC_HIL_CONFIG`.
-- Whether an agent may write the configuration is decided by the configuration, in `permissions.allow_config_write`, and by nothing else. There is no second state store: what holds is what a person reads in the file. A workspace with no configuration lets an agent generate one, and a configuration deleted out of band lets it generate a fresh one — the generated skeleton again, at the generated defaults, so the round trip discards every narrowing the operator had asked for and produces the file `agentic-hil init` would have written.
+- Whether an agent may write the configuration is decided by the configuration, in `permissions.allow_config_write`, and by nothing else. There is no second state store: what holds is what a person reads in the file. A workspace with no configuration lets an agent generate one, and a configuration deleted out of band lets it generate a fresh one: the generated skeleton again, at the generated defaults, so the round trip discards every narrowing the operator had asked for and produces the file `agentic-hil init` would have written.
 """
 
 
@@ -3707,7 +3707,7 @@ pyocd pack show                  # what is installed now
 
 `pyocd pack install` fetches a device-family pack over the network from the vendor index. Agentic HIL never runs it, never runs it for you as part of another call, and has no setting that would. It names the command; a person runs it, knowing what is being fetched and from where.
 
-That rule exists because of what happened without it: an agent looking for the right `target_type` found nothing about packs anywhere, escalated through pyOCD's installed sources and `cmsis_pack_manager`'s internals, and ended up fetching a `.pdsc` from a vendor site by hand — twice — without anyone confirming the download. Do not reconstruct a pack from hand-downloaded `.pdsc` files. `pyocd pack install` is the one supported route.
+That rule exists because of what happened without it: an agent looking for the right `target_type` found nothing about packs anywhere, escalated through pyOCD's installed sources and `cmsis_pack_manager`'s internals, and ended up fetching a `.pdsc` from a vendor site by hand (twice) without anyone confirming the download. Do not reconstruct a pack from hand-downloaded `.pdsc` files. `pyocd pack install` is the one supported route.
 
 ## Where installed packs live
 
@@ -3730,11 +3730,11 @@ These are host setup commands for the toolchain, not hardware actions. They do n
 |---|---|---|
 | `supported` | the backend resolves the configured `target_type`; `source` says `builtin` or `pack` | green |
 | `unsupported` | the backend enumerated its target types and this one is not among them, so no flash can work | **red**, with `install_commands` |
-| `undetermined` | this host could not answer — no toolchain installed, the enumeration failed or could not be read | green, and `undetermined_reason` says why |
+| `undetermined` | this host could not answer: no toolchain installed, the enumeration failed or could not be read | green, and `undetermined_reason` says why |
 | `not_configured` | no `target_type` is set, so pyOCD would guess from the probe's board ID | green |
 | `not_applicable` | this backend has no target type: OpenOCD uses `target_cfg`, STM32CubeProgrammer identifies the part itself | green |
 
-The line between `unsupported` and `undetermined` is deliberate. `unsupported` is a fact about this host; `undetermined` says nothing about the configuration and must not be read as one. A bench with no debugger toolchain installed yet stays green — `agentic-hil setup` rolls back on a red `doctor`, so conflating the two would break installation on exactly the fresh machine the check is meant to help.
+The line between `unsupported` and `undetermined` is deliberate. `unsupported` is a fact about this host; `undetermined` says nothing about the configuration and must not be read as one. A bench with no debugger toolchain installed yet stays green: `agentic-hil setup` rolls back on a red `doctor`, so conflating the two would break installation on exactly the fresh machine the check is meant to help.
 
 `undetermined` is also not a pass. It means the question was asked and went unanswered, and the `doctor` summary says so.
 
@@ -4118,7 +4118,7 @@ MCP_RESOURCES: list[JsonObject] = [
         TARGET_SUPPORT_URI,
         "target-support",
         "Target selection and target support",
-        "Which field names the target per backend, known-good values for the Nucleo-F446RE, how pyOCD target types are provided by CMSIS packs, how to find and install the right one and where installed packs live, and what doctor's target_support statuses mean — including why 'undetermined' is not a failure.",
+        "Which field names the target per backend, known-good values for the Nucleo-F446RE, how pyOCD target types are provided by CMSIS packs, how to find and install the right one and where installed packs live, and what doctor's target_support statuses mean, including why 'undetermined' is not a failure.",
         MARKDOWN_MIME,
     ),
     _resource_descriptor(

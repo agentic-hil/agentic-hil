@@ -5,7 +5,7 @@ This repository uses file-based controls for dependency monitoring and release i
 - Dependabot monitors pip and GitHub Actions dependencies (`.github/dependabot.yml`).
 - PyPI publishing uses GitHub Actions OIDC trusted publishing, with no long-lived API tokens.
 - The publish workflow refuses releases whose tag does not match the `pyproject.toml` version and generates digital attestations for the uploaded distributions.
-- CI runs ruff and the full test suite across Linux/macOS/Windows and Python 3.10–3.13; a single `Required CI` gate aggregates the matrix for branch protection.
+- CI runs ruff and the full test suite across Linux/macOS/Windows and Python 3.10 to 3.13; a single `Required CI` gate aggregates the matrix for branch protection.
 - Configuration and permission bypasses are treated as security vulnerabilities (see `SECURITY.md`).
 
 Additional controls already in place:

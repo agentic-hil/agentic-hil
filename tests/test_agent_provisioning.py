@@ -2,8 +2,8 @@
 
 The invariant every test here circles, since the generated
 default turned over: **an agent can only ever reduce its own authority.** A generation
-grants everything it can — the file it writes is workable from the first call,
-flashing included — and the direction is what is defended: `project_config_set`
+grants everything it can (the file it writes is workable from the first call,
+flashing included) and the direction is what is defended: `project_config_set`
 writes `false` into a permission and never `true`.
 
 "Everything it can" carries a correction of its own: the two permissions in
@@ -102,8 +102,8 @@ def attached_hardware(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> d
         return discovery
 
     # Both, and for one reason: a configured server reads the board through the
-    # shared lifecycle in `adopt`, and an unprovisioned one — which has no policy
-    # to audit against and no lease directory — still reads directly from
+    # shared lifecycle in `adopt`, and an unprovisioned one (which has no policy
+    # to audit against and no lease directory) still reads directly from
     # `tools`. Patching one of the two leaves half these tests talking to the
     # real STM32CubeProgrammer.
     monkeypatch.setattr("agentic_hil.tools.discover_attached_hardware", discover)
@@ -243,7 +243,7 @@ def test_generated_configuration_ignores_permissions_the_workspace_asks_for(tmp_
 
     `agentic-hil init` fills a configuration from this file on purpose: a person
     ran it. Over MCP the same file is repository-controlled data, and the
-    generation ignores its permission block either way — which is now a check in
+    generation ignores its permission block either way, which is now a check in
     the narrowing direction as well: a profile asking for `allow_mass_erase:
     false` does not reach a bench over MCP any more than one asking for `true`
     did. Repository content decides no permission here, in either direction.
@@ -296,7 +296,7 @@ def test_generated_configuration_says_an_agent_wrote_it(tmp_path: Path, monkeypa
         assert "agentic-hil init --force" in text
         # It says it about `project_config_set` and it says what regeneration
         # does instead, because a header that promised the ratchet covered the
-        # whole file would be describing a rule this project does not have — the
+        # whole file would be describing a rule this project does not have: the
         # owner's decision on the generated default keeps creation out of it.
         assert "project_config_set" in text
         assert "arrives at the skeleton's defaults" in text
@@ -318,7 +318,7 @@ def test_deleting_the_configuration_lets_the_agent_generate_the_same_one_again(t
     A configuration removed out of band puts the workspace back in the state it
     started from, and an agent may generate one again. What comes back is byte
     for byte the same skeleton, because the agent still cannot choose what it
-    generates — so the cycle costs whatever a person had *narrowed* and yields
+    generates, so the cycle costs whatever a person had *narrowed* and yields
     the file `agentic-hil init` writes, which they could have run themselves.
     """
     workspace = bench(tmp_path, monkeypatch)
@@ -398,7 +398,7 @@ def test_a_running_server_that_lost_a_narrowed_configuration_may_not_widen_it(tm
     This is the case the old refusal covered and the one that still matters: a
     server whose configuration was narrowed and whose file then vanished must
     not be able to regenerate its way back to the open skeleton. It cannot,
-    because a regeneration carries over the permissions of the policy in force —
+    because a regeneration carries over the permissions of the policy in force,
     and the policy in force is the one this server loaded.
     """
     workspace = bench(tmp_path, monkeypatch)
@@ -437,7 +437,7 @@ def test_the_tool_surface_cannot_take_the_configuration_away() -> None:
     Regenerating one costs a human their settings, so the surface offers no way
     to bring that about: no delete, no move, no path argument anywhere. The tool
     that regenerates the file takes no arguments at all, and the one that changes
-    it takes named keys with scalar values — never a document, never a path.
+    it takes named keys with scalar values: never a document, never a path.
     """
     assert sorted(name for name in MCP_TOOL_NAMES if "config" in name) == [
         PROJECT_CONFIG_ADOPT,
@@ -516,7 +516,7 @@ def test_a_regeneration_carries_over_what_a_person_narrowed(tmp_path: Path, monk
 
 def test_regeneration_keeps_the_artifact_roots_the_person_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The skeleton names the whole workspace. A regeneration that carried the
-    # skeleton's value would widen a file whose owner had narrowed it — the same
+    # skeleton's value would widen a file whose owner had narrowed it: the same
     # silent widening the carried-over permissions exist to prevent.
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
@@ -597,7 +597,7 @@ def test_a_configured_server_refuses_to_write_a_configuration_that_took_the_gran
     """The ordinary server carries the same refusal.
 
     A project that was set up by a person is the common case, and the tool is
-    advertised there too — it has to answer with the permission it is denied by,
+    advertised there too: it has to answer with the permission it is denied by,
     not by being absent from the list. What reaches the refusal now is a
     configuration whose `allow_config_write` was taken away, which is a narrowing
     an agent can make itself and never take back.
@@ -820,13 +820,13 @@ def test_an_empty_directory_reaches_a_hardware_action_with_no_yaml_editing(tmp_p
     The whole of the open generated default, as a sequence. Under the closed default this run
     stopped at the second call with `permission_denied` on `allow_flash`, and the
     way on was a person finding the key in a YAML file outside the repository and
-    setting it by hand — the day of work that produced this change. Here nobody
+    setting it by hand, the day of work that produced this change. Here nobody
     opens an editor at any point.
 
     Flashing takes no extra call, and that is what the interlock correction fixed. Validated
     flashing and unrestricted debugger access are mutually exclusive policies
     (docs/security-design.md), and for a while a generated configuration granted
-    both sides of that exclusion — so `flash_firmware` was refused on a file
+    both sides of that exclusion, so `flash_firmware` was refused on a file
     nobody had touched, and the way on was for somebody to know that two
     permissions being *on* was what blocked it. The generation writes that pair
     false now, and neither of them was a capability to give up: no MCP tool reads
@@ -848,7 +848,7 @@ def test_an_empty_directory_reaches_a_hardware_action_with_no_yaml_editing(tmp_p
         assert PROJECT_CONFIG_CREATE in blocked["next_step"]
 
         # 2. One call, no arguments, no editor, and the bench is described and
-        #    granted — including the two the interlock reads, which the
+        #    granted, including the two the interlock reads, which the
         #    generation writes false precisely so that step 3 works.
         created = service.call(PROJECT_CONFIG_CREATE)
         assert created["ok"] is True, created
@@ -890,7 +890,7 @@ def test_an_empty_directory_reaches_a_hardware_action_with_no_yaml_editing(tmp_p
 def test_a_narrowed_configuration_cannot_be_reopened_by_an_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The other half: everything an agent closes stays closed.
 
-    Four attempts, and the fourth is the one that matters — a permission this
+    Four attempts, and the fourth is the one that matters: a permission this
     same agent took away a moment earlier is exactly as unreachable as one it
     never touched. After the terminal move nothing on this surface can move a
     permission at all, and the call that made it said so.
@@ -992,7 +992,7 @@ def test_a_narrowed_configuration_cannot_be_reopened_by_an_agent(tmp_path: Path,
 # Under the closed default this path was reachable exactly once per workspace, so
 # a run could not be open across it and there was nothing to coordinate with.
 # A generation grants `allow_config_write` in every generated file, which makes
-# regeneration an ordinary call an agent can make at any moment — including the
+# regeneration an ordinary call an agent can make at any moment, including the
 # middle of a run, and including while another process on this machine is driving
 # the probe it would enumerate.
 
@@ -1036,7 +1036,7 @@ def test_regeneration_is_refused_while_this_server_holds_the_bench(tmp_path: Pat
 def test_regeneration_does_not_reach_a_probe_another_owner_holds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A board belongs to whoever holds it, whatever this file says.
 
-    The holder is a stranger — another MCP server, another project's run. It has
+    The holder is a stranger: another MCP server, another project's run. It has
     the physical probe, which is the lock this path takes between enumerating and
     connecting, so the HOTPLUG connect never happens and nothing is written."""
     workspace = bench(tmp_path, monkeypatch)
@@ -1070,7 +1070,7 @@ def _regenerable_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **entry:
     """A workspace with a generated configuration, ready to be regenerated.
 
     ``entry`` is written onto the `debuggers.dut` entry afterwards, which is how
-    a test gives that entry a `resource_id` — the canonical alias a run holds a
+    a test gives that entry a `resource_id`: the canonical alias a run holds a
     board through, and the one a regeneration has to lock in its own right."""
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
@@ -1094,7 +1094,7 @@ def test_regeneration_does_not_reach_a_board_held_through_its_resource_id(tmp_pa
     `resource_id` is how an operator says "this probe and this COM port are one
     unit", and it is the key every run on that bench holds. A regeneration that
     locked only the serial the enumeration returned would connect to a board
-    another owner is holding under that alias — the whole point of the alias
+    another owner is holding under that alias: the whole point of the alias
     being that it is the identity, and the serial one spelling of it."""
     workspace, path = _regenerable_bench(tmp_path, monkeypatch, resource_id="bench-a")
     before = path.read_bytes()
@@ -1157,7 +1157,7 @@ def test_a_regeneration_whose_record_cannot_be_written_quarantines_the_probe(tmp
     before = path.read_bytes()
     # After the read, not before it: `ensure_audit_ready` already refuses a bench
     # whose trail is unwritable before the board is touched, and the case here is
-    # the other one — the record of a read that has already happened.
+    # the other one: the record of a read that has already happened.
     monkeypatch.setattr("agentic_hil.adopt.write_report", lambda config, report: {**report, "audit_ok": False})
 
     service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
@@ -1178,7 +1178,7 @@ def test_a_regeneration_that_cannot_give_the_board_back_writes_nothing(tmp_path:
 
     The generation path used to discard it, so a lease left registered,
     quarantined and blocking still came back as `ok: true`, `cleanup_required:
-    false` — with the configuration rewritten under a board this process was
+    false`, with the configuration rewritten under a board this process was
     still holding."""
     workspace, path = _regenerable_bench(tmp_path, monkeypatch)
     before = path.read_bytes()
@@ -1217,7 +1217,7 @@ def test_a_regeneration_that_raises_comes_back_as_a_quarantine(tmp_path: Path, m
 
     `project_config_create` was outside the audited-hardware exception path, so a
     discovery that raised escaped the service instead of producing the standard
-    structured refusal — and nothing shut the bench behind it."""
+    structured refusal, and nothing shut the bench behind it."""
     workspace, path = _regenerable_bench(tmp_path, monkeypatch)
     # A regeneration writes the same deterministic document the fixture wrote,
     # so equal bytes would be a correct outcome and prove nothing about a
@@ -1261,8 +1261,8 @@ def test_a_regeneration_whose_terminal_record_fails_quarantines_the_bench(tmp_pa
     the record is then re-committed to say `released`. That last write is the one
     tested here, and it used to be the hole: the leases were already gone, so
     nothing was left to quarantine, the coordinator was never told, and the
-    refusal returned the pre-failure lease status — `cleanup_required: false`,
-    `quarantined: false`, `lease_state: released` — beside a summary saying the
+    refusal returned the pre-failure lease status (`cleanup_required: false`,
+    `quarantined: false`, `lease_state: released`) beside a summary saying the
     bench needed an operator. Every field a caller branches on said it was fine,
     and the next hardware call went through.
     """
@@ -1304,7 +1304,7 @@ def test_an_unprovisioned_creator_that_finds_a_configuration_still_leases_the_bo
 
     Both miss the bind, both call `project_config_create` with no coordinator,
     and the first writes the file. The second then finds that configuration on
-    the in-lock reread — the reread exists precisely so it does — and used to
+    the in-lock reread (the reread exists precisely so it does) and used to
     read the board directly from there: no audit, no lease, straight past the
     `resource_id` holder the file it had just loaded names, and outside the
     quarantine path. "No coordinator" is not "no configuration".
@@ -1340,7 +1340,7 @@ def test_an_unprovisioned_creator_that_finds_a_configuration_writes_the_audit_re
     """The other half: with nobody holding the board, the read is a leased read.
 
     A refusal alone would be satisfied by a path that simply gave up. This shows
-    the racing server goes through the same lifecycle every other caller does —
+    the racing server goes through the same lifecycle every other caller does:
     the enumeration pseudo-resource, the configured alias and the enumerated
     probe all locked, and the read written to the audit trail."""
     workspace, _ = _regenerable_bench(tmp_path, monkeypatch, resource_id="bench-a")
@@ -1374,7 +1374,7 @@ def test_a_regeneration_says_which_permissions_it_did_not_grant(tmp_path: Path, 
     one-way rule, so a regenerated file legitimately holds a mix: the permissions
     of the file it replaced on the entries that were already there, the skeleton's
     open default on anything discovered for the first time. What must not happen
-    is a result — or a header a person reads first — that claims one when the
+    is a result (or a header a person reads first) that claims one when the
     other was written."""
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
@@ -1424,7 +1424,7 @@ def test_the_live_contracts_describe_the_generation_that_actually_runs(tmp_path:
     """The server instructions and the tool description are read before the call.
 
     They are the only statement about this tool most callers ever see, so a
-    sentence left over from the closed default is not stale documentation — it is
+    sentence left over from the closed default is not stale documentation: it is
     a live instruction telling a connected agent that a bench it just generated
     grants nothing, at the moment it in fact grants flashing.
 
@@ -1432,7 +1432,7 @@ def test_the_live_contracts_describe_the_generation_that_actually_runs(tmp_path:
     sharper case: a contract that still said "every permission is true" would be
     telling an agent that the two flags the interlock reads are on, and the
     documented way to make flashing work would be to ask an operator to turn them
-    off — advice for a bench that no longer exists, on a file where following it
+    off: advice for a bench that no longer exists, on a file where following it
     changes nothing."""
     workspace = bench(tmp_path, monkeypatch)
     attached_hardware(monkeypatch)
@@ -1463,7 +1463,7 @@ def test_a_narrowing_and_a_regeneration_in_one_session_put_the_loaded_grant_back
     """The accepted behaviour, pinned as behaviour rather than left to a promise.
 
     A server parses its configuration once and does not reload, so the `existing`
-    a regeneration carries permissions from is what it read at startup — not the
+    a regeneration carries permissions from is what it read at startup, not the
     file as `project_config_set` has since left it. One session that narrows and
     then regenerates therefore writes the wider loaded value back.
 
@@ -1511,7 +1511,7 @@ def test_every_live_contract_says_regeneration_carries_the_loaded_state(tmp_path
     """"The permissions already on disk" was a promise this path does not keep.
 
     Each of these is served to a caller before or during the call, and each said
-    a regeneration carries the permissions on disk over — which a caller can only
+    a regeneration carries the permissions on disk over, which a caller can only
     read as "my narrowing survives this". It does not; the loaded configuration
     is what is carried. Every one of them has to say the true thing, because a
     caller that believes the false one regenerates to refresh a probe id and

@@ -84,7 +84,7 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
 # ST-Link serial and the device name whenever it opens a probe, so a reset that
 # connected and then did nothing would confirm itself out of the banner alone.
 # `reset_target` therefore waits for "MCU Reset", and a memory read waits for
-# "Data read successfully" — measured against a NUCLEO-F446RE on
+# "Data read successfully", measured against a NUCLEO-F446RE on
 # STM32CubeProgrammer v2.23.0, which prints it after the UPLOADING block and
 # before the elapsed-time line.
 #
@@ -108,15 +108,15 @@ SESSIONLESS_DEBUG_READS = frozenset({"debug_dump_symbol_ihex", "debug_symbol_val
 # lines STM32CubeProgrammer prints when that argument did what it says. The two
 # belong to the same command and are kept together for that reason: `-rst` and
 # `-halt` are different commands with different success lines, and a single
-# marker set for `reset_target` carried the `-rst` lines only — mode `halt` did
+# marker set for `reset_target` carried the `-rst` lines only: mode `halt` did
 # exactly what it was asked, printed neither of them, and could therefore never
 # report anything but an unconfirmed outcome (#142).
 #
 # `-halt` measured on STM32CubeProgrammer v2.23.0 against a NUCLEO-F446RE: the
 # NORMAL connect banner carries `Reset mode  : Software reset` and the run ends
-# with `Core halted`. The banner settles what this mode does — a software reset
+# with `Core halted`. The banner settles what this mode does (a software reset
 # and then a halt, the same operation OpenOCD's and pyOCD's `reset halt`
-# perform — but it is not a second marker: connect prints it before the halt is
+# perform), but it is not a second marker: connect prints it before the halt is
 # attempted, so a run that connected and then failed to halt prints it
 # unchanged. Only `Core halted` is the operation's own success line, and it is
 # the only one of the two a failure withholds.
@@ -278,8 +278,8 @@ class STLinkBackend:
         if not resolved["ok"]:
             return {"tool": tool, **resolved}
         # `-l st-link-only` enumerates connected probes and never connects to a
-        # target, so every failure of it — including the timeout, whose child
-        # spawn_command reaped before returning — leaves the bench untouched
+        # target, so every failure of it (including the timeout, whose child
+        # spawn_command reaped before returning) leaves the bench untouched
         # and carries the markers that say so.
         command = [*invocation(str(resolved["executable_path"])), "-q", "-l", "st-link-only"]
         completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
@@ -476,7 +476,7 @@ class STLinkBackend:
         <file.hex>` uploads device memory and picks Intel HEX off the file
         extension. Everything a caller can observe is the OpenOCD path's:
         the same arguments, the same allowlist and `debug.max_dump_size_bytes`
-        refusals word for word, the same success fields — so a plan that dumps a
+        refusals word for word, the same success fields, so a plan that dumps a
         symbol does not have to know which probe it is running on. What differs
         is where the symbol table comes from, and that difference is stated
         rather than hidden: with no session there is no loaded image to ask, so
@@ -505,7 +505,7 @@ class STLinkBackend:
         output_path = Path(str(output["resolved_path"]))
         try:
             # The CLI writes the file itself and will not create a missing
-            # parent, so the directory is made here — through the same guarded
+            # parent, so the directory is made here, through the same guarded
             # helper the OpenOCD path uses, so a dump cannot mkdir its way out
             # of the workspace.
             safe_configured_directory(self.config, str(output_path.parent), f"{tool}.output_path")
@@ -521,7 +521,7 @@ class STLinkBackend:
             # successfully" leaves no evidence of where it stopped, and a
             # backend that called that harmless would be inventing the one
             # claim it does not have. Branches that *did* prove their abort
-            # point — "no ST-LINK detected" — arrive carrying not_started and
+            # point ("no ST-LINK detected") arrive carrying not_started and
             # keep it.
             result.update({"side_effect_status": "unknown", "retry_safe": False})
         if result.get("ok"):
@@ -545,8 +545,8 @@ class STLinkBackend:
         `-r` attaches to a live core the same way a reset does, so a symbol read
         here is a standalone hardware interaction, not a call inside a session
         that already holds the lease. The coordination layer takes a one-shot
-        debugger lease for exactly these — machine-wide ownership, run
-        declaration and the incident path for an unconfirmed read — where a
+        debugger lease for exactly these (machine-wide ownership, run
+        declaration and the incident path for an unconfirmed read), where a
         session backend's own lease would carry them instead."""
         return SESSIONLESS_DEBUG_READS
 
@@ -610,7 +610,7 @@ class STLinkBackend:
             confirmation = self._confirm_operation_success(output, STLINK_SUCCESS_CONFIRMATION.get(tool, []) if success_text is None else success_text)
             if not confirmation["confirmed"]:
                 # Confirmation is all-or-nothing here, so this branch is also
-                # reached with some of the expected lines present — a read that
+                # reached with some of the expected lines present: a read that
                 # printed the ST-Link serial and no device name. The lines that
                 # did match travel with the ones that were looked for, so the
                 # result says how far the CLI got rather than leaving a caller
@@ -647,7 +647,7 @@ class STLinkBackend:
         return STLINK_CONNECT_MODES[self.config.debugger.connect_mode]  # type: ignore[return-value]
 
     # STM32CubeProgrammer's own report that the transport never existed, for any
-    # tool, plus — for the reads, whose command drives nothing of its own — its
+    # tool, plus (for the reads, whose command drives nothing of its own) its
     # report that a probe was opened and nothing answered behind it. Both are
     # read off the CLI's output, so each is a positive statement rather than the
     # absence of one; `probe_unconfirmed` is not, and stays out.
@@ -702,9 +702,9 @@ class STLinkBackend:
             # probe named and nothing behind it. A failed call over a channel
             # that never carried anything must refuse, not quarantine. Both are
             # the CLI's own words, read out of its output by
-            # `_classify_output`; `probe_unconfirmed` — an exit status of 0
+            # `_classify_output`; `probe_unconfirmed` (an exit status of 0
             # whose output is missing at least one line that confirms the
-            # connection — deliberately is not, because it names no abort point
+            # connection) deliberately is not, because it names no abort point
             # at all, whether it printed some of them or none.
             result.update(NOT_CONTACTED)
         return result

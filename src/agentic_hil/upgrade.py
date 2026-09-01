@@ -168,7 +168,7 @@ def _upgrade_requirement() -> str:
 # box: "hint: `agentic-hil` is pinned to `0.7.1` (installed with an exact
 # version pin); reinstall with `uv tool install agentic-hil@latest` to upgrade
 # to a new version." A future wording that matches neither phrase falls through
-# to the already-current answer, which claims no upgrade happened — never a
+# to the already-current answer, which claims no upgrade happened: never a
 # false success, and never a refusal for a machine that is simply up to date.
 _EXACT_PIN_MARKERS = ("is pinned to", "exact version pin")
 _PINNED_AT = re.compile(r"pinned to [`'\"]?([0-9][^`'\"\s,;)]*)")
@@ -437,7 +437,7 @@ def empty_directory_removal_command(directory: str) -> str:
 # Only `can` is claimed, because only `can` is decidable from the configuration
 # alone: a `can_buses` entry on any adapter but `process` opens the bus through
 # python-can (can.open_adapter), so the requirement is stated by the file rather
-# than guessed. A `pyocd` debugger is deliberately absent — the backend runs an
+# than guessed. A `pyocd` debugger is deliberately absent: the backend runs an
 # executable the configuration names by path, which an operator may perfectly
 # well have installed outside this environment, so reading a missing extra as a
 # broken bench there would be a false alarm on a working setup.
@@ -451,7 +451,7 @@ def missing_configured_extras(config: AgenticHILConfig) -> JsonObject | None:
 
     A configuration that declares CAN buses on an installation without
     python-can is a bench that cannot do what it says it does, and until now the
-    first `can_session_start` was what found out — hours after the upgrade that
+    first `can_session_start` was what found out, hours after the upgrade that
     caused it, and in a result about a bus rather than about the installation.
     `uv tool install --upgrade` *replaces* the recorded requirement rather than
     raising it, so a bench installed as `agentic-hil[can]` came back without the
@@ -459,8 +459,8 @@ def missing_configured_extras(config: AgenticHILConfig) -> JsonObject | None:
 
     Read off `_installed_extras`, which asks the installed distribution rather
     than trying an import: the question is what this installation has, and that
-    is also what decides the reinstall command. The command names the union — the
-    extras that are here plus the ones the configuration needs — because a
+    is also what decides the reinstall command. The command names the union (the
+    extras that are here plus the ones the configuration needs) because a
     reinstall that carried only the missing one would take the others away.
     """
     needed = configured_extra_requirements(config)
@@ -1157,8 +1157,8 @@ def _upgrade_changed_on_disk(
     version other than the one this process runs, so the run replaced files
     before it stopped and left a half-changed tree. Reporting that as intact and
     `was not replaced` would state the opposite of what the probe just found. The
-    two numbers are named as they are — the release still running in this
-    process, and the one the half-finished run left on disk — and the repair is
+    two numbers are named as they are (the release still running in this
+    process, and the one the half-finished run left on disk), and the repair is
     the same known-good reinstall a broken installation gets, because a version a
     failed run left behind is not one to trust into service by restarting onto
     it. `restart_required` is false for that reason: a restart would adopt the
@@ -1241,7 +1241,7 @@ def _upgrade_changed_nothing(
     """
     base: JsonObject = {
         # Set per branch below: an installation that is already current is a
-        # success — nothing to do and nothing wrong — while one held at a pin is
+        # success (nothing to do and nothing wrong), while one held at a pin is
         # not, because the operator wanted a newer release and did not get it.
         # Refusing both would make `agentic-hil upgrade` exit non-zero on every
         # up-to-date machine, which breaks the provisioning scripts that run it
@@ -1289,8 +1289,8 @@ def replace_installation(*, tool: str) -> JsonObject:
     The whole of the manager interaction and none of either caller's own
     business: no skill refresh, no permission, no bench check. It raises
     `ConfigError("upgrade_manager_not_found")` rather than returning it, because
-    that is the one condition where there is no manager to have an outcome from —
-    the command line prints it as a refusal like any other, and the MCP tool
+    that is the one condition where there is no manager to have an outcome from.
+    The command line prints it as a refusal like any other, and the MCP tool
     turns it into a result.
     """
     holders = _processes_holding_installation()
@@ -1401,7 +1401,7 @@ def replace_installation(*, tool: str) -> JsonObject:
 #
 # Three gates before the shared implementation above, in this order and for this
 # reason. The permission is first because it is the operator's standing policy
-# and the answer does not depend on anything else — a bench whose
+# and the answer does not depend on anything else: a bench whose
 # `allow_upgrade` is false gets the same refusal whatever the platform or the
 # hardware is doing. The platform is second because on Windows the answer is
 # fixed too: no arrangement of runs or leases makes the call possible, so
@@ -1444,15 +1444,15 @@ def _host_locks_running_files() -> bool:
 def _upgrade_cli_only_on_host() -> JsonObject:
     """Windows: a running image cannot be replaced, so the tool says so instead.
 
-    The issue allowed two answers here — a detached helper that swaps once this
-    server has exited, or a named refusal — and forbade the third, a swap that
+    The issue allowed two answers here (a detached helper that swaps once this
+    server has exited, or a named refusal) and forbade the third, a swap that
     half happens. The refusal is the one that can be told the truth about. A
     helper outlives the result that announced it: whatever it does afterwards
     happens with nobody left to report it, so the tool would have to promise an
     outcome it cannot observe, and a helper that failed would leave exactly the
     half-replaced environment the promise was made to avoid. `agentic-hil
     upgrade` at a shell is a process that is not the server, so it can watch its
-    own manager finish and report what actually happened — and it already has the
+    own manager finish and report what actually happened, and it already has the
     `installation_in_use` guard that names the running server as the holder.
     """
     return {
@@ -1460,7 +1460,7 @@ def _upgrade_cli_only_on_host() -> JsonObject:
         "tool": SERVER_UPGRADE,
         "error_type": "upgrade_cli_only_on_host",
         "summary": (
-            "This host is Windows, where a file mapped as a running image cannot be replaced — and this server is "
+            "This host is Windows, where a file mapped as a running image cannot be replaced, and this server is "
             "running out of the installation the upgrade would replace. A package manager that removes the environment "
             "before it rebuilds it fails on that delete and stops in between, leaving neither the old installation nor "
             "the new one, so nothing was attempted. On this host the upgrade is the command line's: `agentic-hil "
@@ -1482,7 +1482,7 @@ def _upgrade_in_open_run(bench: JsonObject) -> JsonObject:
     """The open-run refusal, applied to the code rather than to the permissions.
 
     A run's holds were taken under the release that is running, and replacing
-    that release mid-run moves the rules during the run they govern — the same
+    that release mid-run moves the rules during the run they govern: the same
     move a permission change makes, and refused for the same reason. Read off
     `HardwareCoordinator.status()`'s `bench_held`, which is true for a declared
     run and for a lease alike: a declared run takes the device
@@ -1494,8 +1494,8 @@ def _upgrade_in_open_run(bench: JsonObject) -> JsonObject:
         "tool": SERVER_UPGRADE,
         "error_type": "upgrade_in_open_run",
         "summary": (
-            "Something is holding this bench right now — a declared run, an open COM or CAN session, or a debug "
-            "session — and those holds were taken under the release this server is running. Replacing the code "
+            "Something is holding this bench right now (a declared run, an open COM or CAN session, or a debug "
+            "session), and those holds were taken under the release this server is running. Replacing the code "
             "underneath them would move the rules during the run they govern, so nothing was changed."
         ),
         "running_version": __version__,
@@ -1514,7 +1514,7 @@ def _upgrade_in_open_run(bench: JsonObject) -> JsonObject:
 # process is answering out of is not what is on disk any more, and exactly one
 # thing adopts it.
 _RESTART_STEPS = (
-    "Ask the operator to restart the MCP server — the one the agent host started for this workspace. That is what "
+    "Ask the operator to restart the MCP server: the one the agent host started for this workspace. That is what "
     "loads the release now on disk, and it is the only thing that does.",
     "Do not use `agentic-hil` at a shell as the check that it worked and then assume this server moved with it. The "
     "command line reads the new code every time it runs and is already current; this server is not, and says so in "
@@ -1528,7 +1528,7 @@ def server_upgrade(config: AgenticHILConfig, bench: JsonObject) -> JsonObject:
     """Lift this installation to the newest release, over MCP, or say why not.
 
     `bench` is `HardwareCoordinator.status()`. Taken as an argument rather than
-    read here, because the coordinator that can answer it is the service's own —
+    read here, because the coordinator that can answer it is the service's own:
     the one whose leases and declared run are part of the answer.
     """
     if not config.permissions.allow_upgrade:
@@ -1550,7 +1550,7 @@ def _reported_as_running_code(result: JsonObject, config: AgenticHILConfig) -> J
     The one claim this tool must never make is that the new release is in force.
     Nothing about replacing files changes the code an already-imported process is
     executing, and a host has no way to check the claim, so `running_version` is
-    on every outcome — equal to `version` when nothing moved, and deliberately
+    on every outcome, equal to `version` when nothing moved, and deliberately
     behind it when something did.
     """
     reported: JsonObject = {**result, "running_version": __version__}
