@@ -2103,9 +2103,13 @@ def refuse_redirected_parent(path: Path) -> None:
     on one platform and an absence on the other (#361). Stated once and called
     from each entry point above its platform branch, the answer is the same
     everywhere: the optional read, the mandatory read in ``safe_open_binary``, and
-    the raw writer in ``atomic_write_bytes`` (#370). Every other primitive in this
-    family goes through one of those three, so none of them carries a copy of this
-    rule that could drift.
+    the raw writer in ``atomic_write_bytes`` (#370). The lock primitive
+    ``safe_file_lock`` and the append primitive ``safe_append_text`` open their
+    named file directly on POSIX rather than through any of those three, so each
+    calls this rule itself above its own platform branch, for the audit and
+    recovery ledgers they create, completing the same #370 contract. Every
+    remaining primitive in this family goes through one of those callers, so none
+    of them carries a copy of this rule that could drift.
 
     Says nothing about the leaf, deliberately. Redirection is a property of the
     tree, so it is decidable for a file that is not there, and that is exactly the
@@ -2250,6 +2254,17 @@ def _path_lock(path: Path) -> Iterator[None]:
 @contextmanager
 def safe_file_lock(file_path: str | Path, *, workspace: str | Path | None = None) -> Iterator[None]:
     path = _validated_absolute_file_path(file_path, workspace)
+    # The same rule the mandatory read and the raw writer ask, asked here for the
+    # same reason: the Windows branch reaches it through ``safe_file_path`` and the
+    # POSIX branch opens the named lock file directly, so a lock taken under a
+    # redirected parent was created on POSIX and refused on Windows. This primitive
+    # guards the canonical audit ledger and the recovery ledger, so the file it
+    # creates has to answer the redirection the same way everywhere it runs, the
+    # raw-write contract #370 settled for the read and the atomic writer.
+    #
+    # Before the lock as well as before the branch, because a refused path has
+    # nothing to serialize against, the way ``atomic_write_bytes`` asks it.
+    refuse_redirected_parent(path)
     with _path_lock(path):
         if os.name != "nt":
             parent_descriptor = _open_directory_fd(path.parent)
@@ -2639,6 +2654,15 @@ def atomic_write_text(
 def safe_append_text(file_path: str | Path, text: str, *, encoding: str = "utf-8") -> None:
     path = _validated_absolute_file_path(file_path)
     data = text.encode(encoding)
+    # The append is a write, and a write is the half that can least afford to
+    # differ: the Windows branch asks this rule through ``safe_file_path`` and the
+    # POSIX branch opens the named file directly, so an audit line appended under a
+    # redirected parent landed on POSIX and was refused on Windows. The bytes would
+    # go into the tree the name resolves into while every read back through the
+    # spelling that wrote them is refused, which is exactly the audit-ledger case
+    # this function exists for, so it is refused before either branch, completing
+    # the raw-write contract #370 settled at the read and the atomic writer.
+    refuse_redirected_parent(path)
     with _path_lock(path):
         if os.name != "nt":
             parent_descriptor = _open_directory_fd(path.parent)

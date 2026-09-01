@@ -54,6 +54,8 @@ from agentic_hil.config import (
     project_config_path,
     provisionable_state_root,
     resolve_stable_directory,
+    safe_append_text,
+    safe_file_lock,
     safe_file_path,
     safe_read_bytes,
     safe_read_text,
@@ -1518,3 +1520,117 @@ def test_leaving_the_workspace_is_still_answered_before_redirection(tmp_path: Pa
     assert refusal.value.error_type == "unsafe_configured_path"
     assert refusal.value.summary == "Path leaves the workspace."
     assert "resolved_parent" not in refusal.value.details
+
+
+# ---------------------------------------------------------------------------
+# #370 again: the two raw primitives that open their named file directly rather
+# than through `safe_open_binary` or `atomic_write_bytes`. `safe_file_lock`
+# creates the lock the canonical audit ledger and the recovery ledger serialize
+# on, and `safe_append_text` writes the audit line itself, so a redirected parent
+# these two answered per platform was the same incomplete contract one function
+# further out: their Windows halves reach `safe_file_path` and their POSIX halves
+# open the named file directly, so a lock taken or a line appended under such a
+# parent landed on POSIX and was refused on Windows.
+
+
+def test_the_lock_primitive_is_refused_under_a_redirected_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lock the audit and recovery ledgers serialize on cannot be per-platform.
+
+    A lock file created under a parent that names one place and resolves to
+    another is a lock two writers on the two platforms would take in two different
+    trees, so the serialization the ledger depends on is exactly what the
+    redirection breaks. It is refused, and the proof is that neither spelling holds
+    the lock afterwards.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+    target = holder / "audit.lock"
+
+    with pytest.raises(ConfigError) as refusal, safe_file_lock(target):
+        pass
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["path"] == str(target)
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+    assert not target.exists()
+    assert not (tmp_path / "package-roaming-cache").exists()
+
+
+def test_the_append_primitive_is_refused_under_a_redirected_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The audit line itself is a write, and a write cannot differ across platforms.
+
+    An audit line appended under a redirected parent goes into the tree the name
+    resolves into, while every read of the ledger through the spelling that wrote
+    it is refused, so the record and the reader describe two different files. It is
+    refused before either branch, and neither spelling holds a ledger afterwards.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+    target = holder / "audit.ndjson"
+
+    with pytest.raises(ConfigError) as refusal:
+        safe_append_text(target, '{"event": "probe"}\n')
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["path"] == str(target)
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+    assert not target.exists()
+    assert not (tmp_path / "package-roaming-cache").exists()
+
+
+def test_neither_platform_branch_is_reached_by_the_lock_or_the_append(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Why these two cannot drift apart again, said without needing both platforms.
+
+    The split is the platform branch itself: one side walks POSIX descriptors from
+    `_open_directory_fd` and the other holds Windows handles from
+    `_windows_hold_directory_chain` and consults `safe_file_path`, so a contract
+    enforced inside either is a contract that platform states for itself. Both
+    branch entry points are made to fail loudly here, and the refusal still
+    arrives, on whichever platform is running this, which says the answer is
+    settled above the split rather than agreed by two branches that match today.
+    """
+    from agentic_hil import config as config_module
+
+    holder = redirected_directory(tmp_path, monkeypatch)
+    reached: list[str] = []
+
+    def posix_branch(directory: Path, *, create: bool = False) -> int:
+        reached.append(f"posix:{directory}")
+        raise AssertionError("the POSIX branch was reached, so the answer is still the platform's")
+
+    def windows_branch(directory: Path, *, create: bool = False) -> list[int]:
+        reached.append(f"windows:{directory}")
+        raise AssertionError("the Windows branch was reached, so the answer is still the platform's")
+
+    monkeypatch.setattr(config_module, "_open_directory_fd", posix_branch)
+    monkeypatch.setattr(config_module, "_windows_hold_directory_chain", windows_branch)
+
+    with pytest.raises(ConfigError) as lock_refusal, safe_file_lock(holder / "audit.lock"):
+        pass
+    assert lock_refusal.value.error_type == "unsafe_configured_path"
+
+    with pytest.raises(ConfigError) as append_refusal:
+        safe_append_text(holder / "audit.ndjson", "line\n")
+    assert append_refusal.value.error_type == "unsafe_configured_path"
+
+    assert reached == []
+
+
+def test_the_lock_and_append_still_serve_an_ordinary_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Holds both ways: the rule is about redirection and nothing else.
+
+    Every lock the ledgers take and every audit line a bench that is not
+    redirected writes goes through exactly these two functions, so this is the
+    check that says the refusal was aimed at the profile it names and left the
+    ordinary bench alone.
+    """
+    ordinary = tmp_path / "ordinary" / "agentic-hil"
+    ordinary.mkdir(parents=True)
+
+    lock_target = ordinary / "audit.lock"
+    with safe_file_lock(lock_target):
+        pass
+    assert lock_target.exists()
+
+    ledger = ordinary / "audit.ndjson"
+    safe_append_text(ledger, "one\n")
+    safe_append_text(ledger, "two\n")
+    assert ledger.read_text(encoding="utf-8") == "one\ntwo\n"
