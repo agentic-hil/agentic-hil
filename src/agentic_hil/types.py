@@ -15,7 +15,7 @@ def raised_errno(error: BaseException, target: int) -> bool:
     SocketCAN path the number reaches the caller inside a wrapper's cause chain,
     and a classifier that read `"No such device"` would answer differently under a
     non-English libc and identically to a device whose *name* contains the words.
-    Both attributes are consulted for the same reason — `OSError.errno` is where
+    Both attributes are consulted for the same reason: `OSError.errno` is where
     the kernel's number lives, and a library wrapper such as `can.CanError` copies
     it onto `error_code` when it re-raises.
 
@@ -51,14 +51,14 @@ def fold_hardware_id(value: str) -> str:
     unit, not a file. ``os.path.normcase`` is therefore the wrong instrument for
     them: it folds case on Windows and does nothing at all on POSIX, so two
     config entries naming one unit in two spellings would collapse to one lock
-    on Windows and stay two locks on Linux — the same bench, two different
+    on Windows and stay two locks on Linux: the same bench, two different
     exclusivity guarantees, and no error on either.
 
     Of the two consistent answers, folding is the safe one. An over-collapse
     costs concurrency and announces itself: a run waits, or is told which owner
     holds the board. An under-collapse lets two runs each believe they hold the
     same board, which is the failure the mutex exists to prevent. Nothing is
-    merged silently either way — two entries whose ``resource_id`` values differ
+    merged silently either way: two entries whose ``resource_id`` values differ
     only in case are refused at config load (``config.validate_resource_ids``),
     so an operator who meant them as two units is asked, not overruled."""
     return value.casefold()
@@ -80,7 +80,7 @@ def fold_device_path(value: str) -> str:
 def format_usb_id(value: int | None) -> str:
     """A USB vendor or product id in the spelling every tool but pyserial uses.
 
-    pyserial reports them as integers, and that is what a configuration stores —
+    pyserial reports them as integers, and that is what a configuration stores,
     but nobody reads `1155` off a board. `lsusb`, Windows' device manager and
     pyserial's own ``hwid`` all print the four-digit hex (``VID:PID=0483:374F``),
     so that is what a refusal has to say out loud, and both spellings travel: the
@@ -111,8 +111,8 @@ def is_stable_device_name(value: str) -> bool:
     configuration.
 
     A pure question about the *name*, with no branch on the host asking it. A
-    configuration is read on the machine whose paths it names — a POSIX device
-    name in a file loaded on Windows names nothing either way — and a rule that
+    configuration is read on the machine whose paths it names (a POSIX device
+    name in a file loaded on Windows names nothing either way) and a rule that
     answered differently per platform could not be pinned by a test that runs on
     both."""
     return value.startswith(SERIAL_BY_ID_DIRECTORY) and len(value) > len(SERIAL_BY_ID_DIRECTORY)
@@ -156,8 +156,8 @@ class DebuggerPermissions:
     question as what a *generated* file says. A generation writes every flag
     true but the two the flash interlock refuses on; these defaults decide what
     an existing file means where it says nothing, and turning them over would
-    have widened every configuration already on disk at the moment of an update
-    — the one thing a permission change may not do.
+    have widened every configuration already on disk at the moment of an update:
+    the one thing a permission change may not do.
 
     ``allow_probe`` exists only for version 1 files. From version 2 on there is
     no read permission: exclusivity replaced it, and a version 2 config that
@@ -193,14 +193,14 @@ class IoPermissions:
 
 @dataclass(frozen=True)
 class ProjectPermissions:
-    """What may be done to this project — its configuration, its installation,
+    """What may be done to this project: its configuration, its installation,
     its incidents.
 
     Every flag belongs to the write class of decision 0018: reading the
     configuration needs no grant, writing it does. A generated configuration
     carries all of them true, so an agent can describe the bench,
     narrow it on the operator's request, clear an incident nothing physical was
-    part of, and lift the server onto the current release — without anyone
+    part of, and lift the server onto the current release, without anyone
     opening YAML. The dataclass defaults stay ``False`` for the same reason the
     per-device ones do: they say what a file that names nothing means, and
     widening that would widen every configuration already on disk.
@@ -217,7 +217,7 @@ class ProjectPermissions:
 
     ``allow_config_write``
         regenerate the whole file from hardware discovery
-        (``project_config_create``). Contributes no permission value of its own —
+        (``project_config_create``). Contributes no permission value of its own:
         the permissions already on disk are carried over unchanged, so it is not
         a way back to the open skeleton.
     ``allow_config_description_write``
@@ -233,7 +233,7 @@ class ProjectPermissions:
         longer says three: it sits here because it is project-scoped rather than
         device-scoped, and because a bench that wants an agent kept away from its
         incidents narrows it in the same block as the rest. What it cannot hand
-        over is the physical attestation — that boundary is in the tool, not in
+        over is the physical attestation: that boundary is in the tool, not in
         this flag, and granting this does not move it.
 
     ``allow_upgrade``
@@ -322,7 +322,7 @@ class ComPortConfig:
     # them false is how a target is observed provably undisturbed.
     assert_dtr: bool = True
     assert_rts: bool = True
-    # The USB serial number of the adapter behind this port — for a Nucleo, the
+    # The USB serial number of the adapter behind this port: for a Nucleo, the
     # ST-Link serial that `probe_id` also carries. What `probe_id` is to a debug
     # probe: an opaque hardware id, never a path, folding case everywhere. It is
     # what makes `device` merely the way in rather than the identity, so a port
@@ -335,8 +335,8 @@ class ComPortConfig:
     serial_number: str | None = None
     # The USB vendor and product ids of that same adapter, as pyserial reports
     # them: integers, and the file may also spell them the way `lsusb` does (see
-    # `config.usb_id_config`). They are not a second serial — every ST-Link on
-    # earth carries 0483:374f — so they name a *type* rather than a unit, and
+    # `config.usb_id_config`). They are not a second serial (every ST-Link on
+    # earth carries 0483:374f), so they name a *type* rather than a unit, and
     # they are deliberately absent from the lock key for that reason.
     #
     # What they buy is the thing a serial alone cannot: a USB serial number is
@@ -348,7 +348,7 @@ class ComPortConfig:
     vid: int | None = None
     pid: int | None = None
     resource_id: str | None = None
-    # Which key of this entry an operator says identifies the hardware — the
+    # Which key of this entry an operator says identifies the hardware: the
     # answer `com_port_identity_source` derives, written down. It grants nothing
     # and selects nothing: a declaration that disagrees with the entry's own keys
     # is refused at load, so this can only ever repeat what is already there.
@@ -372,12 +372,12 @@ COM_PORT_IDENTITY_SOURCES = ("resource_id", "serial_number", "vid_pid", "vid", "
 def com_port_identity_source(port: ComPortConfig) -> str:
     """Which key of this entry says which hardware it is.
 
-    One computation, read by `devices.UartDevice.identity_source` — which is what
-    every result reports — and by the version 3 load check, so what the file has
+    One computation, read by `devices.UartDevice.identity_source` (which is what
+    every result reports) and by the version 3 load check, so what the file has
     to declare and what the server reports are the same answer rather than two
     that can drift.
 
-    ``vid_pid`` — or ``vid``/``pid`` alone, when only one is set — is the honest
+    ``vid_pid`` (or ``vid``/``pid`` alone, when only one is set) is the honest
     name for the type check: it says the entry names a kind of adapter and not a
     unit, which is exactly what those keys are."""
     if port.resource_id:
@@ -395,7 +395,7 @@ def com_port_carries_hardware_identity(port: ComPortConfig) -> bool:
     ``resource_id`` alias, the adapter's USB ``serial_number``, or a
     ``/dev/serial/by-id/...`` device name, which udev builds out of the vendor,
     the product and the device's own serial. Exactly the set
-    ``UartDevice.identity_warning`` stays quiet about — which is the point: what
+    ``UartDevice.identity_warning`` stays quiet about, which is the point: what
     version 3 requires a declaration for is precisely what `doctor` warns about."""
     return bool(port.resource_id) or bool(port.serial_number) or is_stable_device_name(port.device)
 
@@ -445,8 +445,8 @@ class CanBusConfig:
     receive_own_messages: bool
     # A controller outside listen-only sends dominant ACK bits, so this is not a
     # preference but the claim that observing this bus sends nothing. It is
-    # enforced per adapter in `can.LISTEN_ONLY_ENFORCEMENT` — the three obtain
-    # the mode three different ways — and an adapter that cannot be held to it
+    # enforced per adapter in `can.LISTEN_ONLY_ENFORCEMENT` (the three obtain
+    # the mode three different ways) and an adapter that cannot be held to it
     # refuses the session rather than listening anyway.
     listen_only: bool
     max_buffer_frames: int
@@ -492,7 +492,7 @@ class RecoveryConfig:
     ``off`` always defers to the operator. ``readonly`` may reap this owner's
     debugger processes and re-read the probe, which touches nothing physical.
     ``reset_halt`` may additionally drive a reset-into-halt to establish a
-    defined state, which is what settles an unconfirmed flash or reset — and is
+    defined state, which is what settles an unconfirmed flash or reset, and is
     a physical action, so a bench whose peripherals react to a reset should say
     ``readonly`` here."""
 
@@ -521,7 +521,7 @@ class AgenticHILConfig:
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     # The probe this config instance drives. A backend, a coordinator resource
     # and a debugger tool all act on exactly one probe, so the selection is made
-    # once — by name — and carried here instead of re-derived at each call site.
+    # once (by name) and carried here instead of re-derived at each call site.
     # It is bound automatically when the project configures a single debugger;
     # with several, the caller names one and an unbound config refuses debugger
     # work rather than picking a board.
@@ -536,7 +536,7 @@ class AgenticHILConfig:
     # happened. A server enforces the configuration it loaded for as long as it
     # runs, so the only way one of its answers can say whether that is still the
     # file on disk is to carry what it read. Empty when the configuration did not
-    # come from a file this process read — "unchanged" is then not a claim it may
+    # come from a file this process read: "unchanged" is then not a claim it may
     # make.
     #
     # `config_digest` is the document the *description* in force came from, and
@@ -559,7 +559,7 @@ class AgenticHILConfig:
     # `permissions_digest` onto the document it compared against: the permission
     # objects still came from startup, and a later reload that does find a
     # difference would otherwise report an intermediate file as their source and
-    # pair it with the startup `loaded_at` — two snapshots read as one.
+    # pair it with the startup `loaded_at`: two snapshots read as one.
     permissions_match_description: bool = True
     # When the description in force was last re-read from disk. Empty on a
     # configuration that has never been reloaded, which is the normal case.
@@ -571,7 +571,7 @@ class AgenticHILConfig:
     def read_free(self) -> bool:
         """Whether reading this bench's devices needs no permission at all.
 
-        Reading can still perturb a target — an SWD attach halts the core, a CAN
+        Reading can still perturb a target: an SWD attach halts the core, a CAN
         controller outside listen_only sends dominant ACK bits, opening a port
         raises DTR. What answers that is exclusivity, not a grant: whoever holds
         the board cannot be disturbed, and whoever observes while no run holds it

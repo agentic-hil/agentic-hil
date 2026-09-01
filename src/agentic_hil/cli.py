@@ -116,7 +116,7 @@ AGENTIC_HIL_REGISTRATION_END = "<!-- Agentic HIL skill registration end -->"
 # Measured: a refusal that only said an unmanaged entry exists was read as an
 # obstacle to clear. Ten runs rewrote the operator's entry by hand and reran
 # setup, and reported success. Say whose the entry is and that the refusal is
-# the answer — and name no action that could be mistaken for a way through.
+# the answer, and name no action that could be mistaken for a way through.
 # What the entry runs is reported beside the file, in `existing_command`, so an
 # operator can recognise their own decision without reading their agent config
 # by hand. That is the report's half of the work; this sentence keeps the
@@ -197,8 +197,8 @@ class FileSnapshot:
 
     Bytes, and existence tracked as its own fact (``raw is None`` ⟺ the path did
     not exist; ``raw == b""`` is an empty file that did). A rollback has to put
-    back what was there, and a file that is not UTF-8 — a UTF-16 config, a
-    truncated write, something binary dropped on the path — is still something a
+    back what was there, and a file that is not UTF-8 (a UTF-16 config, a
+    truncated write, something binary dropped on the path) is still something a
     forced regeneration must restore rather than delete. Snapshotting it as
     decoded text mapped those bytes to ``None``, which reads as "absent", and a
     failed final validation then removed the original instead of restoring it."""
@@ -214,8 +214,8 @@ class FileSnapshot:
     @property
     def content(self) -> str | None:
         """The snapshot decoded as UTF-8, or ``None`` when it was absent or its
-        bytes are not text. For callers that reason about text — the skill-install
-        ownership check — never for restoring, which is byte-exact."""
+        bytes are not text. For callers that reason about text (the skill-install
+        ownership check), never for restoring, which is byte-exact."""
         if self.raw is None:
             return None
         try:
@@ -319,7 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # The gate on the one-way street. Deliberately here and in no
     # tool list: an agent narrows a permission over MCP and never widens one, and
-    # opening one is the operator's, at the operator's shell — the same shell
+    # opening one is the operator's, at the operator's shell, the same shell
     # that already holds `agentic-hil init --force`, which rewrites every
     # permission in the file at once. These two move one named permission and
     # leave the rest of the file alone.
@@ -533,7 +533,7 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     The manager half is `upgrade.replace_installation`, shared verbatim with the
     `server_upgrade` MCP tool. What is this command's alone is
     what follows a swap that actually happened: a shell can refresh the agent
-    skills out of the new package, and an MCP server cannot — it is still the old
+    skills out of the new package, and an MCP server cannot: it is still the old
     code until somebody restarts it.
     """
     requested_agents = agents or []
@@ -884,8 +884,8 @@ def _agent_skill_target(agent: SkillAgent) -> Path:
 def _user_mutation_paths(agent: SkillAgent) -> list[Path]:
     """Everything the user-wide half may write.
 
-    The agent's skill, its user-level MCP registration, and — for an agents-md
-    agent — the file that registers the skill. No project path appears here, so
+    The agent's skill, its user-level MCP registration, and (for an agents-md
+    agent) the file that registers the skill. No project path appears here, so
     a project step that fails can never roll one of these back.
     """
     skill_path = _agent_skill_target(agent)
@@ -899,7 +899,7 @@ def _project_mutation_paths(agent: SkillAgent | None, config_path: Path) -> list
     """Everything the project half may write.
 
     This workspace's authoritative config, and the agent's own write-permission
-    rules — which name this project's config directory and state root, so they
+    rules, which name this project's config directory and state root, so they
     are project content even though the file is user-level.
 
     For opencode that permission file is also the file the user-wide half
@@ -909,7 +909,7 @@ def _project_mutation_paths(agent: SkillAgent | None, config_path: Path) -> list
 
     A claude-code project whose configuration `AGENTIC_HIL_CONFIG` binds outside
     the projects directory is also written into `external-projects.json`, in the
-    same restriction step and before its deny rules — the one record on disk that
+    same restriction step and before its deny rules: the one record on disk that
     says the project exists. That record is here so that a rollback restores its
     exact prior bytes, or removes one this run created; leaving it out let a
     failed restriction step claim the project's changes were rolled back while
@@ -1061,7 +1061,7 @@ def install_agent(agent: str, force: bool = False) -> JsonObject:
 
     The agent's skill, its user-level MCP registration, and the check that there
     is a persistent trusted executable to register. None of that is project
-    state, so this runs with no workspace and no readable authoritative config —
+    state, so this runs with no workspace and no readable authoritative config,
     and it has to. On a stock Windows profile the configuration location fails
     the ancestor trust check, and while both halves shared one transaction that
     refusal took the skill and the MCP entry down with it, leaving the operator
@@ -1777,7 +1777,7 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
 
     Everything here is project state, so it reuses `init_config` rather than
     repeating it, and its rollback covers this workspace's config plus the
-    agent's write-permission rules — never the user-wide skill or MCP
+    agent's write-permission rules, never the user-wide skill or MCP
     registration. Naming an agent is optional: without one the config is still
     written and verified, and only the step that asks that agent to refuse its
     own write tools is left out.
@@ -1892,7 +1892,7 @@ def _refused_project_scope(error: ConfigError) -> JsonObject:
     """Report a project half that was refused before it changed anything.
 
     Raising here would leave the operator reading a configuration refusal with
-    no word about the user-wide half that just succeeded — which is the whole
+    no word about the user-wide half that just succeeded, which is the whole
     thing they get to keep on a profile that refuses the configuration location.
     """
     refusal = error.to_dict()
@@ -1906,7 +1906,7 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
 
     A composition of two independently runnable commands, not one transaction
     across both. Each half owns its rollback set, so a project step that fails
-    leaves the installed skill and the MCP registration standing — which is the
+    leaves the installed skill and the MCP registration standing, which is the
     point where the configuration location is refused and the user-wide half
     has nothing to do with it. The second project for this user needs
     `agentic-hil init` alone.
@@ -2007,13 +2007,13 @@ def _existing_config_text(target_path: Path) -> tuple[bytes | None, str | None, 
     text, and why the text could not be read.
 
     `--force` is the operator's reset, so it has to work on exactly the file most
-    in need of one. Bytes that are not UTF-8 — a UTF-16 save, a truncated write,
-    something binary dropped on the path — once left this command with an
+    in need of one. Bytes that are not UTF-8 (a UTF-16 save, a truncated write,
+    something binary dropped on the path) once left this command with an
     unhandled ``UnicodeDecodeError`` and no way to regenerate at all.
 
     Three returns because a rollback and a permission-narrowing analysis want
     different reads of one file. The bytes are what a failed regeneration
-    restores — the original, exactly, whether or not it is UTF-8 — so a non-UTF-8
+    restores (the original, exactly, whether or not it is UTF-8), so a non-UTF-8
     file is put back rather than deleted; before this, the
     snapshot was taken from the decoded text, and text that would not decode was
     recorded as absence, so rollback removed the original it claimed to restore.
@@ -2022,8 +2022,8 @@ def _existing_config_text(target_path: Path) -> tuple[bytes | None, str | None, 
     place.
 
     The decode is caught and nothing else. A ``ConfigError`` from the guarded
-    read — the path is a symlink, a hardlink, or sits under a directory this user
-    does not solely own — must keep coming out of it, because it says the object
+    read (the path is a symlink, a hardlink, or sits under a directory this user
+    does not solely own) must keep coming out of it, because it says the object
     about to be overwritten is not the one that was named. Widening this to
     swallow it would turn a fail-closed refusal into a silent write over the
     wrong file."""
@@ -2048,7 +2048,7 @@ def _discarded_narrowings(previous_text: str | None, written: JsonObject) -> tup
 
     What the reset owes its operator is the list. Somebody narrows a bench, runs
     `--force` weeks later for an unrelated reason, and without this nothing in
-    the result says the bench is open again — the same silent reopening the
+    the result says the bench is open again: the same silent reopening the
     one-way street on `project_config_set` exists to prevent.
 
     Returns ``(paths, unreadable_reason)``. A file that is not there yields
@@ -2074,9 +2074,9 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
 
     `init` called `discover_attached_hardware` directly: no `before_connect`, no
     coordinator, no record. Enumerating probes and connecting in HOTPLUG mode is
-    a hardware read either way, so that reached a board another run was holding —
-    where `project_config_create`, which writes the same file out of the same
-    read, answers `device_busy` — and it did so leaving nothing in the audit
+    a hardware read either way, so that reached a board another run was holding
+    (where `project_config_create`, which writes the same file out of the same
+    read, answers `device_busy`), and it did so leaving nothing in the audit
     trail. Since agentic-hil/agentic-hil#112 made `init` look
     unconditionally that applied to every `init` rather than only to a workspace
     carrying a profile.
@@ -2084,15 +2084,15 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
     That the CLI is the operator's authority does not carry the exception, and
     `adopt_hardware` is the proof: it makes the same argument about the *grant*,
     waives that, and leases anyway. Authority over your own configuration is not
-    authority over somebody else's running bench — and `--force` rewriting the
+    authority over somebody else's running bench, and `--force` rewriting the
     file in the middle of a stranger's run is not something the operator wants
     either. So this goes through `discover_for_generation`, which is the function
     `project_config_create` uses, under this command's own coordinator.
 
     The open-run refusal comes first, before a word is said to any board. Every
-    other write of this file has one — `project_config_create`,
+    other write of this file has one (`project_config_create`,
     `project_config_adopt_hardware` and `agentic-hil grant`/`revoke` all refuse
-    while a run, a lease or another terminal holds the bench — and `init --force`
+    while a run, a lease or another terminal holds the bench), and `init --force`
     had none. What stopped it was incidental: a run that declared the probe owns
     the lock the read takes, so the read answered `device_busy`. A run that
     declared only a COM port or only a CAN bus holds no probe, and that
@@ -2101,14 +2101,14 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
     answers the question the other write sites ask, so this asks it too.
 
     Returns the discovery, the refusal that is the whole answer when the read did
-    not happen or did not end cleanly, and — when the board was read without a
-    lease — the reason it could not be leased.
+    not happen or did not end cleanly, and (when the board was read without a
+    lease) the reason it could not be leased.
     """
     try:
         current: AgenticHILConfig | None = load_authoritative_config(workspace)
     except ConfigError as error:
         # No configuration to lease against, so no `state_root` to record a lease
-        # under and no policy to audit against — the machinery does not exist
+        # under and no policy to audit against: the machinery does not exist
         # rather than being skipped. Both cases that reach here are that: the
         # first `init` of a workspace, and an `init --force` over a file that
         # cannot be loaded, which is the one command that repairs it. Refusing
@@ -2146,7 +2146,7 @@ def _init_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -
     writes this file from the same read over MCP: what is held was taken under
     the policy this file states, and a regeneration replaces every permission,
     every baudrate and every device binding in it. The holder here is usually
-    another process — an MCP server, another terminal — so the next step names
+    another process (an MCP server, another terminal), so the next step names
     `agentic-hil lease-status`, which says whose bench it is, rather than a run
     this caller could close.
 
@@ -2168,8 +2168,8 @@ def _init_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -
         "workspace_root": existing.workspace_root,
         **remediation_fields("config_write_in_open_run"),
         "next_step": (
-            "`agentic-hil lease-status` names the holder — which devices are held, which frontend took them and under "
-            "which process — and `open_holds` here carries the same. Let the run finish or ask whoever holds it to "
+            "`agentic-hil lease-status` names the holder (which devices are held, which frontend took them and under "
+            "which process) and `open_holds` here carries the same. Let the run finish or ask whoever holds it to "
             f"close it, then run `{CONFIG_REOPEN_COMMAND}` again. `agentic-hil adopt-hardware` is the command that "
             "refreshes the hardware and leaves the rest of the file standing."
         ),
@@ -2216,7 +2216,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # workspace profile says how to name and narrow a bench that was found; it
     # cannot say whether looking is allowed, and gating the read on it
     # meant a fresh installation with no `agentic-hil.config.example.yaml` got a
-    # file full of placeholders on a machine with the board plugged in — while the
+    # file full of placeholders on a machine with the board plugged in, while the
     # MCP server, which reads unconditionally, found that same board. The two
     # answers differed in the one thing neither of them decides: what is attached.
     # Without a profile the fixed default fills the template, which is the profile
@@ -2281,8 +2281,8 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     available_com_ports = list_available_com_ports()
     # Read off the file that was written rather than asserted. The skeleton path
     # grants everything it can, but a project's own
-    # `agentic-hil.config.example.yaml` may set a flag false and that is honoured
-    # — an operator who wrote `allow_mass_erase: false` into their profile meant
+    # `agentic-hil.config.example.yaml` may set a flag false and that is honoured:
+    # an operator who wrote `allow_mass_erase: false` into their profile meant
     # it. A fixed sentence here told them the opposite about their own bench.
     #
     # `narrowed_permissions` rather than a walk of the whole surface, so that the
@@ -2307,7 +2307,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     if not discovered:
         # The placeholders are a finding, not a default. An operator who is not
         # told that discovery ran and came back empty reads the same file as
-        # "detection is broken" — which is exactly how this was reported.
+        # "detection is broken", which is exactly how this was reported.
         next_steps.insert(
             0,
             "This file describes no board yet, because hardware discovery ran and found none: "
@@ -2326,14 +2326,14 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
             f"{'permission' if len(discarded) == 1 else 'permissions'} set to false, and this one grants "
             f"{'it' if len(discarded) == 1 else 'them'}: {', '.join(discarded)}. Close each one again with "
             f"`{CONFIG_REVOKE_COMMAND} <key>`, which moves one permission and leaves every other setting in the file "
-            f"alone (`{CONFIG_GRANT_COMMAND} <key>` is the inverse) — or leave them open if the reset is what you "
+            f"alone (`{CONFIG_GRANT_COMMAND} <key>` is the inverse), or leave them open if the reset is what you "
             "wanted. The rest of the old file is gone the same way: `--force` starts over, and `agentic-hil "
             "adopt-hardware` is the command that refreshes the hardware and keeps everything else.",
         )
     elif unreadable_previous:
         next_steps.insert(
             0,
-            f"`{CONFIG_REOPEN_COMMAND}` replaced a file it could not read as a configuration — {unreadable_previous} — "
+            f"`{CONFIG_REOPEN_COMMAND}` replaced a file it could not read as a configuration ({unreadable_previous}), "
             "so it cannot say which permissions that file had set to false, and this one grants every permission the "
             "profile did not narrow. Read the `permissions` blocks in the new file and close what this bench should "
             f"not have with `{CONFIG_REVOKE_COMMAND} <key>`.",
@@ -2374,7 +2374,7 @@ def adopt_hardware(*, debugger_id: str | None = None, com_port_id: str | None = 
 
     The same computation and the same write path the MCP tool uses, run under the
     authority `agentic-hil init` already runs under: a person at a terminal, in
-    their own project. So the description grant is not consulted here — a
+    their own project. So the description grant is not consulted here: a
     placeholder configuration has it false, and requiring it would mean editing
     the YAML this command exists to stop anyone editing.
 
@@ -2388,13 +2388,13 @@ def adopt_hardware(*, debugger_id: str | None = None, com_port_id: str | None = 
     `agentic-hil init --force`, which since 0.8.0 rewrites the whole file
     at the generated defaults. Whoever has that shell has the operator's
     authority over this configuration outright, and the ratchet was never a
-    promise about them — it holds on the MCP write path, which is where an agent
+    promise about them: it holds on the MCP write path, which is where an agent
     that has only the MCP tools lives.
 
     The grant is what differs, and only the grant. Reading the probe goes through
     the same coordinator every other hardware call on this machine goes through,
     so this command waits for nothing, quarantines nothing and reads nothing that
-    an MCP server or another terminal is holding — a person's authority over
+    an MCP server or another terminal is holding: a person's authority over
     their own configuration is not authority over somebody else's running bench.
     """
     config = load_cli_authoritative_config(None)
@@ -2426,12 +2426,12 @@ def change_permission(command: str, keys: list[str]) -> JsonObject:
     agent holding only the MCP tools cannot reach it, so the ratchet on that
     surface is untouched. Whoever has this shell already has `agentic-hil init
     --force`, which rewrites every permission in the file at once without
-    consulting a grant — so a command that moves one named permission is strictly
+    consulting a grant, so a command that moves one named permission is strictly
     narrower than the authority already standing here, not a new one.
 
     The check and the write are one transaction against a run starting. Reading
     the holds and then writing left a gap: a run that began inside it took the
-    bench under the old policy while the write moved the policy underneath —
+    bench under the old policy while the write moved the policy underneath:
     the open-run refusal, defeated by timing rather than argued away.
     So when the bench reads free, every configured device is held for the length
     of the check-and-write, on the same machine-wide locks a run or a session
@@ -2448,16 +2448,16 @@ def _change_permission_holding_the_bench(command: str, keys: list[str], config: 
     # The holder that is already there: a live session or a quarantine on the
     # project lock, or a run's device holds. Answered first, so a busy bench is a
     # refusal that still validates the key names before it (set_permission decides
-    # that order), and so the one holder a device-lock hold cannot see — a project
-    # lock with no device under it — is still caught.
+    # that order), and so the one holder a device-lock hold cannot see (a project
+    # lock with no device under it) is still caught.
     holds = bench_open_holds(config)
     if holds is not None:
         return set_permission(workspace, config, keys, command=command, open_holds=holds)
     # The devices to hold and the document to write against come from one read
     # taken here, after the (slow) holds probe above rather than from the config
     # loaded before it. The keys and the description then describe the same file
-    # state, so a device repointed in the gap — `COM9` to `COM10`, a `resource_id`
-    # moved from one board to another — cannot leave this command holding the old
+    # state, so a device repointed in the gap (`COM9` to `COM10`, a `resource_id`
+    # moved from one board to another) cannot leave this command holding the old
     # key while a run takes the new one. `expect_document` carries that same
     # description into the write, which refuses if it has moved by the time the
     # write lock is held: either the run collides with the keys held here, or the
@@ -2478,7 +2478,7 @@ def _change_permission_holding_the_bench(command: str, keys: list[str], config: 
     # Hold every configured device across the check-and-write. `begin_run` and a
     # lease both take these machine-wide device locks, so a run or session that
     # begins now waits or is refused here rather than starting under the old
-    # policy — and a run that got in first makes this acquisition fail, which is
+    # policy, and a run that got in first makes this acquisition fail, which is
     # the "the write is refused" side of the same guarantee.
     bench = BenchMutex(frontend="operator-cli")
     try:
@@ -2510,7 +2510,7 @@ def _holds_from_collision(busy: JsonObject) -> JsonObject:
 
     `bench_open_holds` describes the bench from outside its holder; a collision
     the writer hit while taking the bench for its own write describes the same
-    fact from the other side — the device it could not take, and who holds it.
+    fact from the other side: the device it could not take, and who holds it.
     Marked `owner_active: False` because what refused here was a device lock, not
     the project lock a live session holds, and `raced_a_run` so the reason the
     write stopped is legible rather than looking like a bench that was busy all
@@ -2540,7 +2540,7 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
     its own calls is invisible to the first question.
 
     Asking is `HardwareCoordinator.status()`'s job, not this one's. The device
-    half used to live here and helped no other caller — the
+    half used to live here and helped no other caller: the
     same status read a second terminal makes still reported a run's held bench as
     free. This reshapes the one answer for the refusal; it does not go back to
     the locks a second time. Why the holder records are not that answer, and why
@@ -2553,7 +2553,7 @@ def bench_open_holds(config: AgenticHILConfig) -> JsonObject | None:
 
     From out here a declared run and a session that outlived one are the same
     fact, so neither is claimed: what is reported is that the bench is held and
-    by whom. A hold is a hold, and that is what the refusal turns on — those
+    by whom. A hold is a hold, and that is what the refusal turns on: those
     devices were taken under the permissions in this file, and moving the rules
     underneath them is what the open-run refusal rules out.
     """
@@ -2653,7 +2653,7 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narro
         "probe that way: validated flashing and unrestricted debugger access are mutually exclusive policies, so while "
         "either is true on a probe, flash_firmware on that probe is refused. Neither has a tool behind it here, so "
         "turning one on costs you flashing and buys nothing.",
-        "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate — read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
+        "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate: read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ])
     if available_com_ports.get("ok"):
         ports = available_com_ports.get("ports", [])
@@ -2798,7 +2798,7 @@ def _claude_code_deny_patterns(config_path: Path, state_root: Path) -> list[str]
     One `Edit` rule covers every file-editing tool, so it needs no twin.
 
     A pattern needs two leading slashes to mean an absolute path. One leading
-    slash "anchors at the settings source, not the filesystem root" — and these
+    slash "anchors at the settings source, not the filesystem root", and these
     rules go into user settings, where that source is `~/.claude`. Windows paths
     are normalised to POSIX form before matching, so `C:\\Users\\alice` matches
     as `/c/Users/alice`.
@@ -2822,7 +2822,7 @@ def _superseded_claude_code_deny_rules(config_path: Path, state_root: Path) -> s
     Earlier releases built both rules straight from the absolute path: a
     `Write(...)` that Claude Code never consults, and an `Edit(...)` whose single
     leading slash anchored it under `~/.claude` instead of at the filesystem root.
-    The first is loud — a yellow warning at every start — and the
+    The first is loud (a yellow warning at every start) and the
     second is silent, which is worse: it reads as protection and is not.
 
     Identifying them needs no heuristic. The globs are derived from this
@@ -3418,7 +3418,7 @@ def _stale_opencode_deny_patterns(config_path: Path, state_root: Path) -> set[st
     `../../.config/agentic-hil/...` and nothing absolute can equal it.
 
     They are taken back rather than corrected, because Agentic HIL no longer
-    writes a restriction for this host at all — see `restrict_agent_write_access`.
+    writes a restriction for this host at all. See `restrict_agent_write_access`.
     A rule that reads as protection and is not is worse than none, which is the
     same silent failure over again.
 
@@ -3443,14 +3443,14 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
     Installation and use need opposite things: setup must be able to create the
     authoritative config, and afterwards nothing but the operator may change it.
     So this runs last, and it constrains the agent's file tools rather than a
-    path — a path rule would also cover `agentic-hil mcp-stdio`, which has to
+    path: a path rule would also cover `agentic-hil mcp-stdio`, which has to
     keep reading the very file being protected.
 
     It is a lock on the front door, not a wall. A shell can still write the file,
     which is why SECURITY.md asks for a separate identity where that matters.
 
     Which rule form a host actually evaluates is read out of that host's own
-    documentation rather than expected — see `_claude_code_deny_patterns`.
+    documentation rather than expected. See `_claude_code_deny_patterns`.
 
     It refreshes rather than only adds. Every run takes back the rules this tool
     wrote that no configuration of this user's still asks for, so a `state_root`
@@ -3469,7 +3469,7 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
 
     Only claude-code gets a rule written. On opencode the operator decides for
     themselves, and nothing is written on their behalf: its permission model
-    hands the decision to whoever answers the prompt anyway — one "always" adds a
+    hands the decision to whoever answers the prompt anyway. One "always" adds a
     session `allow` for pattern `*`, which `evaluate` reads after the configured
     ruleset and which therefore outranks any denial written here. A rule that a
     single click removes is not a lock, and offering it as one would say
@@ -3516,7 +3516,7 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
     else:
         # opencode gets no restriction written for it, on purpose. What it does
         # get is the removal of the absolute patterns earlier releases left,
-        # which protect nothing — see `_stale_opencode_deny_patterns`.
+        # which protect nothing. See `_stale_opencode_deny_patterns`.
         added = []
         permission = document.get("permission")
         existing = permission.get("edit") if isinstance(permission, dict) else None
@@ -3529,8 +3529,8 @@ def restrict_agent_write_access(agent_id: str, config_path: Path, state_root: Pa
     settled = "The agent already refuses to write the policy files." if agent_id == "claude-code" else _OPENCODE_UNRESTRICTED
     if not added and not removed:
         return {"ok": True, "mode": mode, "summary": settled, "path": str(path), "added": [], "removed": []}
-    # Not sorted, so an operator's own file comes back in the order they wrote it
-    # — which for opencode is also the order its rules are evaluated in.
+    # Not sorted, so an operator's own file comes back in the order they wrote it,
+    # which for opencode is also the order its rules are evaluated in.
     secure_atomic_write_text(path, json.dumps(document, indent=2) + "\n")
     # On the agent rather than on `added`: since #206 a claude-code run that takes
     # back a rule for a tree no configuration names any more has nothing left to
@@ -3851,7 +3851,7 @@ def config_reload(config_path: str | None = None) -> JsonObject:
     What it is for is the moment before that call. An operator who has just
     written a board into the file wants to know that the file loads, that the
     entry is where the reload will look for it, and which of their edits the
-    reload will *not* take — and every one of those questions is answered by
+    reload will *not* take, and every one of those questions is answered by
     running the real merge here, against the same load the server performs. The
     same refusals come out of it too: a file that will not load is refused here
     with the message the server would give, before an agent is asked to make a
@@ -3879,7 +3879,7 @@ def config_reload(config_path: str | None = None) -> JsonObject:
         "would_reload": {section: _section_preview(config, section) for section in RELOADED_SECTIONS},
         "next_steps": [
             "Ask the agent to call `project_config_reload_description` if a device below is the one you just wrote.",
-            "A permission you changed is not in that call's scope. Restart the MCP server for it — the agent host's "
+            "A permission you changed is not in that call's scope. Restart the MCP server for it: the agent host's "
             "server for this workspace, not this command line.",
             f"Sections a reload leaves alone: {', '.join(section for section, _ in NOT_RELOADED_SECTIONS)}.",
         ],
@@ -3932,12 +3932,12 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # anything about what this bench is meant to drive; a config that granted
     # nothing would otherwise demand a debugger toolchain from every operator
     # the moment `init` wrote it. What the config did pin is the honest signal,
-    # and `debugger_drives_hardware` is literally the set config load validated —
+    # and `debugger_drives_hardware` is literally the set config load validated,
     # which since 0.8.0 excludes the starter entry `init` writes with
     # every permission granted and no toolchain named, and includes every entry
     # that has one, whatever its scripts looked like before it did. It takes the
     # configuration too, because under version 2 an entry with no mutation grant
-    # at all is still reachable — read-free — and an entry `doctor` skips is an
+    # at all is still reachable (read-free), and an entry `doctor` skips is an
     # entry nothing validated.
     probed = {name: _doctor_probe_check(config, name) for name, entry in config.debuggers.items() if debugger_drives_hardware(config, entry)}
     checks = {name: result for name, (result, _) in probed.items()}
@@ -3951,7 +3951,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
     }
     # Only a definite negative is a failure. A target-support check that could
     # not run said nothing about this configuration, and reporting it as broken
-    # would make `doctor` red — and `setup` roll back — on any host that has no
+    # would make `doctor` red (and `setup` roll back) on any host that has no
     # debugger toolchain installed yet.
     unsupported = sorted(name for name, support in target_support.items() if support.get("ok") is not True)
     undetermined = sorted(name for name, support in target_support.items() if support.get("status") == "undetermined")
@@ -3997,8 +3997,8 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # nothing said until now: an installation that lost the extra its
     # own configuration needs. `uv tool install --upgrade` replaces the recorded
     # requirement, so a bench installed as `agentic-hil[can]` came back without
-    # python-can, and the first `can_session_start` — hours later, in a result
-    # about a bus — was what found out. Named here with the exact reinstall line,
+    # python-can, and the first `can_session_start` (hours later, in a result
+    # about a bus) was what found out. Named here with the exact reinstall line,
     # for the same reason the identity warning is: this is where an operator
     # looks first, and a warning that does not carry the command is a search.
     missing_extras = missing_configured_extras(config)
@@ -4076,7 +4076,7 @@ def _doctor_mcp_report() -> JsonObject:
         # The refusal already knows which candidates it looked at, where they
         # were, and what was wrong with each. Passing on the summary alone left
         # an operator with "no trusted executable was found" and no path to act
-        # on — a refusal handed over without its reasons, which is the one thing
+        # on: a refusal handed over without its reasons, which is the one thing
         # this project's error line does not do.
         details = error.details if isinstance(error, ConfigError) else {}
         rejected = details.get("rejected_candidates")
@@ -4156,7 +4156,7 @@ def debugger_probes() -> JsonObject:
         finally:
             service.close()
     if not config.debuggers:
-        # Nothing is switched off here — nothing exists. Answer exactly as the
+        # Nothing is switched off here: nothing exists. Answer exactly as the
         # MCP surface does for the same config, so the two do not send an
         # operator hunting for a flag that has no entry to live on.
         return unbound_debugger_error("debugger_probes_list", config)
@@ -4220,7 +4220,7 @@ def run_mcp_stdio(config_path: str | None = None) -> int:
     every tool refusing except the one that generates a configuration once.
 
     Only an absent file takes that route. A configuration that exists and does
-    not load — invalid, or in a location the trust check rejects — is still a
+    not load (invalid, or in a location the trust check rejects) is still a
     hard stop: reading "broken" as "absent" would let a damaged file be replaced
     by a generated one, silently discarding the policy an operator wrote."""
     try:

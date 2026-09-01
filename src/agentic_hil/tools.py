@@ -122,7 +122,7 @@ class AgenticHILToolService:
         self.backend = backend or create_debugger_backend(self.config)
         # Which backend class drives this bench is decided by `debuggers.<n>.type`
         # and by whether a probe is bound at all, so a description reload can
-        # invalidate the *object* and not only its config — a bench that
+        # invalidate the *object* and not only its config: a bench that
         # configured no debugger and now configures one holds an
         # UnboundDebuggerBackend that no `reconfigure` can turn into an OpenOCD
         # one. That rebuild is only ours to make when we built the backend: an
@@ -137,7 +137,7 @@ class AgenticHILToolService:
         # the board is actually running. Only a confirmed flash writes it, and
         # only of a .elf: a .hex or .bin carries no symbol table, and an
         # unconfirmed flash is exactly the case where nobody knows what is on
-        # the board. It is a fact about this bench, not an artifact handle —
+        # the board. It is a fact about this bench, not an artifact handle:
         # nothing is staged or held open by it.
         self._symbol_elf: JsonObject | None = None
         self._debug_lease: HardwareLease | None = None
@@ -259,11 +259,11 @@ class AgenticHILToolService:
 
         An unconfirmed flash may have written part of a new image. Only a flash
         that provably never reached the target (`side_effect_status` still
-        `not_started`) leaves the remembered ELF proven; anything else — an
-        unknown or partial hardware effect — drops it rather than resolve a
+        `not_started`) leaves the remembered ELF proven; anything else (an
+        unknown or partial hardware effect) drops it rather than resolve a
         symbol against an image the board may no longer be running.
 
-        The pre-staging artifact is kept, not the staged copy — staging is
+        The pre-staging artifact is kept, not the staged copy: staging is
         released as soon as the backend returns, while this path stays readable
         for as long as the file does. Its digest is kept with it and revalidated
         at dump time, so a rebuild that replaces the file cannot be read while
@@ -423,7 +423,7 @@ class AgenticHILToolService:
             # answer, not only in the two that name it outright: a caller reading
             # a flash result has the same reason to know that the policy it was
             # decided by is no longer the policy on disk. Answers that already
-            # carry the block — `debugger_info`, and the configuration tools —
+            # carry the block (`debugger_info`, and the configuration tools)
             # are left alone, so there is one statement per result and it always
             # comes from the same check.
             #
@@ -574,8 +574,8 @@ class AgenticHILToolService:
             "test_reactor_status": lambda: self.test_reactor_status(args),
             "test_reactor_stop": lambda: self.test_reactor_stop(args),
             # Deliberately not in `audited_hardware_tools`: it is the one call
-            # that exists to answer a blocked bench, so the gate above — which
-            # refuses every hardware tool while an incident is open — must not
+            # that exists to answer a blocked bench, so the gate above (which
+            # refuses every hardware tool while an incident is open) must not
             # stand in front of it.
             "hardware_recover": lambda: self.hardware_recover(args.get("operator_statement"), args.get("accept_config_change") is True),
             # On a configured server this is the authorized-rewrite half: a
@@ -592,8 +592,8 @@ class AgenticHILToolService:
             # holds, and a probe held by another process on this machine answers
             # device_busy instead of being connected to behind its owner's back.
             PROJECT_CONFIG_ADOPT: lambda: project_config_adopt_hardware(Path(self.config.work_dir), self.config, args, coordinator=self.coordinator, open_holds=self.open_hardware_holds()),
-            # Reads the file and changes nothing on disk, so no grant gates it —
-            # reading is free here, and this cannot widen anything: it takes the
+            # Reads the file and changes nothing on disk, so no grant gates it.
+            # Reading is free here, and this cannot widen anything: it takes the
             # description and leaves every permission where it was. A bench whose
             # allow_config_description_write is false must still be able to pick
             # up a board somebody plugged in.
@@ -630,7 +630,7 @@ class AgenticHILToolService:
                     # stays exactly as it was and the operator still owns it.
                     self._poison_quietly("machine_recovery_failed", error, audit_broken=isinstance(error, (ConfigError, OSError)))
                     recovered = None
-                # The automatic attempt still runs for every tool — it is the
+                # The automatic attempt still runs for every tool: it is the
                 # cheapest way out and it costs a caller nothing. What the
                 # recovery class is exempt from is the *refusal* when that
                 # attempt did not settle the incident: those calls are the
@@ -676,15 +676,15 @@ class AgenticHILToolService:
 
         Before this, an effect tool called with no run open sat outside the run
         model entirely: it took its lease, did its thing, and if it failed into
-        an incident there was no teardown to hang a recovery action on — the
+        an incident there was no teardown to hang a recovery action on. The
         only way back was `hardware_recover` or a person at a shell. A declared
         run around the same call has had that since the abort seam existed.
 
         So the call declares the run itself, over exactly the resources it is
         about to lease, and the declaration is the same `begin_run` an agent's
         own `bench_run_start` makes: the same hold, the same lease record, the
-        same audit trail. The teardown is the same too — literally
-        `bench_run_stop`'s, shared rather than copied — so an incident left
+        same audit trail. The teardown is the same too (literally
+        `bench_run_stop`'s, shared rather than copied), so an incident left
         standing aborts into `recover_after_failed_run` exactly as a declared
         run's would.
 
@@ -714,7 +714,7 @@ class AgenticHILToolService:
         except BaseException:
             # The run still ends and still recovers: an exception on the way out
             # is the failure this seam exists for. Its own recovery block has
-            # nowhere to go — the exception is the answer — but the bench is
+            # nowhere to go (the exception is the answer), but the bench is
             # given back either way.
             self._recover_if_run_left_an_incident(self._end_implicit_run(), declared)
             raise
@@ -799,8 +799,8 @@ class AgenticHILToolService:
         new configuration and hands it back rather than touching this one) or the
         handover to the collaborators. Nothing here field-pokes a live config:
         the object every collaborator holds is replaced with the new one, and the
-        collaborators that keep state derived from it — an open COM session, a
-        cached probe uid, a gdb session — are the ones that decide what of it
+        collaborators that keep state derived from it (an open COM session, a
+        cached probe uid, a gdb session) are the ones that decide what of it
         survives.
 
         It runs on the dispatch path, so it is already under `_lifecycle_lock`
@@ -824,7 +824,7 @@ class AgenticHILToolService:
         Separate from `open_hardware_holds` because it is a different fact: a
         quarantine can outlive every lease that produced it, and it is then
         standing with nothing held. A description reload is refused on it all
-        the same — the operator is about to be asked to physically check the
+        the same: the operator is about to be asked to physically check the
         devices the incident names, and a name that meant another board by the
         time they read it is the one thing that check cannot survive.
 
@@ -865,7 +865,7 @@ class AgenticHILToolService:
 
         Before this tool a quarantine could be seen and explained over MCP and
         cleared nowhere but at a shell, so on a host that has no shell an agent
-        watched a bench it could not return to service — including for incidents
+        watched a bench it could not return to service, including for incidents
         that had provably never touched a board.
 
         Two things gate it, and they are different in kind. `permissions
@@ -875,8 +875,8 @@ class AgenticHILToolService:
         one-way `project_config_set` as the rest.
 
         The class boundary is not authorization and no grant reaches it. Safe
-        state — that a physical board is still and holds the firmware somebody
-        expects — is a claim about the world, and the only entity that can make
+        state (that a physical board is still and holds the firmware somebody
+        expects) is a claim about the world, and the only entity that can make
         it is a person. That has not changed. What changed is who may carry the
         sentence: an agent in a chat window has a person on the other end of it,
         and telling that person to go find a shell, on a host that may not have
@@ -885,7 +885,7 @@ class AgenticHILToolService:
 
         So the boundary now reads: the agent may not *make* the claim, and may
         relay one. `operator_statement` is a string and not a boolean precisely
-        because of that split — a boolean is a flag the caller sets for itself,
+        because of that split: a boolean is a flag the caller sets for itself,
         which is why `confirm_safe_state` does not exist here and will not, while
         a sentence about a bench is something the caller has to have been given.
         Nothing here can verify it was; the tool's own description says outright
@@ -896,8 +896,8 @@ class AgenticHILToolService:
         refusal as the direct route for when there is nobody to ask.
 
         The transition, when it is allowed, is the same `coordinator.recover`
-        the CLI performs — one implementation, one set of marker-consistency
-        checks, one ledger — with the actor and the attestation saying which of
+        the CLI performs (one implementation, one set of marker-consistency
+        checks, one ledger), with the actor and the attestation saying which of
         the two ways in was taken.
 
         `accept_config_change` is the second half of that sameness, and it is a
@@ -920,7 +920,7 @@ class AgenticHILToolService:
         # Read first, refuse second, and deliberately in that order. Reading this
         # bench's state needs no grant anywhere in this project, nothing is
         # cleared before the grant is checked, and a refusal that could not name
-        # the incident would send the operator hunting for an id — on a host that
+        # the incident would send the operator hunting for an id, on a host that
         # has no shell to run `lease-status` in, which is the situation this tool
         # exists for.
         status = self.coordinator.status()
@@ -956,12 +956,12 @@ class AgenticHILToolService:
         physical = sorted(set(reasons) - allowed) if reasons else ["unnamed_incident"]
         # No sentence settles a broken audit. The reason names a ledger that
         # could not be written, and clearing it on a statement would put the
-        # attestation into the very file whose failure raised the incident —
+        # attestation into the very file whose failure raised the incident,
         # so this one family keeps the operator's own route, as it did before.
         audit_broken = sorted(reason for reason in reasons if "audit_broken" in reason)
         if physical and operator_statement and not audit_broken:
             # The operator answered, and the agent is relaying what they said.
-            # This is not the agent attesting anything — it holds no opinion
+            # This is not the agent attesting anything: it holds no opinion
             # about the board and the ledger does not record one. It records a
             # quoted person, under a label that stays distinct from a signature
             # made at the operator's own command line.
@@ -1034,7 +1034,7 @@ class AgenticHILToolService:
         """What this server is holding, or None when it holds nothing.
 
         A configuration write while something is held would change the policy
-        under an active lock — the mirror image of the rule that a run may only
+        under an active lock: the mirror image of the rule that a run may only
         touch what it declared. Both a declared run and a lease taken outside one
         count: a COM session outlives `bench_run_stop` by design, so asking only
         whether a run is open would miss the case where a board is still held.
@@ -1060,8 +1060,8 @@ class AgenticHILToolService:
 
         Without this the agent path had no run boundary at all: every MCP call
         took its device, released it at the end of the call, and left the board
-        free between flash, reset and read. Decision 0018 promises the opposite —
-        every device a run names is held for the run's duration — and that
+        free between flash, reset and read. Decision 0018 promises the opposite
+        (every device a run names is held for the run's duration), and that
         promise only held for `agentic-hil test-reactor` until now.
 
         The devices are resolved completely before anything is locked, and the
@@ -1074,7 +1074,7 @@ class AgenticHILToolService:
             return {"tool": "bench_run_start", "side_effect_committed": False, **error.result}
         try:
             # The raw value, not `float()` over it. The mutex is the layer that
-            # decides what a wait may be, and it rejects `bool` on purpose —
+            # decides what a wait may be, and it rejects `bool` on purpose:
             # converting first handed it `1.0` for a `wait_s: true` nobody could
             # have meant, and handed it a `ValueError`/`TypeError` for a string
             # or a null that went straight past the handler below as a traceback.
@@ -1103,7 +1103,7 @@ class AgenticHILToolService:
         recovery seam the reactor's abort path does: an agent that drove its own
         steps and hit a failure ends its run here, and the bench it hands back
         should be one the next run can start on. The trigger is an incident still
-        standing after the devices are released — an interactive run has no step
+        standing after the devices are released: an interactive run has no step
         list to read a verdict off, and an open incident is the same statement in
         the form this call can actually see."""
         declared = [item for item in (self.coordinator.run_status().get("declared_devices") or []) if isinstance(item, str)]
@@ -1120,8 +1120,8 @@ class AgenticHILToolService:
         A declared run and an implicit single-action run end the same way, so
         they ask the same question in the same place rather than each carrying a
         copy of it: is an incident still standing now the devices are back? That
-        is the failure signal an interactive run has — there is no step list to
-        read a verdict off — and the implicit run inherits it unchanged, which is
+        is the failure signal an interactive run has (there is no step list to
+        read a verdict off), and the implicit run inherits it unchanged, which is
         what makes a bare effect call abort and recover exactly as the same call
         does between `bench_run_start` and `bench_run_stop`.
 
@@ -1202,7 +1202,7 @@ class AgenticHILToolService:
         `init; targets`, pyOCD `status`, ST-Link `-HOTPLUG`), so it cannot change
         the state it is attesting to. `reset_halt` additionally drives the target
         into a defined halted state first, which is what settles an unconfirmed
-        flash, reset, or session start — a physical act, gated on the bench's
+        flash, reset, or session start: a physical act, gated on the bench's
         recovery.auto_recover policy and on allow_reset.
 
         Returns the recovery report, or None when the incident is not machine
@@ -1276,8 +1276,8 @@ class AgenticHILToolService:
         """Put the bench back into a state the next run can start from.
 
         This is the run teardown's recovery seam. A run that failed has already
-        delivered its verdict — the failure is the result, and nothing here
-        changes it — so what is left to do is leave the bench usable instead of
+        delivered its verdict (the failure is the result, and nothing here
+        changes it), so what is left to do is leave the bench usable instead of
         leaving a padlock on it for a person to come and take off. The actions
         are the ones `_attempt_machine_recovery` performs on the acquire path:
         reap this owner's leftover debugger processes, drive the target into a
@@ -1288,7 +1288,7 @@ class AgenticHILToolService:
         cases want the same thing: a step that failed on an assertion leaves a
         board in whatever state the test drove it to, and the next run should not
         inherit it. When there *is* an incident and the actions performed the
-        thing it named as unconfirmed, the incident is resolved here too — see
+        thing it named as unconfirmed, the incident is resolved here too. See
         `RECOVERY_ACTION_REASONS` for which reasons that covers and why the
         `audit_broken` families are not among them.
 
@@ -1424,7 +1424,7 @@ class AgenticHILToolService:
         because the agent asked for it instead of because a gate ran it. So the
         incident ends the same way, with the same ledger line.
 
-        Silent on failure by design — a recovery-class call whose incident could
+        Silent on failure by design: a recovery-class call whose incident could
         not be cleared still returns its own result. The bench stays held and the
         next call says so; swallowing the call's answer to report a bookkeeping
         problem would lose the thing the caller actually asked for."""
@@ -1527,7 +1527,7 @@ class AgenticHILToolService:
         Inspected after `_release_recovered_leases`, and the coordinator's own
         final state is the authority: a release that could not be confirmed fails
         closed, so if the coordinator is blocked again the incident this run
-        raised was cleared but the bench is not free — a new
+        raised was cleared but the bench is not free: a new
         `lease_release_unconfirmed` incident stands in its place. Reporting
         success here would tell a caller to continue on a quarantined bench, so
         this returns the new open incident's cleanup/quarantine fields instead;
@@ -1607,7 +1607,7 @@ class AgenticHILToolService:
         for_recovery = name in recovery_class_tools() and self.coordinator.blocked
         if one_shot or starts_session:
             # A recovery-class one-shot runs on whichever hold the incident left
-            # standing — the lease a quarantined session kept, or the one a
+            # standing: the lease a quarantined session kept, or the one a
             # quarantined one-shot kept. Both still hold the locks it needs, so
             # asking for a second lease is refused as busy by the very hold the
             # incident left; queueing the remedy behind the incident is what
@@ -1643,7 +1643,7 @@ class AgenticHILToolService:
             # A sessionless symbol read is a memory read: `-r` attaches and reads,
             # so a failure the backend proved never reached the target leaves the
             # board unchanged, and one it could not confirm leaves the target's
-            # state — not this host's bookkeeping — in question. It settles and
+            # state (not this host's bookkeeping) in question. It settles and
             # quarantines exactly like `probe_target`.
             read_only = name in {"debugger_probes_list", "probe_target"} or sessionless_read
             if requires_quarantine and read_only and self._readonly_failure_is_settled(result):
@@ -1748,7 +1748,7 @@ class AgenticHILToolService:
 
         The abort point has to be the backend's claim, never this layer's
         inference from fields the backend did not write. Only the backend knows
-        where its own run stopped, and each one says so the same way — with
+        where its own run stopped, and each one says so the same way, with
         ``target_contacted: false`` and ``side_effect_status: not_started``,
         which it writes exactly where it has the evidence: OpenOCD when a
         classification that names a failure to reach the target meets an absent
@@ -1759,9 +1759,9 @@ class AgenticHILToolService:
         until this check demanded them. A returned result proves the spawned
         toolchain child was reaped, so nothing will act on the board from here
         on; it proves nothing about what already happened, and a read on this
-        bench is not passive — an SWD attach halts the core, and a process killed
+        bench is not passive: an SWD attach halts the core, and a process killed
         at its deadline never ran the ``shutdown`` in its own command string.
-        Exceptions never reach this — a raise proves nothing about the child
+        Exceptions never reach this: a raise proves nothing about the child
         process and keeps quarantining as ``debugger_call_exception``."""
         return (
             result.get("target_contacted") is False
@@ -1900,7 +1900,7 @@ def tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
             "This refusal is the answer to the request. Report it and name the permission that is "
             "denied, then stop. You must not enable it: the authoritative configuration belongs to the "
             "operator and only the operator may edit it. You must not carry out the action another way "
-            "either — a debugger, serial device or CAN adapter driven outside Agentic HIL defeats the "
+            "either: a debugger, serial device or CAN adapter driven outside Agentic HIL defeats the "
             "policy this refusal enforces."
         )
     return result
@@ -1958,15 +1958,15 @@ def containment_tools() -> set[str]:
 IMPLICIT_RUN_LABEL = "implicit:"
 # The audited hardware tools that only read the bench. Written out here rather
 # than read off the annotation table in contracts.py: nothing in this package
-# decides behaviour from those hints — contracts.py says so and a test enforces
-# it — so the two are held in step by a test comparing them instead, in
+# decides behaviour from those hints (contracts.py says so and a test enforces
+# it), so the two are held in step by a test comparing them instead, in
 # tests/test_implicit_single_action_run.py. `probe_target` is deliberately not
 # among them, and for the reason contracts.py gives at length: it connects, and
 # an SWD attach halts a running core, so it is an effect on the target and its
 # own failure path treats it as one.
 _READ_ONLY_HARDWARE_TOOLS = frozenset({"debugger_probes_list", "com_read", "can_read", "debug_symbol_info", "debug_symbol_value"})
 # Session starts are deliberately outside the implicit run. The hold one takes
-# outlives the call that opened it — that is what a session is — so a
+# outlives the call that opened it (that is what a session is), so a
 # single-action run around a session start would end, and release, while the
 # session it opened was still running; the release would be a statement that is
 # not true.
@@ -1977,7 +1977,7 @@ def debugger_one_shot_tools() -> set[str]:
     """Debugger tools that take their own lease for one call and give it back.
 
     Everything else in `debugger_effect_tools` runs through a session somebody
-    already opened, on the lease that session holds — except the reads in
+    already opened, on the lease that session holds, except the reads in
     `sessionless_capable_debug_tools`, whose class the backend decides."""
     return {"debugger_probes_list", "probe_target", "flash_firmware", "reset_target"}
 
@@ -2045,9 +2045,9 @@ def implicit_run_tools() -> set[str]:
 
     Derived rather than listed, so a tool that joins the incident-marking set
     later joins this one with it instead of being silently left outside the run
-    model. The base is `audited_hardware_tools` — precisely the calls whose
+    model. The base is `audited_hardware_tools` (precisely the calls whose
     failure can raise an incident, and whose audit trail is proven writable
-    before the board is touched — less four groups:
+    before the board is touched), less four groups:
 
     * the read-only ones. A read leaves nothing for a recovery action to put
       back.
@@ -2055,11 +2055,11 @@ def implicit_run_tools() -> set[str]:
     * the calls made *through* an open debug session. A recovery action reaps
       this owner's debugger processes and drops the debug lease, so a run that
       opened and closed around one call inside a session would take the session
-      with it — and a session is precisely the case where the agent's own hold
+      with it, and a session is precisely the case where the agent's own hold
       already spans several calls. Its teardown is `debug_stop_session` and the
       containment tools beside it, which stay reachable through an incident on
       purpose.
-    * the two configuration tools, which refuse while a run holds the bench —
+    * the two configuration tools, which refuse while a run holds the bench:
       wrapping either in a run would make it refuse itself.
 
     A tool in this set is still only wrapped when there is no run open and no
@@ -2094,13 +2094,13 @@ def recovery_class_tools() -> set[str]:
 
     An incident is what a failed run leaves behind, and the answer to it is to
     put the target back into a known state. Refusing exactly the calls that do
-    that — probe it, reset it, flash a known image onto it — made the incident a
+    that (probe it, reset it, flash a known image onto it) made the incident a
     padlock: the one route out was a person at a command line, for a condition a
     reset settles. So these run *during* an incident.
 
     The line is what the call is for, not how physical it is: a reset drives the
-    target harder than a `com_write` does. The stimulus class — `com_write`,
-    `can_send`, session starts, new runs — stays behind the incident, because
+    target harder than a `com_write` does. The stimulus class (`com_write`,
+    `can_send`, session starts, new runs) stays behind the incident, because
     those neither establish a known state nor are meaningful without one, and a
     measurement taken across an unresolved incident is a measurement nobody can
     stand behind afterwards.
@@ -2139,8 +2139,8 @@ def unbound_debugger_error(tool: str, config: AgenticHILConfig) -> JsonObject:
     """Refuse a debugger call that has no probe to run on.
 
     Two different configurations land here and they need different answers. No
-    MCP tool schema carries a probe name — this surface drives the one bound
-    probe — so telling a caller to "name the debugger" would demand something
+    MCP tool schema carries a probe name (this surface drives the one bound
+    probe), so telling a caller to "name the debugger" would demand something
     the protocol cannot express, which is the shape of refusal that has already
     driven a model to reach for st-flash instead. Say what is actually wrong and
     which route exists, and mark the call unretryable so nobody loops on it."""
@@ -2246,9 +2246,9 @@ def prominent_config_status_tools() -> set[str]:
     """The tools that state which configuration decided the answer, always.
 
     Every other result carries the block only when there is something to report.
-    These two are where an operator goes to compare two answers about one bench —
-    `debugger_info` against `agentic-hil doctor`, and `project_config_describe`
-    for what the file leaves open — so for them "nothing has moved" has to be a
+    These two are where an operator goes to compare two answers about one bench
+    (`debugger_info` against `agentic-hil doctor`, and `project_config_describe`
+    for what the file leaves open), so for them "nothing has moved" has to be a
     statement rather than an absence. It holds for their refusals too: a call
     that is refused still answered out of some configuration, and which one it
     was is exactly what the operator is trying to establish."""
@@ -2269,13 +2269,13 @@ def debugger_effect_tools() -> set[str]:
 # the probe's own COM device are precisely the values that are laborious to write
 # by hand and impossible to guess, and they are the ONLY values the agent side
 # contributes. Everything else is the fixed skeleton. The agent authors no
-# content, so it does not decide allow_flash either — the skeleton does, and from
+# content, so it does not decide allow_flash either: the skeleton does, and from
 # 0.8.0 it decides it open, so the bench an operator gets back is one they
 # can use without opening an editor.
 #
 # The gate still needs no state outside the configuration. A configuration
 # deleted out of band lets an agent generate a fresh one, and the fresh one is
-# this same skeleton — what the cycle costs is whatever a person or an agent had
+# this same skeleton. What the cycle costs is whatever a person or an agent had
 # narrowed, and what it yields is the file `agentic-hil init` writes. The
 # invariant is no longer in what the generation withholds; it is in the direction
 # `project_config_set` allows, which is `true` to `false` and never back.
@@ -2298,7 +2298,7 @@ GENERATED_CONFIG_HEADER_CLOSING = """#
 # You are the one who narrows it. Tell the agent in prose which permission a bench
 # should not have and it writes false here, with a note in `provenance`. That write
 # is `project_config_set`, and it puts false into a permission and no other value,
-# so nothing an agent sends through it widens this file — closing
+# so nothing an agent sends through it widens this file: closing
 # permissions.allow_config_permissions_write is the last permission change it can
 # make there at all.
 #
@@ -2309,7 +2309,7 @@ GENERATED_CONFIG_HEADER_CLOSING = """#
 # configuration the writing server loaded, an entry the discovery finds for the
 # first time arrives at the skeleton's defaults, and a file that has been deleted
 # comes back at those defaults. That loaded state is the one it parsed at
-# startup — a narrowing made over MCP since then is in this file and not in what
+# startup: a narrowing made over MCP since then is in this file and not in what
 # that server holds, so a regeneration before it is restarted writes the older,
 # wider value back. Set allow_config_write to false if this bench should not be
 # regenerated from the agent side at all.
@@ -2326,7 +2326,7 @@ GENERATED_CONFIG_HEADER_CLOSING = """#
 def generated_default_narrowings(document: JsonObject) -> set[str]:
     """The paths a generation writes false itself, by dotted path.
 
-    The `EXCLUSIVE_FLASH_PERMISSIONS` pair on every debugger entry, in practice —
+    The `EXCLUSIVE_FLASH_PERMISSIONS` pair on every debugger entry, in practice:
     read from `generated_permissions` so it stays the same answer as the values
     actually written, for whatever set of sections and flags that covers."""
     expected: set[str] = set()
@@ -2347,7 +2347,7 @@ def narrowed_permissions(document: JsonObject) -> list[str]:
     Read off the document that is about to be written, which is the only place
     the answer is. A regeneration puts the permissions of the file it replaces
     back on the entries that were already there, so a document leaving this list
-    empty and one leaving it long are both ordinary outcomes of the same call —
+    empty and one leaving it long are both ordinary outcomes of the same call,
     and a result that claimed the first while writing the second would be telling
     an operator their narrowed bench had just been reopened.
 
@@ -2355,7 +2355,7 @@ def narrowed_permissions(document: JsonObject) -> list[str]:
     generation writes two of them false itself, and those two are
     not a narrowing: nobody chose them for this bench and there is nothing for an
     operator to restore. Reporting them here would answer the question this list
-    exists to answer — did anything survive, or get taken away? — with a standing
+    exists to answer (did anything survive, or get taken away?) with a standing
     yes on every fresh file. They are stated in the generated header instead, and
     `permissions` in the same result still carries the full true/false surface."""
     by_default = generated_default_narrowings(document)
@@ -2376,8 +2376,8 @@ def _generated_config_header(document: JsonObject) -> str:
     loaded, which is listed."""
     carried = narrowed_permissions(document)
     opening = (
-        "# Every permission below is true — probing, resetting, flashing, and the serial\n"
-        "# and CAN writes of every entry here — except the two that are false so that\n"
+        "# Every permission below is true (probing, resetting, flashing, and the serial\n"
+        "# and CAN writes of every entry here) except the two that are false so that\n"
         "# flashing works: allow_raw_debugger_commands and allow_mass_erase. Neither has\n"
         "# a tool behind it, and either one being true refuses flash_firmware on that\n"
         "# probe. See the interlock at the end of this header.\n"
@@ -2411,8 +2411,8 @@ def project_config_create(
     parameter exists that could name a different one.
 
     ``coordinator`` and ``open_holds`` are the caller's own, and a configured
-    server passes both. Generation reads a board — hardware discovery enumerates
-    probes and connects in HOTPLUG mode — so it is a hardware call and is held to
+    server passes both. Generation reads a board (hardware discovery enumerates
+    probes and connects in HOTPLUG mode), so it is a hardware call and is held to
     what every hardware call on this machine is held to: it is refused while this
     server holds a run or a session, and the probe it reads is leased, so a board
     another process owns answers `device_busy` instead of being connected to
@@ -2434,7 +2434,7 @@ def _project_config_create(
 ) -> JsonObject:
     # Before the lock and before discovery. Those holds were taken under the
     # policy this file states, and a regeneration replaces that policy while it
-    # also talks to the board the run is holding — one step earlier than a
+    # also talks to the board the run is holding: one step earlier than a
     # configuration write is refused, for the same reason adoption refuses here.
     if existing is not None and open_holds:
         return _create_in_open_run_refusal(existing, open_holds)
@@ -2475,7 +2475,7 @@ def _project_config_create(
         document = _generated_document(workspace, state_root, discovery)
         # Grant everything in both cases, so that "a generation decides the
         # permission state completely" holds by construction rather than by
-        # reading what filled the skeleton in — a workspace profile must not be
+        # reading what filled the skeleton in: a workspace profile must not be
         # what decides a permission on this path either way. A regeneration then
         # puts back exactly the permissions of `current`, so a bench somebody
         # narrowed does not come back open off a call made to refresh a probe id.
@@ -2484,7 +2484,7 @@ def _project_config_create(
         # and deliberately not a fresh read: the file may have been narrowed since
         # startup and the policy this server enforces has not moved with it, so
         # generating against the file would write permissions this server is not
-        # running under. The cost is stated rather than fixed — in one session a
+        # running under. The cost is stated rather than fixed: in one session a
         # narrow-then-regenerate puts the loaded grant back, which is accepted
         # because regeneration is creation and the operator's.
         grant_every_permission(document)
@@ -2572,8 +2572,8 @@ def _generated_summary(*, created: bool, narrowed: list[str]) -> str:
         return (
             "Project configuration generated from attached hardware; this server can probe, reset and flash the bench "
             "from it and write to its serial and CAN entries, and can narrow any of those on the operator's request. "
-            "The two permissions `flash_firmware` is interlocked against — allow_raw_debugger_commands and "
-            "allow_mass_erase — are false, which is what makes flashing work; see `next_steps`."
+            "The two permissions `flash_firmware` is interlocked against (allow_raw_debugger_commands and "
+            "allow_mass_erase) are false, which is what makes flashing work; see `next_steps`."
         )
     if not narrowed:
         return (
@@ -2626,7 +2626,7 @@ def discover_for_generation(
     which name the audit record and every refusal carry, which name an incident
     is filed under, and which frontend an owned coordinator announces itself as.
     What is read, what is locked and what happens when any of it fails are not
-    a caller's to vary — that was the defect.
+    a caller's to vary: that was the defect.
 
     Not a partial copy of the adoption path any more but the same function:
     `discover_under_hardware_lease` proves the audit trail writable before the
@@ -2639,13 +2639,13 @@ def discover_for_generation(
     longer have two implementations to differ in.
 
     ``resources`` is what this call is about, and for a regeneration that is every
-    configured entry that names a physical board — not only the bound one. The
+    configured entry that names a physical board, not only the bound one. The
     file being rewritten states the policy for all of them, so none may be under
     another owner's run while it is replaced, and the entry another process holds
     through its `resource_id` is exactly the case a lock on the enumerated serial
     alone would miss.
 
-    A workspace with no configuration at all has none of that machinery — no
+    A workspace with no configuration at all has none of that machinery: no
     policy to audit against, no `state_root` under which a lease could be
     recorded. It is the first `init` and the first `project_config_create` of a
     workspace, so refusing it outright would leave no way to reach a configured
@@ -2656,15 +2656,15 @@ def discover_for_generation(
     different project can be mid-HOTPLUG on the same physical ST-Link right now.
     The enumeration pseudo-resource and the probe lock live under the user's
     home, keyed on the device and reachable with no configuration
-    (`agentic_hil.bench`), so the bootstrap read still takes them — the host-wide
+    (`agentic_hil.bench`), so the bootstrap read still takes them (the host-wide
     enumeration before it enumerates, `probe:<serial>` before it says the first
-    word to the selected board — and answers `device_busy` without connecting
+    word to the selected board) and answers `device_busy` without connecting
     when either is held. Physical-device exclusion is not the part that needed a
     policy.
 
     ``current`` decides that, and ``coordinator`` never does. An unprovisioned
     server has no coordinator and hands None, and the in-lock reread is exactly
-    where it may still find a configuration — the second of two racing servers
+    where it may still find a configuration: the second of two racing servers
     creates none, it loads the one the first just wrote. Treating "no coordinator"
     as "no configuration" made that server read the board directly: unaudited,
     unleased, past the `resource_id` holder the file it had just loaded names, and
@@ -2794,9 +2794,9 @@ def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] |
     mutex exists for: the enumeration and the HOTPLUG connect are the same
     hardware read they are under a lease, and the same ST-Link can be held by
     another workspace on this machine. So the device locks are taken directly
-    through `BenchMutex` — the host-wide enumeration pseudo-resource around the
+    through `BenchMutex` (the host-wide enumeration pseudo-resource around the
     whole read, and `probe:<serial>` in `before_connect`, which is the last point
-    before anything is said to the selected board — and a board another owner is
+    before anything is said to the selected board), and a board another owner is
     holding comes back `device_busy` here exactly as it would through
     `discover_under_hardware_lease`, with nothing said to it.
 
@@ -2848,8 +2848,8 @@ def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] |
 def _bootstrap_device_busy(busy: JsonObject, tool: str) -> JsonObject:
     """A bootstrap read refused because the physical probe is held elsewhere.
 
-    The machine-wide lock answered — another workspace or server is on this
-    board — before anything was said to it. `discover_attached_hardware` reads
+    The machine-wide lock answered (another workspace or server is on this
+    board) before anything was said to it. `discover_attached_hardware` reads
     the device directly here because there is no configuration to lease against,
     but "no lease" was never "no exclusion": the refusal names the holder and is
     retry-safe, exactly as the leased path's `device_busy` is."""
@@ -2956,7 +2956,7 @@ def _generated_next_steps(config: AgenticHILConfig, *, created: bool, narrowed: 
         )
     )
     steps = [
-        f"Report where this configuration is, that an agent generated it, and {granted} — read `permissions` for the "
+        f"Report where this configuration is, that an agent generated it, and {granted}. Read `permissions` for the "
         "whole list. Name allow_mass_erase in particular wherever it is true: it cannot be taken back once it has run.",
         f"Ask the operator which of them this bench should not have. You can write false into any permission in "
         f"{config.config_path} with `project_config_set`; that call writes no other value, so nothing you do through it widens this file.",
@@ -2972,12 +2972,12 @@ def _generated_next_steps(config: AgenticHILConfig, *, created: bool, narrowed: 
             "`.allow_mass_erase`. Validated flashing and unrestricted debugger access are mutually exclusive policies, "
             "so either one being true refuses `flash_firmware` on that probe. Neither has a tool behind it here, so "
             "nothing is unavailable to you because of them. Do not ask the operator to turn them on to make flashing "
-            "work — that is the one change that would stop it."
+            "work: that is the one change that would stop it."
         )
     else:
         steps.append(
             "This server is still serving the configuration it loaded at startup. Ask the operator to restart the "
-            "MCP server before relying on anything this rewrite changed — and note that the permissions just written "
+            "MCP server before relying on anything this rewrite changed, and note that the permissions just written "
             "came from that same loaded state, so any permission narrowed with `project_config_set` since this server "
             "started is granted again in the file now on disk."
         )
@@ -3066,9 +3066,9 @@ class UnprovisionedToolService:
         # Once a configuration exists this object is a forwarder and nothing
         # else. Every call goes through the bound service, including
         # `project_config_create`: that service is what attaches the staleness
-        # block to a result, and the sequence this class exists for — start with
+        # block to a result, and the sequence this class exists for (start with
         # no configuration, create one, let the operator edit it, call create
-        # again — ends in exactly the refusal that would otherwise be returned
+        # again) ends in exactly the refusal that would otherwise be returned
         # around it. A `permission_denied` from an edited file, with nothing to
         # say the file had been edited, is the silence this whole block reports.
         if service is not None:
