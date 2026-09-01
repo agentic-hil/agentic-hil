@@ -20,8 +20,8 @@ from agentic_hil.types import JsonObject
 # no target contact, no side effect, the board where the last call that did
 # reach it left it, safe to retry. 0.7.1's `debugger_command_rejected` fix
 # introduced this shape for one OpenOCD case; every backend failure that can
-# prove its abort point reuses it, because the alternative — quarantining
-# hardware a call provably never touched — demands a physical inspection
+# prove its abort point reuses it, because the alternative (quarantining
+# hardware a call provably never touched) demands a physical inspection
 # nothing justifies. It is the whole of the claim the service layer will act
 # on: a result without these fields is not the opposite claim, it is no claim,
 # and read-only one-shots quarantine on it rather than infer one.

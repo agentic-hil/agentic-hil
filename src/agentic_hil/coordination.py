@@ -55,7 +55,7 @@ LEASE_RELEASE_RETRY_REASON = "lease_release_unconfirmed"
 # nothing on the host can tell that from the outside.
 DEBUGGER_READONLY_RESULT_REASON = "debugger_readonly_result_unconfirmed"
 # The same two tools when the result does *not* name its abort point: the read
-# may have reached the target, and a read on this bench is not passive — an SWD
+# may have reached the target, and a read on this bench is not passive: an SWD
 # attach halts the core, and a backend killed at its deadline never ran the
 # `shutdown` in its own command string. A re-read attests that the probe answers
 # and the target is detected; it says nothing about whether the core is halted,
@@ -79,19 +79,19 @@ RETRYABLE_CLEANUP_REASONS = frozenset(
 # defined state reaches for. Reaching for it is a physical act, so it is gated on
 # the bench's recovery.auto_recover policy and on the probe's allow_reset grant.
 # The enumeration is deliberate: a reset and a target probe speak only for the
-# target, so the UART and CAN cleanup reasons — a handle that may still be open,
-# an adapter that may still be on the bus — are not among its members and keep
+# target, so the UART and CAN cleanup reasons (a handle that may still be open,
+# an adapter that may still be on the bus) are not among its members and keep
 # needing their own teardown or the operator's route.
 # What `status` names when it gives a dead owner's devices back instead of
 # quarantining them. A release reason, not a quarantine reason:
 # it appears in a status result and in the recovery ledger, and by construction
 # never in `cleanup_reasons`, because the incident it would have keyed was never
-# opened. It is in the agent-clearable class below all the same — the class is
+# opened. It is in the agent-clearable class below all the same: the class is
 # the statement "no hardware was contacted under this reason", and an incident
 # that somehow carries it is one nothing touched.
 DEAD_OWNER_NO_CONTACT_REASON = "released_dead_owner_no_contact"
 # Reason classes whose members are provably free of hardware contact, and which
-# therefore need no attestation from anybody — not an operator's, and not a
+# therefore need no attestation from anybody: not an operator's, and not a
 # predicate run against the board. This is the boundary the `hardware_recover`
 # tool may clear on its own.
 #
@@ -99,7 +99,7 @@ DEAD_OWNER_NO_CONTACT_REASON = "released_dead_owner_no_contact"
 # each kind of recovery actually *does*. Machine recovery is allowed the wider
 # set because it earns it: it reaps this owner's leftover processes, re-reads the
 # probe through `probe_target`, and under `reset_halt` drives the target into a
-# defined state first — every reason in that set is settled by performing
+# defined state first: every reason in that set is settled by performing
 # something. This tool performs nothing. It rewrites lease records and appends a
 # ledger line, which is the entire settlement for a reason that names no hardware
 # at all, and would be a blind assertion for one that names an unconfirmed board.
@@ -112,22 +112,22 @@ NO_CONTACT_RECOVERABLE_REASONS = frozenset({DEAD_OWNER_NO_CONTACT_REASON, LEASE_
 
 # The target-state reasons a reset driven into halt, then a probe re-read,
 # settles on top of the retryable and no-contact sets. Each names an unconfirmed
-# *target* state — a flash or reset whose landing is unknown, a session start
+# *target* state (a flash or reset whose landing is unknown, a session start
 # that may have halted or partially loaded the core, a debugger call that raised
-# before it could reap its child, a shutdown that could not report its own end —
+# before it could reap its child, a shutdown that could not report its own end),
 # and driving the MCU into a defined halted state and reading it back is exactly
 # the evidence they lack. A dead owner's adopted incident settles the same way
 # when what it left unconfirmed is what the reset erased.
 #
 # Positive and explicit on purpose. The set this replaced admitted every reason
 # whose name merely lacked ``audit_broken``, which quietly swept in the UART and
-# CAN cleanup reasons — a serial handle that may still be open holding modem
-# lines, a CAN adapter that may still be initialised on the bus — that no reset
+# CAN cleanup reasons (a serial handle that may still be open holding modem
+# lines, a CAN adapter that may still be initialised on the bus) that no reset
 # or target probe can speak for. Those resources verify their own handle, reader
 # thread and adapter teardown, or stay on the operator's route; a reason a
 # performed recovery cannot actually settle is not admitted here by default, it
 # is added deliberately or it keeps needing a person. A newly named reason left
-# out therefore fails closed — one more operator recovery — rather than being
+# out therefore fails closed (one more operator recovery) rather than being
 # auto-cleared without the evidence its name asks for.
 RECOVERY_ACTION_TARGET_REASONS: frozenset[str] = frozenset(
     {
@@ -145,7 +145,7 @@ RECOVERY_ACTION_TARGET_REASONS: frozenset[str] = frozenset(
 # reset into halt establishes. Kept a superset of ``RETRYABLE_CLEANUP_REASONS``
 # so ``_attempt_machine_recovery`` can still read ``reason not in`` it to decide
 # whether a reset is even needed. The ``audit_broken`` families are excluded by
-# construction — none is a member — and ``retryable_incident`` refuses a broken
+# construction (none is a member), and ``retryable_incident`` refuses a broken
 # audit before this is ever consulted, so that exclusion is the second of two
 # locks on the same door.
 RECOVERY_ACTION_REASONS: frozenset[str] = (
@@ -156,7 +156,7 @@ RECOVERY_ACTION_REASONS: frozenset[str] = (
 RECOVERY_ACTION_VIA = "recovery_action"
 # Who a recovery ledger line records as having cleared the incident. Spelled
 # exactly as `agentic_hil.configwrite`'s provenance actors rather than imported
-# from it — coordination sits below the configuration writer — and a test
+# from it (coordination sits below the configuration writer), and a test
 # compares the two so the two spellings cannot drift apart. `server` is neither:
 # it is the coordination layer's own adoption decision, which no person and no
 # agent asked for.
@@ -202,7 +202,7 @@ def _public_record(record: JsonObject | None) -> JsonObject | None:
 
 # What a held device is reported with. `error_class` and `errno` are carried
 # because `BenchMutex` answers a lock it could not even open the same way as one
-# somebody holds — fail-closed, which is right — and without them an unwritable
+# somebody holds (fail-closed, which is right), and without them an unwritable
 # lock directory would read as "another run has the bench" forever.
 DEVICE_HOLD_FIELDS = ("resource", "holder", "held_since", "heartbeat_at", "holder_heartbeat_stale", "error_class", "errno")
 
@@ -428,14 +428,14 @@ class HardwareCoordinator:
         """Bind this coordinator to a re-read description of the same bench.
 
         ``project_config_reload_description`` is the only caller, and it is
-        refused while anything is held or any incident is open — so this runs
+        refused while anything is held or any incident is open, so this runs
         with no lease, no run and no quarantine, which is what makes replacing
         the config safe rather than a change under a live lock.
 
         ``config_sha256`` moves with it. It is what a lease record carries and
         what ``recover`` compares to decide whether the operator has to confirm a
         configuration delta before clearing an incident, and that question is
-        "was the file the same then as it is now" — so it has to name the file
+        "was the file the same then as it is now", so it has to name the file
         this coordinator is now describing, exactly as it would after a restart.
         It is recomputed from the digest the reload already took rather than by
         reading the file again: a second read can straddle an edit, and a record
@@ -503,7 +503,7 @@ class HardwareCoordinator:
         end_run, and every call inside it borrows that hold.
 
         Accepts Device objects or already-derived resource names, one form or the
-        other. Devices are the intended form — they carry the hardware identity and
+        other. Devices are the intended form: they carry the hardware identity and
         collapse two config entries naming one unit onto one lock before anything
         is taken. A declaration mixing the two is refused; see below for why."""
         with self._guard:
@@ -524,12 +524,12 @@ class HardwareCoordinator:
                 # One form or the other, because only one of them is ever locked.
                 # The acquisition below picks its branch on whether any device is
                 # present, so a single Device sends the whole declaration down the
-                # device branch and the hand-written names are never taken — while
+                # device branch and the hand-written names are never taken, while
                 # `declared` covers both and reports them as held. A declared board
                 # that is reported as held and never locked is the one outcome
                 # worse than refusing the run, and it is invisible from here: a
                 # foreign BenchMutex takes the named board while this run counts it
-                # as its own. No caller needs the mixed form — resolve the names to
+                # as its own. No caller needs the mixed form: resolve the names to
                 # devices, or declare the whole run as names.
                 raise CoordinationError(
                     {
@@ -558,7 +558,7 @@ class HardwareCoordinator:
                 # that fails on its third device has already given back its first
                 # two by the time this raises. A declaration made of devices goes
                 # through DeviceSet, which additionally refuses a key the mutex
-                # would not lock — silently not locking a declared board is the
+                # would not lock: silently not locking a declared board is the
                 # one outcome worse than refusing the run. The branch is total
                 # because the mixed form was refused above: a declaration is
                 # either all devices, in which case the set is every one of them,
@@ -609,7 +609,7 @@ class HardwareCoordinator:
             self.bench.owner = replace(self.bench.owner, label=None)
             if declared:
                 self.bench.release(declared)
-            # A lease still open — a COM or CAN session the run left running —
+            # A lease still open (a COM or CAN session the run left running)
             # keeps its own hold on the device, so ending the run here does not
             # pull a board out from under a live session. Say so rather than
             # letting the caller infer a release that did not happen.
@@ -626,7 +626,7 @@ class HardwareCoordinator:
 
         An agent that lost track of its own run reads this instead of guessing:
         a run holds its devices until it is closed or the owning process ends,
-        and nothing times it out — dropping a board that may be mid-operation is
+        and nothing times it out: dropping a board that may be mid-operation is
         the silent failure the mutex exists to prevent."""
         with self._guard:
             declared = sorted(self.declared_resources or ())
@@ -670,8 +670,8 @@ class HardwareCoordinator:
         ``for_recovery`` is how a call that is the *remedy* for the open incident
         gets a lease at all. Refusing it here was what made an incident a
         padlock: the reset that settles the incident could not take the probe,
-        because the incident held it. Exclusivity is untouched — the lease is
-        still a lease, so nothing else reaches the board while it runs — and the
+        because the incident held it. Exclusivity is untouched (the lease is
+        still a lease, so nothing else reaches the board while it runs), and the
         caller carries the authorization, which is the tool class (see
         `tools.recovery_class_tools`) and not a flag anything can set for itself
         on the way past."""
@@ -743,7 +743,7 @@ class HardwareCoordinator:
                             raise CoordinationError(self._quarantined_result(normalized, "Physical resource requires explicit safe-state recovery.", ["owner_process_exited_without_release"]))
                 # The project's own lock only keeps this configuration honest. A
                 # device is shared with every other configuration on the machine,
-                # so exclusivity is taken here too — inside a run this borrows the
+                # so exclusivity is taken here too: inside a run this borrows the
                 # hold the run already has, outside one it lasts for the call.
                 try:
                     self.bench.acquire(normalized)
@@ -1175,7 +1175,7 @@ class HardwareCoordinator:
         clearing could not be durably recorded is not cleared at all. That
         ordering is the reason this can be handed the wide
         ``RECOVERY_ACTION_REASONS`` set without the ledger going quiet about what
-        happened — every incident that stops blocking the bench leaves a line
+        happened: every incident that stops blocking the bench leaves a line
         naming who cleared it and on what evidence."""
         with self._guard:
             permitted = RETRYABLE_CLEANUP_REASONS if allowed is None else allowed
@@ -1225,7 +1225,7 @@ class HardwareCoordinator:
         """Record an incident clearing that no operator signed, or refuse it.
 
         Returns False when the line could not be written, which the caller reads
-        as "the incident stays" — the ledger is the only place a bench owner can
+        as "the incident stays": the ledger is the only place a bench owner can
         later find out that a quarantine ended without anybody being asked."""
         event = {
             "event": "recovery",
@@ -1373,8 +1373,8 @@ class HardwareCoordinator:
     def _dead_owner_made_no_contact(self, record: JsonObject) -> JsonObject | None:
         """What the dead owner's own last record proves about its hardware, or ``None``.
 
-        The reclassification of 0.8.0 — a quarantine needs the *possibility* of
-        an effect — was applied to call failures and never to the owner's
+        The reclassification of 0.8.0 (a quarantine needs the *possibility* of
+        an effect) was applied to call failures and never to the owner's
         death, so a session that provably never reached a board was held all
         the same. The bench-mutex layer has behaved the other way round since
         it existed, and by construction rather than by policy: the machine-
@@ -1384,7 +1384,7 @@ class HardwareCoordinator:
         its own sibling, and the asymmetry was the defect.
 
         Returns the finding when the evidence positively says *no contact*, and
-        ``None`` for everything else — including every case where the evidence is
+        ``None`` for everything else, including every case where the evidence is
         merely absent. That direction is the whole design. A missing report, a
         report that names another lease, a second lease nothing can answer for, a
         configuration that has moved since: each of those is a bench nobody can
@@ -1408,9 +1408,9 @@ class HardwareCoordinator:
         the case this refuses to answer.
 
         *Did it reach the hardware?* ``side_effect_committed: false`` and
-        ``side_effect_status: not_started`` — the backend's own claim, the same
-        pair `_readonly_failure_is_settled` requires, never this layer's inference
-        — plus an intact audit trail, plus a ``config_in_force`` naming the exact
+        ``side_effect_status: not_started`` (the backend's own claim, the same
+        pair `_readonly_failure_is_settled` requires, never this layer's inference)
+        plus an intact audit trail, plus a ``config_in_force`` naming the exact
         configuration bytes the lease record was stamped with. A
         report written under a different document is not evidence about this one.
 
@@ -1418,7 +1418,7 @@ class HardwareCoordinator:
         This is not a restatement of the pair above it: the pair is a claim about
         the *call* that wrote the report, and the marker is a claim about the
         *session*, so where a session start opened its port and then failed
-        afterwards the two disagree — and the report that says `not_started` while
+        afterwards the two disagree, and the report that says `not_started` while
         the marker says the line was driven is exactly the case this must not read
         as innocence. The two session starts in `CALL_SCOPED_LEASE_TOOLS` can both
         produce such a report today: a reader that would not start and a receive
@@ -1573,14 +1573,14 @@ class HardwareCoordinator:
         Asked of the locks, never of the holder records beside them. The OS lock
         is what makes a hold true; a record is only what the last owner wrote,
         and an owner that died leaves it saying `held` forever. A check that
-        believed the record would report a held bench for good after one crash —
+        believed the record would report a held bench for good after one crash:
         a new dead end inside the answer that exists to remove one.
 
         A device this owner already holds is read from its own mutex instead of
         probed: that answer is exact and costs nothing, and re-taking a lock we
         are holding would only exercise the bookkeeping. The rest are taken and
         given back one at a time, through a mutex of their own so this owner's
-        holds are never disturbed — holding a set to find out whether one of them
+        holds are never disturbed: holding a set to find out whether one of them
         is free is how a question turns into a collision.
         """
         keys = config_devices(self.config).lock_keys
@@ -1623,7 +1623,7 @@ class HardwareCoordinator:
         that can attest a physical state; the MCP tool passes the agent and the
         reason class it was allowed to clear by, and the authorization for that
         happens in the caller (`agent_recoverable_reasons`), never here. This
-        performs the transition, and the transition is the same one either way —
+        performs the transition, and the transition is the same one either way,
         which is the point of there being one implementation of it.
 
         ``operator_statement`` carries what a person said about the bench when
@@ -1809,7 +1809,7 @@ class HardwareCoordinator:
             # A closed owner holds nothing, run or no run: the machine-wide hold
             # must not outlive the process that took it, or a clean shutdown
             # would block the bench exactly the way a crash must not. This is the
-            # path a lost MCP client takes — stdin reaches EOF, the server closes
+            # path a lost MCP client takes: stdin reaches EOF, the server closes
             # its service, and an unclosed run is released here rather than
             # waiting for the operating system to reap the process.
             self.declared_resources = None
@@ -2067,7 +2067,7 @@ def lease_config_sha256(config: AgenticHILConfig) -> str:
     Taken from the digest the load already computed over the bytes it parsed,
     never from a fresh read of the path. A second read can straddle an edit, and
     a record stamped with a document nobody parsed answers ``recover``'s question
-    — "was the file the same then as it is now" — wrong in both directions: it
+    ("was the file the same then as it is now") wrong in both directions: it
     reports a change over an untouched file, or none over an edited one. The same
     decision is made one layer up for the report stamp; see
     ``agentic_hil.report.config_in_force``.
@@ -2075,7 +2075,7 @@ def lease_config_sha256(config: AgenticHILConfig) -> str:
     The spelling stays the bare hex digest rather than ``config_digest``'s
     ``sha256:``-prefixed one. Both name the same bytes under the same algorithm,
     but they are not the same string, and records already on disk carry the bare
-    form while ``_record_matches_config`` compares it literally — publishing the
+    form while ``_record_matches_config`` compares it literally: publishing the
     other spelling would report a change over every record written before this,
     which is the very answer this exists to get right.
 

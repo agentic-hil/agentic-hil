@@ -85,7 +85,7 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
 # Which board is behind this entry.
 #
 # `device` says how to reach a port, not which one it is. On both platforms
-# that name is an enumeration order — plug a second ST-Link into a Linux host
+# that name is an enumeration order: plug a second ST-Link into a Linux host
 # and the UART that was ttyACM0 can come up as ttyACM1, and the board that
 # takes the vacated name is opened in its place with nothing in the result
 # saying so. The entry is therefore asked what hardware it means, and the
@@ -93,7 +93,7 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
 # is opened.
 
 COM_PORT_IDENTITY_MISMATCH = "com_port_identity_mismatch"
-# A declared identity that could not be confirmed before opening — the host has
+# A declared identity that could not be confirmed before opening: the host has
 # no serial backend, the port is not enumerated exactly once, the matched port
 # reports no serial, or it reports no vendor and product ids while the entry
 # names them. Distinct from a mismatch: the name may still lead to
@@ -118,7 +118,7 @@ def host_usb_id(value: object) -> int | None:
     """One USB id as the host inventory reports it, or nothing.
 
     pyserial hands out integers. Anything else is a host that did not answer the
-    question, which is the same as not answering it — and an entry that named an
+    question, which is the same as not answering it, and an entry that named an
     id is then refused rather than opened, exactly as it is for a serial the host
     does not report."""
     return value if isinstance(value, int) and not isinstance(value, bool) else None
@@ -128,7 +128,7 @@ def host_usb_id(value: object) -> int | None:
 class PortIdentity:
     """The hardware a configured COM port claims, and the fields that claim it.
 
-    ``expected`` is the unit — a USB serial — and is None for an adapter that
+    ``expected`` is the unit (a USB serial) and is None for an adapter that
     publishes none. ``vid``/``pid`` are the type, and either half may stand
     alone: they narrow a serial that matches (a USB serial is unique only within
     a vendor) and they are the whole claim when there is no serial to narrow."""
@@ -165,8 +165,8 @@ def expected_port_identity(config: AgenticHILConfig, port_id: str) -> PortIdenti
 
     Two sources for the serial, and no third. ``serial_number`` is the entry
     stating its own hardware. A ``resource_id`` shared with a configured debugger
-    is the operator stating that this port and that probe are one unit — which
-    they are on any Nucleo — so the probe's serial is the port's serial.
+    is the operator stating that this port and that probe are one unit (which
+    they are on any Nucleo), so the probe's serial is the port's serial.
 
     ``vid``/``pid`` ride along with whichever of those answered, and stand on
     their own when neither did: an adapter that publishes no serial can still say
@@ -177,7 +177,7 @@ def expected_port_identity(config: AgenticHILConfig, port_id: str) -> PortIdenti
     COM port is *probably* one board, and probably is exactly what must not
     decide which hardware a write reaches: a bench with a separate USB-serial
     adapter has the same shape and a different answer. An entry that names
-    neither gets no expectation, no check, and the behaviour it has today —
+    neither gets no expectation, no check, and the behaviour it has today,
     together with the warning that says why (``UartDevice.identity_warning``).
 
     Ambiguity is the same answer as silence: two debuggers sharing one
@@ -207,7 +207,7 @@ def port_identity_fields(config: AgenticHILConfig, port_id: str) -> JsonObject:
     """How one configured entry is identified, without asking the hardware.
 
     A pure read of the configuration, so it answers on a host with nothing
-    attached — which is where `doctor` and `com_ports_list` are usually run."""
+    attached, which is where `doctor` and `com_ports_list` are usually run."""
     device = uart_device(config, port_id)
     fields: JsonObject = {"identity_source": device.identity_source}
     if device.port.serial_number:
@@ -234,7 +234,7 @@ def port_names_device(host_port: JsonObject, configured_device: str) -> bool:
     adoption on Linux holds ``/dev/serial/by-id/...`` while the enumerator
     reports ``/dev/ttyACM0``, and the link between the two was already resolved
     when the inventory was taken. Case folds as a path, which is the host's rule
-    and not ours — see ``types.fold_device_path``."""
+    and not ours. See ``types.fold_device_path``."""
     wanted = fold_device_path(configured_device)
     candidates = (str(host_port.get("device") or ""), str(host_port.get("stable_device") or ""))
     return any(name and fold_device_path(name) == wanted for name in candidates)
@@ -245,14 +245,14 @@ def _identity_unverified(tool: str, port_id: str, port: ComPortConfig, expectati
 
     Distinct from a mismatch: a mismatch found the wrong board behind the name,
     this found no way to check which board is behind it. Both refuse before the
-    port is opened and for the same reason — an entry that names hardware is
+    port is opened and for the same reason: an entry that names hardware is
     opened only against a `confirmed` comparison, and a check that could not run
     is not one. ``identity['status']`` says which of the three ways the question
     had no answer, and ``identity['summary']`` says it in a sentence.
 
     Retry-safe and no-contact by construction: the port was never touched, so
-    restoring the check — installing the serial backend, plugging the board in,
-    a host that reports the adapter's serial — or running `adopt-hardware` to
+    restoring the check (installing the serial backend, plugging the board in,
+    a host that reports the adapter's serial) or running `adopt-hardware` to
     rewrite the entry, then calling again, is the whole repair."""
     return {
         "ok": False,
@@ -268,8 +268,8 @@ def _identity_unverified(tool: str, port_id: str, port: ComPortConfig, expectati
         **expectation.fields,
         "next_step": (
             "This entry names a board on purpose, so it is opened only once the host confirms the name still leads to it. "
-            "Restore the check — install the serial backend, plug the board in, or use a host that reports the adapter's "
-            "serial — or run `agentic-hil adopt-hardware` to rewrite the entry for the board that is attached. Drop the "
+            "Restore the check (install the serial backend, plug the board in, or use a host that reports the adapter's "
+            "serial) or run `agentic-hil adopt-hardware` to rewrite the entry for the board that is attached. Drop the "
             "entry's `serial_number`/`vid`/`pid`/`resource_id` only if it genuinely names no fixed board."
         ),
         # Nothing was reached, so the bench stays in service and this is not an
@@ -296,7 +296,7 @@ def _identity_mismatch(
     One refusal with two ways in, because from the caller's side they are one
     thing: the name no longer leads to what the entry says. The serial says this
     is another *unit*, the vendor and product ids say it is another *kind* of
-    device — and the second is not the weaker of the two, since a USB serial
+    device, and the second is not the weaker of the two, since a USB serial
     number is unique only within a vendor and a matching one across vendors
     proves nothing at all. Both sides of the comparison are in
     the payload, whichever ran: ``expected_*`` from the configuration,
@@ -314,8 +314,8 @@ def _identity_mismatch(
         **{name: identity[name] for name in ("found_serial_number", "found_vid", "found_pid") if name in identity},
         "likely_causes": likely_causes,
         # Nothing was reached, so the bench stays in service and this is not an
-        # incident: fix the named cause — plug the board in, or let
-        # `adopt-hardware` rewrite the entry — and call again.
+        # incident: fix the named cause (plug the board in, or let
+        # `adopt-hardware` rewrite the entry) and call again.
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
@@ -333,10 +333,10 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
 
     An entry that declares hardware is opened on one ground only: the attached
     device was `confirmed` to be the board it names. The four ways that question
-    has no answer — the serial backend is missing (`backend_unavailable`), the
+    has no answer (the serial backend is missing (`backend_unavailable`), the
     device is not enumerated exactly once (`port_not_enumerated`), the matched
     port reports no serial (`serial_unknown`), or it reports no USB ids while the
-    entry names them (`usb_ids_unknown`) — are refusals too, not opens with
+    entry names them (`usb_ids_unknown`)) are refusals too, not opens with
     a note. The entry asked that this name be proved to still
     reach its board before use, and "the check could not run" does not prove it;
     reporting the gap in a result the caller reads *after* it has already written
@@ -344,7 +344,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     retry-safe and no-contact: restore the check, or `adopt-hardware` the entry,
     and call again.
 
-    An entry that declares no hardware costs nothing here — the host is not
+    An entry that declares no hardware costs nothing here: the host is not
     enumerated at all, so a configuration written before any of this existed
     behaves exactly as it did, `not_declared` and openable."""
     port = config.com_ports[port_id]
@@ -364,7 +364,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
         # a board so that the name would be proved to still reach it before use;
         # pyserial missing means it cannot be, and opening anyway is the wrong-
         # board write the identity exists to prevent. Nothing was contacted, so
-        # the refusal is retry-safe — install the backend and call again.
+        # the refusal is retry-safe: install the backend and call again.
         identity["status"] = "backend_unavailable"
         identity["summary"] = "Host serial ports could not be enumerated, so this port's identity was not verified."
         identity["backend_error"] = str(available.get("summary", ""))
@@ -391,7 +391,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     # Reported when this entry names them, and only then. The host reports vid
     # and pid for every USB adapter, so recording them unconditionally would add
     # fields to the result of every configuration written before these keys
-    # existed — and an entry that names no type has had no type compared.
+    # existed, and an entry that names no type has had no type compared.
     if expectation.vid is not None or expectation.pid is not None:
         if found_vid is not None:
             identity["found_vid"] = found_vid
@@ -439,7 +439,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
     # that matches proves the unit only once the vendor agrees, because a USB
     # serial number is unique within a vendor and nowhere else. For an adapter
     # that publishes no serial this is the whole check, and it is honest about
-    # being one — it separates a CH340 from an ST-Link, not one CH340 from
+    # being one: it separates a CH340 from an ST-Link, not one CH340 from
     # another.
     declared = [(claimed, seen) for claimed, seen in ((expectation.vid, found_vid), (expectation.pid, found_pid)) if claimed is not None]
     if any(seen is None for _, seen in declared):
@@ -490,7 +490,7 @@ def verify_port_identity(config: AgenticHILConfig, port_id: str, tool: str) -> J
 
 # The OS numbers that mean "another program is holding this port", and nothing
 # else. `EWOULDBLOCK`/`EAGAIN` is what a non-blocking exclusive lock answers when
-# the lock is already taken — one number on Linux, not necessarily one number
+# the lock is already taken: one number on Linux, not necessarily one number
 # everywhere, so both are named. `EBUSY` is what a driver answers when the kernel
 # is holding the line exclusively on somebody else's behalf.
 #
@@ -504,7 +504,7 @@ def serial_port_busy(error: BaseException, port_id: str, port_config: ComPortCon
     """The refusal for a port another program already holds, or ``None``.
 
     Open time only and by OS number only, and both halves of that are the
-    contract — the same shape the SocketCAN missing-interface refusal is cut to,
+    contract: the same shape the SocketCAN missing-interface refusal is cut to,
     for the same reason. A refused open leaves no handle behind: the port keeps
     doing whatever its holder is doing with it, this session put nothing on the
     line, and the failure is about which process owns a device name rather than
@@ -513,7 +513,7 @@ def serial_port_busy(error: BaseException, port_id: str, port_config: ComPortCon
     Reachable at all only because the handle is opened exclusively. Without that
     the second open succeeds on POSIX, two processes interleave bytes on one
     line, and the failure surfaces much later as a response that does not match
-    the stimulus — an unknown board state, which is a quarantine. The whole point
+    the stimulus: an unknown board state, which is a quarantine. The whole point
     of asking for exclusivity is to move that failure to here, where it is a
     refusal nobody has to walk to the bench for.
 
@@ -534,7 +534,7 @@ def serial_port_busy(error: BaseException, port_id: str, port_config: ComPortCon
         # `configured_device`, and deliberately no `field`. A `field` names the
         # configuration key that is wrong, and here nothing in the configuration
         # is: the entry reaches exactly the port it means, and somebody else has
-        # it. Naming a key invites the one repair the remediation warns against —
+        # it. Naming a key invites the one repair the remediation warns against:
         # pointing the entry at whichever device is free, which is another board.
         "configured_device": port_config.device,
         "summary": (
@@ -555,7 +555,7 @@ class ComPortSession:
         self.port_id = port_id
         self.port_config = port_config
         self.serial_handle = serial_handle
-        # A supplied marker is authoritative and is never written over here — the
+        # A supplied marker is authoritative and is never written over here: the
         # open that produced it is the evidence, and a constructor is not. Only
         # the marker-less case is filled in, which is the direct construction in
         # tests: those describe an open port, so that is what their marker says.
@@ -709,7 +709,7 @@ class ComPortService:
         if not port["ok"]:
             return self._write_report(port)
         # A write-only line is a legitimate configuration, and the session is the
-        # only way to reach the port at all — gating the open on allow_read alone
+        # only way to reach the port at all: gating the open on allow_read alone
         # made allow_write without allow_read a grant that could never be used.
         port_permissions = port["port_config"].permissions
         if not self.config.com_read_allowed(port["port_config"]) and not port_permissions.allow_write:
@@ -722,7 +722,7 @@ class ComPortService:
         # means this name leads to a board nobody meant, and every one of those
         # steps is already a step taken on its behalf. Enumerating the host to
         # ask which board a configured entry reaches is part of opening it
-        # safely, not a read of the target, so it is not gated on a permission —
+        # safely, not a read of the target, so it is not gated on a permission,
         # and it names only the port being opened, never the inventory.
         identity = verify_port_identity(self.config, port_id, "com_session_start")
         if not identity["ok"]:
@@ -1020,7 +1020,7 @@ class ComPortService:
         What the marker means on this backend: the successful return of
         ``open()``. pyserial applies the configured DTR and RTS states inside
         ``open()``, so by the time it returns the modem lines have been driven and
-        a board that wires DTR to reset has been reset — the marker is exactly the
+        a board that wires DTR to reset has been reset. The marker is exactly the
         line between "that may have happened" and "it cannot have".
 
         A failed ``open()`` stays a refusal, and deliberately, even though on
@@ -1041,7 +1041,7 @@ class ComPortService:
         try:
             # Built unopened so the modem lines are decided BEFORE the port is
             # opened. Passing the device to the constructor opens it immediately
-            # with pyserial's own defaults, which raise DTR and RTS — and on a
+            # with pyserial's own defaults, which raise DTR and RTS, and on a
             # board that wires DTR to reset, listening to a target restarts it.
             # pyserial applies the requested states as part of open(); a driver
             # that pulses a line during the open itself is beyond what any host
@@ -1057,13 +1057,13 @@ class ComPortService:
             # Asked for exclusively, because sharing a line was never a mode this
             # could work in. Two processes on one port interleave their bytes,
             # and what a caller then sees is a reply that does not answer the
-            # stimulus — an unknown board state, which is a quarantine, arriving
+            # stimulus: an unknown board state, which is a quarantine, arriving
             # mid-session and blaming the wrong thing. The machine-wide device
             # lock never covered this: it binds the runs that take it, and a
             # foreign test runner or serial monitor does not.
             #
-            # Windows opens serial devices exclusively whatever this says — the
-            # handle is created with a share mode of zero — so there the flag is
+            # Windows opens serial devices exclusively whatever this says (the
+            # handle is created with a share mode of zero), so there the flag is
             # a declaration of what is already true. On POSIX it is the whole
             # difference: without it a second open succeeds and nothing refuses
             # anything. A handle that will not accept the flag is not opened, and
@@ -1078,14 +1078,14 @@ class ComPortService:
         try:
             serial_handle.open()
         except Exception as error:
-            # The dominant failures — device absent, port held by another
-            # program, adapter unplugged — end here. pyserial's contract for a
+            # The dominant failures (device absent, port held by another
+            # program, adapter unplugged) end here. pyserial's contract for a
             # failed open() is that no open handle remains (it closes any
             # partially created descriptor on its own error path and leaves
             # is_open False); that contract is verified rather than assumed,
             # and a handle that contradicts it is closed here. Only a close
             # that then fails leaves the unknown state that still quarantines.
-            # The port never carried a byte of this session either way — a
+            # The port never carried a byte of this session either way: a
             # failed open does at most what a normal open/close cycle does, and
             # that cycle never needed a physical inspection.
             busy = serial_port_busy(error, port_id, port_config)
@@ -1094,9 +1094,9 @@ class ComPortService:
                 return {**failure, "cleanup_confirmed": True, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
             # A handle that says it is open after the open that failed
             # contradicts the contract, and a descriptor on the device is the
-            # thing that contradiction would mean. That is not proof of contact —
-            # a flag left standing by an object that mismanaged its own state is
-            # not evidence of a syscall — but it is squarely not proof of the
+            # thing that contradiction would mean. That is not proof of contact
+            # (a flag left standing by an object that mismanaged its own state is
+            # not evidence of a syscall), but it is squarely not proof of the
             # absence of it either, so the marker withholds both answers and the
             # handling below decides on the close exactly as it always has.
             contact.record_unproven("serial_open_left_a_handle")
@@ -1294,8 +1294,8 @@ class ComPortService:
             session.lease.quarantine("com_effect_unconfirmed")
         if session is not None:
             # Published on every report this session writes, not only on the one
-            # that opened it, because the reader that needs it — the release of a
-            # dead owner's devices — sees whichever report was committed last.
+            # that opened it, because the reader that needs it (the release of a
+            # dead owner's devices) sees whichever report was committed last.
             prepared = {**prepared, **session.contact.report_fields(), **session.lease.status()}
         written = write_report(self.config, prepared)
         if session is not None and written.get("audit_ok") is False:
@@ -1358,13 +1358,13 @@ def decode_bytes(data: bytes, encoding: str) -> str:
 def serial_by_id_links(directory: str = SERIAL_BY_ID_DIRECTORY) -> dict[str, str]:
     """Every stable serial-port name this host publishes, keyed by what it resolves to.
 
-    Linux's udev maintains ``/dev/serial/by-id/`` — one symlink per port, named
+    Linux's udev maintains ``/dev/serial/by-id/``: one symlink per port, named
     after the vendor, the product and the device's own serial number, and
     therefore unmoved by the enumeration order that decides ``ttyACM0`` from
     ``ttyACM1``. That name is what a configuration should hold.
 
     Windows publishes no counterpart that can be *opened*. It knows the identity
-    perfectly well — the device instance path carries the same USB serial — but
+    perfectly well (the device instance path carries the same USB serial), but
     the only openable name is ``COMn``, and ``COMn`` moves. There the stable half
     of this fix is ``com_ports.<name>.serial_number`` plus the check at open
     time, and this returns nothing rather than pretending otherwise.
@@ -1388,7 +1388,7 @@ def serial_by_id_links(directory: str = SERIAL_BY_ID_DIRECTORY) -> dict[str, str
             continue
         # First spelling wins, and the listing above is sorted, so a port that
         # udev gave two links keeps the same one across runs. Both name one
-        # device, so there is no wrong answer here — only an unstable one, and an
+        # device, so there is no wrong answer here, only an unstable one, and an
         # unstable answer would make adoption rewrite the file on every call.
         links.setdefault(resolved, str(entry))
     return links
@@ -1418,7 +1418,7 @@ def stable_device_name(device: str, stable_names: dict[str, str]) -> str | None:
     one that hands it a kernel name.
 
     The listing is keyed by what udev's symlinks resolve to, which for the
-    ordinary ``/dev/ttyACM0`` is that name itself — so the direct lookup answers
+    ordinary ``/dev/ttyACM0`` is that name itself, so the direct lookup answers
     the common case without a syscall, and ``realpath`` is the fallback for a
     device node that is itself a link."""
     if not device:

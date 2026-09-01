@@ -57,7 +57,7 @@ class UnboundDebuggerBackend:
 
     With zero or several debuggers configured there is no board a bare call
     could mean. Refusing every call here keeps a default from silently picking
-    a board — the failure mode this rework exists to remove."""
+    a board: the failure mode this rework exists to remove."""
 
     def __init__(self, config: AgenticHILConfig):
         self.config = config
@@ -71,8 +71,8 @@ class UnboundDebuggerBackend:
     def sessionless_debug_tools(self) -> frozenset[str]:
         """No probe is bound, so no tool runs as a standalone debugger read here.
 
-        Answered rather than left to ``__getattr__`` — which would turn a set
-        membership test in the coordination layer into a refusal dict — so the
+        Answered rather than left to ``__getattr__`` (which would turn a set
+        membership test in the coordination layer into a refusal dict), so the
         one-shot classification reads the same empty answer it reads from a bound
         session backend."""
         return frozenset()
