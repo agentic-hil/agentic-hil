@@ -43,6 +43,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import ci_linux  # noqa: E402
+import run_lock  # noqa: E402
 
 # What a container that did its job prints last.
 PLAUSIBLE_RESULT = "1476 passed, 35 skipped in 41.23s\n"
@@ -69,7 +70,7 @@ def a_machine_of_this_tests_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 def a_lock_held_by(pid: int, **fields: object) -> Path:
     """Leave a holder record behind, as a run that took the lock would have."""
     record: dict[str, object] = {
-        "version": ci_linux.CI_LOCK_RECORD_VERSION,
+        "version": run_lock.LOCK_RECORD_VERSION,
         "owner_id": "0123456789abcdef",
         "pid": pid,
         "host": socket.gethostname(),
@@ -79,7 +80,7 @@ def a_lock_held_by(pid: int, **fields: object) -> Path:
         "pytest_args": ["-q"],
     }
     record.update(fields)
-    path = ci_linux.ci_lock_path()
+    path = run_lock.lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return path
@@ -87,7 +88,7 @@ def a_lock_held_by(pid: int, **fields: object) -> Path:
 
 def only_these_are_running(monkeypatch: pytest.MonkeyPatch, *pids: int) -> None:
     """The fake liveness: every pid not named here belongs to a process that died."""
-    monkeypatch.setattr(ci_linux, "process_is_running", lambda pid: pid in pids)
+    monkeypatch.setattr(run_lock, "process_is_running", lambda pid: pid in pids)
 
 
 def never_waits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,7 +97,7 @@ def never_waits(monkeypatch: pytest.MonkeyPatch) -> None:
     def refuse(seconds: float) -> None:
         raise AssertionError("the run waited for a lock it was entitled to break")
 
-    monkeypatch.setattr(ci_linux, "wait_for_the_holder", refuse)
+    monkeypatch.setattr(run_lock, "wait_for_the_holder", refuse)
 
 
 class FakeContainer:
@@ -324,8 +325,8 @@ def test_the_lock_lives_in_the_one_place_every_run_looks(a_machine_of_this_tests
     reason: two runs that resolve the lock differently are two runs that cannot
     see each other, which is the whole failure. Naming it also creates nothing,
     so a run that never starts leaves no directory behind."""
-    assert ci_linux.ci_lock_path() == a_machine_of_this_tests_own / ".agentic-hil" / "ci-linux.lock"
-    assert not ci_linux.ci_lock_path().exists()
+    assert run_lock.lock_path() == a_machine_of_this_tests_own / ".agentic-hil" / "ci-linux.lock"
+    assert not run_lock.lock_path().exists()
     assert not (a_machine_of_this_tests_own / ".agentic-hil").exists()
 
 
@@ -346,7 +347,7 @@ def test_a_second_run_waits_for_the_holder_instead_of_starting_a_container(
         containers_started_while_waiting.append(len(captured))
         lock.unlink()
 
-    monkeypatch.setattr(ci_linux, "wait_for_the_holder", the_holder_finishes)
+    monkeypatch.setattr(run_lock, "wait_for_the_holder", the_holder_finishes)
 
     assert ci_linux.main([]) == 0
 
@@ -370,14 +371,14 @@ def test_a_long_wait_keeps_saying_who_it_is_waiting_for(
     only_these_are_running(monkeypatch, 4242)
     stub_docker(monkeypatch)
     clock = [0.0]
-    monkeypatch.setattr(ci_linux, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(run_lock, "time", SimpleNamespace(monotonic=lambda: clock[0]))
 
     def a_minute_passes(seconds: float) -> None:
-        clock[0] += ci_linux.LOCK_NOTICE_INTERVAL_S
-        if clock[0] >= 3 * ci_linux.LOCK_NOTICE_INTERVAL_S:
+        clock[0] += run_lock.LOCK_NOTICE_INTERVAL_S
+        if clock[0] >= 3 * run_lock.LOCK_NOTICE_INTERVAL_S:
             lock.unlink()
 
-    monkeypatch.setattr(ci_linux, "wait_for_the_holder", a_minute_passes)
+    monkeypatch.setattr(run_lock, "wait_for_the_holder", a_minute_passes)
 
     assert ci_linux.main([]) == 0
 
@@ -399,10 +400,10 @@ def test_the_lock_is_held_for_the_whole_container_run(monkeypatch: pytest.Monkey
     refusals: list[str] = []
 
     def a_second_run_tries(command: list[str], **kwargs: object) -> object:
-        other = ci_linux.RunLock()
+        other = run_lock.RunLock()
         try:
             other.acquire(wait=False)
-        except ci_linux.RunLockBusy as busy:
+        except run_lock.RunLockBusy as busy:
             refusals.append(str(busy))
         else:
             other.release()
@@ -414,7 +415,7 @@ def test_the_lock_is_held_for_the_whole_container_run(monkeypatch: pytest.Monkey
     assert ci_linux.main([]) == 0
 
     assert refusals and f"pid {os.getpid()}" in refusals[0]
-    assert not ci_linux.ci_lock_path().exists()
+    assert not run_lock.lock_path().exists()
 
 
 def test_the_lock_is_given_back_even_when_the_run_goes_red(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -422,7 +423,7 @@ def test_the_lock_is_given_back_even_when_the_run_goes_red(monkeypatch: pytest.M
     stub_docker(monkeypatch, output="==== 1 failed, 12 passed in 3.40s ====\n", returncode=1)
 
     assert ci_linux.main([]) == 1
-    assert not ci_linux.ci_lock_path().exists()
+    assert not run_lock.lock_path().exists()
 
 
 def test_a_lock_left_by_a_dead_holder_is_broken_and_the_reason_is_said(
@@ -460,7 +461,7 @@ def test_an_empty_lock_file_is_never_broken_however_long_it_has_sat(
     holder to finish or an operator to clear by hand. A `--no-wait` run refuses
     rather than deleting it, whether the file is fresh or long since published,
     and the refusal points at the one safe way out."""
-    lock = ci_linux.ci_lock_path()
+    lock = run_lock.lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("", encoding="utf-8")
     if age_seconds:
@@ -532,7 +533,7 @@ def test_a_lock_written_by_a_newer_version_of_this_tool_is_left_alone(
     """Two checkouts at two commits on one machine is an ordinary day here. A
     record this version cannot read belongs to a run it cannot judge, and the
     older checkout queues behind the newer one rather than deleting its lock."""
-    a_lock_held_by(4242, version=ci_linux.CI_LOCK_RECORD_VERSION + 1)
+    a_lock_held_by(4242, version=run_lock.LOCK_RECORD_VERSION + 1)
     only_these_are_running(monkeypatch)
     captured = stub_docker(monkeypatch)
     never_waits(monkeypatch)
@@ -549,22 +550,22 @@ def test_a_run_never_queues_behind_its_own_record(monkeypatch: pytest.MonkeyPatc
     filesystem having a bad moment would fail it. What must not happen then is
     the run finding its own record, judging its own pid alive, and waiting for
     itself until somebody kills it."""
-    real_read = ci_linux.read_lock_record
+    real_read = run_lock.read_lock_record
     reads: list[Path] = []
 
     def a_read_that_comes_back_empty_once(path: Path) -> dict | None:
         reads.append(path)
         return None if len(reads) == 1 else real_read(path)
 
-    monkeypatch.setattr(ci_linux, "read_lock_record", a_read_that_comes_back_empty_once)
+    monkeypatch.setattr(run_lock, "read_lock_record", a_read_that_comes_back_empty_once)
     never_waits(monkeypatch)
-    lock = ci_linux.RunLock()
+    lock = run_lock.RunLock()
 
     lock.acquire()
 
     assert lock.held is True
     lock.release()
-    assert not ci_linux.ci_lock_path().exists()
+    assert not run_lock.lock_path().exists()
 
 
 def test_a_run_that_would_break_a_dead_lock_yields_to_the_live_one_that_replaced_it(
@@ -587,7 +588,7 @@ def test_a_run_that_would_break_a_dead_lock_yields_to_the_live_one_that_replaced
     rival = os.getpid()  # the run that wins the takeover: this process, alive
     only_these_are_running(monkeypatch, rival)
 
-    real_guard = ci_linux._machine_wide_guard
+    real_guard = run_lock._machine_wide_guard
     a_rival_has_taken_over: list[bool] = []
 
     @contextmanager
@@ -598,21 +599,21 @@ def test_a_run_that_would_break_a_dead_lock_yields_to_the_live_one_that_replaced
                 a_lock_held_by(rival)  # the live record a winning contender leaves
             yield
 
-    monkeypatch.setattr(ci_linux, "_machine_wide_guard", a_rival_wins_before_we_reach_the_guard)
+    monkeypatch.setattr(run_lock, "_machine_wide_guard", a_rival_wins_before_we_reach_the_guard)
 
     def the_rival_finishes(seconds: float) -> None:
         # The live holder releases; only now is the machine this run's to take.
-        ci_linux.ci_lock_path().unlink()
+        run_lock.lock_path().unlink()
 
-    monkeypatch.setattr(ci_linux, "wait_for_the_holder", the_rival_finishes)
+    monkeypatch.setattr(run_lock, "wait_for_the_holder", the_rival_finishes)
 
-    lock = ci_linux.RunLock()
+    lock = run_lock.RunLock()
     lock.acquire(wait=True)
 
     assert lock.held is True
     # The record on disk is this run's own, written only after the rival was
     # gone -- the rival's live record was waited out, never removed by this run.
-    assert json.loads(ci_linux.ci_lock_path().read_text(encoding="utf-8"))["owner_id"] == lock.record["owner_id"]
+    assert json.loads(run_lock.lock_path().read_text(encoding="utf-8"))["owner_id"] == lock.record["owner_id"]
 
 
 @pytest.mark.skipif(
@@ -632,7 +633,7 @@ def test_two_runs_that_both_find_a_dead_holder_yield_exactly_one_container(
     a_lock_held_by(4242)
     only_these_are_running(monkeypatch, os.getpid())
 
-    real_lock_fd = ci_linux._lock_fd_exclusive
+    real_lock_fd = run_lock._lock_fd_exclusive
     at_the_guard = threading.Barrier(2)
 
     def both_reach_the_guard_together(descriptor: int) -> None:
@@ -643,17 +644,17 @@ def test_two_runs_that_both_find_a_dead_holder_yield_exactly_one_container(
         at_the_guard.wait(timeout=10)
         real_lock_fd(descriptor)
 
-    monkeypatch.setattr(ci_linux, "_lock_fd_exclusive", both_reach_the_guard_together)
+    monkeypatch.setattr(run_lock, "_lock_fd_exclusive", both_reach_the_guard_together)
 
     outcomes: list[str] = []
     record_outcome = threading.Lock()
 
     def contend() -> None:
-        run = ci_linux.RunLock()
+        run = run_lock.RunLock()
         try:
             run.acquire(wait=False)
             verdict = "held"
-        except ci_linux.RunLockBusy:
+        except run_lock.RunLockBusy:
             verdict = "busy"
         with record_outcome:
             outcomes.append(verdict)
@@ -666,7 +667,7 @@ def test_two_runs_that_both_find_a_dead_holder_yield_exactly_one_container(
 
     assert not any(thread.is_alive() for thread in threads)
     assert sorted(outcomes) == ["busy", "held"]
-    surviving = json.loads(ci_linux.ci_lock_path().read_text(encoding="utf-8"))
+    surviving = json.loads(run_lock.lock_path().read_text(encoding="utf-8"))
     assert surviving["pid"] == os.getpid()
 
 
@@ -687,7 +688,7 @@ def test_a_create_never_leaves_the_lock_file_present_and_empty(
     create returns, the path carries a whole record and no staging file is left
     behind. This is what lets `stale_reason` refuse to break any empty file at
     all: a current run can never be the one that left it."""
-    lock = ci_linux.RunLock()
+    lock = run_lock.RunLock()
     staging_glob = f"{lock.path.name}.*.new"
     observed: dict[str, object] = {}
     real_dumps = json.dumps
@@ -702,7 +703,7 @@ def test_a_create_never_leaves_the_lock_file_present_and_empty(
         return real_dumps(obj, **kwargs)
 
     monkeypatch.setattr(
-        ci_linux,
+        run_lock,
         "json",
         SimpleNamespace(dumps=dumps_that_inspects_the_lock_path, loads=json.loads),
     )
@@ -719,7 +720,7 @@ def test_a_create_never_leaves_the_lock_file_present_and_empty(
     assert json.loads(lock.path.read_text(encoding="utf-8"))["owner_id"] == lock.record["owner_id"]
     assert list(lock.path.parent.glob(staging_glob)) == []
     lock.release()
-    assert not ci_linux.ci_lock_path().exists()
+    assert not run_lock.lock_path().exists()
 
 
 @pytest.mark.skipif(
@@ -751,11 +752,11 @@ def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
     assertions reject.
     """
     only_these_are_running(monkeypatch, os.getpid())
-    path = ci_linux.ci_lock_path()
+    path = run_lock.lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
     legacy_record = {
-        "version": ci_linux.CI_LOCK_RECORD_VERSION,
+        "version": run_lock.LOCK_RECORD_VERSION,
         "owner_id": "feedfacecafebeef",
         "pid": os.getpid(),
         "host": socket.gethostname(),
@@ -769,7 +770,7 @@ def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
     contender_made_its_call = threading.Event()
     creator_holds = threading.Event()
 
-    real_stale_reason = ci_linux.stale_reason
+    real_stale_reason = run_lock.stale_reason
 
     def stale_reason_that_marks_the_contenders_call(record: dict | None, judged_path: Path) -> str | None:
         # The contender's verdict on the aged empty file, whichever way it goes:
@@ -781,11 +782,11 @@ def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
         contender_made_its_call.set()
         return verdict
 
-    monkeypatch.setattr(ci_linux, "stale_reason", stale_reason_that_marks_the_contenders_call)
+    monkeypatch.setattr(run_lock, "stale_reason", stale_reason_that_marks_the_contenders_call)
 
-    real_break = ci_linux.RunLock._break
+    real_break = run_lock.RunLock._break
 
-    def break_that_waits_for_the_creator_to_hold(self: ci_linux.RunLock) -> None:
+    def break_that_waits_for_the_creator_to_hold(self: run_lock.RunLock) -> None:
         # Reached only on the buggy path, where the contender judged the aged
         # empty file stale. Holding here until the creator has confirmed its own
         # record and returned holding the lock is what turns the window into the
@@ -794,7 +795,7 @@ def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
         creator_holds.wait(timeout=10)
         real_break(self)
 
-    monkeypatch.setattr(ci_linux.RunLock, "_break", break_that_waits_for_the_creator_to_hold)
+    monkeypatch.setattr(run_lock.RunLock, "_break", break_that_waits_for_the_creator_to_hold)
 
     verdicts: dict[str, str] = {}
     record_verdict = threading.Lock()
@@ -814,18 +815,18 @@ def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
             handle.write(json.dumps(legacy_record, indent=2) + "\n")
         # The create's confirming read: the record on disk is still this
         # creator's, so it holds; any takeover would have to come after.
-        held = ci_linux.read_lock_record(path) == legacy_record
+        held = run_lock.read_lock_record(path) == legacy_record
         with record_verdict:
             verdicts["creator"] = "held" if held else "lost"
         creator_holds.set()
 
     def be_the_contender() -> None:
         empty_published.wait(timeout=10)
-        run = ci_linux.RunLock()
+        run = run_lock.RunLock()
         try:
             run.acquire(wait=False)
             outcome = "held" if run.held else "busy"
-        except ci_linux.RunLockBusy:
+        except run_lock.RunLockBusy:
             outcome = "busy"
         with record_verdict:
             verdicts["contender"] = outcome
@@ -852,7 +853,7 @@ def test_asking_whether_a_process_runs_must_not_end_it() -> None:
     `os.kill` would answer this question by killing the run it was asked about."""
     child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
     try:
-        assert ci_linux.process_is_running(child.pid) is True
+        assert run_lock.process_is_running(child.pid) is True
         assert child.poll() is None
     finally:
         child.stdin.close()

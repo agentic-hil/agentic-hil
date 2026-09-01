@@ -39,11 +39,22 @@ deleted unconditionally afterwards. The evaluation scrubs instead, because its
 evidence is inspected later; here the only product is the commits in the
 repository mount, so the home has no reason to outlive the run.
 
+One containerised run at a time per machine, and the lock that decides it is the
+one `tools/ci_linux.py` takes: `run_lock.py` beside this file, on
+`~/.agentic-hil/ci-linux.lock`. A review loop is a container on the same daemon
+as a full-suite run, and several of those starve each other until one dies
+mid-flight, so this run queues behind whoever holds the machine and holds it
+itself for exactly as long as its own container is up. A loop is the long end of
+that queue: it runs for hours where a suite run is minutes, so its record says
+so, and whoever waits for it is told what it is waiting for rather than left to
+guess. ``--no-wait`` refuses instead of queueing.
+
 Usage:
 
     python tools/loop_in_container.py --task "..." --max-rounds 3
     python tools/loop_in_container.py --start-with review --codex-model gpt-5.1-codex
     python tools/loop_in_container.py --rebuild --task "..."
+    python tools/loop_in_container.py --no-wait --task "..."
 
 Exit codes:
 
@@ -88,9 +99,13 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CONTAINER_DIRECTORY = REPOSITORY_ROOT / "tools" / "loopimage"
 # evals/ is a source tree rather than an installed package, and the container's
 # own modules are not on the path of a script run as
-# "python tools/loop_in_container.py" either.
+# "python tools/loop_in_container.py" either. The third is this file's own
+# directory, where the run lock it shares with tools/ci_linux.py lives: running
+# the file puts it there first anyway, and naming it is what keeps the import
+# working when something reaches this module by another route.
 sys.path.insert(0, str(REPOSITORY_ROOT))
 sys.path.insert(0, str(CONTAINER_DIRECTORY))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from loop_options import (  # noqa: E402
     CODEX_ARGUMENT_OPTION,
@@ -98,6 +113,7 @@ from loop_options import (  # noqa: E402
     owned_options,
     paperwork_values,
 )
+from run_lock import RunLock, RunLockBusy  # noqa: E402
 
 from evals.install.credentials import authentication_failure, credential_health  # noqa: E402
 from evals.install.runner import (  # noqa: E402
@@ -136,6 +152,16 @@ MOUNTED_FILES = "/run/loop-agent-files"
 # failure to be numbered by whoever adds it -- which is how EXIT_CLEANUP_FAILED
 # came to be a third meaning for 4 rather than a new one.
 EXIT_WRAPPER_FAILED = 20
+
+# What this run writes into the shared lock record about itself. A run queued
+# behind this one is deciding whether to wait, and a review loop is the one
+# holder on this machine that can legitimately keep it waiting for hours: the
+# default is three rounds of two agents, each of them building an environment
+# and running the suite. Naming the scale in the record rather than in the run
+# that reads it is what makes the queue message true, because the waiting run
+# cannot know what the container it is waiting for is doing.
+TOOL_NAME = "tools/loop_in_container.py"
+RUNS_FOR = "hours"
 
 # The loop's own exit code, on stderr, whenever the loop ran at all. A run whose
 # home volume outlived it is not a successful run, whatever the loop inside it
@@ -192,6 +218,15 @@ AGENT_EXIT = re.compile(r"^exit (?P<code>\d+) after ")
 
 class Refused(RuntimeError):
     """The run must not start, for a reason worth printing on its own."""
+
+
+def announce(text: str) -> None:
+    """Say something in this wrapper's own voice, on the stream reserved for it.
+
+    stderr, because stdout carries the container's output verbatim and a line
+    this script wrote about itself must stay tellable from a line an agent wrote.
+    """
+    print(f"loop_in_container: {text}", file=sys.stderr, flush=True)
 
 
 def repository_root(start: Path) -> Path:
@@ -645,6 +680,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--image", default=None, help="Container image, overriding the one built from tools/loopimage.")
     parser.add_argument("--rebuild", action="store_true", help="Build the image even when it is already present.")
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Refuse instead of queueing when another containerised run holds this machine.",
+    )
     options, forwarded = parser.parse_known_args(argv)
     # Both calling styles work: with or without the separator ci_linux.py uses.
     forwarded = [argument for argument in forwarded if argument != "--"]
@@ -677,75 +717,103 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_WRAPPER_FAILED
 
-    token = uuid.uuid4().hex[:12]
-    container_name = f"agentic-hil-loop-{token}"
-    home_volume = f"agentic-hil-loop-{token}-home"
-    result = run_capture([docker, "volume", "create", "--label", "agentic-hil.loop=true", home_volume], 60)
-    if result.returncode != 0:
-        print(f"error: could not create the home volume: {result.stderr.strip()}", file=sys.stderr)
-        return EXIT_WRAPPER_FAILED
-
-    command = container_command(
-        docker=docker,
-        image=image,
-        container_name=container_name,
-        home_volume=home_volume,
-        repository=repository,
-        files=files,
-        identity=identity,
-        forwarded=forwarded,
+    # Taken after the pre-flight, which can prompt for a login and spend a small
+    # session refreshing one, and given back only once the container and its home
+    # volume are gone: the window the lock covers is exactly the window this run
+    # has something of its own on the daemon. It is the lock tools/ci_linux.py
+    # takes, on the same file, because a suite container and a loop container
+    # starve each other exactly as two suite containers do.
+    lock = RunLock(
+        tool=TOOL_NAME,
+        runs_for=RUNS_FOR,
+        root=repository,
+        details={"image": image, "loop_args": forwarded},
+        announce=announce,
     )
-    print(f"repository : {repository} (read-write at {MOUNTED_REPOSITORY})")
-    print(f"image      : {image}")
-    print(f"identity   : {identity[0]} <{identity[1]}>")
-    print(f"mounted    : {', '.join(kind for kind, _path in files)} (read-only, one file each)")
-    print(f"home volume: {home_volume} (deleted when this exits)")
-    print(f"$ {' '.join(command)}", flush=True)
-
-    announced: dict[str, str] = {}
-    failure: str | None = None
-    remaining: list[str] = []
-    # None until the loop returns a code of its own. An interrupt leaves it that
-    # way, and a run that never reached a verdict has no verdict to report.
-    inner: int | None = None
     try:
-        inner, announced, failure = stream(command, repository)
-    except KeyboardInterrupt:
-        print("\ninterrupted; stopping the container.", file=sys.stderr)
-    finally:
-        for remove, kind, name in ((remove_container, "container", container_name), (remove_volume, "volume", home_volume)):
-            try:
-                remove(docker, name)
-            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-                remaining.append(f"{kind} {name}: {type(error).__name__}: {error}")
+        lock.acquire(wait=not options.no_wait)
+    except RunLockBusy as busy:
+        # The wrapper's one code, and a sentence saying which of its failures
+        # this was: a refusal here is "there is no review to report", exactly
+        # like a refused pre-flight, and numbering it separately would put
+        # another value next to the loop's own four.
+        announce(f"{busy}. Refusing, because --no-wait was given")
+        return EXIT_WRAPPER_FAILED
+    except OSError as error:
+        announce(f"the lock at {lock.path} could not be taken: {error}")
+        return EXIT_WRAPPER_FAILED
+    try:
+        token = uuid.uuid4().hex[:12]
+        container_name = f"agentic-hil-loop-{token}"
+        home_volume = f"agentic-hil-loop-{token}-home"
+        result = run_capture([docker, "volume", "create", "--label", "agentic-hil.loop=true", home_volume], 60)
+        if result.returncode != 0:
+            print(f"error: could not create the home volume: {result.stderr.strip()}", file=sys.stderr)
+            return EXIT_WRAPPER_FAILED
 
-    if failure is not None and inner not in (None, 0):
-        print(
-            f"\nan agent CLI reported an authentication failure inside the container: {failure!r}\n"
-            "The stored login needs to be renewed on this machine; the container cannot fix it.",
-            file=sys.stderr,
+        command = container_command(
+            docker=docker,
+            image=image,
+            container_name=container_name,
+            home_volume=home_volume,
+            repository=repository,
+            files=files,
+            identity=identity,
+            forwarded=forwarded,
         )
-    print(f"\nreviews    : {announced.get('reviews', on_this_side(paperwork['--review-dir'], repository))}")
-    print(f"logs       : {announced.get('logs', on_this_side(paperwork['--log-dir'], repository))}")
-    print(f"commits    : in {repository}; nothing was pushed and no pull request was opened.")
-    if inner is not None:
-        print(INNER_EXIT.format(code=inner), file=sys.stderr)
-    if remaining:
-        # The home volume is the one place a copy of a login can outlive the run,
-        # and a CLI that rewrites its login file in place turns the tmpfs symlink
-        # the entrypoint made into a regular file in that volume. A run that
-        # leaves it behind is not a run that succeeded, whatever the loop
-        # returned, so this is never folded into the loop's own exit code -- and
-        # the loop's code is on stderr above rather than lost to this one.
-        print(
-            "\nerror: this run left Docker resources behind, and the home volume is where the logins were "
-            "copied to:\n  " + "\n  ".join(remaining) + "\nRemove them by hand.",
-            file=sys.stderr,
-        )
-        return EXIT_WRAPPER_FAILED
-    if inner is None:
-        return EXIT_WRAPPER_FAILED
-    return inner
+        print(f"repository : {repository} (read-write at {MOUNTED_REPOSITORY})")
+        print(f"image      : {image}")
+        print(f"identity   : {identity[0]} <{identity[1]}>")
+        print(f"mounted    : {', '.join(kind for kind, _path in files)} (read-only, one file each)")
+        print(f"home volume: {home_volume} (deleted when this exits)")
+        print(f"$ {' '.join(command)}", flush=True)
+
+        announced: dict[str, str] = {}
+        failure: str | None = None
+        remaining: list[str] = []
+        # None until the loop returns a code of its own. An interrupt leaves it that
+        # way, and a run that never reached a verdict has no verdict to report.
+        inner: int | None = None
+        try:
+            inner, announced, failure = stream(command, repository)
+        except KeyboardInterrupt:
+            print("\ninterrupted; stopping the container.", file=sys.stderr)
+        finally:
+            for remove, kind, name in ((remove_container, "container", container_name), (remove_volume, "volume", home_volume)):
+                try:
+                    remove(docker, name)
+                except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                    remaining.append(f"{kind} {name}: {type(error).__name__}: {error}")
+
+        if failure is not None and inner not in (None, 0):
+            print(
+                f"\nan agent CLI reported an authentication failure inside the container: {failure!r}\n"
+                "The stored login needs to be renewed on this machine; the container cannot fix it.",
+                file=sys.stderr,
+            )
+        print(f"\nreviews    : {announced.get('reviews', on_this_side(paperwork['--review-dir'], repository))}")
+        print(f"logs       : {announced.get('logs', on_this_side(paperwork['--log-dir'], repository))}")
+        print(f"commits    : in {repository}; nothing was pushed and no pull request was opened.")
+        if inner is not None:
+            print(INNER_EXIT.format(code=inner), file=sys.stderr)
+        if remaining:
+            # The home volume is the one place a copy of a login can outlive the run,
+            # and a CLI that rewrites its login file in place turns the tmpfs symlink
+            # the entrypoint made into a regular file in that volume. A run that
+            # leaves it behind is not a run that succeeded, whatever the loop
+            # returned, so this is never folded into the loop's own exit code -- and
+            # the loop's code is on stderr above rather than lost to this one.
+            print(
+                "\nerror: this run left Docker resources behind, and the home volume is where the logins were "
+                "copied to:\n  " + "\n  ".join(remaining) + "\nRemove them by hand.",
+                file=sys.stderr,
+            )
+            return EXIT_WRAPPER_FAILED
+        if inner is None:
+            return EXIT_WRAPPER_FAILED
+        return inner
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":  # pragma: no cover - entry point
