@@ -44,6 +44,8 @@ from agentic_hil.config import (
     CONFIG_ENV,
     ConfigError,
     absolute_without_symlinks,
+    atomic_write_bytes,
+    atomic_write_text,
     authoritative_config_target,
     load_authoritative_config,
     project_config_directories,
@@ -52,7 +54,11 @@ from agentic_hil.config import (
     project_config_path,
     provisionable_state_root,
     resolve_stable_directory,
+    safe_append_text,
+    safe_file_lock,
     safe_file_path,
+    safe_read_bytes,
+    safe_read_text,
     safe_writable_directory,
     secure_optional_read_bytes,
     secure_optional_read_text,
@@ -1298,3 +1304,333 @@ def test_a_redirected_config_root_is_not_reported_as_an_unconfigured_workspace(t
 
     assert refusal.value.error_type == "unsafe_configured_path"
     assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+
+
+# ---------------------------------------------------------------------------
+# #370: the same contract at the raw entry points underneath the secure_* surface.
+#
+# `secure_optional_read_bytes` was made uniform by #361 and every write through
+# `secure_atomic_write_*` goes through it, so the whole trusted-user-file surface
+# already answered one way. Two platform splits stayed live one level down, where
+# the bench's own state, leases, audit ledger, run records and firmware artifacts
+# are read and written: `safe_open_binary`, which every mandatory read goes
+# through, and `atomic_write_bytes`, which every raw write goes through. Both had
+# a Windows half that consults `safe_file_path` and a POSIX half that consulted
+# nothing like it.
+
+
+def test_the_mandatory_read_of_a_present_file_is_refused_under_a_redirected_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mandatory read is where the bench's own state is read from.
+
+    `safe_read_bytes` is not the optional read: nothing above it turns a refusal
+    into an absence, and its callers are the lease records, the audit ledger, the
+    run state and the configuration itself. A read that returned bytes on one
+    platform and refused on the other had those callers describing the same bench
+    two ways, and the bytes are the wrong half to keep: they come out of a tree
+    whose every write through this spelling is refused, so nothing that acts on
+    them can write the result back.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+    present = holder / "lease.json"
+    present.write_bytes(b'{"version": 3}\n')
+
+    with pytest.raises(ConfigError) as refusal:
+        safe_read_bytes(present)
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["path"] == str(present)
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+
+
+def test_the_mandatory_read_of_a_missing_file_is_refused_the_same_way(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Absence is the answer this spelling cannot establish, here as well.
+
+    A missing file raises `FileNotFoundError` here, and several callers read that
+    as "no lease", "no run", "no report". Under a redirected parent the file may
+    well be in the tree the name resolves into, so the refusal is what both cases
+    share, exactly as #361 settled it one level up.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+    missing = holder / "lease.json"
+
+    with pytest.raises(ConfigError) as refusal:
+        safe_read_bytes(missing)
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+
+
+def test_the_decoded_mandatory_read_inherits_the_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`safe_read_text` is `safe_read_bytes` decoded, so there is one place to pin."""
+    holder = redirected_directory(tmp_path, monkeypatch)
+    (holder / "run.json").write_text('{"version": 3}\n', encoding="utf-8")
+
+    with pytest.raises(ConfigError) as refusal:
+        safe_read_text(holder / "run.json")
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+
+
+def test_a_raw_write_under_a_redirected_parent_is_refused_and_lands_nowhere(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The half that can least afford to differ.
+
+    A raw write that lands is a caller told its bytes are at the spelling it
+    named. They are not: they are in the tree that spelling resolves into, and
+    every read back through the same name is refused. So the write is refused,
+    and the proof is that neither spelling holds a file afterwards, the named one
+    because the write never happened and the resolved one because nothing was
+    written there either.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+    target = holder / "lease.json"
+
+    with pytest.raises(ConfigError) as refusal:
+        atomic_write_bytes(target, b'{"version": 3}\n')
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["path"] == str(target)
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+    assert not target.exists()
+    assert not (tmp_path / "package-roaming-cache").exists()
+
+
+def test_the_text_raw_write_inherits_the_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`atomic_write_text` is `atomic_write_bytes` encoded, so it cannot drift."""
+    holder = redirected_directory(tmp_path, monkeypatch)
+    target = holder / "report-state.json"
+
+    with pytest.raises(ConfigError) as refusal:
+        atomic_write_text(target, '{"version": 3}\n')
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+    assert not target.exists()
+
+
+def test_neither_platform_branch_is_reached_by_the_read_or_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Why these two cannot drift apart again, said without needing both platforms.
+
+    The split is the platform branch itself: one side walks POSIX descriptors and
+    the other holds Windows handles and consults `safe_file_path`, so a contract
+    enforced inside either is a contract that platform states for itself. Both
+    branch entry points are made to fail loudly here, and the refusal still
+    arrives, on whichever platform is running this. That is the same proof #361
+    made one level up, and it is what says the answer is settled above the split
+    rather than agreed by two branches that happen to match today.
+    """
+    from agentic_hil import config as config_module
+
+    holder = redirected_directory(tmp_path, monkeypatch)
+    (holder / "present.json").write_bytes(b'{"version": 3}\n')
+    reached: list[str] = []
+
+    def posix_branch(directory: Path, *, create: bool = False) -> int:
+        reached.append(f"posix:{directory}")
+        raise AssertionError("the POSIX branch was reached, so the answer is still the platform's")
+
+    def windows_branch(directory: Path, *, create: bool = False) -> list[int]:
+        reached.append(f"windows:{directory}")
+        raise AssertionError("the Windows branch was reached, so the answer is still the platform's")
+
+    monkeypatch.setattr(config_module, "_open_directory_fd", posix_branch)
+    monkeypatch.setattr(config_module, "_windows_hold_directory_chain", windows_branch)
+
+    for candidate in (holder / "present.json", holder / "missing.json"):
+        with pytest.raises(ConfigError) as read_refusal:
+            safe_read_bytes(candidate)
+        assert read_refusal.value.error_type == "unsafe_configured_path", candidate
+
+    with pytest.raises(ConfigError) as write_refusal:
+        atomic_write_bytes(holder / "written.json", b"{}\n")
+    assert write_refusal.value.error_type == "unsafe_configured_path"
+
+    assert reached == []
+
+
+def test_an_ordinary_parent_still_reads_and_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Holds both ways: the rule is about redirection and nothing else.
+
+    Every lease, audit line, run record and report on a bench that is not
+    redirected goes through exactly these two functions, so this is the check
+    that says the refusal was aimed at the profile it names.
+    """
+    ordinary = tmp_path / "ordinary" / "agentic-hil"
+    ordinary.mkdir(parents=True)
+    target = ordinary / "lease.json"
+
+    atomic_write_bytes(target, b'{"version": 3}\n')
+    assert safe_read_bytes(target) == b'{"version": 3}\n'
+
+    atomic_write_text(target, '{"version": 4}\n')
+    assert safe_read_text(target) == '{"version": 4}\n'
+
+    with pytest.raises(FileNotFoundError):
+        safe_read_bytes(ordinary / "absent.json")
+
+
+def test_the_component_walk_still_answers_for_a_chain_that_resolves_to_itself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rule was added above the walk, not in place of it.
+
+    Hoisting `safe_file_path` into the POSIX branch would have looked like the
+    same fix and would have replaced this: its object check answers a bad chain
+    with one sentence about an output file, where the walk underneath names the
+    component that stopped it. A regular file standing where a directory belongs
+    resolves to the spelling it was named by, so the redirect rule says nothing
+    about it and the platform walk is what answers, which is the whole point of
+    stating the two separately.
+    """
+    base = tmp_path / "ordinary"
+    base.mkdir()
+    (base / "not-a-directory").write_bytes(b"contents\n")
+    blocked = base / "not-a-directory" / "deeper" / "lease.json"
+
+    with pytest.raises(ConfigError) as refusal:
+        safe_read_bytes(blocked)
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    # Not the redirect refusal: this chain names the place it resolves to, and
+    # answering it with `resolved_parent` would send the reader after a
+    # redirection that is not there.
+    assert "resolved_parent" not in refusal.value.details
+
+    with pytest.raises(ConfigError) as write_refusal:
+        atomic_write_bytes(blocked, b"{}\n")
+
+    assert write_refusal.value.error_type == "unsafe_configured_path"
+    assert "resolved_parent" not in write_refusal.value.details
+
+
+def test_leaving_the_workspace_is_still_answered_before_redirection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Artifact validation reaches these two with `workspace=`, and it goes first.
+
+    A path outside the configured workspace is refused for that, whatever its
+    parent resolves to. No permission relaxes workspace containment, so a caller
+    told about a redirection would go and repair a tree it may not use in any
+    case.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (holder / "firmware.elf").write_bytes(b"\x7fELF")
+
+    with pytest.raises(ConfigError) as refusal:
+        safe_read_bytes(holder / "firmware.elf", workspace=workspace)
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.summary == "Path leaves the workspace."
+    assert "resolved_parent" not in refusal.value.details
+
+
+# ---------------------------------------------------------------------------
+# #370 again: the two raw primitives that open their named file directly rather
+# than through `safe_open_binary` or `atomic_write_bytes`. `safe_file_lock`
+# creates the lock the canonical audit ledger and the recovery ledger serialize
+# on, and `safe_append_text` writes the audit line itself, so a redirected parent
+# these two answered per platform was the same incomplete contract one function
+# further out: their Windows halves reach `safe_file_path` and their POSIX halves
+# open the named file directly, so a lock taken or a line appended under such a
+# parent landed on POSIX and was refused on Windows.
+
+
+def test_the_lock_primitive_is_refused_under_a_redirected_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lock the audit and recovery ledgers serialize on cannot be per-platform.
+
+    A lock file created under a parent that names one place and resolves to
+    another is a lock two writers on the two platforms would take in two different
+    trees, so the serialization the ledger depends on is exactly what the
+    redirection breaks. It is refused, and the proof is that neither spelling holds
+    the lock afterwards.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+    target = holder / "audit.lock"
+
+    with pytest.raises(ConfigError) as refusal, safe_file_lock(target):
+        pass
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["path"] == str(target)
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+    assert not target.exists()
+    assert not (tmp_path / "package-roaming-cache").exists()
+
+
+def test_the_append_primitive_is_refused_under_a_redirected_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The audit line itself is a write, and a write cannot differ across platforms.
+
+    An audit line appended under a redirected parent goes into the tree the name
+    resolves into, while every read of the ledger through the spelling that wrote
+    it is refused, so the record and the reader describe two different files. It is
+    refused before either branch, and neither spelling holds a ledger afterwards.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+    target = holder / "audit.ndjson"
+
+    with pytest.raises(ConfigError) as refusal:
+        safe_append_text(target, '{"event": "probe"}\n')
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["path"] == str(target)
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+    assert not target.exists()
+    assert not (tmp_path / "package-roaming-cache").exists()
+
+
+def test_neither_platform_branch_is_reached_by_the_lock_or_the_append(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Why these two cannot drift apart again, said without needing both platforms.
+
+    The split is the platform branch itself: one side walks POSIX descriptors from
+    `_open_directory_fd` and the other holds Windows handles from
+    `_windows_hold_directory_chain` and consults `safe_file_path`, so a contract
+    enforced inside either is a contract that platform states for itself. Both
+    branch entry points are made to fail loudly here, and the refusal still
+    arrives, on whichever platform is running this, which says the answer is
+    settled above the split rather than agreed by two branches that match today.
+    """
+    from agentic_hil import config as config_module
+
+    holder = redirected_directory(tmp_path, monkeypatch)
+    reached: list[str] = []
+
+    def posix_branch(directory: Path, *, create: bool = False) -> int:
+        reached.append(f"posix:{directory}")
+        raise AssertionError("the POSIX branch was reached, so the answer is still the platform's")
+
+    def windows_branch(directory: Path, *, create: bool = False) -> list[int]:
+        reached.append(f"windows:{directory}")
+        raise AssertionError("the Windows branch was reached, so the answer is still the platform's")
+
+    monkeypatch.setattr(config_module, "_open_directory_fd", posix_branch)
+    monkeypatch.setattr(config_module, "_windows_hold_directory_chain", windows_branch)
+
+    with pytest.raises(ConfigError) as lock_refusal, safe_file_lock(holder / "audit.lock"):
+        pass
+    assert lock_refusal.value.error_type == "unsafe_configured_path"
+
+    with pytest.raises(ConfigError) as append_refusal:
+        safe_append_text(holder / "audit.ndjson", "line\n")
+    assert append_refusal.value.error_type == "unsafe_configured_path"
+
+    assert reached == []
+
+
+def test_the_lock_and_append_still_serve_an_ordinary_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Holds both ways: the rule is about redirection and nothing else.
+
+    Every lock the ledgers take and every audit line a bench that is not
+    redirected writes goes through exactly these two functions, so this is the
+    check that says the refusal was aimed at the profile it names and left the
+    ordinary bench alone.
+    """
+    ordinary = tmp_path / "ordinary" / "agentic-hil"
+    ordinary.mkdir(parents=True)
+
+    lock_target = ordinary / "audit.lock"
+    with safe_file_lock(lock_target):
+        pass
+    assert lock_target.exists()
+
+    ledger = ordinary / "audit.ndjson"
+    safe_append_text(ledger, "one\n")
+    safe_append_text(ledger, "two\n")
+    assert ledger.read_text(encoding="utf-8") == "one\ntwo\n"
