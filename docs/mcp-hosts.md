@@ -67,22 +67,16 @@ Run `agentic-hil init` from the firmware project root. It creates one authoritat
 
 The operator reviews that file and takes away the permissions this bench should not have: every one of them starts granted except `allow_raw_debugger_commands` and the irreversible `allow_mass_erase`, which start false because `flash_firmware` is refused on a probe while either is true. Telling the agent which ones to take away works as well as editing: over MCP `project_config_set` writes `false` into a permission and no other value. The MCP server discovers the file from the configured firmware-project working directory. If a different external location is needed, set its absolute path as `AGENTIC_HIL_CONFIG` in the host's user-level, managed, or parent-process environment; do not add a machine-specific value to `.vscode/mcp.json`, `.codex/config.toml`, `.mcp.json`, `opencode.json`, or another repository-controlled file. For unattended hardware benches, use a host/user-level registration that the agent cannot edit.
 
-Optional POSIX override:
-
-```bash
-export AGENTIC_HIL_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/agentic-hil/projects/<project-id>/config.yaml"
-```
-
-Optional Windows PowerShell override:
-
-```powershell
-$env:AGENTIC_HIL_CONFIG = "$env:APPDATA\agentic-hil\projects\<project-id>\config.yaml"
-```
-
 `%APPDATA%` and `%LOCALAPPDATA%` are the discovered defaults, and nothing about their ACLs is inspected: the ownership walk that once did was removed in 0.8.0, because it could only defend against a different account on the same machine and never against your own processes. What is still refused with `unsafe_configured_path` is a path that is not the object it names: a symlinked component, a file where a directory belongs. A redirected profile directory needs no override at all: `%USERPROFILE%\.agentic-hil` is the second root `agentic-hil init` walks to by itself, and a config generated there stays the one this project loads. What the override is for is a location neither root reaches (a roaming share, a volume chosen to keep this bench's files off the system disk), and there it is the supported answer rather than a workaround:
 
 ```powershell
 $env:AGENTIC_HIL_CONFIG = "D:\bench-configs\agentic-hil\projects\<project-id>\config.yaml"
+```
+
+The POSIX spelling of the same binding:
+
+```bash
+export AGENTIC_HIL_CONFIG="/srv/bench-configs/agentic-hil/projects/<project-id>/config.yaml"
 ```
 
 Set `state_root` in that file to a directory under the same root. Set `AGENTIC_HIL_CONFIG` in the host's user-level or managed environment, never in a repository-controlled file. Where each file lives: `agentic-hil://reference/platform-paths`.

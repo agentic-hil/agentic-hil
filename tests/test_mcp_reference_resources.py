@@ -388,7 +388,8 @@ def _prose_lines(text: str) -> list[str]:
     """Every line outside a fenced block, because a fence is syntax, not a claim.
 
     The override examples in `docs/mcp-hosts.md` spell a full configuration path
-    and are right to name one root only: they show what an operator types, not
+    under neither discovered root, which is the only thing the override is for:
+    they show what an operator types to reach a location the walk does not, not
     where discovery looks.
     """
     lines, fenced = [], False
