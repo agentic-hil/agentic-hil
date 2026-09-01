@@ -101,11 +101,15 @@ class ArtifactManager:
             return self._validation_error("Firmware artifact is outside allowed artifact roots.", validation)
         if self.config.validation.require_allowed_extension and not validation["allowed_extension"]:
             return self._validation_error("Firmware artifact extension is not allowed.", validation)
-        # safe_open_binary below refuses this too, but only as "not a single-link
-        # regular file" carrying a backend_error about an *output* file. Name the
-        # real reason here: no configuration key relaxes workspace containment,
-        # so a caller told "regular file" would keep retrying a path that can
-        # never work.
+        # safe_open_binary below refuses this too, and no longer as a symlink or
+        # a regular-file claim: `_validated_absolute_file_path`, the first check
+        # it makes, answers a path outside the workspace with "Path leaves the
+        # workspace." That sentence is lost a few lines further down, where every
+        # refusal out of the guarded open is folded into "must be a single-link
+        # regular file that can be opened safely" with the real reason left in
+        # backend_error. Name it here instead: no configuration key relaxes
+        # workspace containment, so a caller told "regular file" would keep
+        # retrying a path that can never work.
         if not validation["within_workspace"]:
             return self._validation_error(
                 "Firmware artifact is outside workspace_root. Artifact paths must stay inside the configured workspace; no permission relaxes this.",
@@ -197,6 +201,9 @@ class ArtifactManager:
                     "side_effect_status": "not_started",
                     "retry_safe": True,
                 }
+            permanent = self._permanent_path_refusal(source, error, tool)
+            if permanent is not None:
+                return permanent
             return {"ok": False, "tool": tool, "error_type": "artifact_changed", "summary": "Firmware artifact changed after validation.", "backend_error": str(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
 
         temporary_path: Path | None = None
