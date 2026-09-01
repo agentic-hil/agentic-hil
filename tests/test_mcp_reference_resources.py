@@ -13,6 +13,7 @@ here is the one that keeps them from drifting apart.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -344,8 +345,16 @@ def test_the_path_table_names_every_root_a_file_can_land_under(service: AgenticH
     be looked for where it is not. Presence and order are both checked, the
     order against the walk itself rather than against a second copy of it.
     """
-    section = read_text(service, PLATFORM_PATHS_URI).split("## Where things go", 1)[1].split("\n## ", 1)[0]
+    document = read_text(service, PLATFORM_PATHS_URI)
+    section = document.split("## Where things go", 1)[1].split("\n## ", 1)[0]
     cells = {row.split("|")[1].strip(): [cell.strip() for cell in row.split("|")[2:4]] for row in section.splitlines() if row.startswith("| ")}
+
+    # The table is not the only place this document names that directory, and the
+    # override example below it had drifted to a spelling of its own. A caller
+    # who quotes one and then the other quotes two different directories.
+    for line in document.splitlines():
+        found = re.search(r"agentic-hil[\\/]projects[\\/]<(?!name>-<digest>)[^>]+>", line)
+        assert found is None, f"the served table and its own example disagree: {found.group(0)!r} in {line}"
 
     # Holds both ways: the walk the table describes, read from the walk. The
     # platform default first, the root every path refusal recommends after it.
@@ -388,7 +397,8 @@ def _prose_lines(text: str) -> list[str]:
     """Every line outside a fenced block, because a fence is syntax, not a claim.
 
     The override examples in `docs/mcp-hosts.md` spell a full configuration path
-    and are right to name one root only: they show what an operator types, not
+    under neither discovered root, which is the only thing the override is for:
+    they show what an operator types to reach a location the walk does not, not
     where discovery looks.
     """
     lines, fenced = [], False
@@ -415,15 +425,29 @@ def test_no_document_places_the_configuration_under_one_root_only() -> None:
     Swept rather than listed: a fifth document ending the sentence at the
     platform default is the same defect, and it should fail here rather than on
     a bench. One that names both roots is welcome and passes on these terms.
+
+    The sweep recognises that sentence by the spelling of the per-project
+    directory, so the spelling is part of what it guards. A document that named
+    the directory some other way was read here as a document that says nothing
+    about where the configuration lives, and the root check simply did not run
+    on it; the placeholder went three ways across the documents and the served
+    table before anyone noticed. One spelling is therefore asserted rather than
+    assumed, and it is `platform-paths`' own, which is also the shape `init`
+    writes on disk.
     """
     root = Path(__file__).resolve().parents[1]
     # The fallback root's name is read from the code that owns it, so renaming it
     # there fails here rather than leaving every document quietly wrong.
     fallback = Path(safe_user_root()).name
     roots = (f"%USERPROFILE%\\{fallback}", f"~/{fallback}")
-    generated = ("projects/<project-id>/config.yaml", "projects\\<project-id>\\config.yaml")
+    generated = ("projects/<name>-<digest>/config.yaml", "projects\\<name>-<digest>\\config.yaml")
+    # The detection above is keyed on one spelling of the per-project directory,
+    # so a document that spells the same directory another way is not a style
+    # nit: it is invisible here, and the both-roots check never runs on it. The
+    # spelling is `platform-paths`' own, which is also the shape `init` writes.
+    other_spelling = re.compile(r"agentic-hil[\\/]projects[\\/]<(?!name>-<digest>)[^>]+>")
 
-    documents = {}
+    documents, every_line = {}, {}
     for path in sorted(root.rglob("*.md")):
         relative = path.relative_to(root)
         # Dot directories are tooling and virtualenvs (`.venv`, `.testenv`), and
@@ -432,7 +456,17 @@ def test_no_document_places_the_configuration_under_one_root_only() -> None:
         # what a release said, and a past entry is not a claim in force.
         if any(part.startswith(".") or part in {"build", "dist"} for part in relative.parts) or relative.as_posix() == "CHANGELOG.md":
             continue
-        documents[relative.as_posix()] = _prose_lines(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        documents[relative.as_posix()] = _prose_lines(text)
+        every_line[relative.as_posix()] = text.splitlines()
+
+    # Fenced blocks are excluded from the root check below and rightly so, but not
+    # from this one: how many roots a line names depends on whether it is prose or
+    # an example an operator types, while what the directory is called does not.
+    for name, lines in every_line.items():
+        for line in lines:
+            found = other_spelling.search(line)
+            assert found is None, f"{name} spells the per-project directory {found.group(0)!r}, which this sweep cannot see: {line}"
 
     named_by_the_issue = {"docs/configuration.md", "docs/mcp-hosts.md", "SECURITY.md", "examples/nucleo-f446re_demo/README.md"}
     # The sweep has to be able to see the documents the issue named, or an empty

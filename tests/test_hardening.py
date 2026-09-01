@@ -72,6 +72,7 @@ from agentic_hil.report import (
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import CanBusConfig, DebuggerConfig
+from tests.test_virtualized_user_paths import virtualize
 
 WAIT_TIMEOUT_S = 5.0
 POLL_INTERVAL_S = 0.01
@@ -2913,9 +2914,99 @@ def test_artifact_stage_rejects_ancestor_symlink_pivot(tmp_path: Path) -> None:
         staged = manager.stage_for_backend(validation["artifact"], "flash_firmware")
 
         assert staged["ok"] is False
+        # The pivoted ancestor resolves elsewhere, so the guarded read answers
+        # with the same sentence a redirected workspace gets. This one is still
+        # the mid-swap the retryable answer was written for: the workspace the
+        # configuration names resolves to itself, and what moved was a directory
+        # under it, so re-validating really is the way out.
         assert staged["error_type"] == "artifact_changed"
+        assert staged["retry_safe"] is True
     finally:
         manager.close()
+
+
+def test_artifact_stage_carries_a_redirected_workspace_refusal_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal no retry can lift must not be dressed up as one that can.
+
+    The profile is the packaged agent host: the project's own tree names one
+    place and resolves into the package's private cache, so the guarded read
+    refuses every artifact under it for as long as the configuration names that
+    spelling. Answered as `artifact_changed` with `retry_safe: true`, that sends
+    a caller around a loop with no way out, because there is nothing about the
+    file to rebuild or re-validate.
+
+    Validated first and redirected afterwards, because validation goes through
+    the same guarded read and turns a workspace that is already redirected down
+    on its own. What reaches staging is therefore a redirection that begins after
+    validation, or an artifact a caller staged without validating it under this
+    configuration, and both of those are as permanent as the static case.
+    """
+    config = load_test_config(tmp_path)
+    workspace = Path(config.work_dir)
+    firmware = workspace / "build" / "firmware.elf"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"\x7fELFapproved")
+    backing = workspace.parent / "package-local-cache"
+    manager = ArtifactManager(config)
+    try:
+        validation = manager.validate_local_path("build/firmware.elf")
+        assert validation["ok"] is True
+        virtualize(monkeypatch, workspace, backing)
+
+        staged = manager.stage_for_backend(validation["artifact"], "flash_firmware")
+    finally:
+        manager.close()
+
+    assert staged["ok"] is False
+    assert staged["tool"] == "flash_firmware"
+    assert staged["error_type"] == "unsafe_configured_path"
+    assert staged["retry_safe"] is False
+    # Both spellings, because either one alone leaves the reader walking a chain
+    # that shows nothing: no reparse point, no symlink, link count one. The
+    # configured path is what the file names and the resolved one is the answer.
+    assert staged["path"] == str(firmware)
+    assert staged["resolved_parent"] == str(backing / "build")
+    # Carried as the refusal itself rather than restated here, so the fix the
+    # error catalogue serves for this type comes with it and cannot drift from
+    # what the refusal says.
+    assert staged["remediation"] == ConfigError("unsafe_configured_path", staged["summary"]).to_dict()["remediation"]
+    # Still a refusal that happened before the backend ran, so it must not be
+    # recorded as an unconfirmed hardware effect over a file that never reached
+    # the board.
+    assert staged["side_effect_committed"] is False
+    assert staged["side_effect_status"] == "not_started"
+
+
+def test_artifact_stage_still_answers_a_swapped_file_as_retryable(tmp_path: Path) -> None:
+    """The case the retryable answer was written for keeps it.
+
+    Holds both ways. A file replaced between validation and staging is refused by
+    the same guarded read and by the same error type the redirected workspace
+    raises, and here the artifact really did change: build it again, validate it
+    again, and the next attempt goes through. Narrowing the permanent answer to
+    the configured workspace is what keeps these two apart.
+    """
+    config = load_test_config(tmp_path)
+    workspace = Path(config.work_dir)
+    firmware = workspace / "build" / "firmware.elf"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"\x7fELFapproved")
+    manager = ArtifactManager(config)
+    try:
+        validation = manager.validate_local_path("build/firmware.elf")
+        assert validation["ok"] is True
+        firmware.unlink()
+        firmware.mkdir()
+
+        staged = manager.stage_for_backend(validation["artifact"], "flash_firmware")
+    finally:
+        manager.close()
+
+    assert staged["ok"] is False
+    assert staged["error_type"] == "artifact_changed"
+    assert staged["retry_safe"] is True
+    assert staged["side_effect_committed"] is False
+    assert Path(config.work_dir).resolve() == Path(config.work_dir), "the workspace is the healthy one"
 
 
 def test_flash_releases_private_backend_stage(tmp_path: Path) -> None:

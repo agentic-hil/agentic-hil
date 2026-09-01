@@ -83,7 +83,7 @@ What replaced it is detection rather than prevention. `config_status`, on every 
 `AGENTIC_HIL_CONFIG` and a chosen `state_root` are the supported way to bind a project to another location, not a workaround. Nothing about a project is second class for using them: a configuration selected by `AGENTIC_HIL_CONFIG` is read exactly like a discovered one (same schema, same validation, same permissions), and `state_root` may be any absolute directory that does not overlap `workspace_root`.
 
 ```text
-AGENTIC_HIL_CONFIG=C:\Users\<user>\.agentic-hil\projects\<workspace-name>\config.yaml
+AGENTIC_HIL_CONFIG=C:\Users\<user>\.agentic-hil\projects\<name>-<digest>\config.yaml
 state_root:        C:\Users\<user>\.agentic-hil\state
 ```
 
