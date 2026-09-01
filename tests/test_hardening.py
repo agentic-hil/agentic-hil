@@ -3447,6 +3447,150 @@ def test_artifact_outside_the_workspace_is_refused_with_the_real_reason(tmp_path
     assert "single-link regular file" not in result["summary"]
 
 
+def test_artifact_validation_names_a_redirected_workspace_rather_than_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal a caller can act on, instead of one about the wrong thing.
+
+    The profile is the packaged agent host: the project's own tree names one
+    place and resolves into the package's private cache, so the guarded read
+    refuses every artifact under it for as long as the configuration names that
+    spelling. Folded into "must be a single-link regular file that can be opened
+    safely", that sends an operator to inspect a file whose type is perfectly
+    fine, while the sentence naming the tree sits in `backend_error` where the
+    summary contradicts it. There is nothing about the file to fix, and no
+    permission and no rebuild lifts it.
+    """
+    config = load_test_config(tmp_path)
+    workspace = Path(config.work_dir)
+    firmware = workspace / "build" / "firmware.elf"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"\x7fELFapproved")
+    backing = workspace.parent / "package-local-cache"
+    manager = ArtifactManager(config)
+    try:
+        virtualize(monkeypatch, workspace, backing)
+        result = manager.validate_local_path("build/firmware.elf")
+    finally:
+        manager.close()
+
+    assert result["ok"] is False
+    assert result["tool"] == "flash_firmware"
+    assert result["error_type"] == "unsafe_configured_path"
+    assert "single-link regular file" not in result["summary"]
+    assert result["retry_safe"] is False
+    # Both spellings, because either one alone leaves the reader walking a chain
+    # that shows nothing: no reparse point, no symlink, link count one. The
+    # configured path is what the file is named by and the resolved one is the
+    # answer, being the spelling that works.
+    assert result["path"] == str(firmware)
+    assert result["resolved_parent"] == str(backing / "build")
+    # Carried as the refusal itself rather than restated here, so the fix the
+    # error catalogue serves for this type comes with it and cannot drift from
+    # what the refusal says.
+    assert result["remediation"] == ConfigError("unsafe_configured_path", result["summary"]).to_dict()["remediation"]
+    # The read was refused before it reached the object, so nothing was learned
+    # about the file and nothing is claimed about it.
+    assert "regular_file" not in result["validation"]
+    assert "single_link" not in result["validation"]
+    # Nothing was started, which is what keeps this out of quarantine now that
+    # the type is no longer one of the exempt ones.
+    assert result["side_effect_committed"] is False
+    assert result["side_effect_status"] == "not_started"
+
+
+def test_artifact_validation_still_answers_a_file_that_is_not_one_as_before(tmp_path: Path) -> None:
+    """The case the folded summary was written for keeps it.
+
+    Holds both ways. Under a workspace that resolves to itself, a directory
+    standing where the firmware should be is refused by the same guarded read
+    with the same error type a redirected workspace raises, and here the summary
+    is right: the object at that path is not the object it has to be, and that is
+    what a caller has to go and change. Narrowing the permanent answer to the
+    configured workspace is what keeps these two apart.
+    """
+    config = load_test_config(tmp_path)
+    workspace = Path(config.work_dir)
+    (workspace / "build" / "firmware.elf").mkdir(parents=True)
+    assert Path(config.work_dir).resolve() == Path(config.work_dir), "the workspace is the healthy one"
+    service = AgenticHILToolService(config)
+    try:
+        result = service.artifacts.validate_local_path("build/firmware.elf")
+
+        assert result["ok"] is False
+        assert result["error_type"] == "artifact_validation_failed"
+        assert "single-link regular file" in result["summary"]
+        assert result["validation"]["regular_file"] is False
+        assert result["validation"]["single_link"] is False
+        assert result["validation"]["backend_error"]
+        # The exemption this type has always had, and the reason it stays: this
+        # refusal carries no side-effect markers of its own.
+        assert "side_effect_committed" not in result
+        assert service._result_requires_quarantine(result) is False
+    finally:
+        service.close()
+
+
+def test_a_redirected_workspace_refusal_does_not_quarantine_the_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The entanglement the changed error type walks into, settled.
+
+    `artifact_validation_failed` is in `_result_requires_quarantine`'s exempt
+    set, so every refusal validation gave used to be spared by name.
+    `unsafe_configured_path` is not in that set, and must not be added to it: the
+    set outranks even `side_effect_status: unknown`, and that type is raised by
+    output writes and ledger appends too, where a side effect may well be in
+    flight. So this refusal earns its exemption the narrow way, by saying what is
+    true of it: it happens before the backend is invoked and nothing was started.
+    Without that, a firmware path under a virtualized `%LOCALAPPDATA%` would put
+    the bench into recovery over an image that never reached the board.
+    """
+    config = load_test_config(tmp_path)
+    workspace = Path(config.work_dir)
+    firmware = workspace / "build" / "firmware.elf"
+    firmware.parent.mkdir()
+    firmware.write_bytes(b"\x7fELFapproved")
+    service = AgenticHILToolService(config)
+    try:
+        virtualize(monkeypatch, workspace, workspace.parent / "package-local-cache")
+        result = service.artifacts.validate_local_path("build/firmware.elf")
+        monkeypatch.undo()
+
+        assert result["error_type"] == "unsafe_configured_path"
+        assert service._result_requires_quarantine(result) is False
+        # The markers are what does it, and this is the shape the exempt set
+        # would have had to cover instead: the same refusal with nothing said
+        # about what was started quarantines on its type alone.
+        assert service._result_requires_quarantine({key: value for key, value in result.items() if not key.startswith("side_effect")}) is True
+    finally:
+        service.close()
+
+
+def test_the_validation_quarantine_exemption_stayed_with_the_marker(tmp_path: Path) -> None:
+    """Why the exempt set did not move, stated as the two answers it gives.
+
+    Holds both ways, and pins the choice. Exempting `unsafe_configured_path` by
+    name would have been the smaller diff and the wrong claim: membership of that
+    set is asserted of every result that ever carries the type, and it is checked
+    before `side_effect_status`, so an unknown hardware effect answered with that
+    type would stop quarantining. The type is general, raised wherever a
+    configured path is refused, including writes that happen after a target has
+    been contacted. `artifact_validation_failed` keeps its place because nothing
+    but artifact validation produces it and validation runs before any backend
+    call.
+    """
+    service = AgenticHILToolService(load_test_config(tmp_path))
+    try:
+        assert service._result_requires_quarantine({"error_type": "unsafe_configured_path"}) is True
+        assert service._result_requires_quarantine({"error_type": "unsafe_configured_path", "side_effect_status": "unknown"}) is True
+        assert (
+            service._result_requires_quarantine(
+                {"error_type": "unsafe_configured_path", "side_effect_committed": False, "side_effect_status": "not_started"}
+            )
+            is False
+        )
+        assert service._result_requires_quarantine({"error_type": "artifact_validation_failed", "side_effect_status": "unknown"}) is False
+    finally:
+        service.close()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="directory junctions are a Windows construct")
 def test_artifact_behind_a_link_that_leaves_the_workspace_is_named_too(tmp_path: Path) -> None:
     # A lexical containment check reports this path as contained, so the

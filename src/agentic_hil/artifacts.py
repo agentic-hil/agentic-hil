@@ -132,6 +132,14 @@ class ArtifactManager:
                 return self._validation_error("Firmware artifact does not exist.", validation, "artifact_not_found")
             data = b""
         except (ConfigError, OSError) as error:
+            # Asked before the object claims below, because a refusal about the
+            # configured workspace establishes nothing about the file: the read
+            # never got as far as looking at it, so writing regular_file: false
+            # would assert a finding nobody made, on top of a summary that sends
+            # the caller to check a file type that was never the problem.
+            permanent = self._permanent_path_refusal(resolved, error, "flash_firmware")
+            if permanent is not None:
+                return {**permanent, "validation": validation}
             validation.update({"regular_file": False, "single_link": False})
             return self._validation_error("Firmware artifact must be a single-link regular file that can be opened safely.", {**validation, "backend_error": str(error)})
         if validation["exists"]:
@@ -264,28 +272,44 @@ class ArtifactManager:
     def _permanent_path_refusal(self, source: Path, error: ConfigError | OSError, tool: str) -> JsonObject | None:
         """The guarded read's own refusal, wherever no retry can lift it.
 
-        `artifact_changed` with `retry_safe: true` is the right answer for a file
-        swapped between validation and staging: build it again or validate it
-        again, and the next attempt goes through. It is the wrong answer for the
-        two refusals that are about the configured workspace rather than about
-        the file. A workspace whose spelling resolves somewhere else, which is
-        what an MSIX AppContainer does to a project under a virtualized
+        The guarded read's refusals arrive at a caller that folds them into one
+        summary of its own: validation says the artifact "must be a single-link
+        regular file that can be opened safely" and leaves the real sentence in
+        `backend_error`. That fold is right about the case it was written for, a
+        file that is not the object it has to be, and wrong about the two
+        refusals that are about the configured workspace rather than about the
+        file. A workspace whose spelling resolves somewhere else, which is what
+        an MSIX AppContainer does to a project under a virtualized
         `%LOCALAPPDATA%`, refuses every read under it for as long as the
-        configuration names that spelling; an artifact validated under one
-        workspace and staged under another leaves the second one lexically.
-        Neither moves because a caller tries again, so a retryable answer there
-        invites a retry that cannot succeed, once and then forever.
+        configuration names that spelling; a path that leaves the workspace is
+        refused because no configuration key relaxes containment. Neither of
+        those moves because a caller tries again, so an answer about the file's
+        type sends an operator to inspect a file that was never the problem,
+        once and then forever.
 
         The workspace decides it, not the artifact's own parent, because
         redirection is a property of the tree: a root that resolves to itself is
         outside a redirected one, and a root that does not takes every path under
         it with it. An ancestor below a healthy workspace that becomes a symlink
-        resolves elsewhere too, and that one is the mid-swap the retryable answer
-        was written for, so it keeps it.
+        resolves elsewhere too, and that one really is about the file, as are a
+        hard link and a directory standing where a file should be, so those keep
+        the summary the caller already gives them.
 
         Both spellings the refusal carries come across with it: `path` is what
         the configuration names, `resolved_parent` is where it lands, and the
-        resolved one is the answer, being the spelling that works.
+        resolved one is the answer, being the spelling that works. The fix comes
+        from the error catalogue through `to_dict`, scoped by the type, so the
+        remediation in the refusal and the one a caller looks up cannot drift
+        apart.
+
+        `side_effect_committed: false` rather than a new member of
+        `_result_requires_quarantine`'s exempt set. That set is a claim about a
+        whole error type, and it outranks even `side_effect_status: unknown`;
+        `unsafe_configured_path` is raised by output writes and ledger appends
+        too, where a side effect may well be in flight, so exempting the type
+        would tell a bench that nothing happened on the strength of a name. The
+        marker is the narrower claim and the true one: this refusal happens
+        before the backend is invoked, so nothing was started here.
         """
         if not isinstance(error, ConfigError) or error.error_type != "unsafe_configured_path":
             return None

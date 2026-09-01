@@ -77,14 +77,19 @@ If Docker is available, run the Linux job before opening a pull request:
 python tools/ci_linux.py
 ```
 
-It clones the committed tree into a container and runs the suite there — about
-ninety seconds, and the count matches the Linux CI job exactly. Uncommitted work
-is not covered, so commit first.
+It clones the committed tree into a container and runs the suite there: five to
+seven minutes for the whole suite, which is 2700-odd tests in one process by
+design, plus the image pull the first time. The count matches the Linux CI job
+exactly. Uncommitted work is not covered, so commit first.
 
-One of these runs at a time per machine. Three or four full-suite containers on
-one Docker daemon starve each other until a run dies without a pytest summary
-line, so a second invocation queues behind the first and says whose run it is
-waiting for. Pass `--no-wait` to refuse instead of queueing.
+One containerised run at a time per machine, and the review loop below is the
+other one. Three or four full-suite containers on one Docker daemon starve each
+other until a run dies without a pytest summary line, and a loop container is
+another container on that daemon, so both tools take the same lock and a second
+invocation of either queues behind whoever has it. The notice repeats while it
+waits, and it says what it is waiting for as well as who: a suite run is
+minutes, a review loop is hours, and that is the difference between queueing and
+coming back later. Pass `--no-wait` to refuse instead of queueing.
 
 If you cannot run it, say in the pull request which tests you did not run.
 
@@ -118,7 +123,9 @@ from the committed tree it works in and rebuilt when that tree's
 against the commit that changed it rather than against the one the run started
 from. It also refuses a repository that would carry your profile into the
 read-write mount, and it exits non-zero when the container's home outlives the
-run, since that home is the one place a copy of a login can be. Its own failures
+run, since that home is the one place a copy of a login can be. It takes the
+same machine-wide lock `tools/ci_linux.py` takes, for as long as its container
+is up, and `--no-wait` refuses instead of queueing here too. Its own failures
 — no Docker, a refused pre-flight, an interrupted run, a container or volume it
 could not remove — all exit `20`, and anything below that is the loop's own code
 passed through unchanged. Because a leaked home volume takes the exit status

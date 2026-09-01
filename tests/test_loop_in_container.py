@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -18,9 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "loopimage"))
 import agent_review_loop  # noqa: E402
 import agent_shim  # noqa: E402
+import ci_linux  # noqa: E402
 import entrypoint  # noqa: E402
 import loop_in_container  # noqa: E402
 import loop_options  # noqa: E402
+import run_lock  # noqa: E402
 
 
 def _epoch_milliseconds(offset: timedelta) -> int:
@@ -748,6 +751,374 @@ def test_a_clean_run_reports_where_a_custom_review_directory_landed(
     captured = capsys.readouterr()
     assert f"reviews    : {repository / 'notes' / 'reviews'}" in captured.out
     assert f"logs       : {repository / '.agentic-loop' / 'logs'}" in captured.out
+
+
+# --- one containerised run at a time per machine ------------------------------
+#
+# A review loop is a container on the same daemon a full-suite run uses, and
+# several of those starve each other until one dies mid-flight. The loop
+# therefore takes the lock `tools/ci_linux.py` takes, on the same file, and
+# holds it for as long as its container is up.
+#
+# What is tested here is the decision, never a container and never a clock: the
+# docker front is faked exactly as the wrapper's other tests fake it, the answer
+# to "is that pid alive" is faked, and the pause between two attempts on the
+# lock is the seam a test drives the queue through. The mechanism itself is
+# `tools/run_lock.py` and is tested against `ci_linux.py` in
+# `tests/test_ci_linux.py`; what these tests are about is that the loop takes
+# the same lock, on the same file, and that a run queued behind either one is
+# told which of the two it is waiting for.
+
+
+def _a_holder(pid: int, **fields: object) -> Path:
+    """Leave a holder record on the shared lock, as a suite run would have.
+
+    A `ci_linux.py` holder by default, because that is the interesting one: the
+    collision this lock exists to prevent is a loop and a suite run on one
+    daemon, and the queue message has to name the run that is actually holding
+    the machine.
+    """
+    record: dict[str, object] = {
+        "version": run_lock.LOCK_RECORD_VERSION,
+        "owner_id": "0123456789abcdef",
+        "pid": pid,
+        "host": socket.gethostname(),
+        "started_at": "2026-09-01T09:12:33Z",
+        "root": "/home/dev/agentic-hil",
+        "tool": ci_linux.TOOL_NAME,
+        "runs_for": ci_linux.RUNS_FOR,
+    }
+    record.update(fields)
+    path = run_lock.lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _only_these_are_running(monkeypatch: pytest.MonkeyPatch, *pids: int) -> None:
+    """The fake liveness: every pid not named here belongs to a process that died."""
+    monkeypatch.setattr(run_lock, "process_is_running", lambda pid: pid in pids)
+
+
+def _never_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lock nobody holds must be taken, not queued on."""
+
+    def refuse(seconds: float) -> None:
+        raise AssertionError("the run waited for a lock it was entitled to break")
+
+    monkeypatch.setattr(run_lock, "wait_for_the_holder", refuse)
+
+
+def _containers_are_counted(monkeypatch: pytest.MonkeyPatch, started: list[list[str]]) -> None:
+    """The container front: record the command instead of running anything."""
+
+    def start(command: list[str], _repository: Path) -> tuple[int, dict[str, str], str | None]:
+        started.append(command)
+        return 0, {}, None
+
+    monkeypatch.setattr(loop_in_container, "stream", start)
+
+
+def test_both_tools_queue_on_the_one_file() -> None:
+    """A lock the other tool cannot see is not a lock.
+
+    The wrapper imports the mechanism rather than carrying one of its own, and
+    the file keeps the name it had when `ci_linux.py` was the only run that took
+    it: a checkout from before the loop shared it queues at that exact path, and
+    a run that queues somewhere else is a run the others cannot see.
+    """
+    assert loop_in_container.RunLock is run_lock.RunLock is ci_linux.RunLock
+    assert loop_in_container.RunLockBusy is run_lock.RunLockBusy is ci_linux.RunLockBusy
+    assert run_lock.lock_path().name == run_lock.LOCK_NAME == "ci-linux.lock"
+
+
+def test_the_loop_holds_the_machine_for_the_whole_container_and_says_what_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not for the moment before it: a lock released at the door would let a
+    full-suite container start while the loop is still on the daemon, which is
+    the starvation this exists to prevent. Asked from inside the running
+    container, a suite run is refused and told what it is waiting for -- the
+    loop, and hours of it rather than minutes, which is the difference between
+    queueing and coming back tomorrow."""
+    repository = _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+    _only_these_are_running(monkeypatch, os.getpid())
+    refusals: list[str] = []
+    held: list[dict] = []
+
+    def while_the_container_runs(_command: list[str], _repository: Path) -> tuple[int, dict[str, str], str | None]:
+        held.append(json.loads(run_lock.lock_path().read_text(encoding="utf-8")))
+        suite_run = run_lock.RunLock(tool=ci_linux.TOOL_NAME, runs_for=ci_linux.RUNS_FOR)
+        try:
+            suite_run.acquire(wait=False)
+        except run_lock.RunLockBusy as busy:
+            refusals.append(str(busy))
+        else:
+            suite_run.release()
+            refusals.append("the machine was free while the loop's container was running")
+        return 0, {}, None
+
+    monkeypatch.setattr(loop_in_container, "stream", while_the_container_runs)
+
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == 0
+
+    assert refusals and f"pid {os.getpid()}" in refusals[0]
+    assert "running tools/loop_in_container.py, which usually takes hours" in refusals[0]
+    # The record names this run in the terms somebody deciding whether to wait
+    # needs: which tool, how long it takes, and which checkout it is working in.
+    assert held == [
+        {
+            "version": run_lock.LOCK_RECORD_VERSION,
+            "owner_id": held[0]["owner_id"],
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "started_at": held[0]["started_at"],
+            "root": repository.as_posix(),
+            "tool": "tools/loop_in_container.py",
+            "runs_for": "hours",
+            "image": "loop:test",
+            "loop_args": ["--task", "x"],
+        }
+    ]
+    assert not run_lock.lock_path().exists()
+
+
+def test_the_loop_queues_behind_a_suite_run_instead_of_starting_a_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other direction, and the reason the two share a file at all. While a
+    live `ci_linux.py` holds the machine, nothing is handed to docker; the wait
+    ends when that run's lock goes away, and only then does the container start.
+    The holder finishing is scripted into the pause between two attempts, so what
+    is asserted is the order of events and not the outcome of a race."""
+    _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+    lock = _a_holder(4242)
+    _only_these_are_running(monkeypatch, 4242)
+    started: list[list[str]] = []
+    _containers_are_counted(monkeypatch, started)
+    containers_started_while_waiting: list[int] = []
+
+    def the_suite_run_finishes(seconds: float) -> None:
+        containers_started_while_waiting.append(len(started))
+        lock.unlink()
+
+    monkeypatch.setattr(run_lock, "wait_for_the_holder", the_suite_run_finishes)
+
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == 0
+
+    assert containers_started_while_waiting == [0]
+    assert len(started) == 1
+    err = capsys.readouterr().err
+    # In this wrapper's own voice, on the stream reserved for it: stdout is the
+    # container's, and a queue notice has to stay tellable from an agent's line.
+    assert "loop_in_container: another run holds the lock: pid 4242" in err
+    # The scale comes from the holder's own record, which is why it is read off
+    # the suite runner's constant here: a re-measurement moves the number in one
+    # place and this stays an assertion about the message rather than about the
+    # minutes.
+    assert f"running tools/ci_linux.py, which usually takes {ci_linux.RUNS_FOR}" in err
+    assert "--no-wait" in err
+
+
+def test_no_wait_refuses_naming_the_holder_and_starts_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The escape for somebody who knows better: refuse, say who has it, leave
+    their lock exactly where it was, and start nothing at all -- not the
+    container, and not the home volume that is created for it. The status is the
+    wrapper's own 20, because a refusal here is "there is no review to report"
+    exactly like a refused pre-flight, and nothing below 20 may ever be
+    something other than the loop's own verdict."""
+    _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+    lock = _a_holder(4242)
+    _only_these_are_running(monkeypatch, 4242)
+    _never_waits(monkeypatch)
+    started: list[list[str]] = []
+    _containers_are_counted(monkeypatch, started)
+    asked_of_docker: list[list[str]] = []
+
+    def record_the_call(command: list[str], _timeout: int = 120) -> subprocess.CompletedProcess:
+        asked_of_docker.append(command)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(loop_in_container, "run_capture", record_the_call)
+
+    refused = loop_in_container.main(["--image", "loop:test", "--no-wait", "--task", "x"])
+
+    assert refused == loop_in_container.EXIT_WRAPPER_FAILED
+    assert started == []
+    assert asked_of_docker == []
+    assert json.loads(lock.read_text(encoding="utf-8"))["pid"] == 4242
+    err = capsys.readouterr().err
+    assert "pid 4242" in err
+    assert "started 2026-09-01T09:12:33Z" in err
+    assert "Refusing, because --no-wait was given" in err
+
+
+def test_no_wait_is_the_wrappers_own_option_and_never_reaches_the_inner_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every option the wrapper does not consume belongs to `agent_review_loop.py`,
+    which has no `--no-wait` and would refuse the run over it."""
+    _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+    _never_waits(monkeypatch)
+    started: list[list[str]] = []
+    _containers_are_counted(monkeypatch, started)
+
+    assert loop_in_container.main(["--image", "loop:test", "--no-wait", "--task", "x"]) == 0
+
+    assert "--no-wait" not in started[0]
+    assert started[0][-2:] == ["--task", "x"]
+
+
+def test_a_lock_left_by_a_dead_holder_does_not_take_the_machine_with_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A crashed suite run must not cost the machine a review loop as well. The
+    lock is removed, the run starts, and the removal is stated: a lock file that
+    disappeared without a word is indistinguishable from one that was never
+    taken."""
+    _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+    lock = _a_holder(4242)
+    _only_these_are_running(monkeypatch, os.getpid())
+    _never_waits(monkeypatch)
+    started: list[list[str]] = []
+    _containers_are_counted(monkeypatch, started)
+
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == 0
+
+    assert len(started) == 1
+    assert not lock.exists()
+    err = capsys.readouterr().err
+    assert "held by pid 4242" in err
+    assert "no longer running" in err
+
+
+def test_a_holder_from_another_machine_is_never_judged_by_a_local_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A home directory can be a roaming share, and a pid means nothing outside
+    the machine that issued it. Here no process at all is running, so judging the
+    record locally would call it dead and start a loop against a suite run that
+    is very much alive."""
+    _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+    _a_holder(4242, host="another-bench")
+    _only_these_are_running(monkeypatch)
+    _never_waits(monkeypatch)
+    started: list[list[str]] = []
+    _containers_are_counted(monkeypatch, started)
+
+    assert loop_in_container.main(["--image", "loop:test", "--no-wait", "--task", "x"]) == loop_in_container.EXIT_WRAPPER_FAILED
+
+    assert started == []
+    err = capsys.readouterr().err
+    assert "another-bench" in err
+    assert "not written on this machine" in err
+
+
+def test_the_machine_goes_back_to_the_queue_even_when_the_wrapper_itself_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The worst ending this wrapper has: interrupted mid-round, and then unable
+    to remove the home volume it copied the logins into. Both are reported and
+    both take the exit status, and neither may leave the machine locked behind a
+    process that has exited -- the next run would break that lock on liveness
+    anyway, but only after saying it found a holder that had crashed, which is
+    not what happened here."""
+    _ready_to_run(monkeypatch, tmp_path)
+    held_while_the_container_ran: list[bool] = []
+
+    def interrupted(_command: list[str], _repository: Path) -> tuple[int, dict[str, str], str | None]:
+        held_while_the_container_ran.append(run_lock.lock_path().exists())
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(loop_in_container, "stream", interrupted)
+    monkeypatch.setattr(
+        loop_in_container,
+        "remove_volume",
+        lambda _docker, name: (_ for _ in ()).throw(RuntimeError(f"could not remove {name}")),
+    )
+
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_WRAPPER_FAILED
+
+    assert held_while_the_container_ran == [True]
+    assert not run_lock.lock_path().exists()
+    assert "could not remove" in capsys.readouterr().err
+
+
+def test_a_container_that_could_not_be_removed_keeps_the_machine_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The one ending the lock must survive. A container still on the daemon is
+    the machine still in use, so a run that cannot confirm its container removed
+    keeps the lock rather than handing it to the next run onto the same daemon --
+    and keeps it in a state that run will not break on liveness. Here no process
+    at all is judged running, so a plain record naming this run's pid would be
+    torn down as stale; only the cleanup-required record it leaves in place of a
+    release can hold the machine, until an operator stops the container by hand."""
+    _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "stream", lambda _command, _repository: (0, {}, None))
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+
+    def stuck(_docker: str, name: str) -> None:
+        raise RuntimeError(f"Docker container {name} still exists after removal")
+
+    monkeypatch.setattr(loop_in_container, "remove_container", stuck)
+    _only_these_are_running(monkeypatch)
+    _never_waits(monkeypatch)
+
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_WRAPPER_FAILED
+
+    path = run_lock.lock_path()
+    assert path.exists()
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record[run_lock.CLEANUP_REQUIRED_FIELD]
+    assert "still exists after removal" in record[run_lock.CLEANUP_REQUIRED_FIELD]
+
+    # The next run cannot take the machine even though the holder's pid is judged
+    # dead, and it is told why rather than left to find a broken lock.
+    contender = run_lock.RunLock(tool=ci_linux.TOOL_NAME, runs_for=ci_linux.RUNS_FOR)
+    with pytest.raises(run_lock.RunLockBusy) as refused:
+        contender.acquire(wait=False)
+    assert "container it could not confirm removed" in str(refused.value)
+    assert path.exists()
+
+    err = capsys.readouterr().err
+    assert f"keeps the lock at {path}" in err
+    assert "still exists after removal" in err
+
+
+def test_only_the_volume_leaking_still_hands_the_machine_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other side of the same decision, so the retention stays scoped to the
+    resource that warrants it. A leftover volume holds a login copy -- reason
+    enough for exit 20 -- but no daemon capacity, so the container being gone
+    means the machine is free and the lock is released as before. The next run
+    takes it immediately."""
+    _ready_to_run(monkeypatch, tmp_path)  # remove_container is a no-op here
+    monkeypatch.setattr(loop_in_container, "stream", lambda _command, _repository: (0, {}, None))
+    monkeypatch.setattr(
+        loop_in_container,
+        "remove_volume",
+        lambda _docker, name: (_ for _ in ()).throw(RuntimeError(f"Docker volume {name} still exists after removal")),
+    )
+    _only_these_are_running(monkeypatch)
+    _never_waits(monkeypatch)
+
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_WRAPPER_FAILED
+
+    path = run_lock.lock_path()
+    assert not path.exists()
+    err = capsys.readouterr().err
+    assert "still exists after removal" in err
+    assert "keeps the lock" not in err
 
 
 # --- a round that cannot finish, and the four other things one run cost -------
