@@ -29,7 +29,7 @@ from conftest import (
     write_config,
 )
 
-from agentic_hil.config import ConfigError, load_config
+from agentic_hil.config import ConfigError, load_config, project_config_directories, project_config_directory
 from agentic_hil.knowledge import (
     BACKENDS,
     CONFIG_SCHEMA_URI,
@@ -332,6 +332,56 @@ def test_a_refused_path_names_the_component_and_a_location_that_works() -> None:
     said = " ".join(refusal["remediation"])
     assert "windows_path_trust" not in said
     assert "untrusted_principals" not in said
+
+
+def test_the_path_table_names_every_root_a_file_can_land_under(service: AgenticHILToolService) -> None:
+    """The table is what a caller quotes when asked where a file lives.
+
+    The configuration's own walk has named two roots since #354 and the record
+    has stood beside both since #358, so a table naming only the platform
+    default is wrong in the one place a caller trusts, and wrong in the
+    direction that hides a bench: a project generated under the fallback would
+    be looked for where it is not. Presence and order are both checked, the
+    order against the walk itself rather than against a second copy of it.
+    """
+    section = read_text(service, PLATFORM_PATHS_URI).split("## Where things go", 1)[1].split("\n## ", 1)[0]
+    cells = {row.split("|")[1].strip(): [cell.strip() for cell in row.split("|")[2:4]] for row in section.splitlines() if row.startswith("| ")}
+
+    # Holds both ways: the walk the table describes, read from the walk. The
+    # platform default first, the root every path refusal recommends after it.
+    assert project_config_directories()[0] == project_config_directory()
+    assert project_config_directories()[-1] == Path(safe_user_root()) / "projects"
+
+    # A table, still: one header and the same four items, in order.
+    assert list(cells) == [
+        "Item",
+        "authoritative configuration",
+        "`state_root`",
+        "record of configurations bound by `AGENTIC_HIL_CONFIG`",
+        "device locks",
+    ]
+    for item, default, fallback in (
+        ("authoritative configuration", "%APPDATA%\\agentic-hil\\projects", "%USERPROFILE%\\.agentic-hil\\projects\\<name>-<digest>\\config.yaml"),
+        ("authoritative configuration", "$XDG_CONFIG_HOME/agentic-hil/projects", "~/.agentic-hil/projects/<name>-<digest>/config.yaml"),
+        ("`state_root`", "%LOCALAPPDATA%\\agentic-hil", "%USERPROFILE%\\.agentic-hil\\state"),
+        ("`state_root`", "$XDG_STATE_HOME/agentic-hil", "~/.agentic-hil/state"),
+        ("record of configurations bound by `AGENTIC_HIL_CONFIG`", "%APPDATA%\\agentic-hil\\external-projects.json", "%USERPROFILE%\\.agentic-hil\\external-projects.json"),
+        ("record of configurations bound by `AGENTIC_HIL_CONFIG`", "$XDG_CONFIG_HOME/agentic-hil/external-projects.json", "~/.agentic-hil/external-projects.json"),
+    ):
+        named = [cell for cell in cells[item] if default in cell]
+        assert len(named) == 1, (item, default, cells[item])
+        assert fallback in named[0], (item, named[0])
+        assert named[0].index(default) < named[0].index(fallback), (item, named[0])
+
+    # The rule that outranks that order, and the one item the order does not
+    # decide, because both of its files can hold a record at once.
+    assert "an existing file wins over it" in section
+    assert cells["record of configurations bound by `AGENTIC_HIL_CONFIG`"] == [
+        "`%APPDATA%\\agentic-hil\\external-projects.json`, and `%USERPROFILE%\\.agentic-hil\\external-projects.json`",
+        "`$XDG_CONFIG_HOME/agentic-hil/external-projects.json`, and `~/.agentic-hil/external-projects.json`",
+    ]
+    # And the one location that has no second root keeps saying so.
+    assert cells["device locks"] == ["`%USERPROFILE%\\.agentic-hil\\device-locks`, fixed", "`~/.agentic-hil/device-locks`, fixed"]
 
 
 def test_the_removed_trust_check_leaves_no_advice_behind_it(tmp_path: Path) -> None:

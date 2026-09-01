@@ -54,8 +54,11 @@ from agentic_hil.config import (
     resolve_stable_directory,
     safe_file_path,
     safe_writable_directory,
+    secure_optional_read_bytes,
+    secure_optional_read_text,
     user_state_root,
 )
+from agentic_hil.configwrite import config_document_snapshot, load_config_document
 from agentic_hil.report import report_state_path
 from agentic_hil.tools import (
     PROJECT_CONFIG_CREATE,
@@ -990,8 +993,8 @@ def test_uninstall_leaves_the_virtualized_default_record_it_cannot_remove(tmp_pa
     """Uninstall must finish after the migration, not crash on what it left (finding 3).
 
     The migration leaves the virtualized default in place and writes a safe
-    fallback beside it. `secure_remove_file` runs its Windows removal through
-    `safe_file_path`, which refuses exactly that record's redirected parent, so
+    fallback beside it. `secure_remove_file` decides whether the file is there
+    with a guarded read, which refuses exactly that record's redirected parent, so
     handing it the default aborted the command after the deny rules were already
     gone. The default is reported under `left_alone` instead, the safe fallback is
     removed, and the deny rules come back cleanly.
@@ -1149,3 +1152,149 @@ def test_uninstall_reports_a_record_removal_it_could_not_do_as_a_failure(tmp_pat
     assert record_removed == [str(fallback_record)]
     assert not fallback_record.exists()
     assert default_record.exists()
+
+
+# ---------------------------------------------------------------------------
+# #361: one contract for a missing file under a parent the enforcer refuses.
+
+
+def redirected_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A directory that is there, opens and reads, and resolves somewhere else.
+
+    The primitive under the profile, without an `init` around it: the checks in
+    this section are about what one guarded read answers, so the tree is built
+    directly and only `resolve` is moved, exactly as the container moves it.
+    """
+    virtual = tmp_path / "virtual-appdata"
+    holder = virtual / "agentic-hil"
+    holder.mkdir(parents=True)
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+    return holder
+
+
+def test_a_missing_file_under_a_redirected_parent_is_refused_not_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The contract, stated on the case that used to answer per platform.
+
+    The file is not there, and "not there" is not something this spelling can
+    establish: the name resolves into another tree, where the file may well be,
+    and every write through this spelling is refused anyway. So the read refuses
+    with both spellings rather than reporting an absence the tree never asserted.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+    missing = holder / "config.yaml"
+
+    with pytest.raises(ConfigError) as refusal:
+        secure_optional_read_bytes(missing)
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["path"] == str(missing)
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+
+
+def test_a_present_file_under_a_redirected_parent_is_refused_the_same_way(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of the same contract, and why absence could not be the one.
+
+    A file that is there was already refused on Windows, and answering absence
+    uniformly would have had to drop that refusal, on the platform the redirection
+    is real on, or leave one parent refusing a present file and calling a missing
+    one absent. The refusal is the answer both cases can share.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+    present = holder / "config.yaml"
+    present.write_bytes(b"version: 3\n")
+
+    with pytest.raises(ConfigError) as refusal:
+        secure_optional_read_bytes(present)
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+
+
+def test_the_answer_is_settled_before_the_platform_branch_is_reached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Why the two platforms cannot drift apart here again.
+
+    `safe_open_binary` is where the split lives: its Windows half consults
+    `safe_file_path` before it looks for the file and its POSIX half never does, so
+    a contract enforced inside it is a contract each platform states for itself.
+    Deciding above it is what makes the answer one answer, and this is the check
+    that says so without needing the other platform to run it: the guarded open is
+    never reached at all.
+    """
+    from agentic_hil import config as config_module
+
+    holder = redirected_directory(tmp_path, monkeypatch)
+    reached: list[Path] = []
+
+    def recording_open(file_path: str | Path, **kwargs: object) -> None:
+        reached.append(Path(file_path))
+        raise AssertionError("the guarded open was reached, so the answer is still the platform's")
+
+    monkeypatch.setattr(config_module, "safe_open_binary", recording_open)
+
+    for candidate, note in ((holder / "missing.yaml", "absent"), (holder / "present.yaml", "there")):
+        if note == "there":
+            candidate.write_bytes(b"version: 3\n")
+        with pytest.raises(ConfigError) as refusal:
+            secure_optional_read_bytes(candidate)
+        assert refusal.value.error_type == "unsafe_configured_path", note
+
+    assert reached == []
+
+
+def test_the_decoded_sibling_inherits_the_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every optional read is the same read, so there is one place to pin.
+
+    `secure_optional_read_text` is `secure_optional_read_bytes` decoded, and the
+    writers, the removal and the sidecar lock all reach the same function, so none
+    of them carries a copy of this rule to drift.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+
+    with pytest.raises(ConfigError) as refusal:
+        secure_optional_read_text(holder / "config.yaml")
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
+
+
+def test_an_absent_file_under_an_ordinary_parent_is_still_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Holds both ways: the optional read is still optional.
+
+    The refusal is about redirection and nothing else. A file that is simply not
+    there, under a directory that names the place it resolves to, is the answer
+    this function exists to give and is unchanged.
+    """
+    ordinary = tmp_path / "ordinary" / "agentic-hil"
+    ordinary.mkdir(parents=True)
+
+    assert secure_optional_read_bytes(ordinary / "config.yaml") is None
+    assert secure_optional_read_text(ordinary / "config.yaml") is None
+    (ordinary / "config.yaml").write_bytes(b"version: 3\n")
+    assert secure_optional_read_bytes(ordinary / "config.yaml") == b"version: 3\n"
+
+
+def test_a_redirected_config_root_is_not_reported_as_an_unconfigured_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The caller this contract is for, and the sentence it stops.
+
+    `config_document_snapshot` separates "the file is not there" from every
+    failure, and `parse_config_document` turns the first into "this workspace has
+    no Agentic HIL configuration to change". An absence answered for a tree that
+    resolves elsewhere arrived as that sentence, which describes an empty profile
+    and sends the reader to create a configuration, while what is actually there
+    is a root whose every write the enforcer refuses. The refusal carries the
+    resolved spelling instead, which is the one line that ends the search.
+    """
+    holder = redirected_directory(tmp_path, monkeypatch)
+    target = holder / "config.yaml"
+
+    raw, failure = config_document_snapshot(target)
+
+    assert raw is None
+    assert isinstance(failure, ConfigError)
+    assert failure.error_type == "unsafe_configured_path"
+
+    with pytest.raises(ConfigError) as refusal:
+        load_config_document(target)
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details["resolved_parent"] == str(tmp_path / "package-roaming-cache" / "agentic-hil")
