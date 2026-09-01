@@ -1,11 +1,11 @@
 # Test plan only. Hardware resources and permissions always come from the
 # discovered external authoritative file or AGENTIC_HIL_CONFIG override.
-# Every step names the configured entry it drives with `device:` — the
+# Every step names the configured entry it drives with `device:`. The
 # configuration knows whether that name is a `debuggers`, a `com_ports` or a
 # `can_buses` entry, so the plan does not have to spell it. The version 2 keys
 # `debugger:`, `port_id:` and `bus_id:` stay valid as readable aliases; a step
 # writes one or the other, never both. `device:` may be omitted on a debugger
-# step while the config declares exactly one probe; with several, name it — e.g.
+# step while the config declares exactly one probe; with several, name it, e.g.
 # a second board as
 #   - {device: dut_b, action: flash, image_path: build/sensor.elf}
 # The CAN steps below only read: the example configuration's `dut_can` is
@@ -57,8 +57,8 @@ steps:
     timeout_s: 5
 
   # What the read is claiming on a bus: which frame, and what it must carry.
-  # `id:` is required — a bus carries every node's traffic, so a payload matched
-  # without saying whose frame it was is a green another ECU can produce — and
+  # `id:` is required (a bus carries every node's traffic, so a payload matched
+  # without saying whose frame it was is a green another ECU can produce), and
   # `id_mask:` widens it into a family where a protocol encodes a node in the
   # low bits. The payload claim reads the payload as hexadecimal, so a `range:`
   # capture is read in that base too. `max_frames` is how many frames one read

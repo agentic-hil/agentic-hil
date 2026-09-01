@@ -156,7 +156,7 @@ def format_report(results: list[dict[str, Any]], output_root: Path | str) -> str
     statuses = group_statuses(results)
     unstable = unstable_groups(results)
     if unstable:
-        lines.extend(["", "Unstable — repetitions disagreed:"])
+        lines.extend(["", "Unstable, repetitions disagreed:"])
         for group in unstable:
             case_id, cli, model, effort = group
             counted = ", ".join(

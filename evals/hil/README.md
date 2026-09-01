@@ -11,12 +11,12 @@ and the hardware half was manual enough that a stale path could sit in it
 unnoticed. What it encoded is here instead:
 
 - [`testconfig.openocd.yaml`](testconfig.openocd.yaml) and
-  [`testconfig.stlink.yaml`](testconfig.stlink.yaml) — the test plans: flash,
+  [`testconfig.stlink.yaml`](testconfig.stlink.yaml), the test plans: flash,
   open the UART, reset-halt a debug session, run to a breakpoint, stop, close.
 - [`config.openocd.template.yaml`](config.openocd.template.yaml) and
-  [`config.stlink.template.yaml`](config.stlink.template.yaml) — authoritative
+  [`config.stlink.template.yaml`](config.stlink.template.yaml): authoritative
   configuration for an STM32 Nucleo-F446RE on an ST-Link, per backend.
-- [`mcp_probe.py`](mcp_probe.py) — a minimal MCP client that speaks
+- [`mcp_probe.py`](mcp_probe.py): a minimal MCP client that speaks
   `initialize` and `tools/list` over stdio.
 
 ## Running this in a container

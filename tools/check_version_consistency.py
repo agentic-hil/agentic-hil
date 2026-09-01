@@ -4,14 +4,14 @@ A version lives in more places than anyone remembers. The release checklist in
 `docs/release-strategy.md` named seven positions; the release that exposed this
 carried a version in twelve files. The two install-eval matrices were among the
 five nobody had written down, and `validate_source_version` in
-`evals/install/runner.py` raises before a run starts, so both matrices —
-including the runner CLI's own default — aborted on every tree newer than the
+`evals/install/runner.py` raises before a run starts, so both matrices
+(including the runner CLI's own default) aborted on every tree newer than the
 0.4.0 they still pinned. That went unnoticed across two releases, because the
 only thing that enforced version agreement ran on `release: published`: after
 the point of no return, since a PyPI version cannot be re-uploaded.
 
 So this is one module rather than a step in a release job. It reads files and
-compares strings — no secret, no OIDC, no tag — which is exactly the shape that
+compares strings (no secret, no OIDC, no tag), which is exactly the shape that
 belongs on a pull request. `.github/workflows/ci.yml` runs it on every push and
 pull request; `.github/workflows/workflow.yml` runs the same code again at
 release with `--release-tag`, the one comparison that genuinely needs a tag.
@@ -19,7 +19,7 @@ release with `--release-tag`, the one comparison that genuinely needs a tag.
 `locations` below is the list. It is not a copy of the checklist: it is the
 check, and `--list` prints it, so `docs/release-strategy.md` can point here
 instead of repeating an enumeration that drifts. `uncovered_files` closes the
-other half — any file carrying the release version that no entry accounts for
+other half: any file carrying the release version that no entry accounts for
 is an error, so a new home for the version cannot appear unnoticed. That sweep
 skips covered files, so a mention shape an entry's extractor cannot see is a
 mention nothing checks: the `agentic-hil@vX.Y.Z` git-tag pin in
@@ -86,7 +86,7 @@ SKILL_METADATA_VERSION = re.compile(r"""^\s*agentic_hil_version:\s*["']([^"']+)[
 CHANGELOG_RELEASE = re.compile(r"^## \[(\d+\.\d+\.\d+)\]", re.MULTILINE)
 EXPECTED_VERSION_FIELD = re.compile(r"""["']expected_version["']\s*:\s*["']([^"']+)["']""")
 # An `@vX.Y.Z` pin: a git tag in an install URL, an action pin, a tag in a
-# release link. The reference the `@` pins — the token before it — decides
+# release link. The reference the `@` pins (the token before it) decides
 # whose version the pin states: only a reference that names this project
 # (`agentic-hil` is the PyPI name, both halves of the repository path, and the
 # organisation any action of ours lives under) states this project's version.
@@ -133,7 +133,7 @@ SKIPPED_DIRECTORIES = frozenset(
     }
 )
 # Generated output and local agent state, by path rather than by name so that
-# ".claude-plugin" — which is content — is not caught with ".claude".
+# ".claude-plugin" (which is content) is not caught with ".claude".
 # ".agentic-loop" holds review documents and agent transcripts from
 # tools/agent_review_loop.py. A transcript quotes whatever the agents discussed,
 # so one that mentions a version is reporting a conversation, not tracking the
@@ -339,7 +339,7 @@ def _tag_pins(root: Path, relative: str) -> tuple[str, ...]:
 
     A different mention shape from a requirement pin: `>=` and `==` state a
     version, a tag pin states a git reference that happens to be one. The
-    first release after this gate shipped proved the difference matters —
+    first release after this gate shipped proved the difference matters:
     `_requirement_pins` counted five occurrences in TROUBLESHOOTING.md and the
     sixth, `agentic-hil@v0.7.0` in a git URL, was invisible.
     """
@@ -602,7 +602,7 @@ def unclaimed_pins(root: Path) -> list[str]:
     """Project-tied `@vX.Y.Z` pins in covered files that no entry states.
 
     `uncovered_files` deliberately skips a covered file, so a mention shape the
-    file's extractors cannot see is checked by nothing — the gap that was
+    file's extractors cannot see is checked by nothing: the gap that was
     found, where a file counted as covered while a pin in it drifted by hand
     through four releases. This is the closing half: every pin of this shape in
     a covered file must carry a version the file's own entries state, which
@@ -611,7 +611,7 @@ def unclaimed_pins(root: Path) -> list[str]:
 
     Two gaps stay open, named rather than closed. A file in UNTRACKED_MENTIONS
     is excused wholesale by its declared reason. And an uncovered file is the
-    sweep's job, which recognises the current release string — so a pin born
+    sweep's job, which recognises the current release string, so a pin born
     already stale in a brand-new file is seen only by
     tools/check_shipped_references.py, and only as a full repository URL in a
     shipped document.
@@ -842,7 +842,7 @@ def render_list(root: Path) -> str:
     release = release_version(root)
     carried = locations(root)
     occurrences = sum(len(location.versions) for location in carried)
-    # Distinct paths, not entries: a file may hold several claims — TROUBLESHOOTING.md
+    # Distinct paths, not entries: a file may hold several claims. TROUBLESHOOTING.md
     # carries requirement pins and a git-tag pin as two entries.
     files = len({location.path for location in carried})
     built = f" (built as {distribution})" if distribution != release else ""

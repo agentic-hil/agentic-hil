@@ -8,7 +8,7 @@ the declared plan in ../testconfig.yaml:
 which says the same four steps in one command and validates every device name,
 permission and session order before the first hardware action. This file is for
 suites that already run pytest and want the hardware check reported through the
-same runner as everything else, so it drives the same tools by hand — the read
+same runner as everything else, so it drives the same tools by hand: the read
 loop below is what a plan's `uart_expect` step does declaratively.
 
 Build the firmware first, then run pytest from this demo directory with
@@ -19,7 +19,7 @@ agentic-hil.config.example.yaml) and the board connected:
     pytest tests/
 
 Without an Agentic HIL configuration the test is skipped; with a configuration but
-no board attached it fails — that is the point of a hardware-in-the-loop test.
+no board attached it fails: that is the point of a hardware-in-the-loop test.
 """
 from __future__ import annotations
 

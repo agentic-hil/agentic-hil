@@ -544,7 +544,7 @@ def run_logged(
 
     The second element is None, "total" or "idle". A provider that stops
     answering leaves a process that is alive and silent, which the total budget
-    only notices at its very end — an hour of wall clock for a run that died in
+    only notices at its very end: an hour of wall clock for a run that died in
     its first seconds. The idle budget stops that in minutes.
     """
     process = subprocess.Popen(
@@ -637,7 +637,7 @@ REASONING_TOKEN_PATTERN = re.compile(r'"(reasoning_output_tokens|reasoning_token
 STALLS_BEFORE_UNCAPPED = 2
 # Two runs of one agent share one login file on this machine. A provider rotates
 # the refresh token when it hands out a new one, so a concurrent write-back can
-# leave the copy here rejected — which is how a stored login was lost once
+# leave the copy here rejected, which is how a stored login was lost once
 # already. Writing back is serialized; the runs themselves are not.
 _LOGIN_WRITE_BACK = threading.Lock()
 

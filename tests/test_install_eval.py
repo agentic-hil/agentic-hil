@@ -1840,7 +1840,7 @@ def test_disagreeing_repetitions_are_reported_as_unstable() -> None:
     assert unstable_groups(agreeing + disagreeing) == [("quickstart", "opencode", "m", "default")]
 
     report = format_report(agreeing + disagreeing, Path("out"))
-    assert "Unstable — repetitions disagreed:" in report
+    assert "Unstable, repetitions disagreed:" in report
     assert "quickstart | opencode m (default): 1x failed, 1x passed" in report
 
 
