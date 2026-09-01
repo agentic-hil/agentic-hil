@@ -91,6 +91,15 @@ LOCK_POLL_INTERVAL_S = 2.0
 # instead, repeating who holds the lock so a wait can never be mistaken for a
 # hang. `--no-wait` is the way out for somebody who knows better.
 LOCK_NOTICE_INTERVAL_S = 60.0
+# The one field that turns a holder record into a machine no run may take over.
+# A run that exits with a container it could not confirm gone leaves it: the
+# daemon is still in use, but the pid that held the lock is about to die, and a
+# plain record naming a dead pid is exactly what the next run breaks on liveness
+# -- onto a daemon the leftover container never left, the starvation this whole
+# file exists to prevent. `stale_reason` never breaks a record carrying this,
+# and `holder_notice` explains it: it is cleared by an operator who has stopped
+# the container, never automatically.
+CLEANUP_REQUIRED_FIELD = "cleanup_required"
 
 # Windows, where `os.kill(pid, 0)` is not a liveness probe: CPython maps every
 # signal other than the console events onto TerminateProcess, so asking that
@@ -266,6 +275,17 @@ def holder_notice(record: dict | None, path: Path | None = None) -> str:
             "remove the file by hand"
         )
     text = f"another run holds the lock: {describe_holder(record)}"
+    cleanup = record.get(CLEANUP_REQUIRED_FIELD)
+    if cleanup:
+        # Judged before version or host, because the reason it may not be taken
+        # over is neither of those: a run left a container it could not confirm
+        # removed, so the machine is in use however dead the pid now looks. The
+        # only way out is an operator who has stopped that container.
+        return (
+            f"{text}. That run exited with a container it could not confirm removed, so the machine is still in "
+            f"use and this lock is not taken over from here: {cleanup} Once no container of these tools is "
+            "running, remove the lock file by hand"
+        )
     if record.get("version") != LOCK_RECORD_VERSION:
         return f"{text}. That record was written by a different version of this tool, so its holder is not judged from here"
     if not written_on_this_machine(record):
@@ -294,8 +314,17 @@ def stale_reason(record: dict | None, path: Path) -> str | None:
     operator removes the file by hand, rather than ever being taken over from
     here. Breaking one on age alone is the double-acquire this whole mechanism
     exists to prevent.
+
+    A record marked cleanup-required is never broken either, and for the sharper
+    version of the same reason: its holder is provably gone -- the pid is dead --
+    and the machine is still in use anyway, because the run that left it could not
+    confirm its container removed. Liveness is exactly the wrong question there,
+    so it is not asked; an operator stops the container and clears the file (see
+    `RunLock.retain_for_cleanup`).
     """
     if record is None:
+        return None
+    if record.get(CLEANUP_REQUIRED_FIELD):
         return None
     if record.get("version") != LOCK_RECORD_VERSION:
         return None
@@ -526,6 +555,49 @@ class RunLock:
         if self._is_ours():
             with suppress(OSError):
                 os.unlink(self.path)
+
+    def retain_for_cleanup(self, detail: str) -> None:
+        """Keep the machine held when a container may still be on the daemon.
+
+        The one exit `release` must not take. `release` deletes the record, and a
+        deleted record is a free machine: the next run takes it and starts a
+        second container on a daemon the first one's container never left. Simply
+        declining to delete is not enough -- this process is about to exit, and
+        the next run judges a record whose pid is no longer running stale and
+        breaks it (see `stale_reason`). So the record is rewritten in place to one
+        carrying `CLEANUP_REQUIRED_FIELD`, which neither `stale_reason` nor a
+        waiting acquirer will take over: the machine stays held until an operator
+        stops the leftover container and removes the file by hand. `detail` is
+        what that operator, and the next run's queue notice, are told about it.
+
+        The rewrite is atomic -- a whole record staged and `os.replace`d over the
+        lock, so no reader catches the file mid-write -- and it runs while this
+        process is still alive, so a contender either reads the live pid before it
+        or the cleanup mark after it, never a dead pid without the mark. Called
+        from a cleanup path that must not raise: if the record is no longer this
+        run's, or the rewrite fails, the file is left as it stands and the reason
+        is announced.
+        """
+        if not self.held:
+            return
+        self.held = False
+        if not self._is_ours():
+            return
+        record = dict(self.record)
+        record[CLEANUP_REQUIRED_FIELD] = detail
+        staging = self.path.with_name(f"{self.path.name}.{self.record['owner_id']}.cleanup")
+        try:
+            descriptor = os.open(staging, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, indent=2) + "\n")
+            os.replace(staging, self.path)
+        except OSError as error:
+            with suppress(OSError):
+                os.unlink(staging)
+            self.announce(
+                f"could not mark the lock at {self.path} as needing cleanup ({error}); it is left as it stands, "
+                "so the next run may break it on liveness. Stop any leftover container and remove the file by hand"
+            )
 
     def _create(self) -> bool:
         """Try to become the holder by publishing a complete record atomically.

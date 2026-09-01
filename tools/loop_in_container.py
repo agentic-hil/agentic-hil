@@ -44,7 +44,9 @@ one `tools/ci_linux.py` takes: `run_lock.py` beside this file, on
 `~/.agentic-hil/ci-linux.lock`. A review loop is a container on the same daemon
 as a full-suite run, and several of those starve each other until one dies
 mid-flight, so this run queues behind whoever holds the machine and holds it
-itself for exactly as long as its own container is up. A loop is the long end of
+itself for exactly as long as its own container is up -- and, in the one ending
+where the container cannot be confirmed removed, until an operator stops it, for
+the machine is still in use however that run exited. A loop is the long end of
 that queue: it runs for hours where a suite run is minutes, so its record says
 so, and whoever waits for it is told what it is waiting for rather than left to
 guess. ``--no-wait`` refuses instead of queueing.
@@ -742,6 +744,13 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as error:
         announce(f"the lock at {lock.path} could not be taken: {error}")
         return EXIT_WRAPPER_FAILED
+    # Set true only if the container could not be confirmed removed. The lock is
+    # released at the end for every other ending, but not that one: a container
+    # still on the daemon is the machine still in use, and handing it to the next
+    # run is the starvation the lock exists to prevent. Bound here so the outer
+    # finally can read it however the run ends, including a volume-create failure
+    # that returns before the container is ever started.
+    container_unresolved = False
     try:
         token = uuid.uuid4().hex[:12]
         container_name = f"agentic-hil-loop-{token}"
@@ -784,6 +793,13 @@ def main(argv: list[str] | None = None) -> int:
                     remove(docker, name)
                 except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                     remaining.append(f"{kind} {name}: {type(error).__name__}: {error}")
+                    # The container is the resource whose survival keeps the
+                    # machine in use; a leftover volume holds a login copy but no
+                    # daemon capacity. Only the first decides whether the lock may
+                    # be released. `remove_container` raises when the container
+                    # still exists after removal or Docker cannot confirm it gone.
+                    if remove is remove_container:
+                        container_unresolved = True
 
         if failure is not None and inner not in (None, 0):
             print(
@@ -803,17 +819,38 @@ def main(argv: list[str] | None = None) -> int:
             # leaves it behind is not a run that succeeded, whatever the loop
             # returned, so this is never folded into the loop's own exit code -- and
             # the loop's code is on stderr above rather than lost to this one.
-            print(
+            note = (
                 "\nerror: this run left Docker resources behind, and the home volume is where the logins were "
-                "copied to:\n  " + "\n  ".join(remaining) + "\nRemove them by hand.",
-                file=sys.stderr,
+                "copied to:\n  " + "\n  ".join(remaining) + "\nRemove them by hand."
             )
+            if container_unresolved:
+                # The container could still be on the daemon, so the machine is
+                # still in use: this run keeps its lock rather than releasing it
+                # onto the next run, and keeps it in a state that run will not
+                # break on liveness. See the outer finally and RunLock.retain_for_cleanup.
+                note += (
+                    f"\nA container could not be confirmed removed, so this run keeps the lock at {lock.path} "
+                    "rather than handing the machine to the next run onto a daemon the container is still on. "
+                    "Stop the container, then remove that file by hand."
+                )
+            print(note, file=sys.stderr)
             return EXIT_WRAPPER_FAILED
         if inner is None:
             return EXIT_WRAPPER_FAILED
         return inner
     finally:
-        lock.release()
+        # The machine goes back to the queue for every ending but one: a container
+        # that could not be confirmed removed is the machine still in use, and
+        # releasing the lock there starts the next run's container beside it. That
+        # exit keeps the lock instead, in a cleanup-required state the next run
+        # will not break on liveness; every other exit releases it as before.
+        if container_unresolved:
+            lock.retain_for_cleanup(
+                "tools/loop_in_container.py exited with a container it could not confirm removed: "
+                + "; ".join(remaining)
+            )
+        else:
+            lock.release()
 
 
 if __name__ == "__main__":  # pragma: no cover - entry point

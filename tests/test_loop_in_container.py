@@ -1052,6 +1052,75 @@ def test_the_machine_goes_back_to_the_queue_even_when_the_wrapper_itself_fails(
     assert "could not remove" in capsys.readouterr().err
 
 
+def test_a_container_that_could_not_be_removed_keeps_the_machine_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The one ending the lock must survive. A container still on the daemon is
+    the machine still in use, so a run that cannot confirm its container removed
+    keeps the lock rather than handing it to the next run onto the same daemon --
+    and keeps it in a state that run will not break on liveness. Here no process
+    at all is judged running, so a plain record naming this run's pid would be
+    torn down as stale; only the cleanup-required record it leaves in place of a
+    release can hold the machine, until an operator stops the container by hand."""
+    _ready_to_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "stream", lambda _command, _repository: (0, {}, None))
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
+
+    def stuck(_docker: str, name: str) -> None:
+        raise RuntimeError(f"Docker container {name} still exists after removal")
+
+    monkeypatch.setattr(loop_in_container, "remove_container", stuck)
+    _only_these_are_running(monkeypatch)
+    _never_waits(monkeypatch)
+
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_WRAPPER_FAILED
+
+    path = run_lock.lock_path()
+    assert path.exists()
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record[run_lock.CLEANUP_REQUIRED_FIELD]
+    assert "still exists after removal" in record[run_lock.CLEANUP_REQUIRED_FIELD]
+
+    # The next run cannot take the machine even though the holder's pid is judged
+    # dead, and it is told why rather than left to find a broken lock.
+    contender = run_lock.RunLock(tool=ci_linux.TOOL_NAME, runs_for=ci_linux.RUNS_FOR)
+    with pytest.raises(run_lock.RunLockBusy) as refused:
+        contender.acquire(wait=False)
+    assert "container it could not confirm removed" in str(refused.value)
+    assert path.exists()
+
+    err = capsys.readouterr().err
+    assert f"keeps the lock at {path}" in err
+    assert "still exists after removal" in err
+
+
+def test_only_the_volume_leaking_still_hands_the_machine_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other side of the same decision, so the retention stays scoped to the
+    resource that warrants it. A leftover volume holds a login copy -- reason
+    enough for exit 20 -- but no daemon capacity, so the container being gone
+    means the machine is free and the lock is released as before. The next run
+    takes it immediately."""
+    _ready_to_run(monkeypatch, tmp_path)  # remove_container is a no-op here
+    monkeypatch.setattr(loop_in_container, "stream", lambda _command, _repository: (0, {}, None))
+    monkeypatch.setattr(
+        loop_in_container,
+        "remove_volume",
+        lambda _docker, name: (_ for _ in ()).throw(RuntimeError(f"Docker volume {name} still exists after removal")),
+    )
+    _only_these_are_running(monkeypatch)
+    _never_waits(monkeypatch)
+
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_WRAPPER_FAILED
+
+    path = run_lock.lock_path()
+    assert not path.exists()
+    err = capsys.readouterr().err
+    assert "still exists after removal" in err
+    assert "keeps the lock" not in err
+
+
 # --- a round that cannot finish, and the four other things one run cost -------
 
 

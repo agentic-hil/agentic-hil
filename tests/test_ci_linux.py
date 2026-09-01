@@ -446,6 +446,61 @@ def test_a_lock_left_by_a_dead_holder_is_broken_and_the_reason_is_said(
     assert "no longer running" in err
 
 
+def test_a_cleanup_required_lock_is_not_broken_though_its_holder_is_dead(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The exception to the rule above, and the sharper version of it. A run that
+    exited with a container it could not confirm removed leaves this record: the
+    pid is provably dead, and the machine is still in use anyway. Liveness is the
+    wrong question, so it is not asked -- the record is left standing, the run is
+    refused, and the notice sends an operator to stop the container and clear the
+    file rather than reporting a crashed holder that was broken automatically."""
+    lock = a_lock_held_by(4242, cleanup_required="container agentic-hil-loop-abc still exists after removal")
+    only_these_are_running(monkeypatch)  # 4242 is dead, and so is every other pid
+    captured = stub_docker(monkeypatch)
+    never_waits(monkeypatch)
+
+    assert ci_linux.main(["--no-wait"]) == ci_linux.EXIT_LOCKED
+
+    assert captured == []
+    assert lock.exists()
+    err = capsys.readouterr().err
+    assert "container it could not confirm removed" in err
+    assert "still exists after removal" in err
+    assert "remove the lock file by hand" in err
+
+
+def test_retain_for_cleanup_leaves_a_record_the_next_run_will_not_take(
+    a_machine_of_this_tests_own: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write side of the same story, tested against the mechanism directly. A
+    held lock, transitioned for cleanup, becomes a record that survives its
+    holder and is never broken on liveness -- so a second RunLock, finding every
+    pid dead, still cannot acquire it."""
+    holder = run_lock.RunLock(tool=ci_linux.TOOL_NAME, runs_for=ci_linux.RUNS_FOR)
+    holder.acquire(wait=False)
+    assert run_lock.lock_path().exists()
+
+    holder.retain_for_cleanup("container agentic-hil-loop-xyz still exists after removal")
+    record = json.loads(run_lock.lock_path().read_text(encoding="utf-8"))
+    assert record[run_lock.CLEANUP_REQUIRED_FIELD] == "container agentic-hil-loop-xyz still exists after removal"
+    # The record still names the run that left it, so the notice can say who and what.
+    assert record["pid"] == os.getpid()
+    assert record["tool"] == ci_linux.TOOL_NAME
+
+    only_these_are_running(monkeypatch)  # nothing alive, so only the mark can hold it
+    contender = run_lock.RunLock()
+    with pytest.raises(run_lock.RunLockBusy):
+        contender.acquire(wait=False)
+    assert run_lock.stale_reason(record, run_lock.lock_path()) is None
+    assert run_lock.lock_path().exists()
+
+    # A later release from the holder must not delete a machine it no longer holds:
+    # retain_for_cleanup gave it up, so release is a no-op and the record stays.
+    holder.release()
+    assert run_lock.lock_path().exists()
+
+
 @pytest.mark.parametrize("age_seconds", [0.0, 600.0])
 def test_an_empty_lock_file_is_never_broken_however_long_it_has_sat(
     age_seconds: float, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
