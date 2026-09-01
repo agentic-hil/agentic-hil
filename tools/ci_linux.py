@@ -130,6 +130,17 @@ LOCK_POLL_INTERVAL_S = 2.0
 # holds the lock so a wait can never be mistaken for a hang. `--no-wait` is the
 # way out for somebody who knows better.
 LOCK_NOTICE_INTERVAL_S = 60.0
+# The longest a live run is given between publishing the lock path and writing
+# its record into it. `_create` does the two back to back, so any real gap is
+# milliseconds; the margin is wide only so a run publishing under load -- or one
+# on an older checkout that creates outside this machine's guard, where the
+# guard cannot serialise its write against another run's read -- is never
+# mistaken for a holder that died mid-write. An empty file younger than this is
+# read as a write in progress and waited on; only one that has sat empty past it
+# is judged abandoned and removed. Erring long only delays reclaiming a truly
+# dead empty lock, which no run was going to take anyway; erring short is the
+# double-acquire this whole mechanism exists to prevent.
+EMPTY_LOCK_GRACE_S = 10.0
 
 # Windows, where `os.kill(pid, 0)` is not a liveness probe: CPython maps every
 # signal other than the console events onto TerminateProcess, so asking that
@@ -412,6 +423,32 @@ def holder_notice(record: dict | None) -> str:
     return text
 
 
+def _empty_lock_is_still_being_written(path: Path) -> bool:
+    """Whether an empty or unreadable lock file is young enough to be a holder
+    still writing its record rather than one that died mid-write.
+
+    A create publishes the path and then writes the record into it; a reader
+    catching that instant sees no record and cannot tell a write in progress
+    from an abandoned one. The machine guard serialises this run's own create
+    against its own reads, but a run on an older checkout that creates outside
+    the guard writes where this guard does not reach, so an empty file another
+    run just published can still be read here -- and only the file's age tells
+    a live publication from a dead one. The age is read from the modification
+    time, set when the create makes the path and untouched until the record
+    lands, so the clock starts at publication rather than at this read. A file
+    already gone is not being written; a stat that fails for any other reason is
+    left alone, because treating an unreadable file as breakable is the unsafe
+    direction.
+    """
+    try:
+        published_at = path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return (time.time() - published_at) < EMPTY_LOCK_GRACE_S
+
+
 def stale_reason(record: dict | None, path: Path) -> str | None:
     """Why this lock may be broken, or None if it may not be.
 
@@ -420,8 +457,16 @@ def stale_reason(record: dict | None, path: Path) -> str | None:
     is no longer running. Everything else is somebody else's lock, including a
     record from another machine and a record written by a version of this tool
     that this one does not understand.
+
+    An empty or unreadable file is only judged abandoned once it has aged past
+    the publication window: a file that has just appeared may be a run -- this
+    one's or an older checkout's, guarded or not -- part way through its own
+    create, and breaking it would delete a record that is about to name a live
+    holder. That case is waited on, not removed.
     """
     if record is None:
+        if _empty_lock_is_still_being_written(path):
+            return None
         return f"the lock file at {path} carries no readable holder record, so it is being removed"
     if record.get("version") != CI_LOCK_RECORD_VERSION:
         return None

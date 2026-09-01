@@ -33,6 +33,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -444,15 +445,20 @@ def test_a_lock_left_by_a_dead_holder_is_broken_and_the_reason_is_said(
     assert "no longer running" in err
 
 
-def test_a_lock_file_that_says_nothing_is_broken_and_the_reason_is_said(
+def test_a_lock_file_that_says_nothing_is_broken_once_it_has_aged(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     """The other way a lock outlives its run: the file was created and its
     holder died before describing itself. There is nobody to name and nobody to
-    check, and a file in that state can only be removed."""
+    check, and a file in that state can only be removed -- but only once it has
+    sat empty long enough to be a dead mid-write holder rather than a run still
+    publishing its record right now. Aged well past that window here, it is
+    broken at once and the reason is said."""
     lock = ci_linux.ci_lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("", encoding="utf-8")
+    long_dead = time.time() - ci_linux.EMPTY_LOCK_GRACE_S - 60
+    os.utime(lock, (long_dead, long_dead))
     captured = stub_docker(monkeypatch)
     never_waits(monkeypatch)
 
@@ -460,6 +466,26 @@ def test_a_lock_file_that_says_nothing_is_broken_and_the_reason_is_said(
 
     assert len(captured) == 1
     assert "carries no readable holder record" in capsys.readouterr().err
+
+
+def test_a_fresh_empty_lock_is_a_write_in_progress_not_a_stale_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same empty file, but just published: a run part way through its own
+    create, seen in the instant between the path appearing and its record being
+    written. This one may not be broken -- its writer is about to name a live
+    holder -- so a `--no-wait` run refuses rather than deleting it, and the file
+    is left exactly where it was for the writer to finish."""
+    lock = ci_linux.ci_lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("", encoding="utf-8")  # mtime is now: a fresh publication
+    captured = stub_docker(monkeypatch)
+    never_waits(monkeypatch)
+
+    assert ci_linux.main(["--no-wait"]) == ci_linux.EXIT_LOCKED
+
+    assert captured == []
+    assert lock.exists() and lock.read_text(encoding="utf-8") == ""
 
 
 def test_no_wait_refuses_naming_the_holder_and_starts_nothing(
@@ -776,6 +802,121 @@ def test_a_partial_first_write_is_never_taken_for_a_stale_lock(
     assert verdicts.get("contender") == "busy"
     surviving = json.loads(ci_linux.ci_lock_path().read_text(encoding="utf-8"))
     assert surviving["pid"] == os.getpid()
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="models an older checkout's POSIX create -- O_EXCL then a separate write with the file handle held open across the window; Windows refuses to unlink a file that has an open handle, so the break this stages to catch is not the one that would ship there",
+)
+def test_an_older_checkouts_unguarded_create_is_never_taken_for_a_stale_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mixed-checkout form of the publication race. The machine guard only
+    serialises the runs that take it, and the lock file is shared across every
+    checkout on the machine: an older one publishes its record with `O_EXCL` and
+    a separate write without ever touching this guard. A run on this checkout
+    that reads that empty file in the instant before its record lands must not
+    judge it stale, break it, and start a second container against a creator
+    that is about to return holding the lock.
+
+    Staged, not raced. An unguarded creator -- standing in for the older
+    checkout -- publishes the empty file and waits until the contender has made
+    its call on it. The contender is a real run on this checkout. Under the fix
+    it reads the fresh empty file as a write in progress and refuses, and the
+    creator then finishes, confirms its own record and holds: exactly one
+    acquisition. Were the file's age ignored -- the bug this catches -- the
+    contender would call it stale and break it; the break is held until the
+    creator has confirmed and returned holding the lock, so it would delete a
+    live record and acquire on top of it, two holders, which the assertions
+    reject.
+    """
+    only_these_are_running(monkeypatch, os.getpid())
+    path = ci_linux.ci_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    legacy_record = {
+        "version": ci_linux.CI_LOCK_RECORD_VERSION,
+        "owner_id": "feedfacecafebeef",
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started_at": "2026-09-01T09:12:33Z",
+        "root": "/home/dev/older-checkout",
+        "image": "python:3.12",
+        "pytest_args": ["-q"],
+    }
+
+    empty_published = threading.Event()
+    contender_made_its_call = threading.Event()
+    creator_holds = threading.Event()
+
+    real_stale_reason = ci_linux.stale_reason
+
+    def stale_reason_that_marks_the_contenders_call(record: dict | None, judged_path: Path) -> str | None:
+        # The contender's verdict on the empty file, whichever way it goes:
+        # `None` under the fix (a write in progress, left alone) or a reason
+        # under the bug (stale, to be broken). Announcing that the call has been
+        # made -- not which way -- lets the unguarded creator finish its write
+        # without waiting on a break the fix never performs.
+        verdict = real_stale_reason(record, judged_path)
+        contender_made_its_call.set()
+        return verdict
+
+    monkeypatch.setattr(ci_linux, "stale_reason", stale_reason_that_marks_the_contenders_call)
+
+    real_break = ci_linux.RunLock._break
+
+    def break_that_waits_for_the_creator_to_hold(self: ci_linux.RunLock) -> None:
+        # Reached only on the buggy path, where the contender judged the fresh
+        # empty file stale. Holding here until the creator has confirmed its own
+        # record and returned holding the lock is what turns the window into the
+        # two-holder outcome the assertion rejects; the fix never lets the
+        # contender read this file as stale, so this never runs.
+        creator_holds.wait(timeout=10)
+        real_break(self)
+
+    monkeypatch.setattr(ci_linux.RunLock, "_break", break_that_waits_for_the_creator_to_hold)
+
+    verdicts: dict[str, str] = {}
+    record_verdict = threading.Lock()
+
+    def be_the_unguarded_creator() -> None:
+        # An older checkout's create: `O_EXCL` to publish the path, then a
+        # separate write of the record -- and never the machine guard.
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        empty_published.set()
+        contender_made_its_call.wait(timeout=10)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(legacy_record, indent=2) + "\n")
+        # The create's confirming read: the record on disk is still this
+        # creator's, so it holds; any takeover would have to come after.
+        held = ci_linux.read_lock_record(path) == legacy_record
+        with record_verdict:
+            verdicts["creator"] = "held" if held else "lost"
+        creator_holds.set()
+
+    def be_the_contender() -> None:
+        empty_published.wait(timeout=10)
+        run = ci_linux.RunLock()
+        try:
+            run.acquire(wait=False)
+            outcome = "held" if run.held else "busy"
+        except ci_linux.RunLockBusy:
+            outcome = "busy"
+        with record_verdict:
+            verdicts["contender"] = outcome
+
+    creator = threading.Thread(target=be_the_unguarded_creator, name="creator")
+    contender = threading.Thread(target=be_the_contender, name="contender")
+    creator.start()
+    contender.start()
+    for thread in (creator, contender):
+        thread.join(timeout=15)
+
+    assert not creator.is_alive() and not contender.is_alive()
+    assert verdicts.get("creator") == "held"
+    assert verdicts.get("contender") == "busy"
+    surviving = json.loads(path.read_text(encoding="utf-8"))
+    assert surviving["owner_id"] == legacy_record["owner_id"]
 
 
 def test_asking_whether_a_process_runs_must_not_end_it() -> None:
