@@ -835,8 +835,8 @@ def test_the_reference_describes_the_shape_of_a_configuration() -> None:
     for section in config_schema()["properties"]:
         assert f"### `{section}`" in document, section
     # Which two are required, and a case worked through rather than described.
-    assert "workspace_root` — required" in document
-    assert "state_root` — required" in document
+    assert "workspace_root` (required)" in document
+    assert "state_root` (required)" in document
     assert "## A worked example" in document
     assert "066AFF495451885087171450" in document and "stm32f446re" in document
 
@@ -865,7 +865,7 @@ def test_the_reference_scopes_the_ratchet_to_the_call_it_holds_for() -> None:
     which call the direction belongs to and what the other one does."""
     document = (read_resource(CONFIG_SHAPE_URI) or {})["text"]
 
-    assert "### Permissions move one way — through `project_config_set`" in document
+    assert "### Permissions move one way: through `project_config_set`" in document
     assert "### What the ratchet does not cover" in document
     assert "the MCP permission-write path can only narrow" in document
     # Regeneration, described as it behaves rather than as the ratchet — and at
