@@ -62,7 +62,7 @@ import socket
 import subprocess
 import sys
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -111,6 +111,13 @@ EXIT_LOCKED = 5
 # file never leaves the machine that wrote it.
 CI_LOCK_ROOT_NAME = ".agentic-hil"
 CI_LOCK_NAME = "ci-linux.lock"
+# A second file beside the lock, and a different kind of thing: never a record,
+# never removed, holding nobody. Runs take a machine-wide OS lock on it for the
+# split second in which a dead lock is read, judged and replaced, so that step
+# is indivisible across every run on this machine. The record lock says *who*
+# holds the machine; this one serialises the one moment two runs could each undo
+# the other's takeover. See `_machine_wide_guard`.
+CI_LOCK_GUARD_NAME = "ci-linux.lock.guard"
 # Bumped when a reader of this file could otherwise misread it. An unknown
 # version is never judged stale: a newer checkout of this repository running
 # beside an older one is an ordinary day here, and the older one must queue
@@ -437,6 +444,62 @@ def wait_for_the_holder(seconds: float) -> None:
     time.sleep(seconds)
 
 
+def _lock_fd_exclusive(descriptor: int) -> None:
+    """Block until this process holds `descriptor`'s exclusive lock.
+
+    POSIX `flock` and Windows `msvcrt.locking` are chosen for the one property
+    that makes the guard safe: the operating system drops the lock when the
+    descriptor is closed *or the process exits*, crash included. There is
+    therefore no stale guard to break in turn -- the failure the record lock
+    goes to such lengths to detect cannot happen here, because a dead holder of
+    this lock is not holding it. The lock is advisory and the descriptor is
+    private to this process; nothing outside this tool ever sees it.
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        # `locking` works from the current offset; a byte at the start is the
+        # whole of it. LK_LOCK blocks, retrying, until the byte is free. A run
+        # holds the guard only for the moment of a takeover, so the wait a
+        # contender sees here is that moment, not a queued suite.
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+
+@contextmanager
+def _machine_wide_guard(path: Path):
+    """Hold the machine-wide guard for the length of the `with` block.
+
+    Reading the holder record, judging it dead and replacing it has to be one
+    indivisible step. It is not, on its own: two runs that both find the same
+    dead holder each remove the file and each create it, and the one that
+    returns first is holding a lock the second is about to delete out from under
+    it -- two containers on one daemon, the single outcome this file exists to
+    prevent. `O_EXCL` cannot close that window, because the loser's confirming
+    read comes after the winner has already been told it holds the lock.
+
+    So the takeover runs under an OS lock that only one run on the machine can
+    hold at a time. It is deliberately not the record lock grown a second job:
+    that one must survive this process to name a running container to the next
+    run, and this one must not survive it at all. An empty sentinel both runs
+    open by the same path, locked and released by the kernel, is the whole of
+    it. The file is created if absent and never removed; it carries nothing to
+    remove.
+    """
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        _lock_fd_exclusive(descriptor)
+        yield
+    finally:
+        # Closing the descriptor releases the OS lock; the sentinel file stays.
+        os.close(descriptor)
+
+
 class RunLockBusy(RuntimeError):
     """Somebody else holds the machine, and the refusal names them."""
 
@@ -450,17 +513,27 @@ class RunLock:
 
     Ownership is the existence of the lock file, created with `O_EXCL` so two
     runs cannot both create it, and carrying the record that lets a contender
-    name the holder or judge it dead. It is not the operating system's advisory
-    lock the bench mutex uses: this script is standalone by design, it runs from
-    checkouts that may not even be installed, and a pid in a file is a promise
-    it can keep with the standard library alone. The cost of that choice is
-    exactly one case, spelled out where it is paid: a holder that crashed and
-    whose pid has since been reused looks alive, and the next run queues instead
-    of starting. It waits; it never runs twice.
+    name the holder or judge it dead. The record is a pid in a file rather than
+    an OS lock held for the whole run, on purpose: this script is standalone by
+    design, it runs from checkouts that may not even be installed, and a run has
+    to be able to say *which* checkout is holding the machine to somebody
+    reading a queued run -- a whole-run flock names nobody. The cost of that
+    choice is exactly one case, spelled out where it is paid: a holder that
+    crashed and whose pid has since been reused looks alive, and the next run
+    queues instead of starting. It waits; it never runs twice.
+
+    The one step the record cannot make atomic on its own -- reading a holder,
+    judging it dead, and replacing it -- runs under a short-lived OS lock that
+    the kernel releases the instant this process exits (see
+    `_machine_wide_guard`). That guard is not the bench mutex and not the record
+    lock; it is held for the moment of a takeover and for nothing else.
     """
 
     def __init__(self, *, path: Path | None = None, root: Path | None = None, image: str = "", pytest_args: list[str] | None = None):
         self.path = ci_lock_path() if path is None else path
+        # The guard lives beside the record lock, so a test that redirects one
+        # by pointing `path` elsewhere redirects the other with it.
+        self.guard_path = self.path.with_name(CI_LOCK_GUARD_NAME)
         self.record = {
             "version": CI_LOCK_RECORD_VERSION,
             "owner_id": secrets.token_hex(8),
@@ -483,25 +556,41 @@ class RunLock:
         waited_from = time.monotonic()
         while True:
             if self._create():
-                self.held = True
-                if announced_at is not None:
-                    announce(f"the lock is free after {round(time.monotonic() - waited_from)}s of waiting; starting")
+                self._mark_held(announced_at, waited_from)
                 return
-            record = read_lock_record(self.path)
-            if record and record.get("owner_id") == self.record["owner_id"]:
-                # This run's own record, which it can only be reading because
-                # the read that confirms a create came back empty once. The lock
-                # is ours and always was; without this, a run would queue behind
-                # itself and find a holder that stays alive as long as it waits.
-                self.held = True
-                return
-            stale = stale_reason(record, self.path)
-            if stale is not None:
-                if stale not in said:
-                    announce(stale)
-                    said.add(stale)
-                self._break()
-                continue
+            # A lock already exists. Reading it, judging its holder dead and
+            # replacing it must be one indivisible step across the machine, or
+            # two runs that both find the same dead holder each remove what the
+            # other just created and both start a container. The guard makes it
+            # atomic; the read below is fresh under the guard, so a lock a
+            # contender broke and took over between the failed create and here
+            # is seen as the live lock it now is, not the dead one it was.
+            record = None
+            with _machine_wide_guard(self.guard_path):
+                record = read_lock_record(self.path)
+                if record and record.get("owner_id") == self.record["owner_id"]:
+                    # This run's own record, which it can only be reading because
+                    # the read that confirms a create came back empty once. The
+                    # lock is ours and always was; without this, a run would
+                    # queue behind itself and find a holder that stays alive as
+                    # long as it waits.
+                    self.held = True
+                    return
+                stale = stale_reason(record, self.path)
+                if stale is not None:
+                    if stale not in said:
+                        announce(stale)
+                        said.add(stale)
+                    self._break()
+                    if self._create():
+                        self._mark_held(announced_at, waited_from)
+                        return
+                    # The break left the path free for a moment, and another
+                    # run's plain create -- the fast path above, which needs no
+                    # guard -- took it before ours did. That run holds the
+                    # machine now; re-read it on the next turn and wait for
+                    # whoever it is.
+                    continue
             if not wait:
                 raise RunLockBusy(record)
             now = time.monotonic()
@@ -512,6 +601,12 @@ class RunLock:
                 announce(f"still waiting after {round(now - waited_from)}s: {describe_holder(record)}")
                 announced_at = now
             wait_for_the_holder(LOCK_POLL_INTERVAL_S)
+
+    def _mark_held(self, announced_at: float | None, waited_from: float) -> None:
+        """Record that the lock is now ours, saying so if a wait preceded it."""
+        self.held = True
+        if announced_at is not None:
+            announce(f"the lock is free after {round(time.monotonic() - waited_from)}s of waiting; starting")
 
     def release(self) -> None:
         """Give the machine back, and only if it is still ours to give.
@@ -531,13 +626,17 @@ class RunLock:
     def _create(self) -> bool:
         """Try to become the holder, and confirm that this run actually did.
 
-        The confirming read is not paranoia about `O_EXCL`, which is atomic; it
-        closes the one gap breaking a stale lock opens. Two runs that both find
-        the same dead holder both remove the file and both create it, one after
-        the other, and the loser's record is the one that got overwritten. The
-        loser reads the file back, does not find itself, and goes back to
-        queueing. Nobody can lose this way twice, because the record now in the
-        file names a living process that no contender will judge stale.
+        `O_EXCL` is atomic, so two runs racing to create the file where none
+        existed already resolve cleanly: one wins, the loser catches
+        `FileExistsError` and queues. Breaking a stale lock and creating over it
+        is the step that is not atomic on its own, and `acquire` runs that under
+        the machine guard rather than leaning on this read.
+
+        The confirming read stays for the one thing the guard does not cover: a
+        filesystem that hands back the create's own descriptor and then fails
+        the read that follows. A run that cannot see its own record must not
+        report that it holds the lock; it returns False, re-reads under the
+        guard, and recognises the record as its own there.
         """
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
@@ -553,12 +652,15 @@ class RunLock:
         return bool(written) and written.get("owner_id") == self.record["owner_id"]
 
     def _break(self) -> None:
-        """Remove a lock whose holder is gone.
+        """Remove a lock whose holder is gone. Called only under the guard.
 
-        A vanished file means a contender broke the same lock first, which is
-        the outcome this wanted anyway. Any other failure is a real one and is
-        raised: a stale lock that cannot be removed has to be said out loud, not
-        waited on forever.
+        Because the guard admits one run to the takeover at a time, the record
+        this removes is exactly the one `acquire` read and judged dead a moment
+        earlier under the same guard -- no other run can have replaced it in
+        between. A file already gone is tolerated all the same, so a lock a
+        holder cleared itself while dying is not a crash here; any other failure
+        is real and is raised, because a stale lock that cannot be removed has
+        to be said out loud, not waited on forever.
         """
         with suppress(FileNotFoundError):
             os.unlink(self.path)

@@ -32,6 +32,8 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -547,6 +549,109 @@ def test_a_run_never_queues_behind_its_own_record(monkeypatch: pytest.MonkeyPatc
     assert lock.held is True
     lock.release()
     assert not ci_linux.ci_lock_path().exists()
+
+
+def test_a_run_that_would_break_a_dead_lock_yields_to_the_live_one_that_replaced_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window the machine guard closes, told as one run's experience of it.
+
+    A dead holder is on disk, and this run has every right to break it. But
+    while it waits its turn at the guard, another run breaks the same dead lock
+    and starts a container under a fresh, live record. When this run finally
+    holds the guard it must read *that* record, recognise a live holder, and
+    queue -- not remove it and start a second container against the run that now
+    has the machine. Only once the live holder releases may this run take over.
+
+    The takeover-by-a-rival is staged into the guard so the outcome is asserted,
+    not raced: the first time this run enters the guard, a live record is already
+    waiting where the dead one was.
+    """
+    a_lock_held_by(4242)  # a dead holder this run is entitled to break
+    rival = os.getpid()  # the run that wins the takeover: this process, alive
+    only_these_are_running(monkeypatch, rival)
+
+    real_guard = ci_linux._machine_wide_guard
+    a_rival_has_taken_over: list[bool] = []
+
+    @contextmanager
+    def a_rival_wins_before_we_reach_the_guard(path: Path):
+        with real_guard(path):
+            if not a_rival_has_taken_over:
+                a_rival_has_taken_over.append(True)
+                a_lock_held_by(rival)  # the live record a winning contender leaves
+            yield
+
+    monkeypatch.setattr(ci_linux, "_machine_wide_guard", a_rival_wins_before_we_reach_the_guard)
+
+    def the_rival_finishes(seconds: float) -> None:
+        # The live holder releases; only now is the machine this run's to take.
+        ci_linux.ci_lock_path().unlink()
+
+    monkeypatch.setattr(ci_linux, "wait_for_the_holder", the_rival_finishes)
+
+    lock = ci_linux.RunLock()
+    lock.acquire(wait=True)
+
+    assert lock.held is True
+    # The record on disk is this run's own, written only after the rival was
+    # gone -- the rival's live record was waited out, never removed by this run.
+    assert json.loads(ci_linux.ci_lock_path().read_text(encoding="utf-8"))["owner_id"] == lock.record["owner_id"]
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the guard's blocking take-over is POSIX flock; msvcrt retries rather than blocking, so the interleaving this forces is not the one that ships on Windows",
+)
+def test_two_runs_that_both_find_a_dead_holder_yield_exactly_one_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The race the guard exists for, run for real on two threads. Both read the
+    same dead holder and both go to take the machine; without the guard each
+    removes what the other just created and both would start a container. A
+    barrier lines them up on the guard so their takeovers genuinely overlap, and
+    the assertion is the invariant that must survive any interleaving: exactly
+    one run comes out holding the lock, and one record -- a live one -- is left
+    on disk."""
+    a_lock_held_by(4242)
+    only_these_are_running(monkeypatch, os.getpid())
+
+    real_lock_fd = ci_linux._lock_fd_exclusive
+    at_the_guard = threading.Barrier(2)
+
+    def both_reach_the_guard_together(descriptor: int) -> None:
+        # Each contender takes the guard exactly once here -- the winner to
+        # break and create, the loser to read the winner's live record -- so the
+        # barrier releases them into the lock together and the OS serialises the
+        # takeover, not the test.
+        at_the_guard.wait(timeout=10)
+        real_lock_fd(descriptor)
+
+    monkeypatch.setattr(ci_linux, "_lock_fd_exclusive", both_reach_the_guard_together)
+
+    outcomes: list[str] = []
+    record_outcome = threading.Lock()
+
+    def contend() -> None:
+        run = ci_linux.RunLock()
+        try:
+            run.acquire(wait=False)
+            verdict = "held"
+        except ci_linux.RunLockBusy:
+            verdict = "busy"
+        with record_outcome:
+            outcomes.append(verdict)
+
+    threads = [threading.Thread(target=contend) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert sorted(outcomes) == ["busy", "held"]
+    surviving = json.loads(ci_linux.ci_lock_path().read_text(encoding="utf-8"))
+    assert surviving["pid"] == os.getpid()
 
 
 def test_asking_whether_a_process_runs_must_not_end_it() -> None:
