@@ -11,9 +11,14 @@ in this repository for handing a stored login to an agent CLI:
   CLI that rewrites its login file writes to a copy that dies with the
   container.
 
-Unlike the evaluation, nothing is exported back to the host: the wrapper deletes
-the home volume unconditionally, because the only product of a loop run is the
-commits it made in the repository mount.
+One file does go back, for the reason the evaluation exports one: a refresh
+token is single use, so a CLI that refreshes in here leaves the host holding a
+value the provider has already replaced, and the next run cannot start at all.
+Codex refreshes on its way into every session, so its `auth.json` is staged into
+the home volume before this exits, where it outlives the tmpfs and the container
+by exactly as long as the wrapper needs to read it back. Nothing else travels
+outward: the only other product of a loop run is the commits it made in the
+repository mount.
 
 Neither agent is installed into a shared environment here. Each gets one of its
 own, built from the committed tree it works in and rebuilt when that tree's
@@ -24,6 +29,8 @@ CLIs on PATH and does it.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -64,6 +71,20 @@ MOUNTED_PATHS = {
 # --repo exactly as the loop resolves it.
 DEFAULT_PAPERWORK = {"--review-dir": ".agentic-loop/reviews", "--log-dir": ".agentic-loop/logs"}
 
+# Which kinds the wrapper takes back, and where they wait for it. The home
+# volume rather than the tmpfs, because the tmpfs is gone the instant the
+# container is: the volume is the one thing this run leaves behind that the
+# wrapper still holds when the container has exited, and the wrapper deletes it
+# immediately afterwards.
+#
+# Codex alone. A run is hours and an access token is not, so the refresh the
+# wrapper makes on the host before the run is not the last one: Codex makes
+# another on its way into a session in here, and issue #391 is what that costs.
+# Taking a file back means replacing the operator's own, which is done for the
+# login that has been shown to need it rather than for every login there is.
+RETURNED = ("codex-auth",)
+STAGED_LOGINS = HOME / ".agentic-loop-logins"
+
 # Scratch every standard tool writes beside the code unless it is told
 # otherwise. Setting TMPDIR moves what a tool asks the system for; it does not
 # move these, and a round of the loop proved it -- Ruff left `.ruff_cache` on the
@@ -94,6 +115,46 @@ def place_mounted_files(kinds: list[str]) -> None:
         if target.exists() or target.is_symlink():
             raise FileExistsError(f"destination already exists: {target}")
         target.symlink_to(temporary)
+
+
+def stage_logins(kinds: list[str]) -> list[str]:
+    """Leave what the CLI holds now where the wrapper can still read it.
+
+    The path is read through whatever it has become. A CLI that refreshes writes
+    either through the symlink placed above, which lands on the tmpfs, or over
+    it, which leaves a regular file in the home volume; copying from the
+    resolved path covers both, and `evals/install/refresh_login.py` says the
+    same thing about the same two cases.
+
+    Called for every ending, so it must never be the reason a run reports a
+    failure it did not have: a kind with nothing to copy is skipped, and the
+    caller suppresses what the filesystem refuses.
+    """
+    staged = []
+    STAGED_LOGINS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for kind in kinds:
+        source = MOUNTED_PATHS.get(kind)
+        if kind not in RETURNED or source is None or not source.is_file():
+            continue
+        destination = STAGED_LOGINS / kind
+        shutil.copyfile(source, destination)
+        destination.chmod(0o600)
+        staged.append(kind)
+    return staged
+
+
+def dump_logins(kinds: list[str]) -> dict[str, str]:
+    """Read the staged logins out of the home volume, in a later container.
+
+    That container mounts the volume read-only and has no network, so this is
+    the whole of what it does: the wrapper decides what to do with the answer.
+    """
+    staged = {}
+    for kind in kinds:
+        path = STAGED_LOGINS / kind
+        if kind in RETURNED and path.is_file():
+            staged[kind] = path.read_text(encoding="utf-8")
+    return staged
 
 
 def cgroup_peak(name: str) -> int | None:
@@ -240,8 +301,20 @@ def loop_environment() -> dict[str, str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kinds", nargs="*", default=[])
+    parser.add_argument(
+        "--dump-logins",
+        action="store_true",
+        help="print what the last run staged for the wrapper, and do nothing else.",
+    )
     parser.add_argument("loop_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+
+    if args.dump_logins:
+        # A second container, on the home volume the first one left behind. It
+        # has no repository mount and no round to run, so it answers before
+        # every check that is about running one.
+        json.dump(dump_logins(list(args.kinds)), sys.stdout)
+        return 0
 
     if os.geteuid() == 0:
         raise RuntimeError("the loop container must not run as root")
@@ -258,6 +331,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return subprocess.run(command, cwd=str(REPO), env=loop_environment(), check=False).returncode
     finally:
+        # Every ending, the operator stopping the run included: the signal
+        # reaches this process, the loop dies with it, and what the last round
+        # rotated to is the only value the provider still accepts. Suppressed
+        # rather than raised, because a run that produced commits is not a
+        # failed run just because this could not copy a file.
+        with contextlib.suppress(OSError):
+            staged = stage_logins(list(args.kinds))
+            print(f"staged for the host: {', '.join(staged) if staged else 'nothing'}", flush=True)
         report_peaks()
 
 

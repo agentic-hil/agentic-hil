@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -12,10 +13,22 @@ from typing import Any
 # Refreshing on the host beforehand avoids that entirely.
 REFRESH_MARGIN = timedelta(hours=1)
 
+# What a provider says when the refresh token in a stored login has already been
+# spent. A refresh token is single use: the copy that refreshes first receives
+# the next one, and every other copy of that login is left holding a value the
+# provider has already replaced. No file states this, because the file cannot
+# know what another copy of it did, so the only way to learn it is to try the
+# refresh and read the answer.
+SPENT_REFRESH_TOKEN = re.compile(
+    r"refresh token was already used|failed to refresh token|please log out and sign in again",
+    re.IGNORECASE,
+)
+
 # An agent CLI reports an unusable login before it does anything else, so these
 # phrases separate a dead credential from a failure the evaluation is about.
 AUTHENTICATION_FAILURES = (
     re.compile(r"token refresh failed", re.IGNORECASE),
+    SPENT_REFRESH_TOKEN,
     re.compile(r"\b(401|403)\b.{0,40}\b(unauthorized|forbidden)\b", re.IGNORECASE),
     re.compile(r"\b(unauthorized|invalid[_ ]api[_ ]key|authentication[_ ]error)\b", re.IGNORECASE),
     re.compile(r"\bnot logged in\b|\bplease (run )?(re-?)?login\b", re.IGNORECASE),
@@ -32,11 +45,59 @@ def authentication_failure(text: str) -> str | None:
     return None
 
 
+def spent_refresh_token(text: str) -> str | None:
+    """The CLI's own line saying the stored refresh token has already been used.
+
+    The whole line rather than the phrase inside it, because this is the one
+    credential answer nothing on this machine can derive for itself: whoever
+    reads it has to be able to see what the CLI actually said, including the
+    provider's own wording for what to do about it.
+    """
+    for line in text.splitlines():
+        if SPENT_REFRESH_TOKEN.search(line):
+            return line.strip()
+    return None
+
+
 def _moment(value: Any) -> datetime | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
     # Both agent CLIs store milliseconds since the epoch.
     return datetime.fromtimestamp(value / 1000, timezone.utc)
+
+
+def _claimed_expiry(token: Any) -> datetime | None:
+    """When a stored JSON Web Token says it stops being accepted.
+
+    codex keeps no expiry field of its own: its `auth.json` states when the
+    login was last refreshed, and the moment that matters is inside the access
+    token, whose middle segment is a base64url-encoded claim set carrying `exp`
+    in seconds since the epoch rather than the milliseconds the other two CLIs
+    write into a field.
+
+    Anything that does not decode into that shape is not this function's to
+    interpret. It answers None, and the caller reports a login whose expiry it
+    could not read rather than inventing one.
+    """
+    if not isinstance(token, str):
+        return None
+    segments = token.split(".")
+    if len(segments) != 3:
+        return None
+    payload = segments[1]
+    try:
+        # base64url without the padding the encoder is allowed to omit.
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except ValueError:
+        # binascii.Error and UnicodeDecodeError are both ValueError, so a
+        # segment that is not base64, not UTF-8 or not JSON lands here.
+        return None
+    if not isinstance(claims, dict):
+        return None
+    expiry = claims.get("exp")
+    if not isinstance(expiry, (int, float)) or isinstance(expiry, bool):
+        return None
+    return datetime.fromtimestamp(expiry, timezone.utc)
 
 
 def credential_health(kind: str, path: Path, now: datetime | None = None) -> tuple[str, str]:
@@ -65,6 +126,29 @@ def credential_health(kind: str, path: Path, now: datetime | None = None) -> tup
         if access_expiry is not None and access_expiry <= moment + REFRESH_MARGIN:
             return "stale", f"the access token expires at {access_expiry.isoformat()}; a refresh is due"
         return "ok", f"valid until {access_expiry.isoformat()}" if access_expiry else "no expiry stated"
+
+    if kind == "codex-auth":
+        tokens = document.get("tokens")
+        if not isinstance(tokens, dict):
+            api_key = document.get("OPENAI_API_KEY")
+            if isinstance(api_key, str) and api_key.strip():
+                # A key rather than a session: it carries no refresh token, so
+                # there is nothing here a container could spend.
+                return "ok", "an API key is stored, and an API key has nothing to refresh"
+            return "expired", f"{path} carries neither a tokens section nor an API key"
+        refresh_token = tokens.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            return "expired", "the stored login carries no refresh token"
+        access_expiry = _claimed_expiry(tokens.get("access_token"))
+        if access_expiry is None:
+            # Reported rather than papered over: without an expiry this cannot
+            # say whether the container will refresh, and a guess here is what
+            # decides whether a refresh happens on this machine or in a
+            # container that takes the rotated token with it.
+            return "unknown", f"{path} states no access token expiry"
+        if access_expiry <= moment + REFRESH_MARGIN:
+            return "stale", f"the access token expires at {access_expiry.isoformat()}; a refresh is due"
+        return "ok", f"valid until {access_expiry.isoformat()}"
 
     if kind == "opencode-auth":
         providers = {name: value for name, value in document.items() if isinstance(value, dict)}
