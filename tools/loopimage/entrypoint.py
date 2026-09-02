@@ -11,14 +11,14 @@ in this repository for handing a stored login to an agent CLI:
   CLI that rewrites its login file writes to a copy that dies with the
   container.
 
-One file does go back, for the reason the evaluation exports one: a refresh
+The logins do go back, for the reason the evaluation exports one: a refresh
 token is single use, so a CLI that refreshes in here leaves the host holding a
 value the provider has already replaced, and the next run cannot start at all.
-Codex refreshes on its way into every session, so its `auth.json` is staged into
-the home volume before this exits, where it outlives the tmpfs and the container
-by exactly as long as the wrapper needs to read it back. Nothing else travels
-outward: the only other product of a loop run is the commits it made in the
-repository mount.
+Codex refreshes on its way into every session and Claude Code refreshes once an
+access token's hour is up, so both files are staged into the home volume before
+this exits, where they outlive the tmpfs and the container by exactly as long as
+the wrapper needs to read them back. Nothing else travels outward: the only
+other product of a loop run is the commits it made in the repository mount.
 
 Neither agent is installed into a shared environment here. Each gets one of its
 own, built from the committed tree it works in and rebuilt when that tree's
@@ -76,12 +76,15 @@ DEFAULT_PAPERWORK = {"--review-dir": ".agentic-loop/reviews", "--log-dir": ".age
 # wrapper still holds when the container has exited, and the wrapper deletes it
 # immediately afterwards.
 #
-# Codex alone. A run is hours and an access token is not, so the refresh the
-# wrapper makes on the host before the run is not the last one: Codex makes
-# another on its way into a session in here, and issue #391 is what that costs.
-# Taking a file back means replacing the operator's own, which is done for the
-# login that has been shown to need it rather than for every login there is.
-RETURNED = ("codex-auth",)
+# Both OAuth logins. A run is hours and an access token is not, so the refresh
+# the wrapper makes on the host before the run is not the last one: Codex makes
+# another on its way into a session in here, a Claude Code access token lasts
+# about an hour so the implementer rounds refresh in here too, and issue #391 is
+# what that costs. Taking a file back means replacing the operator's own, which
+# is done for the logins that have been shown to need it rather than for every
+# file that travels in: claude-config carries account state and no token, and
+# the two instruction files are the operator's own text.
+RETURNED = ("claude-auth", "codex-auth")
 STAGED_LOGINS = HOME / ".agentic-loop-logins"
 
 # Scratch every standard tool writes beside the code unless it is told

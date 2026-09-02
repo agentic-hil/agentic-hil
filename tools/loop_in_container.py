@@ -32,13 +32,13 @@ has spent it, this machine holds a value the provider has already replaced and
 no later run can log in at all. Both halves of that are answered here. The
 Codex login's expiry is read out of the access token it stores rather than
 reported as unknown, so a refresh that is due happens on this machine like the
-Claude one; and because Codex refreshes again on the way into every session it
-starts in there, the container's own copy is taken back, at the end of each
-round from the container that is still running and at the end of the run from
-the home volume the container stages it into. Neither is a way for the container
-to write here: `docker cp` and a read-only volume mount are how the file is
-read, and `apply_refreshed_login` refuses a document that is not the login it
-replaces and keeps the previous one beside it.
+Claude one; and because both CLIs refresh again inside a run that outlasts an
+access token, both containerised copies are taken back, at the end of each
+invocation from the container that is still running and at the end of the run
+from the home volume the container stages them into. Neither is a way for the
+container to write here: `docker cp` and a read-only volume mount are how the
+file is read, and `apply_refreshed_login` refuses a document that is not the
+login it replaces and keeps the previous one beside it.
 
 The operator's standing instructions to each CLI travel the same way, when they
 exist. A fresh home has none, and a fresh home is what the first containerised
@@ -46,10 +46,10 @@ round ran in: the agent had never been told this operator's rules and signed its
 commit with an attribution trailer they forbid.
 
 The home the container builds from those files is a Docker volume that is
-deleted unconditionally afterwards, once the login staged in it has been read
+deleted unconditionally afterwards, once the logins staged in it have been read
 back. The evaluation scrubs instead, because its evidence is inspected later;
-here the only products are the commits in the repository mount and that one
-file, so the home outlives the container by the length of a single read and no
+here the only products are the commits in the repository mount and those two
+files, so the home outlives the container by the length of a single read and no
 longer.
 
 One containerised run at a time per machine, and the lock that decides it is the
@@ -225,16 +225,33 @@ HEALTH_CHECKED = ("claude-auth", "codex-auth")
 # use, so the copy that refreshes first is the only one that can refresh again:
 # a run that lets its container refresh and then throws that container away
 # leaves this machine holding a value the provider has already replaced, and
-# every later run inherits it. Codex is the one that reaches that state here: a
-# run is hours and an access token is not, so the refresh made below before the
-# run is not the last one, and Codex makes another on its way into a session in
-# there.
+# every later run inherits it.
 #
-# tools/loopimage/entrypoint.py places the file at this path and stages a copy
+# Both OAuth logins reach that state here, and for the same reason: a run is
+# hours and an access token is not, so the refresh made below before the run is
+# not the last one. Codex makes another on its way into every session it starts
+# in there; a Claude Code access token lasts about an hour, which the pre-flight
+# says out loud when it prints `valid until` an hour ahead, so the implementer
+# rounds refresh in there too. Returning only Codex left the Claude refresh
+# token this machine holds spent by a run that reported taking a login back, and
+# every Claude Code session on this machine reads that one file.
+#
+# tools/loopimage/entrypoint.py places each file at these paths and stages a copy
 # of it in the home volume before it exits; both halves read that arrangement
 # from the constants here and there, and a test holds them to each other.
-RETURNED = ("codex-auth",)
-CONTAINER_LOGIN_PATHS = {"codex-auth": f"{CONTAINER_HOME}/.codex/auth.json"}
+RETURNED = ("claude-auth", "codex-auth")
+CONTAINER_LOGIN_PATHS = {
+    "claude-auth": f"{CONTAINER_HOME}/.claude/.credentials.json",
+    "codex-auth": f"{CONTAINER_HOME}/.codex/auth.json",
+}
+# Which CLI can have rotated which login, so the end of an invocation reads back
+# the file that invocation could have spent and no other. Every kind is read
+# again from the home volume at the end of the run whatever happens; this is
+# what bounds the cost of a run that never reaches its own ending to the round
+# that was in flight. The mapping is by CLI rather than by role, because which
+# of the two implements and which reviews is the caller's to choose and neither
+# choice changes whose token a CLI refreshes.
+AGENT_LOGINS = {"claude": ("claude-auth",), "codex": ("codex-auth",)}
 
 # The smallest session Codex has: outside a repository, persisting nothing of
 # its own, and without the operator's config.toml, whose model, provider and
@@ -663,11 +680,17 @@ def returned_login(docker: str, container_name: str, kind: str) -> str | None:
         return landing.read_text(encoding="utf-8", errors="replace")
 
 
-def collect_from_container(docker: str, container_name: str, files: list[tuple[str, Path]]) -> list[str]:
-    """Take back what the container holds now, while it is still running."""
+def collect_from_container(
+    docker: str, container_name: str, files: list[tuple[str, Path]], kinds: tuple[str, ...] = RETURNED
+) -> list[str]:
+    """Take back what the container holds now, while it is still running.
+
+    `kinds` narrows that to the logins the invocation that just ended could have
+    rotated; the default is every login that travels back at all.
+    """
     lines = []
     for kind, path in files:
-        if kind not in RETURNED:
+        if kind not in RETURNED or kind not in kinds:
             continue
         said = write_back(kind, path, returned_login(docker, container_name, kind))
         if said is not None:
@@ -1019,13 +1042,14 @@ def main(argv: list[str] | None = None) -> int:
         inner: int | None = None
 
         def agent_finished(agent: str) -> None:
-            # The reviewer is the last thing a round runs, and Codex is the CLI
-            # whose login this run is responsible for. Taking it back here bounds
-            # what a run that never reaches its own ending can cost this machine
-            # to the one round that was in flight.
-            if agent == "codex":
-                for line in collect_from_container(docker, container_name, files):
-                    announce(line)
+            # Both CLIs, each for its own login: an invocation that has ended is
+            # an invocation whose session refreshed on its way in and is holding
+            # nothing now, so this is the moment its file can be read out of a
+            # container that is still running. Taking it back here bounds what a
+            # run that never reaches its own ending can cost this machine to the
+            # one round that was in flight.
+            for line in collect_from_container(docker, container_name, files, AGENT_LOGINS.get(agent, ())):
+                announce(line)
 
         try:
             inner, announced, failure = stream(command, repository, agent_finished)
