@@ -2,8 +2,10 @@
 
 import argparse
 import base64
+import contextlib
 import json
 import os
+import signal
 import socket
 import stat
 import subprocess
@@ -1479,6 +1481,107 @@ def test_an_interrupted_stream_stops_the_container_before_it_lets_the_interrupt_
 
     assert events == ["interrupt", "stop agentic-hil-loop-abc", "waited"]
     assert "working" in capsys.readouterr().out
+
+
+# A real subprocess running entrypoint.main(), stopped with the same signal
+# `docker stop` sends it. The wrapper-side test above proves the wrapper asks
+# the container to stop and waits for it; this proves the ask does what the whole
+# arrangement depends on -- that the stop signal reaches the staging rather than
+# tearing the interpreter down before its finally, which is Python's default for
+# SIGTERM and would leave the home volume empty of the login the round refreshed.
+_STOP_SIGNAL_HARNESS = """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, {loopimage!r})
+import entrypoint
+
+home = Path(sys.argv[1])
+ready = Path(sys.argv[2])
+
+login = home / "codex" / "auth.json"
+login.parent.mkdir(parents=True, exist_ok=True)
+login.write_text("REFRESHED-TOKEN", encoding="utf-8")
+
+entrypoint.STAGED_LOGINS = home / "staged"
+entrypoint.MOUNTED_PATHS = dict(entrypoint.MOUNTED_PATHS)
+entrypoint.MOUNTED_PATHS["codex-auth"] = login
+
+repo = home / "repo"
+(repo / ".git").mkdir(parents=True)
+entrypoint.REPO = repo
+
+entrypoint.place_mounted_files = lambda kinds: None
+entrypoint.prepare_repository = lambda: None
+entrypoint.report = lambda name: None
+entrypoint.report_peaks = lambda: None
+entrypoint.os.geteuid = lambda: 1000
+
+# The loop the entrypoint starts: announce that main() has reached its own
+# subprocess.run (so the stop signal below lands during the wait, with the
+# handler already installed) and then block until the signal kills it.
+blocker = "import pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text('ready'); time.sleep(120)"
+entrypoint.loop_command = lambda forwarded: [sys.executable, "-c", blocker, str(ready)]
+
+raise SystemExit(entrypoint.main(["--kinds", "codex-auth", "--", "--task", "x"]))
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stop-signal semantics; the container this runs in is Linux")
+def test_the_container_stop_signal_reaches_the_staging_before_the_process_exits(tmp_path: Path) -> None:
+    """`docker stop` sends SIGTERM, whose default action would terminate the
+    interpreter without running the finally that stages the in-flight round's
+    login. The entrypoint installs a handler that turns it into an unwind, so a
+    process actually stopped with that signal writes the staged copy before it
+    exits. Anything less leaves the home volume empty of what the round rotated
+    to, which is the loss the whole read-back exists to prevent."""
+    home = tmp_path / "home"
+    home.mkdir()
+    ready = tmp_path / "ready"
+    harness = tmp_path / "stop_signal_harness.py"
+    log = tmp_path / "harness.log"
+    loopimage = str(Path(loop_in_container.__file__).resolve().parent / "loopimage")
+    harness.write_text(_STOP_SIGNAL_HARNESS.format(loopimage=loopimage), encoding="utf-8")
+
+    # Output to a file rather than a pipe, and a session of its own: the loop
+    # child inherits the parent's stdout, so a pipe read would not see EOF until
+    # that child closed it too -- and the process group is what cleans up that
+    # child if a regression leaves the entrypoint failing to kill it.
+    with log.open("wb") as sink:
+        process = subprocess.Popen(
+            [sys.executable, str(harness), str(home), str(ready)],
+            stdout=sink,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists():
+            if process.poll() is not None:
+                pytest.fail(f"the harness exited before it started the loop:\n{log.read_text(errors='replace')}")
+            if time.monotonic() > deadline:
+                pytest.fail("the harness never reported the loop had started")
+            time.sleep(0.02)
+        # The signal docker stop sends by default, to the entrypoint alone.
+        process.terminate()
+        process.wait(timeout=30)
+    finally:
+        # Kill the whole group, so a run left blocked by a broken handler -- or
+        # the loop child a working one already killed -- does not outlive the test.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        if process.poll() is None:
+            process.wait(timeout=10)
+
+    output = log.read_text(encoding="utf-8", errors="replace")
+    staged = home / "staged" / "codex-auth"
+    assert staged.is_file(), f"the stop signal did not reach the staging:\n{output}"
+    assert staged.read_text(encoding="utf-8") == "REFRESHED-TOKEN"
+    # The unwind, not the default terminate: 128 + SIGTERM is the code main()
+    # returns from its KeyboardInterrupt branch, and a process torn down by the
+    # default action would report the raw negative signal instead.
+    assert process.returncode == 128 + signal.SIGTERM
+    assert "staged for the host: codex-auth" in output
 
 
 def _ready_to_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:

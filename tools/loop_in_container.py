@@ -950,10 +950,13 @@ def stop_container(docker: str, container_name: str) -> None:
     The entrypoint copies the in-flight round's login into the home volume in
     its own finally block; a collector that reads the volume before that block
     has run reads an empty or stale copy and then deletes the container the only
-    fresh one is still in. `docker stop` sends the signal and blocks until the
-    container is gone, which is that finally block running to completion. Never
-    raises: it is one step of a cleanup that must reach the volume read whatever
-    the daemon says.
+    fresh one is still in. `docker stop` sends SIGTERM -- the image declares no
+    STOPSIGNAL -- and Python would tear the interpreter down on it without
+    running a single finally, so the entrypoint installs a handler (`_unwind_on_stop`
+    in tools/loopimage/entrypoint.py) that turns SIGTERM into the unwind that
+    block needs. `docker stop` then blocks until the container is gone, which is
+    that finally running to completion. Never raises: it is one step of a cleanup
+    that must reach the volume read whatever the daemon says.
     """
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         run_capture([docker, "stop", container_name], 60)

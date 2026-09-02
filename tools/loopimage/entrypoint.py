@@ -32,6 +32,7 @@ import argparse
 import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -322,6 +323,27 @@ def loop_environment() -> dict[str, str]:
     return environment
 
 
+def _unwind_on_stop(_signum: int, _frame: object) -> None:
+    """Turn the container's stop signal into an orderly unwind.
+
+    `docker stop` sends SIGTERM -- this image declares no STOPSIGNAL -- and
+    Python's default action for it terminates the interpreter without running a
+    single `finally`. That is exactly the block `main` stages the in-flight
+    round's login in, so the default action would skip it: the value the round
+    refreshed to would die on the tmpfs with the container, and this machine
+    would keep the single-use refresh token that round already spent -- issue
+    #391 in the one form the wrapper cannot answer from outside, because a signal
+    that never runs the staging leaves nothing in the home volume to read back.
+
+    Raising here makes SIGTERM unwind the stack exactly as the default SIGINT
+    handler does, so that `finally` runs and the rotated login reaches the volume
+    whatever stopped the run -- the wrapper's own `stop_container`, an operator's
+    `docker stop`, or the daemon shutting down. `tools/loop_in_container.py`'s
+    `stop_container` sends this signal and waits for this unwind to finish.
+    """
+    raise KeyboardInterrupt
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kinds", nargs="*", default=[])
@@ -352,14 +374,29 @@ def main(argv: list[str] | None = None) -> int:
 
     command = loop_command(list(args.loop_args))
     print(f"loop: {' '.join(command)}", flush=True)
+    # docker stop sends SIGTERM, whose default action terminates this interpreter
+    # without running the finally below; turn it into an unwind so the staging
+    # runs however this run is stopped. Restored in the finally so an in-process
+    # caller -- the suite runs main() directly -- does not inherit this handler.
+    previous_sigterm = signal.signal(signal.SIGTERM, _unwind_on_stop)
     try:
         return subprocess.run(command, cwd=str(REPO), env=loop_environment(), check=False).returncode
+    except KeyboardInterrupt:
+        # Stopped mid-run: the wrapper's stop_container, an operator's docker
+        # stop, or a Ctrl-C that reached this process. subprocess.run has already
+        # killed the loop child on its way out of its own wait, so the finally
+        # below stages what the in-flight round refreshed to and this returns the
+        # code a signal-stopped run conventionally carries.
+        print("loop: stopped; staging the in-flight round's login before exit", flush=True)
+        return 128 + signal.SIGTERM
     finally:
-        # Every ending, the operator stopping the run included: the signal
-        # reaches this process, the loop dies with it, and what the last round
-        # rotated to is the only value the provider still accepts. Suppressed
-        # rather than raised, because a run that produced commits is not a
-        # failed run just because this could not copy a file.
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        # Every ending, the operator stopping the run included: _unwind_on_stop
+        # turns the stop signal into the exception that reaches here, the loop
+        # dies with it, and what the last round rotated to is the only value the
+        # provider still accepts. Suppressed rather than raised, because a run
+        # that produced commits is not a failed run just because this could not
+        # copy a file.
         with contextlib.suppress(OSError):
             staged = stage_logins(list(args.kinds))
             print(f"staged for the host: {', '.join(staged) if staged else 'nothing'}", flush=True)
