@@ -5,12 +5,16 @@ import base64
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 import time
 import types
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -860,6 +864,54 @@ def test_the_container_stages_what_it_holds_where_the_volume_keeps_it(
     # Only what the wrapper asked for, whatever else it was handed: the other
     # files are mounted for the agents, not for this machine to take back.
     assert [path.name for path in (home / ".agentic-loop-logins").iterdir()] == ["codex-auth"]
+
+
+@contextmanager
+def _watching_the_modes(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[int]]:
+    """A umask that forbids nothing, and every chmod that happens under it.
+
+    The umask, because otherwise a mode assertion is the machine's answer rather
+    than the code's: under `umask 0077` a plain copy already lands at 0600. The
+    chmod list, because the question is "never wider" rather than "narrow by the
+    end": a copy created through the umask and chmodded afterwards finishes at
+    the same mode, and the stretch between the two calls is what this closes.
+    """
+    chmods: list[int] = []
+    real_chmod = os.chmod
+
+    def watched_chmod(path: Any, mode: int, **kwargs: Any) -> None:
+        chmods.append(mode)
+        real_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", watched_chmod)
+    previous = os.umask(0)
+    try:
+        yield chmods
+    finally:
+        os.umask(previous)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes; the container this runs in is Linux")
+def test_the_staged_login_is_owner_only_from_the_moment_it_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The copy left in the home volume carries the token the run refreshed to.
+
+    `shutil.copyfile` creates through the umask and a chmod afterwards is a
+    window, so the mode is on the file at creation. Same rule and same shape as
+    `evals/install/refresh_login.py`, which is the file this one says it agrees
+    with.
+    """
+    home, login = _a_container_home(tmp_path, monkeypatch)
+    login.write_text(_codex_login(timedelta(days=1)), encoding="utf-8")
+
+    with _watching_the_modes(monkeypatch) as chmods:
+        assert entrypoint.stage_logins(["codex-auth"]) == ["codex-auth"]
+
+    staged = home / ".agentic-loop-logins" / "codex-auth"
+    assert staged.read_text(encoding="utf-8") == login.read_text(encoding="utf-8")
+    assert stat.S_IMODE(staged.stat().st_mode) == 0o600
+    assert chmods == []
 
 
 def test_a_login_the_cli_wrote_through_the_link_is_staged_too(

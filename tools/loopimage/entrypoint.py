@@ -32,7 +32,6 @@ import argparse
 import contextlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -101,6 +100,30 @@ TOOL_CACHES = {
 PYTEST_CACHE = SCRATCH / "pytest-cache"
 
 
+def copy_private(source: Path, destination: Path) -> None:
+    """Copy a mounted file to a copy its owner alone can read.
+
+    `shutil.copyfile` creates through the process umask, and a chmod afterwards
+    is a window: for the stretch between the two calls a login is readable by
+    anyone else on the machine. Every file that travels through here is one, so
+    the mode is on the file from the moment it exists instead. The same argument
+    and the same shape as `copy_private` in `evals/install/refresh_login.py`,
+    written out again because nothing of this repository but this file, the shim
+    and the options module is in the image.
+    """
+    data = source.read_bytes()
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(destination)
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(data)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def place_mounted_files(kinds: list[str]) -> None:
     for kind in kinds:
         source = MOUNTED_FILES / kind
@@ -108,8 +131,7 @@ def place_mounted_files(kinds: list[str]) -> None:
             raise FileNotFoundError(f"mount missing: {source}")
         temporary = TEMPORARY_FILES / kind
         temporary.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        shutil.copyfile(source, temporary)
-        temporary.chmod(0o600)
+        copy_private(source, temporary)
         target = MOUNTED_PATHS[kind]
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if target.exists() or target.is_symlink():
@@ -137,8 +159,7 @@ def stage_logins(kinds: list[str]) -> list[str]:
         if kind not in RETURNED or source is None or not source.is_file():
             continue
         destination = STAGED_LOGINS / kind
-        shutil.copyfile(source, destination)
-        destination.chmod(0o600)
+        copy_private(source, destination)
         staged.append(kind)
     return staged
 
