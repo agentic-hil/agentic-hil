@@ -16,7 +16,7 @@ import yaml
 
 pytest_plugins = ["pytester"]
 
-from support import remove_trusted_launcher  # noqa: E402
+from support import remove_trusted_launcher, sweep_stale_launchers  # noqa: E402
 
 # Where every test's isolated HOME, config, state and temporary storage go.
 # Resolved once, here, out of the system temp root and before any test has
@@ -56,7 +56,14 @@ STALE_SANDBOX_AGE_S = 6 * 60 * 60
 
 @pytest.fixture(scope="session", autouse=True)
 def _clean_up_trusted_launcher() -> Iterator[None]:
-    """Remove the session's trusted launcher, wherever a test created it."""
+    """Remove the session's trusted launcher, wherever a test created it.
+
+    The sweep on the way in is what catches the sessions that never reached the
+    finalizer on the way out: a run that is killed or crashes leaves its
+    launcher in the real home under its own pid, and nothing else on the machine
+    knows what that directory is. It only ever removes a sibling whose pid names
+    no live process, so a suite running beside this one keeps its own."""
+    sweep_stale_launchers()
     yield
     remove_trusted_launcher()
 

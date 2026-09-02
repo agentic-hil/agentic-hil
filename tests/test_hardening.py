@@ -367,6 +367,87 @@ def test_a_sandbox_root_is_swept_only_once_nobody_is_using_it() -> None:
         shutil.rmtree(stale, ignore_errors=True)
 
 
+def test_a_launcher_is_swept_only_once_its_run_is_gone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The leftover of a killed run, and the three neighbours around it.
+
+    The trusted launcher has to sit in the real home, and the finalizer that
+    removes it only runs when a session ends on its own terms. A run that is
+    killed or crashes leaves its directory behind under its own pid, so the
+    leftovers accumulate one per interrupted run until somebody notices
+    eighteen of them.
+
+    What the sweep may take is decided by the pid in the name and nothing else,
+    which is the whole of the risk: a suite running beside this one has a
+    launcher of its own in the same home, and deleting it mid-run is the one
+    injury a sweep of shared space can cause. So the four directories planted
+    here are the four answers that question has. The live pid is a child still
+    running, held open across the sweep rather than assumed alive. The dead one
+    is a child that has already exited, so the liveness this asserts is the real
+    one on both platforms, including the Windows handle wait that exists because
+    `os.kill(pid, 0)` would answer by terminating the process it was asked
+    about.
+
+    The home is this test's own, because the sweep is about a shared directory
+    and a fixture planted in the real one would be planting it beside every
+    other suite on the machine.
+    """
+    import support
+
+    home = tmp_path / "home"
+    own = home / f"{support.LAUNCHER_PREFIX}{os.getpid()}"
+    monkeypatch.setattr(support, "LAUNCHER_ROOT", own)
+    alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        ended = subprocess.Popen([sys.executable, "-c", ""])
+        ended.wait()
+        running = home / f"{support.LAUNCHER_PREFIX}{alive.pid}"
+        dead = home / f"{support.LAUNCHER_PREFIX}{ended.pid}"
+        unparsed = home / f"{support.LAUNCHER_PREFIX}not-a-pid"
+        for root in (own, running, dead, unparsed):
+            (root / "bin").mkdir(parents=True)
+            (root / "bin" / "agentic-hil").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+        removed = support.sweep_stale_launchers()
+
+        assert removed == [dead]
+        assert not dead.exists()
+        # A parallel suite's launcher, and the reason every uncertain answer
+        # counts as alive.
+        assert running.is_dir()
+        # Somebody else's directory that merely shares the prefix.
+        assert unparsed.is_dir()
+        # This session's own, which its own sweep must never take.
+        assert own.is_dir()
+    finally:
+        alive.kill()
+        alive.wait()
+
+
+def test_a_launcher_the_sweep_cannot_remove_is_left_where_it_stands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A removal that fails is not this suite's business to report or to fail on.
+
+    The home the launchers share is a real profile, and what sits in it beside
+    this run's directory can be another user's leftover or one the platform will
+    not let go of while something still holds a file inside it. Neither is a
+    reason to end a suite before its first test, and neither may be counted as
+    swept. Standing in for both here is the portable spelling of the same
+    refusal: an entry with a dead run's name that `rmtree` will not take.
+    """
+    import support
+
+    home = tmp_path / "home"
+    own = home / f"{support.LAUNCHER_PREFIX}{os.getpid()}"
+    monkeypatch.setattr(support, "LAUNCHER_ROOT", own)
+    own.mkdir(parents=True)
+    ended = subprocess.Popen([sys.executable, "-c", ""])
+    ended.wait()
+    refused = home / f"{support.LAUNCHER_PREFIX}{ended.pid}"
+    refused.write_text("not a directory, and not this sweep's to remove\n", encoding="utf-8")
+
+    assert support.sweep_stale_launchers() == []
+    assert refused.is_file()
+
+
 def test_a_test_that_undoes_its_own_monkeypatch_keeps_the_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     """The one line that once aimed the whole suite at the operator's profile.
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentic-hil"
-version = "0.21.0"
+version = "0.21.1.dev0"
 description = "A green build is not enough: Agentic HIL lets an AI agent probe, flash, reset and exchange UART and CAN traffic with a real STM32 or other embedded target, through policy-gated MCP tools instead of a raw debugger shell, so hardware-in-the-loop tests run unattended in CI."
 readme = "README.md"
 requires-python = ">=3.10"

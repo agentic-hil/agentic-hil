@@ -4,6 +4,12 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Fixed
+
+- **Every interrupted suite run left a trusted-launcher directory in the real home, and nothing ever collected them.** `tests/support.py` puts the launcher at `~/agentic-hil-pytest-launcher-<pid>` on purpose: the product's trust rule refuses an executable under a temp root or a group-writable directory, so `tmp_path` and `tempfile.gettempdir()` cannot hold one, and the real home is the single place that is both writable and trusted everywhere the suite runs. `tests/conftest.py` removed it in a session finalizer, and a finalizer only runs when the session ends on its own terms: a run that is killed, crashes or loses a worker never reached it, and because the name carries the pid, every such run left a fresh directory holding a stub `bin/agentic-hil`. One bench had collected eighteen of them, one per interrupted run over a few weeks. A session now sweeps its predecessors' leavings before its first test instead of trusting each of them to have cleaned up after itself. What may be taken is decided by the pid in the name and nothing else, with the liveness discipline `tools/run_lock.py` settled for exactly this question: on Windows a wait on the process handle, never `os.kill(pid, 0)`, which CPython maps onto `TerminateProcess` and which would answer the question by killing the run it was asked about. Every uncertain answer counts as alive, so a live pid, a pid this cannot get a readable answer about, a name that does not parse as one, and a directory this process may not delete are all left exactly where they stand; the only injury a sweep of shared space can do is deleting the launcher a suite running beside this one is still using, and a session's own launcher is held by that same rule, its pid being that very process. A removal that fails is silent and is not reported as swept, because another user's leftover is not this run's to judge and is never a reason to end a suite before its first test. The rule is spelled out again in `tests/support.py` rather than imported from `tools/`, which never ships: `tests/conftest.py` imports that module at module scope, and a test tree that reaches into `tools/` from there fails to collect out of a source distribution, so what the two must keep in step is the rule and not the code. (#385)
+
 ## [0.21.0] - 2026-09-01
 
 ### Added

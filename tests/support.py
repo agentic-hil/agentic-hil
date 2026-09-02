@@ -13,7 +13,20 @@ REAL_HOME = Path(os.path.expanduser("~"))
 # does, and Local AppData was the wrong place anyway: a packaged host process
 # has its writes there redirected into its own LocalCache, so the launcher never
 # landed where the path said it did.
-LAUNCHER_ROOT = REAL_HOME / f"agentic-hil-pytest-launcher-{os.getpid()}"
+#
+# The pid is in the name so two suites on one machine never share a launcher,
+# and so a directory left by a run that never reached its finalizer can be
+# judged by the next run rather than accumulating forever (see
+# `sweep_stale_launchers`).
+LAUNCHER_PREFIX = "agentic-hil-pytest-launcher-"
+LAUNCHER_ROOT = REAL_HOME / f"{LAUNCHER_PREFIX}{os.getpid()}"
+
+# Windows, where `os.kill(pid, 0)` is not a liveness probe: CPython maps every
+# signal other than the console events onto TerminateProcess, so asking that
+# question there kills the run being asked about.
+_WINDOWS_SYNCHRONIZE = 0x00100000
+_WINDOWS_WAIT_OBJECT_0 = 0x00000000
+_WINDOWS_ERROR_INVALID_PARAMETER = 87
 
 
 def trusted_launcher() -> Path:
@@ -36,3 +49,122 @@ def trusted_launcher() -> Path:
 
 def remove_trusted_launcher() -> None:
     shutil.rmtree(LAUNCHER_ROOT, ignore_errors=True)
+
+
+def sweep_stale_launchers() -> list[Path]:
+    """Remove the launchers of runs that are no longer running, and say which.
+
+    `remove_trusted_launcher` only runs when a session ends on its own terms. A
+    run that is killed, crashes, or loses a worker never reaches it, and since
+    the name carries the pid, every such run leaves a fresh directory in the
+    real home: one bench had collected eighteen of them, one per interrupted run
+    over a few weeks. So a session cleans up after its predecessors instead of
+    trusting each of them to have cleaned up after itself.
+
+    A directory is removed only when this machine can prove nobody owns it. A
+    live pid, a pid this cannot get a readable answer about, a name that carries
+    no pid at all, and a directory this process is not allowed to delete are all
+    left exactly where they stand. That asymmetry is the whole design: the only
+    damage a sweep can do is deleting the launcher a suite running beside this
+    one is still using, and every uncertain answer therefore counts as alive.
+    """
+    removed: list[Path] = []
+    for candidate in sorted(LAUNCHER_ROOT.parent.glob(f"{LAUNCHER_PREFIX}*")):
+        # This session's own launcher needs no case of its own, which is the one
+        # way this differs from the sandbox sweep beside it: that one judges by
+        # age, and a long session's own root is exactly what looks old. Liveness
+        # cannot make that mistake, because the pid in this run's own name is
+        # this very process.
+        pid = _launcher_pid(candidate.name)
+        if pid is None or process_is_running(pid):
+            continue
+        try:
+            shutil.rmtree(candidate)
+        except OSError:
+            # Another user's leftover, or one this platform will not let go of
+            # while something still holds a file inside it. Not this run's to
+            # judge and never a reason to fail a suite, so it stays where it is
+            # and is not reported as removed.
+            continue
+        removed.append(candidate)
+    return removed
+
+
+def _launcher_pid(name: str) -> int | None:
+    """The pid a launcher directory's name carries, or None if it carries none.
+
+    Only the exact spelling `LAUNCHER_ROOT` writes counts, ascii digits naming a
+    real pid and nothing else. A name that does not parse is not something this
+    suite left behind, and a sweep has no business deleting a directory of
+    somebody else's that merely shares the prefix. `isdigit` is asked after
+    `isascii` because on its own it accepts spellings `int` then refuses,
+    superscripts among them.
+    """
+    suffix = name[len(LAUNCHER_PREFIX) :]
+    if not (suffix.isascii() and suffix.isdigit()):
+        return None
+    pid = int(suffix)
+    return pid if pid > 0 else None
+
+
+def process_is_running(pid: int) -> bool:
+    """Whether `pid` is a live process on this machine, without disturbing it.
+
+    The discipline `tools/run_lock.py` settled for exactly this question, spelled
+    out again here rather than imported. `tools/` is repository tooling that
+    never ships, `tests/conftest.py` imports this module at module scope, and a
+    test tree that reaches into `tools/` from there fails to collect out of a
+    source distribution; MANIFEST.in says so, and names the file that learned it
+    the hard way. What the two must keep in step is the rule, not the code.
+
+    Every uncertain answer is `True`, deliberately: this decides whether a
+    directory may be deleted out from under whoever owns it, so "I cannot tell"
+    means "leave it alone".
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_process_is_running(pid)
+    try:
+        # Signal 0 checks for the process without delivering anything. Zero and
+        # negative pids are excluded above because they address process groups.
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # PermissionError says it exists and belongs to somebody else; anything
+        # else is an answer this cannot read, and both mean "do not touch it".
+        return True
+    return True
+
+
+def _windows_process_is_running(pid: int) -> bool:
+    """The same question on Windows, where `os.kill(pid, 0)` would answer it by
+    terminating the process. `WaitForSingleObject` on the process handle asks
+    without touching it: a live process is unsignalled, an exited one is
+    signalled at once. Exit codes are not consulted, because a process that
+    exited with 259 is indistinguishable from a running one through
+    `GetExitCodeProcess`, and this is the one call site where that matters."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    wait_for_object = kernel32.WaitForSingleObject
+    wait_for_object.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    wait_for_object.restype = wintypes.DWORD
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    handle = open_process(_WINDOWS_SYNCHRONIZE, False, pid)
+    if not handle:
+        # Only "no such process" is a dead process. Access denied means it is
+        # alive and owned by somebody else, which is still alive.
+        return ctypes.get_last_error() != _WINDOWS_ERROR_INVALID_PARAMETER
+    try:
+        return wait_for_object(handle, 0) != _WINDOWS_WAIT_OBJECT_0
+    finally:
+        close_handle(handle)
