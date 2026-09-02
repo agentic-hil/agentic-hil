@@ -21,9 +21,15 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # The Windows legs of the grown suite take about fourteen minutes of
-    # pytest alone; fifteen ended runs seconds after a green summary and
-    # reported the cancellation as a failure.
+    # 25 minutes for the whole job, and the suite is the part that grew into
+    # it. In one process the Windows legs took about fourteen minutes of pytest
+    # alone on an ordinary runner and twenty-three on a slow one, which is close
+    # enough to the limit that it cancelled two runs whose tests were green: one
+    # inside `Run tests` at 25m18s with 2307 tests already passed, one after
+    # pytest had printed `2754 passed, 84 skipped in 1400.29s`, in the step
+    # after it. The step below now runs the suite across the runner's cores, so
+    # the same work is minutes rather than tens of minutes and this limit is
+    # margin for a slow runner instead of a deadline a slow runner beats.
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -63,8 +69,18 @@ jobs:
       - name: Check shipped repository references
         run: python tools/check_shipped_references.py
 
+      # Across the runner's cores, which is what a developer run already uses.
+      # Nothing in the suite is marked serial and nothing has to be: every test
+      # gets its own HOME, config, state and temporary storage, and its
+      # device-lock root, its CAN broker endpoint and its run records all follow
+      # that HOME, so two workers cannot meet in a configuration, a lock, a
+      # socket or a scratch file. CONTRIBUTING.md, under "Running the suite on
+      # all cores", carries what a new test has to keep true for that to stay
+      # so. It is named here rather than in `addopts`, so a bare `pytest` in a
+      # checkout is still one process and a failure can be read without a worker
+      # id in front of it.
       - name: Run tests
-        run: pytest
+        run: pytest -n auto
 
       - name: Check package build
         run: python -m build
