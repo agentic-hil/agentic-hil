@@ -944,9 +944,27 @@ class ComPortService:
         if not self.config.com_read_allowed(port["port_config"]):
             return self._permission_denied(tool, "Reading this COM port is disabled by the authoritative config.", port_id)
         session_result = self._active_session(port_id, tool)
-        if not session_result["ok"]:
-            return session_result
-        session = session_result["session"]
+        if session_result["ok"]:
+            session = session_result["session"]
+        else:
+            # A reader that died before this call was made still leaves behind
+            # whatever it had already pulled off the line, and those bytes are
+            # feedback the bench really received. They are drained and handed
+            # out below instead of being lost to a refusal that is right about
+            # the reader and wrong about the bytes, which is the same answer
+            # this call already gives when the reader dies after the read
+            # rather than before it: which side of the read the death landed on
+            # was only ever a matter of scheduling. The refusal is not dropped
+            # here, it is deferred. A reader that buffered nothing has nothing
+            # to hand out, and the empty read below still answers
+            # `session_not_active` with the reader's error nested. Only that
+            # plain refusal is reopened, and only for a reader that recorded an
+            # error: a quarantine, a lease that is no longer active, and a port
+            # with no session at all are refusals about more than the reader,
+            # and they stand as they are.
+            session = self.sessions.get(port_id)
+            if session is None or session.reader_error is None or session_result.get("error_type") != "session_not_active":
+                return session_result
         try:
             parsed_max_bytes = session.port_config.max_buffer_bytes if max_bytes is None else int(max_bytes)
             parsed_wait_timeout_s = float(wait_timeout_s)
@@ -969,15 +987,13 @@ class ComPortService:
             del session.buffer[:parsed_max_bytes]
             remaining = len(session.buffer)
         if not data and session.reader_error is not None:
-            # The wait loop above exited because the reader died while this
-            # call was waiting on it, not because the session was fine and
-            # the deadline simply passed: `_active_session` already refuses
-            # a read against a session in this state before the wait even
-            # starts, and a reader that dies mid-wait deserves exactly that
-            # refusal rather than a quiet "no feedback" once it is too late
-            # to ask before the fact. Re-checking now is the same question,
-            # asked one call later, and it reuses the same answer rather than
-            # inventing a second way to say a session is not active.
+            # Empty, and against a reader that is no longer running: either it
+            # died while this call was waiting on it, or it was already dead
+            # when the call arrived and had buffered nothing to hand over. Both
+            # are a failed read rather than the quiet "no feedback" an empty
+            # buffer means on a healthy session, and both are refused with the
+            # same answer `_active_session` gives, rather than a second way of
+            # saying that a session is not active.
             failure = self._active_session(port_id, tool)
             if not failure["ok"]:
                 return failure

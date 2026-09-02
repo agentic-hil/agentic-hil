@@ -786,6 +786,35 @@ class DataThenDiesSerialHandle:
         self.is_open = False
 
 
+class DataThenDiesOnCueSerialHandle:
+    """Delivers one chunk of real data and then holds the reader still until
+    the test releases it, so a read can be made while the bytes are buffered
+    and the reader is provably alive rather than in a race with it.
+
+    ``buffered`` is set from inside the second read, which the reader reaches
+    only after the first chunk has been put in the session buffer and audited.
+    """
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.buffered = threading.Event()
+        self.may_die = threading.Event()
+
+    def read(self, size: int) -> bytes:
+        self.calls += 1
+        if self.calls == 1:
+            return b"ok\n"
+        self.buffered.set()
+        self.may_die.wait(WAIT_TIMEOUT_S)
+        raise OSError("device disconnected after delivering data")
+
+    def close(self) -> None:
+        self.is_open = False
+
+
 def test_com_read_reports_failure_when_reader_dies_mid_wait(tmp_path: Path) -> None:
     """The bug this pins: a reader that dies while `com_read` is inside its
     wait loop used to exit that loop into the same result as no feedback at
@@ -823,14 +852,27 @@ def test_com_read_reports_failure_when_reader_dies_mid_wait(tmp_path: Path) -> N
 def test_com_read_keeps_real_data_a_success_even_if_the_reader_later_dies(tmp_path: Path) -> None:
     """The fix is scoped to an empty read: a call that did retrieve real
     bytes before the reader went on to fail stays a success, with the
-    reader's error still nested for the next call to see."""
+    reader's error still there for the next call to see.
+
+    The ordering is now forced instead of raced for. The handle delivers its
+    chunk and then holds the reader inside its next read until this test lets
+    go, so the reader is provably alive when the read is made and provably
+    dead when the follow-up read asks again. The other ordering, where the
+    reader is already dead when the call arrives, is pinned by
+    test_com_read_hands_out_bytes_the_reader_buffered_before_it_died.
+    """
     config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
     service = ComPortService(config)
     log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-data-then-dies.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = DataThenDiesSerialHandle()
+    handle = DataThenDiesOnCueSerialHandle()
     session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path))
     service.sessions["dut"] = session
+    reader = session.reader
+    assert reader is not None
+
+    assert handle.buffered.wait(WAIT_TIMEOUT_S), "reader never came back for a second read"
+    assert session.reader_error is None
 
     result = service.read_bytes("dut", 16, 2.0)
 
@@ -838,6 +880,139 @@ def test_com_read_keeps_real_data_a_success_even_if_the_reader_later_dies(tmp_pa
     assert overall_success(result) is True
     assert result["bytes_read"] == 3
     assert result["data"]["text"] == "ok\n"
+    # Handed over rather than copied: the session buffer no longer holds them.
+    assert result["buffer_remaining_bytes"] == 0
+
+    handle.may_die.set()
+    reader.join(WAIT_TIMEOUT_S)
+    assert not reader.is_alive(), "reader thread never finished"
+
+    later = service.read_bytes("dut", 16, 0.0)
+
+    assert later["ok"] is False, later
+    assert later["error_type"] == "session_not_active"
+    assert later["reader_error"]["error_type"] == "serial_read_failed"
+
+
+def test_com_read_hands_out_bytes_the_reader_buffered_before_it_died(tmp_path: Path) -> None:
+    """The bug this pins: which side of the read the reader's death landed on
+    decided whether real bytes were handed over at all. A death observed
+    before the call looked, which a slow runner or a fast reader produces,
+    made `com_read` answer `session_not_active`, and the bytes the reader had
+    already pulled off the line went with the refusal. That refusal was right
+    about the reader and wrong about the bytes: a read that finds the reader
+    dead now drains what it buffered and answers with those bytes, the
+    reader's error nested beside them, in the shape the call already used when
+    the death arrived after the read instead of before it.
+
+    The reader is run to completion in this thread before the read, so the
+    ordering is the state of the session rather than a race for it.
+    """
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-dead-reader-buffered.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    session = ComPortSession("dut", config.com_ports["dut"], DataThenDiesSerialHandle(), str(log_path), start_reader=False)
+    service.sessions["dut"] = session
+
+    session._reader_loop()
+
+    assert bytes(session.buffer) == b"ok\n"
+    assert session.reader_error is not None
+    assert service._session_is_active(session) is False
+
+    result = service.read_bytes("dut", 16, 0.0)
+
+    assert result["ok"] is True, result
+    assert overall_success(result) is True
+    assert result["bytes_read"] == 3
+    assert result["data"]["text"] == "ok\n"
+    assert result["reader_error"]["error_type"] == "serial_read_failed"
+    assert result["buffer_remaining_bytes"] == 0
+    # Handed over once, not served again: with the buffer empty, the dead
+    # reader is the whole answer.
+    again = service.read_bytes("dut", 16, 0.0)
+    assert again["ok"] is False, again
+    assert again["error_type"] == "session_not_active"
+
+
+def test_com_read_refuses_a_dead_reader_that_buffered_nothing(tmp_path: Path) -> None:
+    """The other half of that ordering: draining what a dead reader left is
+    no licence to call an empty read a success. A session whose reader died
+    without buffering anything still answers `session_not_active` with the
+    reader's error nested, and carries no data field to mistake for
+    feedback."""
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-dead-reader-empty.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    session = ComPortSession("dut", config.com_ports["dut"], FailingSerialHandle(), str(log_path), start_reader=False)
+    service.sessions["dut"] = session
+
+    session._reader_loop()
+
+    assert not session.buffer
+    assert session.reader_error is not None
+
+    result = service.read_bytes("dut", 16, 0.0)
+
+    assert result["ok"] is False, result
+    assert overall_success(result) is False
+    assert result["error_type"] == "session_not_active"
+    assert result["reader_error"]["error_type"] == "serial_read_failed"
+    assert "data" not in result
+
+
+def test_com_read_does_not_drain_a_quarantined_session(tmp_path: Path) -> None:
+    """The drain reaches past a dead reader and no further: a session that
+    needs cleanup keeps its quarantine, and its buffer with it. The reader
+    here could not write its audit line, which is a broken audit as well as a
+    stopped reader, and an audit nobody could write is the last thing a
+    hand-over of the same bytes may talk past."""
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    # A directory, so the reader's audit append cannot be written.
+    log_path = tmp_path / ".agentic-hil" / "logs"
+    log_path.mkdir(parents=True, exist_ok=True)
+    session = ComPortSession("dut", config.com_ports["dut"], DataThenDiesSerialHandle(), str(log_path), start_reader=False)
+    service.sessions["dut"] = session
+
+    session._reader_loop()
+
+    assert bytes(session.buffer) == b"ok\n"
+    assert session.audit_broken is True
+
+    result = service.read_bytes("dut", 16, 0.0)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "resource_quarantined"
+    assert result["cleanup_required"] is True
+    # What was refused was not also consumed.
+    assert bytes(session.buffer) == b"ok\n"
+
+
+def test_com_read_does_not_drain_a_session_whose_reader_never_failed(tmp_path: Path) -> None:
+    """The drain answers for a reader that died and for nothing else. A
+    session that is inactive for some other reason, here a handle reporting
+    itself closed while no reader ever recorded an error, is refused exactly
+    as it always was, and whatever it still holds stays held."""
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-closed-handle.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = FailingSerialHandle()
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), start_reader=False)
+    # What a reader leaves behind, without the reader ever having failed.
+    session.buffer.extend(b"ok\n")
+    handle.is_open = False
+    service.sessions["dut"] = session
+
+    result = service.read_bytes("dut", 16, 0.0)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "session_not_active"
+    assert session.reader_error is None
+    assert bytes(session.buffer) == b"ok\n"
 
 
 def test_com_session_stop_retains_session_when_close_fails_for_retry(tmp_path: Path) -> None:

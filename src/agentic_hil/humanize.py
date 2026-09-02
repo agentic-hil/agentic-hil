@@ -98,6 +98,7 @@ def write_rendered(stream: object, text: str) -> None:
 
 
 def _render_lines(result: JsonObject, command: str | None) -> list[str]:
+    result = _audit_errors_where_they_happened(result)
     if _error_type(result):
         # A refusal is rendered the same way for every command: the error type
         # names it, the summary says what happened, and the catalogue says what
@@ -216,12 +217,64 @@ def _members(value: Mapping[str, object]) -> tuple[list[tuple[str, object]], lis
     """
     rows: list[tuple[str, object]] = []
     bodies: list[tuple[str, object]] = []
-    for key, item in value.items():
+    for key, item in _one_audit_error(value).items():
         if _renderable_scalar(item) and not _process_output(key, item):
             rows.append((key, item))
         else:
             bodies.append((str(key), item))
     return rows, bodies
+
+
+# The two fields an audit failure is carried in. `audit_error` is `audit_errors[0]`
+# wherever one is built (`report.merge_audit_status`, `report.mark_audit_failure`,
+# `test_reactor.propagate_result_status`): one field for a caller that reads a single
+# failure, one list for a caller that reads them all, and the same object in both.
+_AUDIT_ERROR_KEYS = ("audit_error", "audit_errors")
+
+
+def _one_audit_error(value: Mapping[str, object]) -> Mapping[str, object]:
+    """The same object's two names collapsed to the one that carries them all.
+
+    The document is right to hold both, and a person reading one refusal was
+    shown the identical paragraph and the identical five remediation items twice
+    in a row for it (#387). The list is what survives, because it is the one that
+    is complete when a run failed its audit in more than one place.
+    """
+    errors = _entries(value.get("audit_errors"))
+    if not errors or _mapping(value.get("audit_error")) not in errors:
+        return value
+    return {key: item for key, item in value.items() if key != "audit_error"}
+
+
+def _audit_errors_where_they_happened(result: JsonObject) -> JsonObject:
+    """Drop an aggregate's copy of the audit failures its own steps already carry.
+
+    A plan that cannot write its audit trail answers with the same refusal three
+    times: in the failing step's result, in the top-level `audit_error`, and in
+    the top-level `audit_errors` the aggregate flattens every step's into. All
+    three belong in the document, which is a machine contract read field by
+    field. None of them is one a person needs twice, and the copies furthest
+    from the step stand furthest from the one thing that explains them.
+
+    Only what is provably the same object goes, compared by value against
+    everything else this document holds. An audit failure no step carries, a
+    cleanup that could not be recorded, a run that failed before its first step,
+    is printed nowhere else and stays exactly where it is.
+    """
+    errors = _entries(result.get("audit_errors"))
+    if not errors:
+        return result
+    elsewhere = {key: value for key, value in result.items() if key not in _AUDIT_ERROR_KEYS}
+    return elsewhere if all(_holds(elsewhere, error) for error in errors) else result
+
+
+def _holds(node: object, needle: JsonObject) -> bool:
+    """Whether ``needle`` already stands somewhere inside ``node``, by value."""
+    if isinstance(node, Mapping):
+        return dict(node) == needle or any(_holds(item, needle) for item in node.values())
+    if isinstance(node, Sequence) and not isinstance(node, (str, bytes)):
+        return any(_holds(item, needle) for item in node)
+    return False
 
 
 def _member_lines(key: str, value: object, indent: str) -> list[str]:
@@ -472,9 +525,22 @@ def _nested_sequence(value: Sequence[object], indent: str = _INDENT) -> list[str
     lines: list[str] = []
     for item in value:
         if isinstance(item, Mapping):
-            # The first scalar field carries the bullet, because a list of small
+            # A result-shaped entry is a result wherever it stands, so it is
+            # rendered by the same pass a nested one is: its summary heads the
+            # bullet, `error_type` and the numbered remediation land where every
+            # other refusal keeps them. Anything else keeps the older rule, where
+            # the first scalar field carries the bullet, because a list of small
             # objects is nearly always a list of named things and a bare `-` with
             # the name on the line under it reads as an empty entry.
+            #
+            # A list of refusals is what made the distinction worth drawing.
+            # `ConfigError.to_dict` opens with `ok: False`, so `audit_errors`
+            # rendered its first entry as `- no` and then folded five numbered
+            # remediation items into one comma-joined row (#387).
+            if _looks_like_result(item):
+                lines.extend(_wrap(_result_head(item), indent=f"{indent}- ", hanging=f"{indent}  "))
+                lines.extend(_result_body(item, indent + _INDENT * 2))
+                continue
             rows, bodies = _members(item)
             if rows:
                 lines.extend(_wrap(_scalar(rows[0][1]), indent=f"{indent}- ", hanging=f"{indent}  "))
@@ -492,6 +558,11 @@ def _looks_like_result(value: Mapping[str, object]) -> bool:
     return "summary" in value or "ok" in value
 
 
+def _result_head(value: Mapping[str, object]) -> str:
+    """The one sentence a nested result is introduced by, wherever it stands."""
+    return _summary(value) or _verdict(value) or "ok"
+
+
 def _result_lines(value: Mapping[str, object], indent: str = _INDENT) -> list[str]:
     """A nested result: its verdict, its summary, its own fields, its remediation.
 
@@ -502,10 +573,13 @@ def _result_lines(value: Mapping[str, object], indent: str = _INDENT) -> list[st
     only the sentence would have been the one place this layer lost something
     somebody acts on. The advice stays last, under the facts it is advice about.
     """
-    lines = _wrap(_summary(value) or _verdict(value) or "ok", indent=indent)
+    return [*_wrap(_result_head(value), indent=indent), *_result_body(value, indent)]
+
+
+def _result_body(value: Mapping[str, object], indent: str) -> list[str]:
+    """Everything a nested result carries under its own opening sentence."""
     error_type = _error_type(value)
-    if error_type:
-        lines.extend(_fields([("error_type", error_type)], indent=indent))
+    lines = _fields([("error_type", error_type)], indent=indent) if error_type else []
     rows, bodies = _members({key: item for key, item in value.items() if key not in _HANDLED_EVERYWHERE})
     lines.extend(_fields(rows, indent=indent))
     for key, item in bodies:

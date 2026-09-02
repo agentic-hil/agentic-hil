@@ -11,9 +11,14 @@ in this repository for handing a stored login to an agent CLI:
   CLI that rewrites its login file writes to a copy that dies with the
   container.
 
-Unlike the evaluation, nothing is exported back to the host: the wrapper deletes
-the home volume unconditionally, because the only product of a loop run is the
-commits it made in the repository mount.
+The logins do go back, for the reason the evaluation exports one: a refresh
+token is single use, so a CLI that refreshes in here leaves the host holding a
+value the provider has already replaced, and the next run cannot start at all.
+Codex refreshes on its way into every session and Claude Code refreshes once an
+access token's hour is up, so both files are staged into the home volume before
+this exits, where they outlive the tmpfs and the container by exactly as long as
+the wrapper needs to read them back. Nothing else travels outward: the only
+other product of a loop run is the commits it made in the repository mount.
 
 Neither agent is installed into a shared environment here. Each gets one of its
 own, built from the committed tree it works in and rebuilt when that tree's
@@ -24,8 +29,10 @@ CLIs on PATH and does it.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
-import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -64,6 +71,23 @@ MOUNTED_PATHS = {
 # --repo exactly as the loop resolves it.
 DEFAULT_PAPERWORK = {"--review-dir": ".agentic-loop/reviews", "--log-dir": ".agentic-loop/logs"}
 
+# Which kinds the wrapper takes back, and where they wait for it. The home
+# volume rather than the tmpfs, because the tmpfs is gone the instant the
+# container is: the volume is the one thing this run leaves behind that the
+# wrapper still holds when the container has exited, and the wrapper deletes it
+# immediately afterwards.
+#
+# Both OAuth logins. A run is hours and an access token is not, so the refresh
+# the wrapper makes on the host before the run is not the last one: Codex makes
+# another on its way into a session in here, a Claude Code access token lasts
+# about an hour so the implementer rounds refresh in here too, and issue #391 is
+# what that costs. Taking a file back means replacing the operator's own, which
+# is done for the logins that have been shown to need it rather than for every
+# file that travels in: claude-config carries account state and no token, and
+# the two instruction files are the operator's own text.
+RETURNED = ("claude-auth", "codex-auth")
+STAGED_LOGINS = HOME / ".agentic-loop-logins"
+
 # Scratch every standard tool writes beside the code unless it is told
 # otherwise. Setting TMPDIR moves what a tool asks the system for; it does not
 # move these, and a round of the loop proved it -- Ruff left `.ruff_cache` on the
@@ -80,6 +104,30 @@ TOOL_CACHES = {
 PYTEST_CACHE = SCRATCH / "pytest-cache"
 
 
+def copy_private(source: Path, destination: Path) -> None:
+    """Copy a mounted file to a copy its owner alone can read.
+
+    `shutil.copyfile` creates through the process umask, and a chmod afterwards
+    is a window: for the stretch between the two calls a login is readable by
+    anyone else on the machine. Every file that travels through here is one, so
+    the mode is on the file from the moment it exists instead. The same argument
+    and the same shape as `copy_private` in `evals/install/refresh_login.py`,
+    written out again because nothing of this repository but this file, the shim
+    and the options module is in the image.
+    """
+    data = source.read_bytes()
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(destination)
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(data)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def place_mounted_files(kinds: list[str]) -> None:
     for kind in kinds:
         source = MOUNTED_FILES / kind
@@ -87,13 +135,51 @@ def place_mounted_files(kinds: list[str]) -> None:
             raise FileNotFoundError(f"mount missing: {source}")
         temporary = TEMPORARY_FILES / kind
         temporary.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        shutil.copyfile(source, temporary)
-        temporary.chmod(0o600)
+        copy_private(source, temporary)
         target = MOUNTED_PATHS[kind]
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if target.exists() or target.is_symlink():
             raise FileExistsError(f"destination already exists: {target}")
         target.symlink_to(temporary)
+
+
+def stage_logins(kinds: list[str]) -> list[str]:
+    """Leave what the CLI holds now where the wrapper can still read it.
+
+    The path is read through whatever it has become. A CLI that refreshes writes
+    either through the symlink placed above, which lands on the tmpfs, or over
+    it, which leaves a regular file in the home volume; copying from the
+    resolved path covers both, and `evals/install/refresh_login.py` says the
+    same thing about the same two cases.
+
+    Called for every ending, so it must never be the reason a run reports a
+    failure it did not have: a kind with nothing to copy is skipped, and the
+    caller suppresses what the filesystem refuses.
+    """
+    staged = []
+    STAGED_LOGINS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for kind in kinds:
+        source = MOUNTED_PATHS.get(kind)
+        if kind not in RETURNED or source is None or not source.is_file():
+            continue
+        destination = STAGED_LOGINS / kind
+        copy_private(source, destination)
+        staged.append(kind)
+    return staged
+
+
+def dump_logins(kinds: list[str]) -> dict[str, str]:
+    """Read the staged logins out of the home volume, in a later container.
+
+    That container mounts the volume read-only and has no network, so this is
+    the whole of what it does: the wrapper decides what to do with the answer.
+    """
+    staged = {}
+    for kind in kinds:
+        path = STAGED_LOGINS / kind
+        if kind in RETURNED and path.is_file():
+            staged[kind] = path.read_text(encoding="utf-8")
+    return staged
 
 
 def cgroup_peak(name: str) -> int | None:
@@ -237,11 +323,58 @@ def loop_environment() -> dict[str, str]:
     return environment
 
 
+class _ContainerStopped(BaseException):
+    """The container stop `_unwind_on_stop` turns SIGTERM into.
+
+    A `BaseException` of its own rather than `KeyboardInterrupt`, so `main` can
+    catch the container's own stop without also catching a genuine Ctrl-C. The
+    default SIGINT handler still raises `KeyboardInterrupt`, which passes through
+    the same staging `finally` and then propagates, so an interactive interrupt
+    keeps the conventional 130 that a caller reads as "stopped at the keyboard",
+    distinct from the 128 + SIGTERM a `docker stop` returns.
+    """
+
+
+def _unwind_on_stop(_signum: int, _frame: object) -> None:
+    """Turn the container's stop signal into an orderly unwind.
+
+    `docker stop` sends SIGTERM -- this image declares no STOPSIGNAL -- and
+    Python's default action for it terminates the interpreter without running a
+    single `finally`. That is exactly the block `main` stages the in-flight
+    round's login in, so the default action would skip it: the value the round
+    refreshed to would die on the tmpfs with the container, and this machine
+    would keep the single-use refresh token that round already spent -- issue
+    #391 in the one form the wrapper cannot answer from outside, because a signal
+    that never runs the staging leaves nothing in the home volume to read back.
+
+    Raising here makes SIGTERM unwind the stack exactly as the default SIGINT
+    handler does, so that `finally` runs and the rotated login reaches the volume
+    whatever stopped the run -- the wrapper's own `stop_container`, an operator's
+    `docker stop`, or the daemon shutting down. It raises `_ContainerStopped`
+    rather than `KeyboardInterrupt` so the stop stays distinct from a genuine
+    Ctrl-C; `tools/loop_in_container.py`'s `stop_container` sends this signal and
+    waits for this unwind to finish.
+    """
+    raise _ContainerStopped
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kinds", nargs="*", default=[])
+    parser.add_argument(
+        "--dump-logins",
+        action="store_true",
+        help="print what the last run staged for the wrapper, and do nothing else.",
+    )
     parser.add_argument("loop_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+
+    if args.dump_logins:
+        # A second container, on the home volume the first one left behind. It
+        # has no repository mount and no round to run, so it answers before
+        # every check that is about running one.
+        json.dump(dump_logins(list(args.kinds)), sys.stdout)
+        return 0
 
     if os.geteuid() == 0:
         raise RuntimeError("the loop container must not run as root")
@@ -255,9 +388,36 @@ def main(argv: list[str] | None = None) -> int:
 
     command = loop_command(list(args.loop_args))
     print(f"loop: {' '.join(command)}", flush=True)
+    # docker stop sends SIGTERM, whose default action terminates this interpreter
+    # without running the finally below; turn it into an unwind so the staging
+    # runs however this run is stopped. Restored in the finally so an in-process
+    # caller -- the suite runs main() directly -- does not inherit this handler.
+    previous_sigterm = signal.signal(signal.SIGTERM, _unwind_on_stop)
     try:
         return subprocess.run(command, cwd=str(REPO), env=loop_environment(), check=False).returncode
+    except _ContainerStopped:
+        # Stopped mid-run by SIGTERM: the wrapper's stop_container, an operator's
+        # docker stop, or a daemon shutdown, each of which _unwind_on_stop turns
+        # into this. subprocess.run has already killed the loop child on its way
+        # out of its own wait, so the finally below stages what the in-flight
+        # round refreshed to and this returns the 128 + SIGTERM such a stop
+        # conventionally carries. A genuine Ctrl-C raises KeyboardInterrupt, not
+        # this, and is deliberately not caught here: it unwinds the same finally
+        # and then propagates, so the interpreter still exits with the 130 that
+        # keeps an interactive interrupt distinct from a container stop.
+        print("loop: stopped; staging the in-flight round's login before exit", flush=True)
+        return 128 + signal.SIGTERM
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        # Every ending, the operator stopping the run included: _unwind_on_stop
+        # turns the stop signal into the exception that reaches here, the loop
+        # dies with it, and what the last round rotated to is the only value the
+        # provider still accepts. Suppressed rather than raised, because a run
+        # that produced commits is not a failed run just because this could not
+        # copy a file.
+        with contextlib.suppress(OSError):
+            staged = stage_logins(list(args.kinds))
+            print(f"staged for the host: {', '.join(staged) if staged else 'nothing'}", flush=True)
         report_peaks()
 
 

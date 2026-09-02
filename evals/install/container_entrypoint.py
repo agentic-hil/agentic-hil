@@ -19,6 +19,7 @@ from .fixtures import (
     remove_registration_block,
     skills_directory,
 )
+from .refresh_login import PRIVATE_MODE, copy_private
 from .refresh_login import export as export_refreshed
 from .scrub_credentials import AUTH_PATHS, scrub
 from .source import IGNORED_DIRECTORY_NAMES, IGNORED_FILE_SUFFIXES
@@ -178,8 +179,7 @@ def prepare_credential_files(agent: str, kinds: list[str]) -> None:
             raise FileNotFoundError(f"credential mount missing: {source}")
         temporary = TEMPORARY_CREDENTIALS / kind
         temporary.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        shutil.copyfile(source, temporary)
-        temporary.chmod(0o600)
+        copy_private(source, temporary, PRIVATE_MODE)
         target = AUTH_PATHS[kind]
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if target.exists() or target.is_symlink():

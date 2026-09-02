@@ -503,18 +503,43 @@ def is_failure_report(report: JsonObject) -> bool:
     return not overall_success(report)
 
 
+# The checks `overall_success` folds into one boolean, in the order it applies
+# them and named by the field each one reads. One table rather than a chain of
+# `and`s because a caller that has to say *why* a result is not a success must
+# read the same predicates the boolean was computed from: a second copy of them
+# somewhere else is a second copy that drifts, and the verdict it produces then
+# names a check the boolean did not fail on.
+SUCCESS_CHECKS: tuple[tuple[str, Callable[[JsonObject], bool]], ...] = (
+    ("ok", lambda result: result.get("ok") is True),
+    ("target_ok", lambda result: result.get("target_ok") is not False),
+    ("audit_ok", lambda result: result.get("audit_ok") is not False),
+    ("cleanup_ok", lambda result: result.get("cleanup_ok") is not False),
+    ("cleanup_required", lambda result: result.get("cleanup_required") is not True),
+    ("quarantined", lambda result: result.get("quarantined") is not True),
+    ("lease_state", lambda result: result.get("lease_state") in {None, "active", "released"}),
+    ("side_effect_status", lambda result: result.get("side_effect_status") not in {"unknown", "partial"}),
+    ("hardware_state", lambda result: result.get("hardware_state") != "unknown"),
+)
+
+
+def failed_success_check(result: JsonObject) -> str | None:
+    """Which check this result failed first, or None when it is a success.
+
+    `overall_success` answers "may this go on", which is what almost every
+    caller wants and exactly what none of them may report as the reason it
+    stopped: nine different facts arrive as one `False`, and a caller that
+    describes that `False` in its own words describes whichever of the nine it
+    happened to be written about. The run teardown's recovery did that with a
+    reset into halt: a reset the target confirmed, whose report could not be
+    written, failed the `audit_ok` check and was reported as a target that never
+    confirmed the reset, contradicting the recovery's own log and denying the
+    halted state the recovery had just left the board in (#389).
+    """
+    return next((name for name, check in SUCCESS_CHECKS if not check(result)), None)
+
+
 def overall_success(result: JsonObject) -> bool:
-    return (
-        result.get("ok") is True
-        and result.get("target_ok") is not False
-        and result.get("audit_ok") is not False
-        and result.get("cleanup_ok") is not False
-        and result.get("cleanup_required") is not True
-        and result.get("quarantined") is not True
-        and result.get("lease_state") in {None, "active", "released"}
-        and result.get("side_effect_status") not in {"unknown", "partial"}
-        and result.get("hardware_state") != "unknown"
-    )
+    return failed_success_check(result) is None
 
 
 def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[str], list[str]]) -> JsonObject:

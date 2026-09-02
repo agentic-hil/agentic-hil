@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -304,6 +305,18 @@ def _rendered(document: object, command: str) -> str:
     return render_result(document, command)
 
 
+def _reflowed(text: str) -> str:
+    """The rendering with the line breaks the wrapper put in taken back out.
+
+    What a rendering says and where it says it are two assertions, and only the
+    second one is about the terminal. A path never wraps, so counting one in the
+    rendered text counts copies at any width; a command is several words and
+    wraps exactly like the prose around it, so counting one there counts copies
+    at one width and splits it at the next.
+    """
+    return " ".join(text.split())
+
+
 def test_the_forced_init_a_person_runs_reads_as_prose() -> None:
     out = _rendered(INIT_FORCED, "init")
     assert out.startswith("Agentic HIL project configured.")
@@ -436,6 +449,163 @@ def test_a_refusal_whose_diagnosis_is_a_list_of_objects_renders_the_entries() ->
     assert "4412" in out and "7781" in out
     assert "claude.exe" in out and "agentic-hil.exe" in out
     assert "{" not in out and "[" not in out
+
+
+# The one string a copy of the audit failure cannot be counted without. Prose
+# wraps to the terminal and a path never does, so this is what says how many
+# times the finding was printed.
+REDIRECTED_PARENT = "C:/Users/op/AppData/Local/Packages/host/LocalCache/Local/agentic-hil/projects/blinky/reports"
+
+
+def _audit_refusal() -> dict:
+    """A plan refused because its audit trail could not be written.
+
+    The shape `report.audit_unavailable` and `test_reactor.propagate_result_status`
+    build together, which is the one an operator met on the redirected profile of
+    #387: the step's own refusal, the aggregate's `audit_error`, and the
+    aggregate's `audit_errors` flattened from every step, all three holding the
+    same object.
+    """
+    audit_error = {
+        "ok": False,
+        "error_type": "unsafe_configured_path",
+        "summary": "Configured file's parent directory resolves to a different location than it names.",
+        "field": "state_root",
+        "path": "C:/Users/op/AppData/Local/agentic-hil/projects/blinky/reports/report-state.json",
+        "resolved_parent": REDIRECTED_PARENT,
+    }
+    step_result = {
+        "ok": False,
+        "tool": "flash_firmware",
+        "error_type": "audit_unavailable",
+        "summary": "Hardware action was not started because audit output is unavailable.",
+        "side_effect_committed": False,
+        "audit_ok": False,
+        "audit_error": audit_error,
+    }
+    return {
+        "ok": False,
+        "tool": "test_reactor",
+        "error_type": "audit_unavailable",
+        "summary": "Hardware action was not started because audit output is unavailable.",
+        "failed_step": 1,
+        "step_error_type": "audit_unavailable",
+        "steps": [{"index": 1, "route": "dut", "action": "flash", "result": step_result}],
+        "audit_ok": False,
+        "audit_error": audit_error,
+        "audit_errors": [audit_error],
+    }
+
+
+def test_an_audit_failure_is_printed_once_and_not_in_each_field_that_carries_it() -> None:
+    """Three fields, one finding, and a person reads it where it happened.
+
+    `audit_error` is `audit_errors[0]` wherever one is built, and a plan's
+    top-level `audit_errors` is its steps' flattened into one list. The document
+    is right to carry all three, and the rendering printed the same paragraph and
+    the same five remediation items three times over, the last two copies with no
+    step beside them to say which action they were about.
+    """
+    out = _rendered(_audit_refusal(), "test-reactor")
+
+    assert out.count(REDIRECTED_PARENT) == 1
+    # It survives where it explains something: under the step that met it.
+    before, _, _after = out.partition(REDIRECTED_PARENT)
+    assert "action  flash" in before
+    assert "\n  audit_error\n" not in out
+    assert "\n  audit_errors\n" not in out
+    # The remediation comes with the one copy that is left, rather than being the
+    # thing that was repeated. Counted with the line breaks taken back out, for
+    # the reason REDIRECTED_PARENT is counted with them still in: this one is
+    # prose, and where prose breaks is the terminal's business.
+    assert _reflowed(out).count("agentic-hil init --force") == 1
+
+
+def test_the_suite_pins_the_terminal_width_it_renders_at() -> None:
+    """Which width a rendering test compares text at is part of its fixture.
+
+    Nothing sets COLUMNS for a pytest process, so the module would wrap to
+    whatever the runner leaves it, and on Linux that is two answers for one
+    suite: its own 88 column fallback in a single process, and COLUMNS=80 in a
+    pytest-xdist worker, which inherits the 80x24 default GNU readline writes
+    into the C environment when the parent imports `readline` (#390).
+    `isolated_config_environment` pins it the way it pins HOME and TMPDIR. Read
+    back through the same call the module makes, with a fallback of nothing, so
+    removing the pin fails here rather than moving prose in every other rendering
+    test.
+    """
+    assert shutil.get_terminal_size(fallback=(0, 0)).columns == 88
+
+
+@pytest.mark.parametrize("columns", [62, 78, 80, 88, 120])
+def test_an_audit_refusal_says_the_same_things_at_every_terminal_width(monkeypatch: pytest.MonkeyPatch, columns: int) -> None:
+    """The width decides where the lines break and nothing else.
+
+    Pinning the width keeps the suite's own comparisons stable; it must not be
+    what makes them true. COLUMNS=80 is what a pytest-xdist worker on Linux is
+    given, and the 78 columns of prose that leaves is where the wrap fell between
+    `agentic-hil` and `init --force`, so the one copy of the remediation that is
+    printed stopped being countable while nothing about it had changed (#390).
+    """
+    monkeypatch.setenv("COLUMNS", str(columns))
+    monkeypatch.setenv("LINES", "24")
+
+    out = _reflowed(_rendered(_audit_refusal(), "test-reactor"))
+
+    assert out.count(REDIRECTED_PARENT) == 1
+    assert out.count("agentic-hil init --force") == 1
+    # The whole remediation once, counted on a token no width can break, so the
+    # two assertions above cannot agree by both being zero.
+    assert out.count("agentic-hil://reference/platform-paths") == 1
+
+
+def test_an_audit_failure_no_step_carries_is_still_printed() -> None:
+    """The rule is "not twice", not "not at all".
+
+    A run that failed before its first step, or a cleanup whose record could not
+    be written, holds an audit failure nothing else in the document repeats. That
+    one has nowhere else to be read, so it stays exactly where it is.
+    """
+    document = _audit_refusal()
+    document.pop("steps")
+
+    out = _rendered(document, "test-reactor")
+
+    assert out.count(REDIRECTED_PARENT) == 1
+    assert "\n  audit_errors\n" in out
+
+
+def test_a_list_of_refusals_is_headed_by_what_each_refusal_says() -> None:
+    """`- no` is not a name, and it was the name every refusal list gave.
+
+    A list entry is headed by its first scalar field, and `ConfigError.to_dict`
+    opens with `ok: False`, so an `audit_errors` list opened each entry with the
+    rendering of that boolean and then folded five numbered remediation items
+    into one comma-joined row. A result-shaped entry is a result wherever it
+    stands, so it is rendered as one.
+    """
+    document = {
+        "ok": False,
+        "tool": "bench_run_stop",
+        "error_type": "audit_unavailable",
+        "summary": "The run was closed and its audit trail was not written.",
+        "audit_ok": False,
+        "audit_errors": [
+            {"ok": False, "error_type": "unsafe_configured_path", "summary": "The reports directory resolves elsewhere.", "field": "state_root"},
+            {"error_type": "OSError", "backend_error": "no space left on device"},
+        ],
+    }
+
+    out = _rendered(document, "bench-run-stop")
+
+    assert "- no" not in out
+    assert "\n    - The reports directory resolves elsewhere.\n" in out
+    # The numbered remediation the catalogue holds for it, as a refusal prints it
+    # anywhere else, rather than one comma-joined strip.
+    assert "\n          1. Read `resolved_parent` first" in out
+    # An entry that is not result-shaped keeps the older head, which is the field
+    # that names it rather than the first one that happens to be a boolean.
+    assert "\n    - OSError\n" in out
 
 
 def test_captured_output_that_is_enormous_says_how_much_it_cut_and_keeps_both_ends() -> None:

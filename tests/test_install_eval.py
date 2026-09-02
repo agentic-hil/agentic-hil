@@ -2,21 +2,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
 import sys
 import threading
 import time
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from evals.install import bench_openocd, guard, scrub_credentials
+from evals.install import bench_openocd, guard, refresh_login, scrub_credentials
 from evals.install import runner as install_runner
 from evals.install.adapters import adapter_for, build_agent_command
 from evals.install.config import CredentialFile, Job, load_case, load_matrix
-from evals.install.credentials import authentication_failure, credential_health
+from evals.install.credentials import authentication_failure, credential_health, spent_refresh_token
 from evals.install.fixtures import (
     SENTINEL_KEY,
     SENTINEL_VALUE,
@@ -435,6 +440,164 @@ def test_refreshed_login_is_rejected_unless_it_is_still_a_login(tmp_path: Path) 
 
     assert path.read_text(encoding="utf-8") == original
     assert not path.with_name(path.name + BACKUP_SUFFIX).exists()
+
+
+def test_a_codex_api_key_login_is_accepted_by_the_return_validator(tmp_path: Path) -> None:
+    """An API key is a supported Codex login; the validator has to agree.
+
+    `credential_health` accepts a Codex `auth.json` that carries an `OPENAI_API_KEY`
+    and no OAuth tokens, so the validator guarding the write-back must accept the
+    same document. An API key has nothing to refresh, so the container returns it
+    byte for byte, and that unchanged return reads as `unchanged` rather than as a
+    login missing an access or refresh token it never had.
+    """
+    path = tmp_path / "auth.json"
+    api_key_login = json.dumps({"OPENAI_API_KEY": "sk-not-a-real-key", "tokens": None})
+    path.write_text(api_key_login, encoding="utf-8")
+
+    assert apply_refreshed_login("codex-auth", path, api_key_login) == "unchanged"
+    assert path.read_text(encoding="utf-8") == api_key_login
+    assert not path.with_name(path.name + BACKUP_SUFFIX).exists()
+
+    # A tokens-less document without a key is still not a login, and must not
+    # replace one: the API-key path widens what is accepted, it does not open it.
+    assert "rejected" in apply_refreshed_login("codex-auth", path, json.dumps({"OPENAI_API_KEY": ""}))
+    assert path.read_text(encoding="utf-8") == api_key_login
+
+
+POSIX_MODES = pytest.mark.skipif(os.name == "nt", reason="POSIX file modes; Windows has none of these to keep")
+
+
+@contextmanager
+def _watching_the_modes(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[int]]:
+    """A umask that forbids nothing, and every chmod that happens under it.
+
+    The umask, because otherwise a mode assertion is the machine's answer rather
+    than the code's: on a bench running `umask 0077` a plain `write_text` already
+    produces 0600 and the assertion passes with the fix reverted.
+
+    The chmod list, because the question is "never wider" rather than "narrow by
+    the end". A copy created through the umask and chmodded to 0600 afterwards
+    finishes at the same mode as one created 0600, and the stretch between the
+    two calls is the whole of what is being closed here.
+    """
+    chmods: list[int] = []
+    real_chmod = os.chmod
+
+    def watched_chmod(path: Any, mode: int, **kwargs: Any) -> None:
+        chmods.append(mode)
+        real_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", watched_chmod)
+    previous = os.umask(0)
+    try:
+        yield chmods
+    finally:
+        os.umask(previous)
+
+
+@POSIX_MODES
+def test_a_refreshed_login_is_never_written_through_a_wider_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write-back must not widen what the CLI itself keeps at 0600.
+
+    `Path.write_text` and `shutil.copyfile` create through the process umask,
+    which on a shared machine is 0644. That put an access token and a refresh
+    token in two files every account on the machine could read: the temporary,
+    for as long as it took to rename it over the login, and the backup, which
+    stays behind until somebody deletes it.
+    """
+    path = tmp_path / "auth.json"
+    path.write_text(_claude_login(), encoding="utf-8")
+    path.chmod(0o600)
+    backup = path.with_name(path.name + BACKUP_SUFFIX)
+
+    temporary_modes: list[int] = []
+    real_replace = os.replace
+
+    def watched_replace(source: Any, destination: Any, **kwargs: Any) -> None:
+        # The last moment the temporary can be looked at, and since a rename
+        # carries the mode over, the mode the login is about to land with.
+        temporary_modes.append(stat.S_IMODE(os.stat(source).st_mode))
+        real_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "replace", watched_replace)
+
+    with _watching_the_modes(monkeypatch) as chmods:
+        outcome = apply_refreshed_login("claude-auth", path, _claude_login(access="new-token"))
+
+    assert "replaced" in outcome
+    assert temporary_modes == [0o600]
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert chmods == []
+    # The bytes are still the point; the mode is what was missing from it.
+    assert path.read_text(encoding="utf-8") == _claude_login(access="new-token")
+    assert backup.read_text(encoding="utf-8") == _claude_login()
+
+
+@POSIX_MODES
+def test_a_login_written_where_there_was_none_is_owner_only_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing to take a mode from is the case that has to default to the narrow one.
+
+    There is no backup either, so this also pins that the absent previous file is
+    not quietly copied into one.
+    """
+    path = tmp_path / "auth.json"
+
+    with _watching_the_modes(monkeypatch) as chmods:
+        assert "replaced" in apply_refreshed_login("claude-auth", path, _claude_login())
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert not path.with_name(path.name + BACKUP_SUFFIX).exists()
+    assert chmods == []
+
+
+@POSIX_MODES
+def test_the_login_exported_out_of_a_finished_run_is_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same rule on the way out of a container as on the way back into the home.
+
+    This copy holds the token the run refreshed to and sits in the home volume
+    until the wrapper reads it, so it is created owner-only rather than created
+    readable and narrowed a moment later.
+    """
+    source = tmp_path / "auth.json"
+    source.write_text(_claude_login(), encoding="utf-8")
+    exported = tmp_path / "refreshed"
+    monkeypatch.setattr(refresh_login, "REFRESHED_DIRECTORY", exported)
+    monkeypatch.setitem(refresh_login.AUTH_PATHS, "claude-auth", source)
+
+    with _watching_the_modes(monkeypatch) as chmods:
+        assert refresh_login.export(["claude-auth"]) == ["claude-auth"]
+
+    landed = exported / "claude-auth"
+    assert landed.read_text(encoding="utf-8") == _claude_login()
+    assert stat.S_IMODE(landed.stat().st_mode) == 0o600
+    assert chmods == []
+
+
+def test_a_transient_refresh_failure_is_not_reported_as_a_spent_token() -> None:
+    """A generic refresh failure is an auth failure, not proof the token was spent.
+
+    `failed to refresh token` prefixes a transient outage as readily as a reuse, so
+    it must not drive the spent-token verdict, which tells the operator the token is
+    gone for good and the only cure is to sign in again. It still counts as an
+    authentication failure, so a run that hits it stops as a dead-credential case
+    rather than being blamed on the product.
+    """
+    transient = "Failed to refresh token: connection timed out"
+    assert spent_refresh_token(transient) is None
+    assert authentication_failure(transient) is not None
+
+    # Only wording that names reuse is the spent-token answer.
+    for spent in ("refresh token was already used", "please log out and sign in again"):
+        assert spent_refresh_token(spent) is not None
+        assert authentication_failure(spent) is not None
 
 
 def test_dead_login_is_recognised_before_and_during_a_run(tmp_path: Path) -> None:

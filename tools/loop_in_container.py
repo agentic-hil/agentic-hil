@@ -24,10 +24,21 @@ the reason its `credentials.py` states: a token refreshed inside a container may
 rotate the refresh token, and the rotated value dies with the container while
 this machine keeps the stale one. So health is decided here, refreshing happens
 here, and the container receives individual login files as read-only bind
-mounts -- never a profile directory. `credential_health` reports `unknown` for
-the Codex login because that file states no expiry; that is a real gap in the
-pre-flight and it is the evaluation's gap too, so it is reported rather than
-papered over.
+mounts -- never a profile directory.
+
+A rotated token is not merely stale, though, which is what issue #391 cost an
+operator: a refresh token is single use, so once the copy inside the container
+has spent it, this machine holds a value the provider has already replaced and
+no later run can log in at all. Both halves of that are answered here. The
+Codex login's expiry is read out of the access token it stores rather than
+reported as unknown, so a refresh that is due happens on this machine like the
+Claude one; and because both CLIs refresh again inside a run that outlasts an
+access token, both containerised copies are taken back, at the end of each
+invocation from the container that is still running and at the end of the run
+from the home volume the container stages them into. Neither is a way for the
+container to write here: `docker cp` and a read-only volume mount are how the
+file is read, and `apply_refreshed_login` refuses a document that is not the
+login it replaces and keeps the previous one beside it.
 
 The operator's standing instructions to each CLI travel the same way, when they
 exist. A fresh home has none, and a fresh home is what the first containerised
@@ -35,9 +46,14 @@ round ran in: the agent had never been told this operator's rules and signed its
 commit with an attribution trailer they forbid.
 
 The home the container builds from those files is a Docker volume that is
-deleted unconditionally afterwards. The evaluation scrubs instead, because its
-evidence is inspected later; here the only product is the commits in the
-repository mount, so the home has no reason to outlive the run.
+deleted afterwards, once the logins staged in it have been read back and
+written to this machine. It is kept only when that read-back could not be
+confirmed -- a login that did not come back is a token this run may already have
+spent, and the volume is the one copy of what it rotated to -- and then the run
+fails and says how to recover it. The evaluation scrubs instead, because its
+evidence is inspected later; here the only products are the commits in the
+repository mount and those two files, so the home outlives the container by the
+length of a single read and no longer.
 
 One containerised run at a time per machine, and the lock that decides it is the
 one `tools/ci_linux.py` takes: `run_lock.py` beside this file, on
@@ -87,15 +103,20 @@ loop_options.py` is where both halves read that rule from.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import json
 import os
 import posixpath
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CONTAINER_DIRECTORY = REPOSITORY_ROOT / "tools" / "loopimage"
@@ -117,7 +138,12 @@ from loop_options import (  # noqa: E402
 )
 from run_lock import RunLock, RunLockBusy  # noqa: E402
 
-from evals.install.credentials import authentication_failure, credential_health  # noqa: E402
+from evals.install.credentials import (  # noqa: E402
+    authentication_failure,
+    credential_health,
+    spent_refresh_token,
+)
+from evals.install.refresh_login import apply_refreshed_login  # noqa: E402
 from evals.install.runner import (  # noqa: E402
     docker_mount,
     docker_security_options,
@@ -200,6 +226,60 @@ INSTRUCTION_FILES = {
 # claude-config carries account and onboarding state rather than a token, so
 # there is no expiry in it to judge.
 HEALTH_CHECKED = ("claude-auth", "codex-auth")
+# What comes back, and where the container keeps it. A refresh token is single
+# use, so the copy that refreshes first is the only one that can refresh again:
+# a run that lets its container refresh and then throws that container away
+# leaves this machine holding a value the provider has already replaced, and
+# every later run inherits it.
+#
+# Both OAuth logins reach that state here, and for the same reason: a run is
+# hours and an access token is not, so the refresh made below before the run is
+# not the last one. Codex makes another on its way into every session it starts
+# in there; a Claude Code access token lasts about an hour, which the pre-flight
+# says out loud when it prints `valid until` an hour ahead, so the implementer
+# rounds refresh in there too. Returning only Codex left the Claude refresh
+# token this machine holds spent by a run that reported taking a login back, and
+# every Claude Code session on this machine reads that one file.
+#
+# tools/loopimage/entrypoint.py places each file at these paths and stages a copy
+# of it in the home volume before it exits; both halves read that arrangement
+# from the constants here and there, and a test holds them to each other.
+RETURNED = ("claude-auth", "codex-auth")
+CONTAINER_LOGIN_PATHS = {
+    "claude-auth": f"{CONTAINER_HOME}/.claude/.credentials.json",
+    "codex-auth": f"{CONTAINER_HOME}/.codex/auth.json",
+}
+# Which CLI can have rotated which login, so the end of an invocation reads back
+# the file that invocation could have spent and no other. Every kind is read
+# again from the home volume at the end of the run whatever happens; this is
+# what bounds the cost of a run that never reaches its own ending to the round
+# that was in flight. The mapping is by CLI rather than by role, because which
+# of the two implements and which reviews is the caller's to choose and neither
+# choice changes whose token a CLI refreshes.
+AGENT_LOGINS = {"claude": ("claude-auth",), "codex": ("codex-auth",)}
+
+# The smallest session Codex has: outside a repository, persisting nothing of
+# its own, and without the operator's config.toml, whose model, provider and
+# hook settings are all ways for this probe to fail for a reason that is not the
+# login. Leaving that file out is safe here in its own words: it does not load
+# $CODEX_HOME/config.toml, and auth still uses $CODEX_HOME.
+CODEX_SESSION = (
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--color",
+    "never",
+    "--sandbox",
+    "read-only",
+)
+
+# How each login is refreshed on this machine: the CLI to start, what to call it
+# when telling an operator to start it themselves, and the smallest session that
+# makes the CLI do it.
+HOST_REFRESH = {
+    "claude-auth": ("claude", "Claude Code", ["-p", "--output-format", "text", "reply with: ok"]),
+    "codex-auth": ("codex", "Codex", ["exec", *CODEX_SESSION, "reply with: ok"]),
+}
 # Forwarded by name only when set on this machine, so a container never receives
 # an empty variable that looks like a configured credential.
 CREDENTIAL_ENVIRONMENT = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY")
@@ -210,9 +290,16 @@ CREDENTIAL_ENVIRONMENT = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENA
 ANNOUNCED_DIRECTORY = re.compile(r"^(reviews|logs)\s+:\s+(\S.*?)\s*$")
 
 # Every line the loop prints on behalf of an agent carries that agent's round
-# prefix. Anything without one -- this wrapper's own output, the entrypoint's
-# echo of the command, the loop's summary -- is not an agent saying anything.
-AGENT_LINE = re.compile(r"^(?P<agent>\[(?:claude|codex)\s+r\d+\])\s(?P<rest>.*)$")
+# prefix, and stalled-round recovery adds a stage to it: the second invocation
+# of a round is announced `[claude r2 finish]`, run with stage="finish" by
+# tools/agent_review_loop.py. The optional stage is part of the bracket so that
+# invocation is read like any other -- its login is taken back when it exits and
+# its authentication failure is attributed to it -- rather than slipping past a
+# parser that only knew the stageless prefix and leaving a login it refreshed
+# outside the bounded write-back. Anything without a bracket at all -- this
+# wrapper's own output, the entrypoint's echo of the command, the loop's summary
+# -- is not an agent saying anything.
+AGENT_LINE = re.compile(r"^(?P<agent>\[(?P<cli>claude|codex)\s+r\d+(?:\s+\w+)?\])\s(?P<rest>.*)$")
 # The loop prints this for every agent invocation, failed or not, and it is what
 # ties a phrase in the output to an invocation that actually could not run.
 AGENT_EXIT = re.compile(r"^exit (?P<code>\d+) after ")
@@ -434,25 +521,32 @@ def git_identity(repo: Path) -> tuple[str, str]:
 def refresh_stale_login(kind: str, detail: str) -> None:
     """Refresh a login on this machine, where a rotated token survives the run.
 
-    Starting the CLI is what refreshes it; there is no command that only
-    refreshes, so this spends one very small session to do it.
+    Starting the CLI is what refreshes it. Neither CLI has a command that only
+    refreshes: `codex login` offers `status` and nothing else, and its `status`
+    reads the stored file without asking the provider anything, so a login whose
+    refresh token another copy has already spent still reports itself logged in.
+    So this spends one very small session per login to have the refresh happen
+    here, where the rotated value survives the run, and to find out here rather
+    than three quarters of an hour into a review whether it can happen at all.
     """
-    if kind != "claude-auth":
+    started = HOST_REFRESH.get(kind)
+    if started is None:
         raise Refused(
             f"the {kind} login needs refreshing here first ({detail}), and this wrapper knows no "
             "host-side refresh for it. Start its CLI once on this machine, then rerun."
         )
-    executable = shutil.which("claude")
+    name, product, arguments = started
+    executable = shutil.which(name)
     if executable is None:
         raise Refused(
-            f"the {kind} login needs refreshing ({detail}) and claude is not on PATH here. "
+            f"the {kind} login needs refreshing ({detail}) and {name} is not on PATH here. "
             "Refreshing it inside the container can rotate the token and leave this machine's "
-            "copy rejected. Start Claude Code once on this machine, then rerun."
+            f"copy rejected. Start {product} once on this machine, then rerun."
         )
-    print(f"{kind}: {detail}; starting Claude Code here once so the refreshed token stays on this machine", flush=True)
+    print(f"{kind}: {detail}; starting {product} here once so the refreshed token stays on this machine", flush=True)
     try:
         completed = subprocess.run(
-            [executable, "-p", "--output-format", "text", "reply with: ok"],
+            [executable, *arguments],
             capture_output=True,
             text=True,
             timeout=300,
@@ -463,14 +557,27 @@ def refresh_stale_login(kind: str, detail: str) -> None:
         # of the pre-flight says that far less clearly than the reason does.
         raise Refused(
             f"the {kind} refresh attempt did not finish within {error.timeout:.0f}s, so the login was not "
-            f"refreshed ({detail}). Start Claude Code once on this machine, then rerun."
+            f"refreshed ({detail}). Start {product} once on this machine, then rerun."
         ) from error
     except OSError as error:
         raise Refused(
             f"the {kind} refresh attempt could not start {executable}: {error}. The login was not refreshed "
-            f"({detail}). Start Claude Code once on this machine, then rerun."
+            f"({detail}). Start {product} once on this machine, then rerun."
         ) from error
     if completed.returncode != 0:
+        spent = spent_refresh_token(f"{completed.stdout}\n{completed.stderr}")
+        if spent is not None:
+            # The state a run of this loop leaves behind when it has refreshed
+            # inside the container and thrown the container away, and the reason
+            # this check exists at all: the file looks like a login, `codex
+            # login status` calls it one, and nothing on this machine can turn
+            # it back into one. The CLI's own line goes with it, because that
+            # line is the only place the answer was ever stated.
+            raise Refused(
+                f"the {kind} refresh token stored here has already been used, so no round could authenticate "
+                f"and nothing on this machine can refresh it. {name} said: {spent}. Sign in again with "
+                f"{product}, then rerun."
+            )
         raise Refused(f"the {kind} refresh attempt failed: {completed.stderr.strip() or completed.stdout.strip()}")
 
 
@@ -518,6 +625,209 @@ def check_logins(files: list[tuple[str, Path]]) -> None:
                     "Sign in again, then rerun."
                 )
         print(f"{kind}: {state} ({detail})", flush=True)
+
+
+def finished_agent(line: str) -> str | None:
+    """Which CLI this line reports the end of an invocation of, if it is one.
+
+    The loop prints one of these for every invocation, failed or not, and for
+    the reviewer it is also the end of a round: the implementer of the next
+    round has not started, and nothing else in the container is holding the
+    login. It is the last moment in a round at which what that round refreshed
+    to can still be read out of a container that is running.
+    """
+    match = AGENT_LINE.match(line)
+    if match is None or AGENT_EXIT.match(match.group("rest")) is None:
+        return None
+    return match.group("cli")
+
+
+# The write_back() outcomes that mean this machine can be sure it now holds the
+# login: it was written, or it already held it. Every other outcome is a copy
+# that could not be confirmed applied -- nothing came back, the write raised, or
+# the document was not the login it replaces -- and the end-of-run collection
+# must not delete the volume it is staged in over one of those.
+WRITE_BACK_CONFIRMED = ("applied", "unchanged")
+
+
+def write_back(kind: str, host_path: Path, content: str | None) -> tuple[str, str | None]:
+    """Put a login the container refreshed back where this machine keeps it.
+
+    `apply_refreshed_login` is the evaluation's, and it decides the same three
+    things here: a document that is not the login it replaces is rejected rather
+    than written, the previous file is kept beside the new one, and the
+    replacement is a rename rather than a truncate-and-write. Nothing is said
+    about a file that has not moved, because a run where no refresh happened is
+    the ordinary run and has nothing to report.
+
+    Returns `(outcome, line)`. The outcome is "absent" when nothing came back,
+    "failed" when the write raised, "rejected" when the document was not the
+    login it replaces, "unchanged" when this machine already held it, and
+    "applied" when it was written; only the last two are in `WRITE_BACK_CONFIRMED`.
+    The line is the sentence to print, or None when there is nothing to say.
+    Never raises: this is called from the cleanup of a run that may already be
+    failing, and a login that could not be written back is a line in the report
+    rather than a second failure on top of the first.
+    """
+    if content is None or not content.strip():
+        return "absent", None
+    try:
+        outcome = apply_refreshed_login(kind, host_path, content)
+    except OSError as error:
+        return "failed", f"{kind}: could not be written back to {host_path}: {type(error).__name__}: {error}"
+    if outcome == "unchanged":
+        return "unchanged", None
+    if outcome.startswith("rejected"):
+        return "rejected", f"{kind}: {outcome}"
+    return "applied", f"{kind}: {outcome}"
+
+
+def returned_login(docker: str, container_name: str, kind: str) -> str | None:
+    """Read a login out of the container that is running, without asking it to help.
+
+    `docker cp` reaches into the container from this side, so nothing inside has
+    to cooperate and nothing has to be writable from in there for this to work.
+    The link is followed on purpose: the entrypoint puts a symlink at that path
+    and a CLI that refreshes either writes through it or replaces it, and this
+    has to answer the same in both cases.
+
+    None whenever the copy did not happen, which includes the ordinary case of a
+    container that has already exited: the file lives on a tmpfs that goes with
+    it, and what a finished run left behind is read out of the home volume
+    instead.
+    """
+    with tempfile.TemporaryDirectory(prefix="agentic-hil-loop-") as directory:
+        landing = Path(directory) / kind
+        source = f"{container_name}:{CONTAINER_LOGIN_PATHS[kind]}"
+        try:
+            result = run_capture([docker, "cp", "--follow-link", source, str(landing)], 60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0 or not landing.is_file():
+            return None
+        return landing.read_text(encoding="utf-8", errors="replace")
+
+
+def collect_from_container(
+    docker: str, container_name: str, files: list[tuple[str, Path]], kinds: tuple[str, ...] = RETURNED
+) -> list[str]:
+    """Take back what the container holds now, while it is still running.
+
+    `kinds` narrows that to the logins the invocation that just ended could have
+    rotated; the default is every login that travels back at all.
+    """
+    lines = []
+    for kind, path in files:
+        if kind not in RETURNED or kind not in kinds:
+            continue
+        # A login the running container still holds is read best-effort here:
+        # `returned_login` answers None for a container that has already exited,
+        # and that absence is the ordinary case rather than a failure -- what a
+        # finished run left is read from the home volume instead.
+        _outcome, said = write_back(kind, path, returned_login(docker, container_name, kind))
+        if said is not None:
+            lines.append(said)
+    return lines
+
+
+def staged_login_command(
+    *, docker: str, image: str, container_name: str, home_volume: str, kinds: list[str]
+) -> list[str]:
+    """Read what the run staged, out of the home volume, with no network and no writing.
+
+    A second container because a Docker volume is not a directory this machine
+    can open, and the loop's own container is gone by the time this runs. The
+    same arrangement `evals/install/runner.py` reads a refreshed login back
+    with, for the same reason.
+    """
+    return [
+        docker,
+        "run",
+        "--rm",
+        "--name",
+        container_name,
+        *docker_security_options(),
+        "--network",
+        "none",
+        "--mount",
+        docker_mount("volume", home_volume, CONTAINER_HOME, readonly=True),
+        image,
+        "--dump-logins",
+        "--kinds",
+        *kinds,
+    ]
+
+
+class VolumeReadback(NamedTuple):
+    """What the end-of-run volume read produced, and whether it can be trusted.
+
+    `lines` are the sentences to announce, exactly as the read always produced.
+    `unresolved` is non-empty when a login this run took into the container
+    could not be confirmed written back to this machine: the helper failed, the
+    answer was not JSON, an expected login was absent from it, or applying one
+    raised or was rejected. Each entry is one such reason. A run with anything
+    unresolved must keep the home volume rather than delete the one staged copy
+    of a token it cannot prove this machine already holds.
+    """
+
+    lines: list[str]
+    unresolved: list[str]
+
+
+def collect_from_volume(
+    *, docker: str, image: str, container_name: str, home_volume: str, files: list[tuple[str, Path]]
+) -> VolumeReadback:
+    """Take back what the run left staged, however the run ended.
+
+    Every login this run could have rotated is expected back: the entrypoint
+    stages each of them into the volume before it exits, so one missing from the
+    answer is a copy that did not survive rather than an ordinary absence. What
+    cannot be confirmed applied -- a read that failed, an answer that was not the
+    logins, or a write that could not be made -- is returned as `unresolved`, so
+    the caller keeps the volume it is staged in rather than deleting the only
+    copy of a token this machine may already have spent.
+    """
+    wanted = [(kind, path) for kind, path in files if kind in RETURNED]
+    if not wanted:
+        return VolumeReadback([], [])
+    command = staged_login_command(
+        docker=docker,
+        image=image,
+        container_name=container_name,
+        home_volume=home_volume,
+        kinds=[kind for kind, _path in wanted],
+    )
+    try:
+        result = run_capture(command, 120)
+    except (OSError, subprocess.SubprocessError) as error:
+        reason = f"the logins staged in {home_volume} could not be read: {type(error).__name__}: {error}"
+        return VolumeReadback([reason], [reason])
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        reason = f"the logins staged in {home_volume} could not be read: {detail}"
+        return VolumeReadback([reason], [reason])
+    try:
+        staged = json.loads(result.stdout or "{}")
+    except ValueError:
+        reason = f"the logins staged in {home_volume} came back as something other than JSON"
+        return VolumeReadback([reason], [reason])
+    if not isinstance(staged, dict):
+        reason = f"the logins staged in {home_volume} came back as something other than a table of them"
+        return VolumeReadback([reason], [reason])
+    lines: list[str] = []
+    unresolved: list[str] = []
+    for kind, path in wanted:
+        content = staged.get(kind)
+        outcome, said = write_back(kind, path, content if isinstance(content, str) else None)
+        if said is not None:
+            lines.append(said)
+        if outcome not in WRITE_BACK_CONFIRMED:
+            unresolved.append(
+                said
+                if said is not None
+                else f"{kind} was not staged in {home_volume}: what the container refreshed it to could not be recovered"
+            )
+    return VolumeReadback(lines, unresolved)
 
 
 def container_command(
@@ -619,21 +929,53 @@ def credential_evidence(line: str, pending: dict[str, str]) -> str | None:
         return None  # the command line the loop echoes: argv, not output
     exited = AGENT_EXIT.match(rest)
     if exited is None:
-        if agent not in pending:
-            phrase = authentication_failure(rest)
-            if phrase is not None:
-                pending[agent] = phrase
+        if agent not in pending and authentication_failure(rest) is not None:
+            # The whole line, not the substring authentication_failure() matched.
+            # The real Codex reuse line leads with the generic "Failed to refresh
+            # token" wording and only names reuse further along it, so the matched
+            # substring is that generic prefix. main() reads this value back
+            # through spent_refresh_token() to tell a spent credential from a
+            # transient outage; keep the line whole so the reuse wording that
+            # check needs -- and the provider's own instruction with it -- is
+            # still there rather than truncated to the prefix a timeout shares.
+            pending[agent] = rest.strip()
         return None
     phrase = pending.pop(agent, None)
     return phrase if exited.group("code") != "0" else None
 
 
-def stream(command: list[str], repository: Path) -> tuple[int, dict[str, str], str | None]:
+def stop_container(docker: str, container_name: str) -> None:
+    """Ask the container to stop, and wait for it, so its entrypoint can stage.
+
+    The entrypoint copies the in-flight round's login into the home volume in
+    its own finally block; a collector that reads the volume before that block
+    has run reads an empty or stale copy and then deletes the container the only
+    fresh one is still in. `docker stop` sends SIGTERM -- the image declares no
+    STOPSIGNAL -- and Python would tear the interpreter down on it without
+    running a single finally, so the entrypoint installs a handler (`_unwind_on_stop`
+    in tools/loopimage/entrypoint.py) that turns SIGTERM into the unwind that
+    block needs. `docker stop` then blocks until the container is gone, which is
+    that finally running to completion. Never raises: it is one step of a cleanup
+    that must reach the volume read whatever the daemon says.
+    """
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        run_capture([docker, "stop", container_name], 60)
+
+
+def stream(
+    command: list[str],
+    repository: Path,
+    agent_finished: Callable[[str], None] | None = None,
+) -> tuple[int, dict[str, str], str | None]:
     """Run the container, printing its output as it arrives.
 
     Returns the exit code, the loop's own directories translated back to this
     side of the mount, and the first phrase that looks like an agent CLI
     refusing a login -- which is the failure worth naming rather than debugging.
+
+    `agent_finished` is called with the name of each agent CLI as its invocation
+    ends. That is the only place a caller can act on a round that has finished
+    while the container it finished in is still there to be read.
     """
     announced: dict[str, str] = {}
     pending: dict[str, str] = {}
@@ -649,14 +991,28 @@ def stream(command: list[str], repository: Path) -> tuple[int, dict[str, str], s
         env=docker_subprocess_environment(command[0]),
     )
     assert process.stdout is not None
-    for line in process.stdout:
-        print(line.rstrip(), flush=True)
-        match = ANNOUNCED_DIRECTORY.match(line)
-        if match is not None:
-            announced[match.group(1)] = on_this_side(match.group(2), repository)
-        evidence = credential_evidence(line, pending)
-        if failure is None:
-            failure = evidence
+    try:
+        for line in process.stdout:
+            print(line.rstrip(), flush=True)
+            match = ANNOUNCED_DIRECTORY.match(line)
+            if match is not None:
+                announced[match.group(1)] = on_this_side(match.group(2), repository)
+            evidence = credential_evidence(line, pending)
+            if failure is None:
+                failure = evidence
+            agent = finished_agent(line)
+            if agent is not None and agent_finished is not None:
+                agent_finished(agent)
+    except KeyboardInterrupt:
+        # The operator interrupted the run. The container's entrypoint stages the
+        # in-flight round's login in its own finally block; stop the container and
+        # wait for it to exit, so the home volume the end-of-run collector reads
+        # next holds what this round rotated to rather than the empty or stale copy
+        # this same interrupt would otherwise race it to. `--name` is the container
+        # this command started, taken off the command line that started it.
+        stop_container(command[0], command[command.index("--name") + 1])
+        process.wait()
+        raise
     return process.wait(), announced, failure
 
 
@@ -780,15 +1136,56 @@ def main(argv: list[str] | None = None) -> int:
         announced: dict[str, str] = {}
         failure: str | None = None
         remaining: list[str] = []
+        # Reasons the end-of-run volume read could not confirm a login was
+        # written back. Non-empty keeps the home volume rather than deleting it:
+        # it is the one place the copy the container refreshed to survives, and a
+        # run that cannot prove this machine already holds it must not throw it
+        # away. Set in the finally so the reporting below can read it.
+        login_recovery: list[str] = []
         # None until the loop returns a code of its own. An interrupt leaves it that
         # way, and a run that never reached a verdict has no verdict to report.
         inner: int | None = None
+
+        def agent_finished(agent: str) -> None:
+            # Both CLIs, each for its own login: an invocation that has ended is
+            # an invocation whose session refreshed on its way in and is holding
+            # nothing now, so this is the moment its file can be read out of a
+            # container that is still running. Taking it back here bounds what a
+            # run that never reaches its own ending can cost this machine to the
+            # one round that was in flight.
+            for line in collect_from_container(docker, container_name, files, AGENT_LOGINS.get(agent, ())):
+                announce(line)
+
         try:
-            inner, announced, failure = stream(command, repository)
+            inner, announced, failure = stream(command, repository, agent_finished)
         except KeyboardInterrupt:
-            print("\ninterrupted; stopping the container.", file=sys.stderr)
+            # `stream` stopped the container and waited for it before it re-raised,
+            # so its entrypoint has already staged the in-flight round's login into
+            # the volume the collector below reads.
+            print("\ninterrupted; stopped the container and reading back its staged logins.", file=sys.stderr)
         finally:
-            for remove, kind, name in ((remove_container, "container", container_name), (remove_volume, "volume", home_volume)):
+            # Before the volume goes, and inside the same cleanup the lock
+            # release covers, so a run that failed, was refused mid-flight or was
+            # interrupted hands this machine the same login a clean run does.
+            readback = collect_from_volume(
+                docker=docker,
+                image=image,
+                container_name=f"{container_name}-logins",
+                home_volume=home_volume,
+                files=files,
+            )
+            for line in readback.lines:
+                announce(line)
+            # A login that could not be confirmed written back keeps the volume
+            # it is staged in: deleting it is deleting the only fresh copy of a
+            # token this run may already have spent. So the volume is removed only
+            # when the read confirmed every one, and left with recovery
+            # instructions otherwise.
+            login_recovery = readback.unresolved
+            removals = [(remove_container, "container", container_name)]
+            if not login_recovery:
+                removals.append((remove_volume, "volume", home_volume))
+            for remove, kind, name in removals:
                 try:
                     remove(docker, name)
                 except (OSError, RuntimeError, subprocess.SubprocessError) as error:
@@ -802,9 +1199,18 @@ def main(argv: list[str] | None = None) -> int:
                         container_unresolved = True
 
         if failure is not None and inner not in (None, 0):
+            cause = (
+                # Not "renew it here": a spent refresh token is what this run's
+                # own copy leaves behind, so telling an operator the stored login
+                # went stale would name the state and miss the cause.
+                "A refresh token is single use, so the copy this run took in is what spent the one this "
+                "machine held. Whatever the container refreshed to has been written back above, if it could "
+                "be read; if nothing was, sign in again here."
+                if spent_refresh_token(failure) is not None
+                else "The stored login needs to be renewed on this machine; the container cannot fix it."
+            )
             print(
-                f"\nan agent CLI reported an authentication failure inside the container: {failure!r}\n"
-                "The stored login needs to be renewed on this machine; the container cannot fix it.",
+                f"\nan agent CLI reported an authentication failure inside the container: {failure!r}\n{cause}",
                 file=sys.stderr,
             )
         print(f"\nreviews    : {announced.get('reviews', on_this_side(paperwork['--review-dir'], repository))}")
@@ -812,6 +1218,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"commits    : in {repository}; nothing was pushed and no pull request was opened.")
         if inner is not None:
             print(INNER_EXIT.format(code=inner), file=sys.stderr)
+        if login_recovery:
+            # The volume was kept on purpose, so this is not the "remove it by
+            # hand" note below: it holds the copies, and the operator is told how
+            # to read them back before removing it. A run that could not confirm a
+            # login reached this machine is never a run that succeeded, whatever
+            # the loop returned, so this takes the exit status too.
+            reader = " ".join(
+                staged_login_command(
+                    docker=docker,
+                    image=image,
+                    container_name=f"{container_name}-logins",
+                    home_volume=home_volume,
+                    kinds=list(RETURNED),
+                )
+            )
+            print(
+                "\nerror: this run could not confirm every login it took into the container was written back to "
+                f"this machine, so it kept the home volume {home_volume} rather than deleting the copies staged "
+                "in it:\n  " + "\n  ".join(login_recovery) + "\nRead them back with:\n  " + reader + "\nApply what "
+                f"it prints to the matching login on this machine, then remove the volume with "
+                f"`{docker} volume rm {home_volume}`.",
+                file=sys.stderr,
+            )
         if remaining:
             # The home volume is the one place a copy of a login can outlive the run,
             # and a CLI that rewrites its login file in place turns the tmpfs symlink
@@ -834,6 +1263,7 @@ def main(argv: list[str] | None = None) -> int:
                     "Stop the container, then remove that file by hand."
                 )
             print(note, file=sys.stderr)
+        if remaining or login_recovery:
             return EXIT_WRAPPER_FAILED
         if inner is None:
             return EXIT_WRAPPER_FAILED

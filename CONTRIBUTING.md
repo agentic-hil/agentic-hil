@@ -26,7 +26,12 @@ pytest -n auto
 
 `addopts` deliberately does not carry `-n auto`: a bare `pytest` stays one
 process, so a failure can be read without a worker id in front of it, and what
-CI runs stays a separate decision from what a developer types.
+each runner does stays a command line rather than a property of the checkout.
+The hosted jobs in `.github/workflows/ci.yml` pass it, because in one process
+the Windows legs sat close enough to the job's time limit that a slow runner
+cancelled two runs whose tests were green. `tools/ci_linux.py` and the review
+loop container below stay one process by design; their durations and their
+limits are their own.
 
 Nothing has to be marked to make this safe. Every test already gets its own
 HOME, config, state and temporary storage, and its device-lock root, its CAN

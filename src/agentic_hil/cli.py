@@ -47,6 +47,7 @@ from agentic_hil.config import (
     permission_summary,
     project_config_directories,
     project_config_path,
+    provisionable_state_root,
     refuse_redirected_parent,
     resolve_stable_directory,
     safe_directory,
@@ -61,7 +62,6 @@ from agentic_hil.config import (
     tool_owned_user_roots,
     trusted_persistent_executable,
     user_file_lock_path,
-    user_state_root,
 )
 from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOAD, RELOADED_SECTIONS, reload_description
 from agentic_hil.configstate import config_status, with_config_status
@@ -1814,7 +1814,7 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
     # of them for its mode, so an operator's group-writable tree keeps the modes
     # it was given. The field stays because callers read it.
     permission_changes: list[str] = []
-    state_actions = ensure_safe_state_root()
+    state_actions = ensure_safe_state_root(workspace, target_path)
     config_result: JsonObject
     doctor_result = _skipped_setup_step("Doctor was not reached.")
     permission_result: JsonObject
@@ -1834,7 +1834,7 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
             if keep_existing:
                 config_result = {"ok": True, "skipped": True, "existing": True, "summary": "Existing authoritative config, unchanged: not a byte of it was written, and this never replaces operator policy.", "path": str(target_path)}
             else:
-                config_result = init_config(config_path, force=force, _locked=True)
+                config_result = init_config(config_path, force=force, _locked=True, _target=target_path)
 
             if overall_success(config_result):
                 doctor_result = doctor(config_path)
@@ -2198,19 +2198,31 @@ def _init_lease_note(unleased: str | None) -> JsonObject:
     }
 
 
-def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False) -> JsonObject:
+def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False, _target: Path | None = None) -> JsonObject:
     # Asked again rather than taken from the caller: this is the function that
     # writes `workspace_root`, so the one directory a project may not be rooted
     # in is settled here as well as in `init_project`, and a later caller cannot
     # arrive with the check skipped.
     workspace = _project_workspace()
-    target_path = initialized_config_path(workspace)
+    # Asked once per command, and carried. `_target` is what the caller that
+    # already took this command's lock decided, never a caller's own choice of
+    # file: `init_project` and the unlocked pass below each hold
+    # `secure_user_file_lock(target_path)` while this runs, and a second walk
+    # inside the lock can answer with a different candidate than the one that was
+    # locked. On a redirected profile it does: the first walk creates the
+    # per-workspace directory under the platform default and rejects it for
+    # resolving elsewhere, and once that directory exists the root itself
+    # resolves onto the redirected tree, so the next walk finds a candidate that
+    # is resolve-stable and takes it. That locked one file and wrote another, and
+    # `state_root` is chosen from where the file goes (#387), so the two halves of
+    # the answer came from two different decisions about one command.
+    target_path = _target if _target is not None else initialized_config_path(workspace)
     validate_legacy_config_selector(config_path, workspace, target_path)
     if _path_entry_exists(target_path) and not force:
         return {"ok": False, "error_type": "config_exists", "summary": "Agentic HIL configuration already exists. Use --force to overwrite it.", "path": str(target_path)}
     if not _locked:
         with secure_user_file_lock(target_path):
-            return init_config(config_path, force, _locked=True)
+            return init_config(config_path, force, _locked=True, _target=target_path)
     original_bytes, existing, unreadable_existing = _existing_config_text(target_path)
     # Look first, and let the profile decide only what is written down. A
     # workspace profile says how to name and narrow a bench that was found; it
@@ -2229,6 +2241,21 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         # nothing to write a file from. Nothing was written; the refusal is the
         # whole answer.
         return {**refusal, "path": str(target_path)}
+    # One decision for both paths this command writes, taken from the file's own
+    # location. `init` used to name the platform default here whatever
+    # `initialized_config_path` had just decided, so a profile that moved the
+    # configuration to the fallback root got a `state_root` pointing at the root
+    # that move was made to get away from: the file generated, `doctor` called
+    # the bench healthy, and every plan was refused `audit_unavailable` at its
+    # first step on a `state_root` nothing in the file could repair (#387).
+    try:
+        state_root = provisionable_state_root(workspace, target_path)
+    except ConfigError as error:
+        # Nothing has been written at this point, and nothing will be: a
+        # configuration naming a state root this profile refuses is worse than no
+        # configuration, because the bench it describes cannot record a single
+        # hardware action. The refusal carries the locations that would work.
+        return {**error.to_dict(), "summary": f"{error.summary} No configuration was written.", "path": str(target_path)}
     discovered = overall_success(discovery)
     if discovered:
         template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
@@ -2241,10 +2268,10 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
             configured = apply_discovery_to_template(template, profile if profile is not None else DEFAULT_PROJECT_PROFILE, discovery)
         except ConfigError as error:
             return {**error.to_dict(), "summary": f"{error.summary} No configuration was written.", "path": str(target_path)}
-        document = {"workspace_root": str(workspace), "state_root": str(user_state_root()), **configured}
+        document = {"workspace_root": str(workspace), "state_root": str(state_root), **configured}
         text = yaml.safe_dump(document, sort_keys=False, allow_unicode=False)
     else:
-        text = f"workspace_root: {json.dumps(str(workspace))}\nstate_root: {json.dumps(str(user_state_root()))}\n\n{DEFAULT_CONFIG_TEMPLATE}"
+        text = f"workspace_root: {json.dumps(str(workspace))}\nstate_root: {json.dumps(str(state_root))}\n\n{DEFAULT_CONFIG_TEMPLATE}"
     safe_directory(target_path.parent)
     descriptor, temporary_name = tempfile.mkstemp(prefix=".agentic-hil-config-validate-", dir=target_path.parent)
     temporary_path = Path(temporary_name)
@@ -4006,6 +4033,17 @@ def doctor(config_path: str | None = None) -> JsonObject:
         identity_warnings = [*identity_warnings, f"{missing_extras['summary']} Reinstall with: {missing_extras['reinstall_command']}"]
     if identity_warnings:
         report["warnings"] = identity_warnings
+    # The same list of grants `init` reports for the file it wrote and the same
+    # one a reload compares, rather than the dataclass read off field by field.
+    # `asdict` cannot leave a key out, so it reported `allow_probe` and
+    # `allow_read` false on a version 2 file, where there is no read permission
+    # at all and the schema refuses the key: `doctor` listed the two as closed
+    # on a configuration `init` had just described as open for everything but
+    # the flashing interlock, and a newcomer who read `doctor` first went
+    # looking for a grant that does not exist. `permission_summary` omits them
+    # exactly where they decide nothing and still names them on a version 1
+    # file, where they gate probing and reading for real.
+    granted = permission_summary(config)
     return {
         **report,
         "config_path": config.config_path,
@@ -4018,15 +4056,15 @@ def doctor(config_path: str | None = None) -> JsonObject:
                 "type": entry.type,
                 "probe_id": entry.probe_id,
                 "bound": name == config.debugger_id,
-                "permissions": asdict(entry.permissions),
+                "permissions": granted["debuggers"][name],
                 **({"scripts": _doctor_debugger_scripts(entry)} if entry.type == "openocd" else {}),
                 **({"check": checks[name]} if name in checks else {}),
                 **({"target_support": target_support[name]} if name in target_support else {}),
             }
             for name, entry in config.debuggers.items()
         },
-        "com_ports": {port_id: {"device": port.device, "baudrate": port.baudrate, "encoding": port.encoding, **port_identity_fields(config, port_id), "permissions": asdict(port.permissions)} for port_id, port in config.com_ports.items()},
-        "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd, "permissions": asdict(bus.permissions)} for bus_id, bus in config.can_buses.items()},
+        "com_ports": {port_id: {"device": port.device, "baudrate": port.baudrate, "encoding": port.encoding, **port_identity_fields(config, port_id), "permissions": granted["com_ports"][port_id]} for port_id, port in config.com_ports.items()},
+        "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd, "permissions": granted["can_buses"][bus_id]} for bus_id, bus in config.can_buses.items()},
         "debugger": debugger_info,
     }
 

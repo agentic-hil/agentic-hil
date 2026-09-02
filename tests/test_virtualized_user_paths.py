@@ -28,7 +28,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from conftest import FAKE_STLINK
 
+from agentic_hil.backends.common import CompletedCommand
 from agentic_hil.bench import BenchMutex
 from agentic_hil.cli import (
     _claude_code_deny_patterns,
@@ -36,8 +38,10 @@ from agentic_hil.cli import (
     _external_project_record_path,
     _recorded_external_configurations,
     _visible_project_configurations,
+    init_config,
     init_project,
     restrict_agent_write_access,
+    run_test_reactor,
     uninstall_agent_integration,
 )
 from agentic_hil.config import (
@@ -47,6 +51,7 @@ from agentic_hil.config import (
     atomic_write_bytes,
     atomic_write_text,
     authoritative_config_target,
+    ensure_safe_state_root,
     load_authoritative_config,
     project_config_directories,
     project_config_directory,
@@ -65,6 +70,7 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.configwrite import config_document_snapshot, load_config_document
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.report import report_state_path
 from agentic_hil.tools import (
     PROJECT_CONFIG_CREATE,
@@ -1634,3 +1640,258 @@ def test_the_lock_and_append_still_serve_an_ordinary_parent(tmp_path: Path, monk
     safe_append_text(ledger, "one\n")
     safe_append_text(ledger, "two\n")
     assert ledger.read_text(encoding="utf-8") == "one\ntwo\n"
+
+
+# ---------------------------------------------------------------------------
+# #387: one profile, one decision. The walk that places the configuration and the
+# walk that places `state_root` are asking one question about one host, and `init`
+# asked them separately: it moved the file to the fallback root and wrote the
+# platform default into it, so the bench it generated loaded, reported healthy,
+# and refused every plan at its first step with `audit_unavailable` on a
+# `state_root` nothing in the file could repair.
+
+
+def one_attached_stlink(monkeypatch: pytest.MonkeyPatch, executable: Path, serial: str) -> None:
+    """The bench `agentic-hil init` reads, through the real discovery path.
+
+    Only the two ST-Link processes and the host port inventory are replaced, so
+    enumeration, selection and the COM correlation all run for real. The
+    executable is the caller's own copy of the fake programmer and the serial is
+    the caller's own, because the device locks a run takes are machine-wide and
+    keyed on the board: two tests here declaring one probe would refuse each
+    other rather than fail their own assertions.
+    """
+
+    def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        listing = f"ST-LINK SN : {serial}\n"
+        return CompletedCommand(listing if "-l" in command else f"{listing}Device name : STM32F446RE\n", "", 0, False, False)
+
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: executable.as_posix())
+    monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
+    monkeypatch.setattr(
+        "agentic_hil.bootstrap.list_available_com_ports",
+        lambda tool: {"ok": True, "tool": tool, "ports": [{"device": "COM7", "serial_number": serial}]},
+    )
+
+
+def own_programmer(tmp_path: Path) -> Path:
+    """This test's own copy of the fake programmer, outside the workspace."""
+    programmer = tmp_path / "fake_stlink.py"
+    programmer.write_bytes(FAKE_STLINK.read_bytes())
+    return programmer
+
+
+def written_state_root(result: dict) -> Path:
+    """The `state_root` the file on disk names, read off the file itself."""
+    document = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
+    return Path(document["state_root"])
+
+
+def test_init_moves_the_state_root_with_the_configuration_it_had_to_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The defect, stated as the one file the command writes.
+
+    `init` decided the configuration's root with the candidate walk of #354 and
+    then named `user_state_root()` regardless, so one command produced a file
+    under `~/.agentic-hil` naming a `state_root` under the virtualized root the
+    file had just been moved off.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK38701")
+
+    created = init_config()
+
+    assert created["ok"] is True, created
+    assert Path(created["path"]).parent.parent == fallback_config_root()
+    assert written_state_root(created) == fallback_state_root()
+    assert Path(load_authoritative_config(workspace).state_root) == fallback_state_root()
+    # The platform default was passed over on merit and not because it was
+    # broken: nothing about this profile's state root is redirected, and the same
+    # walk still takes it for a configuration that did not have to move. What
+    # moved `state_root` is the configuration having moved, and nothing else.
+    assert provisionable_state_root(workspace) == user_state_root()
+    assert provisionable_state_root(workspace, Path(created["path"])) == fallback_state_root()
+
+
+def test_the_walk_this_profile_answers_twice_answers_differently(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Why one command has to ask once, stated as the walk itself.
+
+    The first walk creates the per-workspace directory under the platform
+    default and rejects that root for resolving elsewhere, and it is that
+    directory existing which makes the root resolve into the redirected tree, so
+    the second walk meets a candidate that is resolve-stable and takes it. Both
+    answers are right about the moment they were asked; a command that asks
+    twice gets two of them.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+
+    first = authoritative_config_target(workspace)
+    second = authoritative_config_target(workspace)
+
+    assert first.parent.parent == fallback_config_root()
+    assert second != first
+    assert second.is_relative_to(tmp_path / "package-roaming-cache")
+
+
+def test_init_writes_the_file_it_locked_rather_than_a_second_walks_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One command, one file, and the lock over the file that is written.
+
+    `init` took `secure_user_file_lock` on the walk's first answer and then
+    walked again inside the lock, which on this profile is the walk above: it
+    locked the fallback file and wrote the redirected one. The lock then covered
+    a file nothing wrote, and `state_root`, which is chosen from where the file
+    goes, was decided by a walk the command had already been given the answer to.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK38705")
+
+    created = init_config()
+
+    assert created["ok"] is True, created
+    assert Path(created["path"]) == fallback_config_root() / project_config_leaf(workspace) / "config.yaml"
+    assert not (tmp_path / "package-roaming-cache" / "agentic-hil" / "projects" / project_config_leaf(workspace) / "config.yaml").exists()
+
+
+def test_a_plan_reaches_its_first_step_under_the_configuration_init_generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the file being right is worth, measured on the bench it describes.
+
+    The refusal in #387 came at the first hardware action of the first plan: the
+    audit gate writes under `state_root`, the enforcer refuses the spelling the
+    file named, and every step after it is refused for the same reason. A
+    configuration `init` generates has to be one the same host can run a plan
+    under, so this runs one.
+
+    Both roots are redirected here, which is the profile the report came from: a
+    container virtualizes %APPDATA% and %LOCALAPPDATA% together. `init` wrote the
+    platform default into `state_root` without asking whether this host accepts
+    it, so the file it generated named the one root the enforcer refuses.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    virtual_config = virtualized_user_config(tmp_path, monkeypatch)
+    virtual_state = virtualized_user_state(tmp_path, monkeypatch)
+    virtualize(monkeypatch, virtual_config, tmp_path / "package-roaming-cache")
+    virtualize(monkeypatch, virtual_state, tmp_path / "package-local-cache")
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK38702")
+    created = init_config()
+    assert created["ok"] is True, created
+    assert Path(created["path"]).parent.parent == fallback_config_root()
+    assert written_state_root(created) == fallback_state_root()
+    plan = workspace / ".agentic-hil" / "reset.testconfig.yaml"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text("version: 4\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+
+    result = run_test_reactor(str(plan))
+
+    assert [(step["index"], step["action"]) for step in result["steps"]] == [(1, "reset")], result
+    assert result["steps"][0]["result"].get("error_type") != "audit_unavailable", result["steps"][0]
+    assert result.get("audit_ok") is not False, result
+    assert result["ok"] is True, result
+
+
+def test_the_unredirected_profile_still_gets_both_platform_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tie is a fallback moving in step, not a relocation of every bench.
+
+    A host with nothing redirected writes the configuration where it always did
+    and names the state root it always named, and the fallback root is not
+    created at all.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK38703")
+
+    created = init_config()
+
+    assert created["ok"] is True, created
+    assert Path(created["path"]).parent.parent == project_config_directory()
+    assert written_state_root(created) == user_state_root()
+    assert not fallback_state_root().exists()
+    assert not (fallback_config_root() / project_config_leaf(workspace)).exists()
+
+
+def test_the_state_root_pre_flight_creates_the_root_the_file_will_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The third place one command decided a state root for itself.
+
+    `init_project` runs this before anything is written so that a state root that
+    cannot be created is reported while nothing has changed. It created the
+    platform default unconditionally, which on this profile meant the pre-flight
+    proved a root the file would not name and left the root the run would meet
+    untested.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+    target = authoritative_config_target(workspace)
+    assert target.parent.parent == fallback_config_root(), "this profile has to have moved the configuration"
+
+    assert ensure_safe_state_root(workspace, target) == []
+
+    assert fallback_state_root().is_dir()
+
+
+def test_the_pre_flight_still_creates_the_platform_default_where_it_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbouring case, unchanged: an ordinary profile keeps its own root."""
+    workspace = bench(tmp_path, monkeypatch)
+    target = authoritative_config_target(workspace)
+    assert target.parent.parent == project_config_directory()
+
+    assert ensure_safe_state_root(workspace, target) == []
+
+    assert user_state_root().is_dir()
+    assert not fallback_state_root().exists()
+
+
+def test_both_generation_paths_keep_the_remediation_that_promises_both_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sentence an operator is handed, held to what the commands do.
+
+    Item 3 of the `unsafe_configured_path` remediation says both commands fall
+    back to `~/.agentic-hil` for the configuration and the state_root. It was
+    true of `project_config_create` and half true of `init`, and a remediation
+    that is half true about the command it names is worse than none: it is what
+    sends somebody to re-run the command that produced the broken file. So the
+    claim is read out of the catalogue and both commands are held to it.
+    """
+    promise = [item for item in remediation_fields("unsafe_configured_path", "state_root")["remediation"] if "both the configuration and the state_root" in item]
+    assert len(promise) == 1, "this test is not reading the remediation item any more"
+    assert "`agentic-hil init`" in promise[0] and "`project_config_create`" in promise[0]
+
+    workspace = bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+    attached_hardware(monkeypatch)
+    service = UnprovisionedToolService(workspace)
+    try:
+        over_mcp = service.call(PROJECT_CONFIG_CREATE)
+    finally:
+        service.close()
+    assert over_mcp["ok"] is True, over_mcp
+    assert Path(over_mcp["path"]).parent.parent == fallback_config_root()
+    assert Path(over_mcp["state_root"]) == fallback_state_root()
+
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK38704")
+    at_the_command_line = init_config(force=True)
+
+    assert at_the_command_line["ok"] is True, at_the_command_line
+    assert Path(at_the_command_line["path"]).parent.parent == fallback_config_root()
+    assert written_state_root(at_the_command_line) == fallback_state_root()
+
+
+def test_the_deterministic_refusal_names_the_repair_instead_of_a_retry() -> None:
+    """A refusal about a path does not become right by being asked again.
+
+    Item 4 said "Re-run the command that failed. Nothing else has to change."
+    The identical command, with nothing changed, was refused identically with a
+    new run id, which is the promise #374 took off the artifact path. What
+    replaces it names the command that rewrites the state root the file got
+    wrong.
+    """
+    remediation = remediation_fields("unsafe_configured_path", "state_root")["remediation"]
+    joined = " ".join(remediation)
+
+    assert "Re-run the command that failed. Nothing else has to change." not in joined
+    assert "deterministic" in joined
+    assert "`agentic-hil init --force`" in joined
+    assert "`project_config_create`" in joined
