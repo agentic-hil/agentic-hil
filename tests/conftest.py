@@ -247,6 +247,21 @@ def isolated_config_environment(
     for variable in ("TMPDIR", "TEMP", "TMP"):
         isolation.setenv(variable, str(temp_root))
     isolation.setattr(tempfile, "tempdir", str(temp_root))
+    # The width every rendered result wraps to is redirected for the reason the
+    # paths above are: it belongs to the runner, and a rendering test compares
+    # text. `shutil.get_terminal_size` reads COLUMNS and LINES before it asks the
+    # device, and nothing sets either for a pytest process. A pytest-xdist worker
+    # on Linux is handed COLUMNS=80 and LINES=24 all the same: importing
+    # `readline` in the parent has GNU readline write its own 80x24 default into
+    # the C environment with `setenv`, where the parent's own `os.environ`
+    # snapshot never sees it and every child it spawns inherits it. So one
+    # document wrapped to 78 columns under `-n auto` and to 86 in a single
+    # process, on Linux alone, and an assertion counting a command in the prose
+    # passed or failed on how the suite had been started (#390). Pinned to the
+    # width the module falls back to when nothing answers, so the rendering is
+    # the same everywhere and is nobody's terminal.
+    isolation.setenv("COLUMNS", "88")
+    isolation.setenv("LINES", "24")
     isolation.delenv("AGENTIC_HIL_CONFIG", raising=False)
     return config_root
 

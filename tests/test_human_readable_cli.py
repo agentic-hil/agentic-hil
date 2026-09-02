@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -304,6 +305,18 @@ def _rendered(document: object, command: str) -> str:
     return render_result(document, command)
 
 
+def _reflowed(text: str) -> str:
+    """The rendering with the line breaks the wrapper put in taken back out.
+
+    What a rendering says and where it says it are two assertions, and only the
+    second one is about the terminal. A path never wraps, so counting one in the
+    rendered text counts copies at any width; a command is several words and
+    wraps exactly like the prose around it, so counting one there counts copies
+    at one width and splits it at the next.
+    """
+    return " ".join(text.split())
+
+
 def test_the_forced_init_a_person_runs_reads_as_prose() -> None:
     out = _rendered(INIT_FORCED, "init")
     assert out.startswith("Agentic HIL project configured.")
@@ -502,8 +515,48 @@ def test_an_audit_failure_is_printed_once_and_not_in_each_field_that_carries_it(
     assert "\n  audit_error\n" not in out
     assert "\n  audit_errors\n" not in out
     # The remediation comes with the one copy that is left, rather than being the
-    # thing that was repeated.
+    # thing that was repeated. Counted with the line breaks taken back out, for
+    # the reason REDIRECTED_PARENT is counted with them still in: this one is
+    # prose, and where prose breaks is the terminal's business.
+    assert _reflowed(out).count("agentic-hil init --force") == 1
+
+
+def test_the_suite_pins_the_terminal_width_it_renders_at() -> None:
+    """Which width a rendering test compares text at is part of its fixture.
+
+    Nothing sets COLUMNS for a pytest process, so the module would wrap to
+    whatever the runner leaves it, and on Linux that is two answers for one
+    suite: its own 88 column fallback in a single process, and COLUMNS=80 in a
+    pytest-xdist worker, which inherits the 80x24 default GNU readline writes
+    into the C environment when the parent imports `readline` (#390).
+    `isolated_config_environment` pins it the way it pins HOME and TMPDIR. Read
+    back through the same call the module makes, with a fallback of nothing, so
+    removing the pin fails here rather than moving prose in every other rendering
+    test.
+    """
+    assert shutil.get_terminal_size(fallback=(0, 0)).columns == 88
+
+
+@pytest.mark.parametrize("columns", [62, 78, 80, 88, 120])
+def test_an_audit_refusal_says_the_same_things_at_every_terminal_width(monkeypatch: pytest.MonkeyPatch, columns: int) -> None:
+    """The width decides where the lines break and nothing else.
+
+    Pinning the width keeps the suite's own comparisons stable; it must not be
+    what makes them true. COLUMNS=80 is what a pytest-xdist worker on Linux is
+    given, and the 78 columns of prose that leaves is where the wrap fell between
+    `agentic-hil` and `init --force`, so the one copy of the remediation that is
+    printed stopped being countable while nothing about it had changed (#390).
+    """
+    monkeypatch.setenv("COLUMNS", str(columns))
+    monkeypatch.setenv("LINES", "24")
+
+    out = _reflowed(_rendered(_audit_refusal(), "test-reactor"))
+
+    assert out.count(REDIRECTED_PARENT) == 1
     assert out.count("agentic-hil init --force") == 1
+    # The whole remediation once, counted on a token no width can break, so the
+    # two assertions above cannot agree by both being zero.
+    assert out.count("agentic-hil://reference/platform-paths") == 1
 
 
 def test_an_audit_failure_no_step_carries_is_still_printed() -> None:
