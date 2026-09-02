@@ -16,7 +16,7 @@ from evals.install import bench_openocd, guard, scrub_credentials
 from evals.install import runner as install_runner
 from evals.install.adapters import adapter_for, build_agent_command
 from evals.install.config import CredentialFile, Job, load_case, load_matrix
-from evals.install.credentials import authentication_failure, credential_health
+from evals.install.credentials import authentication_failure, credential_health, spent_refresh_token
 from evals.install.fixtures import (
     SENTINEL_KEY,
     SENTINEL_VALUE,
@@ -435,6 +435,48 @@ def test_refreshed_login_is_rejected_unless_it_is_still_a_login(tmp_path: Path) 
 
     assert path.read_text(encoding="utf-8") == original
     assert not path.with_name(path.name + BACKUP_SUFFIX).exists()
+
+
+def test_a_codex_api_key_login_is_accepted_by_the_return_validator(tmp_path: Path) -> None:
+    """An API key is a supported Codex login; the validator has to agree.
+
+    `credential_health` accepts a Codex `auth.json` that carries an `OPENAI_API_KEY`
+    and no OAuth tokens, so the validator guarding the write-back must accept the
+    same document. An API key has nothing to refresh, so the container returns it
+    byte for byte, and that unchanged return reads as `unchanged` rather than as a
+    login missing an access or refresh token it never had.
+    """
+    path = tmp_path / "auth.json"
+    api_key_login = json.dumps({"OPENAI_API_KEY": "sk-not-a-real-key", "tokens": None})
+    path.write_text(api_key_login, encoding="utf-8")
+
+    assert apply_refreshed_login("codex-auth", path, api_key_login) == "unchanged"
+    assert path.read_text(encoding="utf-8") == api_key_login
+    assert not path.with_name(path.name + BACKUP_SUFFIX).exists()
+
+    # A tokens-less document without a key is still not a login, and must not
+    # replace one: the API-key path widens what is accepted, it does not open it.
+    assert "rejected" in apply_refreshed_login("codex-auth", path, json.dumps({"OPENAI_API_KEY": ""}))
+    assert path.read_text(encoding="utf-8") == api_key_login
+
+
+def test_a_transient_refresh_failure_is_not_reported_as_a_spent_token() -> None:
+    """A generic refresh failure is an auth failure, not proof the token was spent.
+
+    `failed to refresh token` prefixes a transient outage as readily as a reuse, so
+    it must not drive the spent-token verdict, which tells the operator the token is
+    gone for good and the only cure is to sign in again. It still counts as an
+    authentication failure, so a run that hits it stops as a dead-credential case
+    rather than being blamed on the product.
+    """
+    transient = "Failed to refresh token: connection timed out"
+    assert spent_refresh_token(transient) is None
+    assert authentication_failure(transient) is not None
+
+    # Only wording that names reuse is the spent-token answer.
+    for spent in ("refresh token was already used", "please log out and sign in again"):
+        assert spent_refresh_token(spent) is not None
+        assert authentication_failure(spent) is not None
 
 
 def test_dead_login_is_recognised_before_and_during_a_run(tmp_path: Path) -> None:

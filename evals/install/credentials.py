@@ -19,15 +19,26 @@ REFRESH_MARGIN = timedelta(hours=1)
 # provider has already replaced. No file states this, because the file cannot
 # know what another copy of it did, so the only way to learn it is to try the
 # refresh and read the answer.
+#
+# Only wording that names reuse belongs here. A spent token is permanent -- the
+# only cure is to sign in again -- so this must not match a phrase a transient
+# failure can also print. `failed to refresh token` is exactly that: it prefixes
+# `failed to refresh token: connection timed out` as readily as a reuse, so it
+# lives in AUTHENTICATION_FAILURES below and not here, where it would report a
+# retriable outage as a credential the operator has to replace.
 SPENT_REFRESH_TOKEN = re.compile(
-    r"refresh token was already used|failed to refresh token|please log out and sign in again",
+    r"refresh token was already used|please log out and sign in again",
     re.IGNORECASE,
 )
 
 # An agent CLI reports an unusable login before it does anything else, so these
-# phrases separate a dead credential from a failure the evaluation is about.
+# phrases separate a dead credential from a failure the evaluation is about. The
+# generic refresh failures -- either word order -- sit here rather than in
+# SPENT_REFRESH_TOKEN: they show authentication did not happen without claiming
+# the token is spent, which is the narrower thing only the reuse wording proves.
 AUTHENTICATION_FAILURES = (
     re.compile(r"token refresh failed", re.IGNORECASE),
+    re.compile(r"failed to refresh token", re.IGNORECASE),
     SPENT_REFRESH_TOKEN,
     re.compile(r"\b(401|403)\b.{0,40}\b(unauthorized|forbidden)\b", re.IGNORECASE),
     re.compile(r"\b(unauthorized|invalid[_ ]api[_ ]key|authentication[_ ]error)\b", re.IGNORECASE),

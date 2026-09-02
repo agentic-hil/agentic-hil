@@ -60,7 +60,14 @@ def usable_login(kind: str, document: Any) -> bool:
             document, "claudeAiOauth", "refreshToken"
         )
     if kind == "codex-auth":
-        return _has_text(document, "tokens", "access_token") and _has_text(document, "tokens", "refresh_token")
+        if _has_text(document, "tokens", "access_token") and _has_text(document, "tokens", "refresh_token"):
+            return True
+        # An API key is a supported Codex login in its own right: it carries no
+        # OAuth tokens because it has nothing to refresh, and `credential_health`
+        # already accepts one at the preflight. The return validator has to agree,
+        # or an unchanged, valid API-key auth.json is rejected on the way back out
+        # of every container even though nothing in it was ever spent.
+        return _has_text(document, "OPENAI_API_KEY")
     if kind == "opencode-auth":
         providers = [value for value in document.values() if isinstance(value, dict)]
         return any(_has_text(provider, "access") and _has_text(provider, "refresh") for provider in providers)

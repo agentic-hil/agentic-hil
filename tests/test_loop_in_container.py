@@ -1079,6 +1079,50 @@ def test_a_volume_that_cannot_be_read_is_a_line_rather_than_a_second_failure(
     ) == ["the logins staged in loop-1-home could not be read: OSError: docker is gone"]
 
 
+def test_a_returned_codex_api_key_login_is_taken_back_without_a_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An API-key Codex login is supported, so its unchanged return is the ordinary run.
+
+    `credential_health` accepts a Codex `auth.json` carrying an `OPENAI_API_KEY`
+    and no OAuth tokens, so a run started from one is a valid run. An API key has
+    nothing to refresh, so the container hands the same bytes back, and the
+    write-back must read that as unchanged rather than rejecting a login for missing
+    tokens it never had. Both collection paths run it: the container while it is
+    still up, and the home volume after it has exited.
+    """
+    stored = tmp_path / "auth.json"
+    api_key_login = json.dumps({"OPENAI_API_KEY": "sk-not-a-real-key", "tokens": None})
+    stored.write_text(api_key_login, encoding="utf-8")
+    backup = tmp_path / f"auth.json{refresh_login.BACKUP_SUFFIX}"
+
+    def docker_cp(command: list[str], _timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        Path(command[-1]).write_text(api_key_login, encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(loop_in_container, "run_capture", docker_cp)
+    assert loop_in_container.collect_from_container("docker", "loop-1", [("codex-auth", stored)]) == []
+    assert stored.read_text(encoding="utf-8") == api_key_login
+    assert not backup.exists()
+
+    def dumped(command: list[str], _timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, json.dumps({"codex-auth": api_key_login}), "")
+
+    monkeypatch.setattr(loop_in_container, "run_capture", dumped)
+    assert (
+        loop_in_container.collect_from_volume(
+            docker="docker",
+            image="loop:test",
+            container_name="loop-1-logins",
+            home_volume="loop-1-home",
+            files=[("codex-auth", stored)],
+        )
+        == []
+    )
+    assert stored.read_text(encoding="utf-8") == api_key_login
+    assert not backup.exists()
+
+
 def _ready_to_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Everything main() needs except the container itself."""
     home = tmp_path / "profile"
@@ -1275,10 +1319,16 @@ def test_every_ending_hands_this_machine_the_login_the_container_held(
 def test_the_report_names_the_cause_rather_than_the_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """"Renew the stored login" was true about the state and wrong about the cause."""
+    """"Renew the stored login" was true about the state and wrong about the cause.
+
+    The spent-token report is reserved for wording that names reuse: only then is
+    it certain the stored copy was replaced out from under this machine. A phrase
+    that merely says the refresh failed is left to the neighbour below, because it
+    prefixes a transient outage as readily as a reuse.
+    """
     _ready_to_run(monkeypatch, tmp_path)
     monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
-    phrase = "Failed to refresh token"
+    phrase = "refresh token was already used"
     monkeypatch.setattr(
         loop_in_container,
         "stream",
@@ -1295,20 +1345,30 @@ def test_the_report_names_the_cause_rather_than_the_state(
 def test_a_login_failure_that_is_not_a_spent_token_still_says_to_renew_it_here(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The neighbour: an expired login is still the operator's to renew."""
+    """The neighbour: a login that failed without naming reuse is the operator's to renew.
+
+    A plainly expired token, and a generic refresh failure whose wording a transient
+    outage shares, both land here: the run stops as a dead-credential case, but the
+    report does not claim the stored copy was spent, because neither phrase proves it.
+    """
     _ready_to_run(monkeypatch, tmp_path)
     monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
-    monkeypatch.setattr(
-        loop_in_container,
-        "stream",
-        lambda _command, _repository, _finished=None: (agent_review_loop.EXIT_FAILED, {}, "OAuth token expired"),
-    )
+    for phrase in ("OAuth token expired", "Failed to refresh token: connection timed out"):
+        monkeypatch.setattr(
+            loop_in_container,
+            "stream",
+            lambda _command, _repository, _finished=None, _phrase=phrase: (
+                agent_review_loop.EXIT_FAILED,
+                {},
+                _phrase,
+            ),
+        )
 
-    loop_in_container.main(["--image", "loop:test", "--task", "x"])
+        loop_in_container.main(["--image", "loop:test", "--task", "x"])
 
-    reported = capsys.readouterr().err
-    assert "The stored login needs to be renewed on this machine" in reported
-    assert "single use" not in reported
+        reported = capsys.readouterr().err
+        assert "The stored login needs to be renewed on this machine" in reported
+        assert "single use" not in reported
 
 
 def test_the_round_that_just_ended_is_what_the_wrapper_reads_the_login_after(
@@ -4630,14 +4690,29 @@ def test_a_timed_out_agents_descendant_is_dead_and_silent_before_salvage(tmp_pat
     marker = workdir / "late-write.txt"
     child_pid_file = workdir / "child.pid"
     script = tmp_path / "agent_with_child.py"
+    # run_agent's timeout runs from the moment it launches the helper, so the
+    # helper has to boot and spawn its grandchild inside this budget or it is
+    # killed before it can even write child.pid -- and then the assertions below
+    # have no pid to read. One second was too little on a loaded `pytest -n auto`
+    # runner, where a fresh interpreter can take seconds just to start; this is a
+    # generous multiple of that, so a slow start under load is margin rather than
+    # the reason child.pid is missing.
+    startup_budget = 5.0
+    # The grandchild stays dormant until well past the timeout, so whenever it
+    # actually started it had not written the marker yet when the kill landed.
+    # That makes the marker check independent of timing: run_agent only raises
+    # AgentTimeout after _terminate_tree has confirmed the whole group gone, so by
+    # the assertions the grandchild is dead, wrote nothing before it died, and can
+    # write nothing now -- no post-kill wait has to guess when its write was due.
+    grandchild_dormant = startup_budget + 10.0
     script.write_text(
         "import os, pathlib, subprocess, sys, time\n"
         "devnull = open(os.devnull, 'w')\n"
-        # A grandchild that would write to the tree only after the timeout, then
-        # stay alive -- so a survivor is both a late write and a live process.
+        # A grandchild that would write to the tree only long after the timeout,
+        # then stay alive -- so a survivor is both a late write and a live process.
         "child = subprocess.Popen(\n"
         "    [sys.executable, '-c',\n"
-        "     \"import pathlib, time; time.sleep(2.0); \"\n"
+        f"     \"import pathlib, time; time.sleep({grandchild_dormant}); \"\n"
         "     \"pathlib.Path('late-write.txt').write_text('a descendant wrote after the timeout', encoding='utf-8'); \"\n"
         "     \"time.sleep(120)\"],\n"
         "    stdout=devnull, stderr=devnull,\n"
@@ -4656,17 +4731,17 @@ def test_a_timed_out_agents_descendant_is_dead_and_silent_before_salvage(tmp_pat
             workdir,
             "[claude r1]",
             tmp_path / "log.txt",
-            timeout=1,
+            timeout=startup_budget,
             dry_run=False,
             heartbeat=0,
         )
 
+    # _terminate_tree confirmed the group gone before run_agent raised, so the
+    # descendant is dead here; having stayed dormant until well past the timeout,
+    # it never wrote the marker before the kill and cannot write it now.
     child_pid = int(child_pid_file.read_text())
-    # Past when the descendant's write would have landed had it lived, so an
-    # absent marker is the kill beating it rather than the check merely being early.
-    time.sleep(1.5)
-    assert not marker.exists(), "a descendant wrote to the working tree after the timeout"
     assert not _pid_alive(child_pid), "a descendant survived the timeout"
+    assert not marker.exists(), "a descendant wrote to the working tree after the timeout"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the process-group kill path is POSIX-only")
