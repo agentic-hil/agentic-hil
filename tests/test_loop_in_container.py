@@ -896,6 +896,24 @@ def test_a_spent_token_survives_attribution_and_still_reads_as_spent() -> None:
     assert spent_refresh_token(failure) is not None
 
 
+def test_a_finish_invocation_that_refuses_a_login_is_attributed_to_it() -> None:
+    """The stalled-round finish invocation carries `[claude r2 finish]`, and its
+    authentication failure has to be tied to the same prefix its exit line does,
+    or the refusal is a phrase this wrapper never names."""
+    pending: dict[str, str] = {}
+    transcript = [
+        "[claude r2 finish] $ /opt/loop/bin/claude -p --output-format text\n",
+        "[claude r2 finish] OAuth token expired\n",
+        "[claude r2 finish] exit 1 after 3s (log: /repo/.agentic-loop/logs/round-02-claude-finish.log)\n",
+    ]
+
+    assert [loop_in_container.credential_evidence(line, pending) for line in transcript] == [
+        None,
+        None,
+        "OAuth token expired",
+    ]
+
+
 def _a_container_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str = "codex-auth") -> tuple[Path, Path]:
     """The two paths the container's staging works between.
 
@@ -1098,6 +1116,19 @@ def test_only_an_invocation_that_ended_is_the_end_of_a_round() -> None:
     assert loop_in_container.finished_agent("loop: python /repo/tools/agent_review_loop.py\n") is None
 
 
+def test_a_stalled_rounds_finish_invocation_is_an_invocation_like_any_other() -> None:
+    """Recovery re-runs the implementer as `[claude r2 finish]` (agent_review_loop
+    runs it with stage="finish"). That invocation can rotate the Claude login on
+    its way in exactly as the first one did, so its exit has to be recognised as
+    the end of an invocation, or the per-invocation write-back never reads its
+    file and a later hard kill loses what it refreshed to.
+    """
+    assert loop_in_container.finished_agent("[claude r2 finish] exit 0 after 44s (log: /repo/x.log)\n") == "claude"
+    assert loop_in_container.finished_agent("[codex  r3 finish] exit 0 after 30s (log: /repo/x.log)\n") == "codex"
+    # Still not an exit line just because it carries the stage.
+    assert loop_in_container.finished_agent("[claude r2 finish] finishing the fix\n") is None
+
+
 def _a_stored_login(tmp_path: Path, kind: str = "codex-auth") -> Path:
     """One login of `kind`, on this machine, close enough to expiry to be refreshed."""
     relative, build = RETURNED_LOGINS[kind]
@@ -1210,7 +1241,10 @@ def test_the_login_a_finished_run_staged_is_read_out_of_the_home_volume(
     )
 
     assert stored.read_text(encoding="utf-8") == rotated
-    assert said == [f"{kind}: replaced; previous login kept at {stored.name}{refresh_login.BACKUP_SUFFIX}"]
+    assert said.lines == [f"{kind}: replaced; previous login kept at {stored.name}{refresh_login.BACKUP_SUFFIX}"]
+    # The one login asked for came back and was applied, so nothing is unresolved
+    # and the caller is free to delete the volume it was staged in.
+    assert said.unresolved == []
     # It reads, and can do nothing else: no network, and the volume holding the
     # copies is mounted read-only.
     assert commands[0][-3:] == ["--dump-logins", "--kinds", kind]
@@ -1252,20 +1286,28 @@ def test_a_volume_that_cannot_be_read_is_a_line_rather_than_a_second_failure(
         files=[("codex-auth", stored)],
     )
 
-    assert said == ["the logins staged in loop-1-home could not be read: Error: No such volume: loop-1-home"]
+    reason = "the logins staged in loop-1-home could not be read: Error: No such volume: loop-1-home"
+    assert said.lines == [reason]
+    # It does not raise on top of a run that may already be failing, but a read
+    # it could not make is a login it could not confirm: the caller keeps the
+    # volume rather than deleting the copy it could not see.
+    assert said.unresolved == [reason]
 
     monkeypatch.setattr(
         loop_in_container,
         "run_capture",
         lambda command, _timeout=120: (_ for _ in ()).throw(OSError("docker is gone")),
     )
-    assert loop_in_container.collect_from_volume(
+    thrown = loop_in_container.collect_from_volume(
         docker="docker",
         image="loop:test",
         container_name="loop-1-logins",
         home_volume="loop-1-home",
         files=[("codex-auth", stored)],
-    ) == ["the logins staged in loop-1-home could not be read: OSError: docker is gone"]
+    )
+    gone = "the logins staged in loop-1-home could not be read: OSError: docker is gone"
+    assert thrown.lines == [gone]
+    assert thrown.unresolved == [gone]
 
 
 def test_a_returned_codex_api_key_login_is_taken_back_without_a_rejection(
@@ -1298,18 +1340,145 @@ def test_a_returned_codex_api_key_login_is_taken_back_without_a_rejection(
         return subprocess.CompletedProcess(command, 0, json.dumps({"codex-auth": api_key_login}), "")
 
     monkeypatch.setattr(loop_in_container, "run_capture", dumped)
-    assert (
-        loop_in_container.collect_from_volume(
+    readback = loop_in_container.collect_from_volume(
+        docker="docker",
+        image="loop:test",
+        container_name="loop-1-logins",
+        home_volume="loop-1-home",
+        files=[("codex-auth", stored)],
+    )
+    # An unchanged, valid API-key login is a confirmed return: nothing to say and
+    # nothing left unresolved, so the volume it was staged in is deleted.
+    assert readback.lines == []
+    assert readback.unresolved == []
+    assert stored.read_text(encoding="utf-8") == api_key_login
+    assert not backup.exists()
+
+
+def test_an_expected_login_absent_from_the_answer_is_not_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The entrypoint stages every login it is given, so one missing from the read
+    is a copy that did not survive -- a token this run may already have spent with
+    no recovered value to replace it. It is left unresolved so the volume it would
+    have been in is kept, not deleted."""
+    claude = _a_stored_login(tmp_path, "claude-auth")
+    codex = _a_stored_login(tmp_path, "codex-auth")
+    rotated = RETURNED_LOGINS["claude-auth"][1](timedelta(days=1), refresh_token="rotated-in-the-container")
+
+    def dumped(command: list[str], _timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        # Only the Claude login comes back; the Codex one the run also took in is
+        # absent, the shape the bug hides in.
+        return subprocess.CompletedProcess(command, 0, json.dumps({"claude-auth": rotated}), "")
+
+    monkeypatch.setattr(loop_in_container, "run_capture", dumped)
+    readback = loop_in_container.collect_from_volume(
+        docker="docker",
+        image="loop:test",
+        container_name="loop-1-logins",
+        home_volume="loop-1-home",
+        files=[("claude-auth", claude), ("codex-auth", codex)],
+    )
+
+    # The one that came back is applied; the one that did not is the reason the
+    # volume is kept, and it names itself and the volume in the recovery line.
+    assert readback.lines == [f"claude-auth: replaced; previous login kept at {claude.name}{refresh_login.BACKUP_SUFFIX}"]
+    assert len(readback.unresolved) == 1
+    assert "codex-auth was not staged in loop-1-home" in readback.unresolved[0]
+
+
+def test_an_answer_that_is_not_json_keeps_the_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dump that came back as something other than the logins is a read that did
+    not happen, so nothing is confirmed and the volume is kept."""
+    stored = _a_stored_login(tmp_path, "codex-auth")
+    for answer in ("<html>login</html>", json.dumps(["codex-auth"])):
+        monkeypatch.setattr(
+            loop_in_container,
+            "run_capture",
+            lambda command, _timeout=120, _answer=answer: subprocess.CompletedProcess(command, 0, _answer, ""),
+        )
+        readback = loop_in_container.collect_from_volume(
             docker="docker",
             image="loop:test",
             container_name="loop-1-logins",
             home_volume="loop-1-home",
             files=[("codex-auth", stored)],
         )
-        == []
+        assert readback.unresolved == readback.lines
+        assert readback.unresolved and "loop-1-home" in readback.unresolved[0]
+
+
+def test_a_login_that_cannot_be_written_back_keeps_the_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read succeeded and the login is real, but this machine's copy could not
+    be replaced. The write failure is both announced and left unresolved, so the
+    volume that still holds the refreshed value is kept for a retry by hand."""
+    stored = _a_stored_login(tmp_path, "codex-auth")
+    rotated = RETURNED_LOGINS["codex-auth"][1](timedelta(days=1), refresh_token="rotated-in-the-container")
+
+    def dumped(command: list[str], _timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, json.dumps({"codex-auth": rotated}), "")
+
+    monkeypatch.setattr(loop_in_container, "run_capture", dumped)
+    monkeypatch.setattr(
+        loop_in_container,
+        "apply_refreshed_login",
+        lambda _kind, _path, _content: (_ for _ in ()).throw(OSError("read-only file system")),
     )
-    assert stored.read_text(encoding="utf-8") == api_key_login
-    assert not backup.exists()
+
+    readback = loop_in_container.collect_from_volume(
+        docker="docker",
+        image="loop:test",
+        container_name="loop-1-logins",
+        home_volume="loop-1-home",
+        files=[("codex-auth", stored)],
+    )
+
+    assert readback.lines and "could not be written back" in readback.lines[0]
+    assert readback.unresolved == readback.lines
+
+
+def test_an_interrupted_stream_stops_the_container_before_it_lets_the_interrupt_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The container stages the in-flight round's login in its own finally block.
+    The interrupt reaches this wrapper at the same instant it reaches the
+    container, so stream stops the container and waits for it before it re-raises
+    -- otherwise the end-of-run read races that staging and deletes an empty
+    volume. The order of events is the whole point of the test."""
+    events: list[str] = []
+
+    class FakePopen:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.stdout = self._lines()
+
+        def _lines(self) -> Iterator[str]:
+            yield "[claude r1] working\n"
+            events.append("interrupt")
+            raise KeyboardInterrupt
+
+        def wait(self) -> int:
+            events.append("waited")
+            return 130
+
+    monkeypatch.setattr(loop_in_container.subprocess, "Popen", lambda *_args, **_kwargs: FakePopen())
+
+    def stop(command: list[str], _timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        events.append(f"stop {command[-1]}")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(loop_in_container, "run_capture", stop)
+
+    command = ["docker", "run", "--rm", "--name", "agentic-hil-loop-abc", "loop:test"]
+    with pytest.raises(KeyboardInterrupt):
+        loop_in_container.stream(command, tmp_path)
+
+    assert events == ["interrupt", "stop agentic-hil-loop-abc", "waited"]
+    assert "working" in capsys.readouterr().out
 
 
 def _ready_to_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
@@ -1323,11 +1492,21 @@ def _ready_to_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(loop_in_container, "repository_root", lambda _start: repository)
     monkeypatch.setattr(loop_in_container, "git_identity", lambda _repo: ("A Developer", "dev@example.invalid"))
     monkeypatch.setattr(loop_in_container, "image_present", lambda _docker, _image: True)
-    monkeypatch.setattr(
-        loop_in_container,
-        "run_capture",
-        lambda _command, _timeout=120: subprocess.CompletedProcess([], 0, "", ""),
-    )
+
+    def run_capture(command: list[str], _timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        # The end-of-run volume read is answered with the logins this machine
+        # already holds, so an ordinary run confirms every one of them unchanged
+        # and deletes the volume. A test that needs a rotation, a partial answer,
+        # or a read failure overrides this after calling the helper.
+        if "--dump-logins" in command:
+            staged = {
+                kind: (home / relative).read_text(encoding="utf-8")
+                for kind, (relative, _build) in RETURNED_LOGINS.items()
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps(staged), "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(loop_in_container, "run_capture", run_capture)
     monkeypatch.setattr(loop_in_container, "remove_container", lambda _docker, _name: None)
     return repository
 
@@ -1349,6 +1528,41 @@ def test_a_home_volume_that_survives_the_run_fails_it(
     assert "still exists after removal" in captured.err
     assert "-home" in captured.err
     assert f"commits    : in {repository}" in captured.out
+
+
+def test_a_login_the_run_could_not_confirm_keeps_the_volume_and_fails_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The volume is the one copy of what the container refreshed to. A run that
+    cannot confirm every login reached this machine keeps the volume rather than
+    deleting it, prints the command that reads it back, and takes the wrapper's
+    own exit status -- the loss issue #391 cost an operator, caught instead of
+    reported as a clean run."""
+    _ready_to_run(monkeypatch, tmp_path)
+    home = tmp_path / "profile"
+    claude = (home / RETURNED_LOGINS["claude-auth"][0]).read_text(encoding="utf-8")
+
+    def partial(command: list[str], _timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        if "--dump-logins" in command:
+            # Only the Claude login comes back; the Codex one the run also took in
+            # is absent from the answer, so it cannot be confirmed written back.
+            return subprocess.CompletedProcess(command, 0, json.dumps({"claude-auth": claude}), "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(loop_in_container, "run_capture", partial)
+    removed: list[str] = []
+    monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, name: removed.append(name))
+    monkeypatch.setattr(loop_in_container, "stream", lambda _command, _repository, _finished=None: (0, {}, None))
+
+    assert loop_in_container.main(["--image", "loop:test", "--task", "x"]) == loop_in_container.EXIT_WRAPPER_FAILED
+
+    # The volume is kept, not deleted: it holds the copy that could not be confirmed.
+    assert removed == []
+    err = capsys.readouterr().err
+    assert "codex-auth was not staged" in err
+    assert "kept the home volume" in err
+    # The operator is handed the exact command that reads the copies back.
+    assert "--dump-logins" in err
 
 
 def test_an_interrupted_run_that_cannot_clean_up_says_so(
@@ -1495,7 +1709,11 @@ def test_every_ending_hands_this_machine_the_login_the_container_held(
         if other != kind
     }
     order: list[str] = []
-    _the_container_hands_back(monkeypatch, {kind: rotated}, order)
+    # The entrypoint stages every login it was given, so the read answers with
+    # both: the one this round rotated, and the other exactly as this machine
+    # already holds it. Only the first is a write-back; the second is confirmed
+    # unchanged, which is what lets the volume be deleted at all.
+    _the_container_hands_back(monkeypatch, {kind: rotated, **untouched}, order)
     monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: order.append("removed"))
 
     def ended(
@@ -1589,7 +1807,9 @@ def test_the_invocation_that_just_ended_is_what_the_wrapper_reads_the_login_afte
     """
     _ready_to_run(monkeypatch, tmp_path)
     monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: None)
-    monkeypatch.setattr(loop_in_container, "run_capture", lambda command, _timeout=120: subprocess.CompletedProcess(command, 0, "", ""))
+    # The end-of-run volume read keeps the dump-aware answer _ready_to_run sets,
+    # so it confirms both logins unchanged and this test stays about the
+    # per-invocation reads it mocks below.
     read: list[tuple[str, tuple[str, ...]]] = []
     monkeypatch.setattr(
         loop_in_container,
