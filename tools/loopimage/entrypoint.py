@@ -323,6 +323,18 @@ def loop_environment() -> dict[str, str]:
     return environment
 
 
+class _ContainerStopped(BaseException):
+    """The container stop `_unwind_on_stop` turns SIGTERM into.
+
+    A `BaseException` of its own rather than `KeyboardInterrupt`, so `main` can
+    catch the container's own stop without also catching a genuine Ctrl-C. The
+    default SIGINT handler still raises `KeyboardInterrupt`, which passes through
+    the same staging `finally` and then propagates, so an interactive interrupt
+    keeps the conventional 130 that a caller reads as "stopped at the keyboard",
+    distinct from the 128 + SIGTERM a `docker stop` returns.
+    """
+
+
 def _unwind_on_stop(_signum: int, _frame: object) -> None:
     """Turn the container's stop signal into an orderly unwind.
 
@@ -338,10 +350,12 @@ def _unwind_on_stop(_signum: int, _frame: object) -> None:
     Raising here makes SIGTERM unwind the stack exactly as the default SIGINT
     handler does, so that `finally` runs and the rotated login reaches the volume
     whatever stopped the run -- the wrapper's own `stop_container`, an operator's
-    `docker stop`, or the daemon shutting down. `tools/loop_in_container.py`'s
-    `stop_container` sends this signal and waits for this unwind to finish.
+    `docker stop`, or the daemon shutting down. It raises `_ContainerStopped`
+    rather than `KeyboardInterrupt` so the stop stays distinct from a genuine
+    Ctrl-C; `tools/loop_in_container.py`'s `stop_container` sends this signal and
+    waits for this unwind to finish.
     """
-    raise KeyboardInterrupt
+    raise _ContainerStopped
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -381,12 +395,16 @@ def main(argv: list[str] | None = None) -> int:
     previous_sigterm = signal.signal(signal.SIGTERM, _unwind_on_stop)
     try:
         return subprocess.run(command, cwd=str(REPO), env=loop_environment(), check=False).returncode
-    except KeyboardInterrupt:
-        # Stopped mid-run: the wrapper's stop_container, an operator's docker
-        # stop, or a Ctrl-C that reached this process. subprocess.run has already
-        # killed the loop child on its way out of its own wait, so the finally
-        # below stages what the in-flight round refreshed to and this returns the
-        # code a signal-stopped run conventionally carries.
+    except _ContainerStopped:
+        # Stopped mid-run by SIGTERM: the wrapper's stop_container, an operator's
+        # docker stop, or a daemon shutdown, each of which _unwind_on_stop turns
+        # into this. subprocess.run has already killed the loop child on its way
+        # out of its own wait, so the finally below stages what the in-flight
+        # round refreshed to and this returns the 128 + SIGTERM such a stop
+        # conventionally carries. A genuine Ctrl-C raises KeyboardInterrupt, not
+        # this, and is deliberately not caught here: it unwinds the same finally
+        # and then propagates, so the interpreter still exits with the 130 that
+        # keeps an interactive interrupt distinct from a container stop.
         print("loop: stopped; staging the in-flight round's login before exit", flush=True)
         return 128 + signal.SIGTERM
     finally:

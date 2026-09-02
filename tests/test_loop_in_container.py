@@ -1527,14 +1527,11 @@ raise SystemExit(entrypoint.main(["--kinds", "codex-auth", "--", "--task", "x"])
 """
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX stop-signal semantics; the container this runs in is Linux")
-def test_the_container_stop_signal_reaches_the_staging_before_the_process_exits(tmp_path: Path) -> None:
-    """`docker stop` sends SIGTERM, whose default action would terminate the
-    interpreter without running the finally that stages the in-flight round's
-    login. The entrypoint installs a handler that turns it into an unwind, so a
-    process actually stopped with that signal writes the staged copy before it
-    exits. Anything less leaves the home volume empty of what the round rotated
-    to, which is the loss the whole read-back exists to prevent."""
+def _run_until_stopped_by(tmp_path: Path, sig: int) -> tuple[subprocess.Popen[bytes], str, Path]:
+    """Run entrypoint.main() as a real subprocess, wait until its loop child is
+    up (so the signal lands during the wait, with the handler installed), send
+    `sig` to the entrypoint alone, and return the finished process, its combined
+    output, and the path the in-flight login should have been staged to."""
     home = tmp_path / "home"
     home.mkdir()
     ready = tmp_path / "ready"
@@ -1562,8 +1559,9 @@ def test_the_container_stop_signal_reaches_the_staging_before_the_process_exits(
             if time.monotonic() > deadline:
                 pytest.fail("the harness never reported the loop had started")
             time.sleep(0.02)
-        # The signal docker stop sends by default, to the entrypoint alone.
-        process.terminate()
+        # To the entrypoint alone, as a stop or a Ctrl-C reaching this process
+        # would arrive -- not the whole group, which the loop child is also in.
+        process.send_signal(sig)
         process.wait(timeout=30)
     finally:
         # Kill the whole group, so a run left blocked by a broken handler -- or
@@ -1574,14 +1572,49 @@ def test_the_container_stop_signal_reaches_the_staging_before_the_process_exits(
             process.wait(timeout=10)
 
     output = log.read_text(encoding="utf-8", errors="replace")
-    staged = home / "staged" / "codex-auth"
+    return process, output, home / "staged" / "codex-auth"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stop-signal semantics; the container this runs in is Linux")
+def test_the_container_stop_signal_reaches_the_staging_before_the_process_exits(tmp_path: Path) -> None:
+    """`docker stop` sends SIGTERM, whose default action would terminate the
+    interpreter without running the finally that stages the in-flight round's
+    login. The entrypoint installs a handler that turns it into an unwind, so a
+    process actually stopped with that signal writes the staged copy before it
+    exits. Anything less leaves the home volume empty of what the round rotated
+    to, which is the loss the whole read-back exists to prevent."""
+    process, output, staged = _run_until_stopped_by(tmp_path, signal.SIGTERM)
     assert staged.is_file(), f"the stop signal did not reach the staging:\n{output}"
     assert staged.read_text(encoding="utf-8") == "REFRESHED-TOKEN"
     # The unwind, not the default terminate: 128 + SIGTERM is the code main()
-    # returns from its KeyboardInterrupt branch, and a process torn down by the
+    # returns from its _ContainerStopped branch, and a process torn down by the
     # default action would report the raw negative signal instead.
     assert process.returncode == 128 + signal.SIGTERM
     assert "staged for the host: codex-auth" in output
+    # The container-stop branch ran, which the Ctrl-C counterpart below must not.
+    assert "loop: stopped; staging the in-flight round's login before exit" in output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stop-signal semantics; the container this runs in is Linux")
+def test_a_keyboard_interrupt_stages_too_but_keeps_the_conventional_ctrl_c_status(tmp_path: Path) -> None:
+    """A genuine Ctrl-C must stage the in-flight login just as a `docker stop`
+    does -- the same loss the SIGTERM handler exists to prevent -- yet stay
+    distinguishable from one. The default SIGINT handler raises KeyboardInterrupt,
+    which main() does not catch: the staging finally runs and it propagates, and
+    the interpreter re-raises the signal so the process dies of SIGINT. That is
+    the conventional 130 a caller reads as an interactive interrupt, not the
+    128 + SIGTERM the container-stop branch returns."""
+    process, output, staged = _run_until_stopped_by(tmp_path, signal.SIGINT)
+    assert staged.is_file(), f"the interrupt did not reach the staging:\n{output}"
+    assert staged.read_text(encoding="utf-8") == "REFRESHED-TOKEN"
+    # Death by the signal, not the container-stop return: subprocess reports the
+    # negative signal number, which a shell renders as the conventional 130
+    # (128 + SIGINT). It must not be flattened into the container-stop code.
+    assert process.returncode == -signal.SIGINT
+    assert process.returncode != 128 + signal.SIGTERM
+    assert "staged for the host: codex-auth" in output
+    # The container-stop branch, and only it, prints this; a Ctrl-C must not.
+    assert "loop: stopped; staging the in-flight round's login before exit" not in output
 
 
 def _ready_to_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
