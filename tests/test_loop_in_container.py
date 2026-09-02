@@ -50,6 +50,15 @@ def _codex_access_token(offset: timedelta) -> str:
 
 
 def _codex_login(access_expires_in: timedelta = timedelta(days=1), *, refresh_token: str = "r") -> str:
+    """One stored codex login, in the shape codex writes one.
+
+    Two calls with the same arguments can be the same document, so a test that
+    needs a login to differ from another has to say what differs. Nothing here
+    is unique per call: the token expiries are whole seconds, and the system
+    clock behind `last_refresh` advances in 15.6ms steps on Windows before
+    Python 3.13, which is long enough for two logins built back to back to
+    carry the same timestamp.
+    """
     return json.dumps(
         {
             "OPENAI_API_KEY": None,
@@ -62,6 +71,13 @@ def _codex_login(access_expires_in: timedelta = timedelta(days=1), *, refresh_to
             "last_refresh": datetime.now(timezone.utc).isoformat(),
         }
     )
+
+
+def _refresh_token(document: str) -> str:
+    """The one field a refresh rotates, and the one two logins have to differ in."""
+    token = json.loads(document)["tokens"]["refresh_token"]
+    assert isinstance(token, str)
+    return token
 
 
 def _stored_logins(
@@ -1226,7 +1242,14 @@ def test_every_ending_hands_this_machine_the_login_the_container_held(
     """
     _ready_to_run(monkeypatch, tmp_path)
     stored = tmp_path / "profile" / ".codex" / "auth.json"
-    rotated = _codex_login(timedelta(days=1))
+    # A refresh rotates the refresh token, and that is what makes the returned
+    # document a replacement rather than the file this machine already holds.
+    # Stated here rather than left to the timestamp inside the login: on a clock
+    # that does not advance between the two calls they are the same document,
+    # there is nothing to write back, and the test would be asserting a line
+    # about a refresh that never happened.
+    rotated = _codex_login(timedelta(days=1), refresh_token="rotated-in-the-container")
+    assert _refresh_token(rotated) != _refresh_token(stored.read_text(encoding="utf-8"))
     order: list[str] = []
     _the_container_hands_back(monkeypatch, rotated, order)
     monkeypatch.setattr(loop_in_container, "remove_volume", lambda _docker, _name: order.append("removed"))
