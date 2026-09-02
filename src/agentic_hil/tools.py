@@ -82,6 +82,8 @@ from agentic_hil.report import (
     audit_unavailable,
     claim_auto_recover_default_warning,
     ensure_audit_ready,
+    failed_success_check,
+    merge_audit_status,
     overall_success,
     read_last_report,
     write_report,
@@ -100,6 +102,39 @@ def _backend_kind(config: AgenticHILConfig | None) -> str | None:
     step."""
     debugger = getattr(config, "debugger", None)
     return debugger.type if debugger is not None else None
+
+
+# Why a recovery action's result was not a success, one clause per check
+# `overall_success` folds together, written to be read into a sentence about the
+# action that produced it. The `ok` check is deliberately absent: it is the only
+# one that says the action itself did not report success, and each recovery
+# action words that in its own terms. Every other entry is a fact about the
+# *result* of an action the bench did carry out, and describing those in the
+# words of the first is what told an operator that a target this recovery had
+# just driven into halt, with `Core halted` in the log it wrote, had never
+# confirmed the halt (#389).
+RECOVERY_CHECK_CLAUSES: dict[str, str] = {
+    "target_ok": "the result reports that the target itself failed",
+    "audit_ok": "the result could not be written to the audit record",
+    "cleanup_ok": "the cleanup behind it did not confirm",
+    "cleanup_required": "the result still asks for cleanup",
+    "quarantined": "the result came back quarantined",
+    "lease_state": "the hardware lease behind it did not come back usable",
+    "side_effect_status": "what it did to the target is not established",
+    "hardware_state": "the state it left the target in is not established",
+}
+
+
+def recovery_check_clause(check: str) -> str:
+    """The clause naming what a recovery action's result failed on.
+
+    A fallback rather than a lookup that raises, because the table this reads
+    against is `SUCCESS_CHECKS` and that table can grow: a check with no
+    sentence yet must still be named in the verdict rather than turn a recovery
+    into a crash. `test_every_success_check_has_a_recovery_clause` holds the two
+    tables together, so the fallback stays a safety net rather than the thing an
+    operator reads."""
+    return RECOVERY_CHECK_CLAUSES.get(check, f"the result failed its {check} check")
 
 
 class AgenticHILToolService:
@@ -1358,24 +1393,61 @@ class AgenticHILToolService:
         if reset_halt:
             actions.append("reset_halt")
             reset = self._invoke_dispatch(lambda: self.backend.reset_target("halt"))
-            if not overall_success(reset):
-                return {
-                    **result,
-                    "outcome": "failed",
-                    "failed_action": "reset_halt",
-                    "summary": "The target did not confirm a reset into halt, so the bench stays as the failed run left it.",
-                }
+            failed_check = failed_success_check(reset)
+            if failed_check is not None:
+                return self._recovery_action_failed(
+                    result,
+                    "reset_halt",
+                    failed_check,
+                    # Only the `ok` check says the confirmation did not arrive.
+                    # Under every other one the backend confirmed the halt off
+                    # the line it looks for and the log it wrote carries that
+                    # line, so the target is halted: the recovery still fails,
+                    # because what failed is unresolved, but the verdict says
+                    # which check failed and leaves the board's state standing
+                    # instead of denying it (#389).
+                    "The target did not confirm a reset into halt, so the bench stays as the failed run left it."
+                    if failed_check == "ok"
+                    else f"The target confirmed the reset into halt, but {recovery_check_clause(failed_check)}, so the incident stands even though the target is halted.",
+                    reset,
+                )
         actions.append("probe_target")
         verification = self._invoke_dispatch(self.backend.probe_target)
-        if not overall_success(verification) or verification.get("target_detected") is not True:
-            return {
-                **result,
-                "outcome": "failed",
-                "failed_action": "probe_target",
-                "summary": "The probe did not report a detected target after the recovery action.",
-            }
+        detected = verification.get("target_detected") is True
+        failed_check = failed_success_check(verification)
+        if failed_check is not None or not detected:
+            return self._recovery_action_failed(
+                result,
+                "probe_target",
+                failed_check,
+                # The same split one action later: a probe that answered with a
+                # detected target and then failed a check about its own result
+                # did not fail to find the target, and saying it did would send
+                # an operator to the wiring for an audit that could not be
+                # written.
+                "The probe did not report a detected target after the recovery action."
+                if not detected or failed_check == "ok"
+                else f"The probe detected the target after the recovery action, but {recovery_check_clause(failed_check)}, so the incident stands.",
+                verification,
+            )
         result["safe_state_predicate"] = "reset_halt" if reset_halt else "readonly_probe"
         return {**result, "outcome": "recovered", **self._settle_incident_after_recovery(reset_halt)}
+
+    @staticmethod
+    def _recovery_action_failed(result: JsonObject, action: str, failed_check: str | None, summary: str, source: JsonObject) -> JsonObject:
+        """One recovery action that did not come back a success.
+
+        `failed_check` names the `overall_success` check the action's result
+        failed, so the block says what stopped the recovery rather than leaving
+        a reader to take the worst reading of the summary. It travels beside the
+        action's own audit status, because the check the verdict names is often
+        `audit_ok`, and a block that named that check without the error line
+        behind it would send an operator looking for evidence this result
+        already holds."""
+        failure: JsonObject = {**result, "outcome": "failed", "failed_action": action, "summary": summary}
+        if failed_check is not None:
+            failure["failed_check"] = failed_check
+        return merge_audit_status(failure, source)
 
     def _settle_incident_after_recovery(self, reset_halt: bool) -> JsonObject:
         """Clear the incident the run was standing under, if the actions answered it.

@@ -20,9 +20,10 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import write_config
+from conftest import FAKE_STLINK_HALT_UNCONFIRMED, write_config
 
-from agentic_hil.config import load_config
+from agentic_hil import report as report_module
+from agentic_hil.config import ConfigError, load_config
 from agentic_hil.coordination import (
     ATTESTATION_NO_STANDING_STATE,
     ATTESTATION_RECOVERY_ACTION,
@@ -31,9 +32,15 @@ from agentic_hil.coordination import (
     RECOVERY_ACTOR_SERVER,
     HardwareCoordinator,
 )
-from agentic_hil.report import CONTACT_MARKER_KEY, CONTACT_MARKER_SOURCE_KEY, write_report
+from agentic_hil.report import (
+    CONTACT_MARKER_KEY,
+    CONTACT_MARKER_SOURCE_KEY,
+    SUCCESS_CHECKS,
+    logs_directory,
+    write_report,
+)
 from agentic_hil.test_reactor import TestReactor
-from agentic_hil.tools import AgenticHILToolService
+from agentic_hil.tools import RECOVERY_CHECK_CLAUSES, AgenticHILToolService
 
 # Machine-wide device locks contend across sibling clones, so this name is this
 # module's alone.
@@ -93,11 +100,12 @@ class FakeBackend:
         return frozenset()
 
 
-def config_for(workspace: Path, *, auto_recover: str | None = None, allow_reset: bool = True):
+def config_for(workspace: Path, *, auto_recover: str | None = None, allow_reset: bool = True, **written_kwargs):
     written = write_config(
         workspace,
         permissions={"allow_probe": True, "allow_flash": True, "allow_reset": allow_reset},
         auto_recover=auto_recover,
+        **written_kwargs,
     )
     written.write_text(
         "permissions:\n  allow_recover: true\n" + written.read_text(encoding="utf-8"),
@@ -936,3 +944,174 @@ def test_an_inherited_incident_recorded_under_another_configuration_is_refused(t
         service.close()
 
     assert recovery_action_lines(config) == []
+
+
+# ---------------------------------------------------------------------------
+# D. The verdict and the log the recovery wrote say the same thing.
+
+
+def reset_log(config) -> dict:
+    """The log the recovery's own reset wrote, read the way an operator reads it.
+
+    The whole of #389 is a disagreement between this file and the verdict beside
+    it, so every test in this section asserts against the file rather than
+    against the result that is under test."""
+    logs = sorted(Path(logs_directory(config)).glob("stlink-*-reset_target.log"))
+    assert len(logs) == 1, logs
+    return json.loads(logs[0].read_text(encoding="utf-8"))
+
+
+def refuse_report_commits(monkeypatch: pytest.MonkeyPatch, config) -> None:
+    """Let every write through except the two the report commit makes.
+
+    #387's bench in one fixture: `logs.directory` sits under the workspace and
+    the report files under a state root the packaged host redirects, so the
+    programmer log lands on disk and the report that would record the same run
+    is refused by the path guard. That is why the operator in #389 could read
+    `Core halted` out of a run the verdict called unconfirmed.
+    """
+    refused = {report_module.last_report_path(config), report_module.last_failure_path(config)}
+    original = report_module.safe_write_text
+
+    def guarded(config_argument, file_path, text, **kwargs):
+        if str(file_path) in refused:
+            raise ConfigError(
+                "unsafe_configured_path",
+                "Configured file's parent directory resolves to a different location than it names.",
+            )
+        return original(config_argument, file_path, text, **kwargs)
+
+    monkeypatch.setattr(report_module, "safe_write_text", guarded)
+
+
+def test_a_halt_the_log_confirms_is_reported_as_recovered(tmp_path: Path) -> None:
+    """The baseline the other two are read against, and it runs the real ST-Link
+    backend against the CLI transcript #389's bench produced: exit 0 with `Core
+    halted`. The phrase is the one `STLINK_RESET_MODES` looks for, so a recovery
+    that reads this log has its confirmation."""
+    config = config_for(tmp_path, debugger_type="stlink")
+    service = AgenticHILToolService(config)
+    try:
+        quarantine(service, RESET_REASON)
+        recovery = service.recover_after_failed_run(["dut"])
+
+        assert recovery["outcome"] == "recovered", recovery
+        assert recovery["safe_state_predicate"] == "reset_halt"
+        assert recovery["incident_resolved"] is True, recovery
+    finally:
+        service.close()
+
+    log = reset_log(config)
+    assert log["returncode"] == 0, log
+    assert "Core halted" in log["stdout"], log
+
+
+def test_a_halt_the_log_does_not_confirm_stays_unconfirmed(tmp_path: Path) -> None:
+    """The other direction, unchanged: a CLI that connects, exits 0 and never
+    says the core stopped leaves nobody able to say the target is halted, and the
+    verdict that names the confirmation is the right one for it."""
+    config = config_for(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK_HALT_UNCONFIRMED)
+    service = AgenticHILToolService(config)
+    try:
+        quarantine(service, RESET_REASON)
+        recovery = service.recover_after_failed_run(["dut"])
+
+        assert recovery["outcome"] == "failed", recovery
+        assert recovery["failed_action"] == "reset_halt"
+        assert recovery["failed_check"] == "ok"
+        assert "did not confirm a reset into halt" in recovery["summary"]
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()
+
+    log = reset_log(config)
+    assert log["returncode"] == 0, log
+    assert "Core halted" not in log["stdout"], log
+
+
+def test_a_confirmed_halt_whose_report_cannot_be_written_names_the_audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#389 itself: the reset confirmed, the report could not be committed, and
+    the recovery reported the target as never having confirmed the halt.
+
+    Two claims were false at once. The confirmation did arrive, and the log this
+    same recovery wrote carries it; and the core was halted, so "the bench stays
+    as the failed run left it" described a board the recovery had just moved. The
+    recovery still fails, because an audit that could not be written is not an
+    incident anything here may clear, but it now names that check and leaves the
+    halted state standing."""
+    config = config_for(tmp_path, debugger_type="stlink")
+    service = AgenticHILToolService(config)
+    try:
+        quarantine(service, RESET_REASON)
+        refuse_report_commits(monkeypatch, config)
+
+        recovery = service.recover_after_failed_run(["dut"])
+
+        assert recovery["outcome"] == "failed", recovery
+        assert recovery["failed_action"] == "reset_halt"
+        assert recovery["failed_check"] == "audit_ok", recovery
+        assert "confirmed the reset into halt" in recovery["summary"], recovery
+        assert "audit record" in recovery["summary"], recovery
+        assert "did not confirm" not in recovery["summary"], recovery
+        assert "stays as the failed run left it" not in recovery["summary"], recovery
+        # The decisive line travels with the verdict rather than being left in a
+        # file the block does not name.
+        assert recovery["audit_ok"] is False, recovery
+        assert recovery["audit_error"]["error_type"] == "unsafe_configured_path", recovery
+        # Failing closed is unchanged: nothing was cleared on an unauditable act.
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()
+
+    assert recovery_action_lines(config) == []
+    # And the verdict now agrees with the log the same recovery wrote.
+    log = reset_log(config)
+    assert log["returncode"] == 0, log
+    assert "Core halted" in log["stdout"], log
+
+
+def test_a_probe_that_detected_the_target_names_the_check_it_failed(tmp_path: Path) -> None:
+    """The same split one action later.
+
+    The read-back has the identical shape: `overall_success` folds the probe's
+    own answer together with facts about its result, and a probe that reported a
+    detected target and could not have its report written did not fail to find
+    the target. Sending an operator to the wiring for an audit that could not be
+    written is the same lie one line down."""
+
+    class ProbeReportUnwritable(FakeBackend):
+        def probe_target(self) -> dict:
+            return {
+                **super().probe_target(),
+                "audit_ok": False,
+                "audit_error": {"error_type": "unsafe_configured_path", "summary": "Configured file's parent directory resolves to a different location than it names."},
+            }
+
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config, backend=ProbeReportUnwritable())
+    try:
+        quarantine(service, RESET_REASON)
+        recovery = service.recover_after_failed_run(["dut"])
+
+        assert recovery["outcome"] == "failed", recovery
+        assert recovery["failed_action"] == "probe_target"
+        assert recovery["failed_check"] == "audit_ok", recovery
+        assert "The probe detected the target" in recovery["summary"], recovery
+        assert "audit record" in recovery["summary"], recovery
+        assert "did not report a detected target" not in recovery["summary"], recovery
+        assert recovery["audit_ok"] is False, recovery
+        assert service.coordinator.status()["blocked"] is True
+    finally:
+        service.close()
+
+    assert recovery_action_lines(config) == []
+
+
+def test_every_success_check_has_a_recovery_clause() -> None:
+    """The two tables that have to stay in step.
+
+    `SUCCESS_CHECKS` is where a tenth check would be added, and a recovery
+    verdict that could not name it would fall back to a sentence nobody wrote.
+    `ok` is the one check with no clause, because each recovery action words a
+    failed action in its own terms."""
+    assert {name for name, _ in SUCCESS_CHECKS} == {"ok", *RECOVERY_CHECK_CLAUSES}

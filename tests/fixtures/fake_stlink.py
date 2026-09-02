@@ -62,7 +62,7 @@ def read_memory(args: list[str]) -> int:
 # connects, including the ones that then fail, which is why the backend does
 # not read it as confirmation of anything.
 CONNECT_BANNER = """      -------------------------------------------------------------------
-                       STM32CubeProgrammer v2.18.0
+                       STM32CubeProgrammer v2.23.0
       -------------------------------------------------------------------
 
 ST-LINK SN  : STLINK123
@@ -85,7 +85,7 @@ BL Version  : 0x90
 def main() -> int:
     args = sys.argv[1:]
     if "--version" in args:
-        print("STM32CubeProgrammer version: 2.18.0")
+        print("STM32CubeProgrammer version: 2.23.0")
         return 0
     if "-l" in args:
         if "st-link-only" not in args:
@@ -108,6 +108,13 @@ def main() -> int:
         # A different command from `-rst` with a success line of its own: the
         # CLI resets the part through the NORMAL connect and then reports the
         # core it stopped. Neither `-rst` line appears.
+        #
+        # Exit 0 and `Core halted` are the two facts #389's bench log carries
+        # for STM32CubeProgrammer 2.23.0 on a NUCLEO-F446RE, and the phrase is
+        # the one `STLINK_RESET_MODES["halt"]` looks for: nothing about this
+        # version's wording is missing from the backend, which is why a run that
+        # printed it and was still reported as an unconfirmed halt was a verdict
+        # defect and not a parse one.
         print(CONNECT_BANNER)
         print("Core halted")
     else:
