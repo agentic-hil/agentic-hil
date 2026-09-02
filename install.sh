@@ -17,7 +17,7 @@ set -eu
 # untouched. Deliberately not a capability floor either: step 4 registers the
 # skill out of whatever copy step 1 left in place, so a floor left a returning
 # user on an old package and an old skill at once.
-RELEASE="0.21.0"
+RELEASE="0.21.1"
 
 AGENT=""
 WITH_AGENT_INSTALL=1
