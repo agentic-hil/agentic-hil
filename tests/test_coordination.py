@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from conftest import DEFAULT_TEST_PERMISSIONS, write_config
+from support import PUBLISH_ATOMICALLY_SOURCE, publish_atomically, published
 
 from agentic_hil import process as process_module
 from agentic_hil.bridge import BRIDGE_PROTOCOL_VERSION, BridgeCleanupError, ProcessBridgeSession
@@ -104,7 +105,9 @@ def test_pinned_state_root_coordinates_processes_with_different_environments(tmp
     config_path = write_config(tmp_path)
     ready = tmp_path / "owner-ready"
     stop = tmp_path / "owner-stop"
-    script = """
+    script = (
+        PUBLISH_ATOMICALLY_SOURCE
+        + """
 import sys, time
 from pathlib import Path
 from agentic_hil.config import load_config
@@ -112,12 +115,13 @@ from agentic_hil.coordination import HardwareCoordinator
 config = load_config(sys.argv[1])
 coordinator = HardwareCoordinator(config, 'child')
 lease = coordinator.acquire('physical:shared-environment')
-Path(sys.argv[2]).write_text('ready', encoding='utf-8')
+publish_atomically(sys.argv[2], 'ready')
 while not Path(sys.argv[3]).exists():
     time.sleep(0.02)
 lease.release()
 coordinator.close()
 """
+    )
     environment = os.environ.copy()
     environment["LOCALAPPDATA"] = str(tmp_path / "child-state")
     environment["XDG_STATE_HOME"] = str(tmp_path / "child-state")
@@ -134,15 +138,19 @@ coordinator.close()
             coordinator.acquire("physical:shared-environment")
         assert excinfo.value.result["error_type"] == "resource_busy"
     finally:
-        stop.write_text("stop", encoding="utf-8")
+        publish_atomically(str(stop), "stop")
         child.wait(timeout=10)
 
 
 def wait_for_file(path: Path, child: subprocess.Popen, timeout_s: float = 10) -> bool:
+    """Wait until the child has published `path`, or until it dies trying.
+
+    For the value rather than for the name, which is what a file written under a
+    temporary name and renamed into place can promise (issue #395)."""
     deadline = time.monotonic() + timeout_s
-    while not path.exists() and child.poll() is None and time.monotonic() < deadline:
+    while not published(path) and child.poll() is None and time.monotonic() < deadline:
         time.sleep(0.02)
-    return path.exists()
+    return published(path)
 
 
 def test_different_projects_conflict_on_same_physical_resource(tmp_path: Path) -> None:
@@ -327,27 +335,26 @@ def test_direct_process_service_reaps_owned_orphans_before_close(
 def test_a_killed_owner_hands_its_devices_back_without_a_ritual(tmp_path: Path) -> None:
     config_path = write_config(tmp_path)
     marker = tmp_path / "owner-ready"
-    script = """
+    script = (
+        PUBLISH_ATOMICALLY_SOURCE
+        + """
 import sys, time
-from pathlib import Path
 from agentic_hil.config import load_config
 from agentic_hil.coordination import HardwareCoordinator
 config = load_config(sys.argv[1])
 coordinator = HardwareCoordinator(config, 'child')
 coordinator.acquire('physical:crash-test')
-Path(sys.argv[2]).write_text('ready', encoding='utf-8')
+publish_atomically(sys.argv[2], 'ready')
 time.sleep(60)
 """
+    )
     environment = os.environ.copy()
     dependency_root = str(Path(yaml.__file__).resolve().parents[1])
     source_root = str(Path(__file__).resolve().parents[1] / "src")
     environment["PYTHONPATH"] = os.pathsep.join([dependency_root, source_root, environment.get("PYTHONPATH", "")])
     child = subprocess.Popen([sys.executable, "-c", script, str(config_path), str(marker)], env=environment)
     try:
-        deadline = time.monotonic() + 10
-        while not marker.exists() and child.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert marker.exists(), "child did not acquire lease"
+        assert wait_for_file(marker, child), "child did not acquire lease"
     finally:
         child.kill()
         child.wait(timeout=10)

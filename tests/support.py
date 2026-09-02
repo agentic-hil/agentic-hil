@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import shutil
+import time
 from pathlib import Path
 
 # Captured before any test monkeypatches HOME.
@@ -27,6 +29,83 @@ LAUNCHER_ROOT = REAL_HOME / f"{LAUNCHER_PREFIX}{os.getpid()}"
 _WINDOWS_SYNCHRONIZE = 0x00100000
 _WINDOWS_WAIT_OBJECT_0 = 0x00000000
 _WINDOWS_ERROR_INVALID_PARAMETER = 87
+
+
+def publish_atomically(path: str, text: str) -> None:
+    """Give ``path`` its whole value in one step, so no reader ever sees it empty.
+
+    ``open(path, "w").write(value)`` puts the name on the disk first and the
+    value in it afterwards, and a reader that polls for the name can land in
+    between: a loaded `macos-latest` runner read a helper's pid file that existed
+    with nothing in it and converted the empty string (issue #395). Writing under
+    a temporary name in the same directory and renaming it over the target closes
+    that window, because a rename either has happened or has not: the name is
+    absent, or it carries the whole value.
+
+    The imports are inside the body because this function's own source is what
+    the suite's spawned helpers run. `PUBLISH_ATOMICALLY_SOURCE` is
+    `inspect.getsource` of it, so a helper in a fresh interpreter publishes by
+    the same rule the parent reads by, without importing anything from the suite
+    and without a second copy of the rule to keep in step.
+    """
+    import os
+    import time
+
+    temporary = f"{path}.publishing"
+    with open(temporary, "w", encoding="utf-8") as stream:
+        stream.write(text)
+    # Windows refuses a rename onto a name another process holds open, and a
+    # reader polling for the value is exactly such a process. That can only bite
+    # a second publication to the same name, since the first one has nothing to
+    # replace, but a helper must not die of it either way.
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
+PUBLISH_ATOMICALLY_SOURCE = inspect.getsource(publish_atomically)
+
+
+def published(path: Path) -> bool:
+    """Whether ``path`` already carries a value published by the writer above.
+
+    The question a poller has to ask instead of `exists()`. Under the rename a
+    name that is there is complete, so the two answers agree; asking for the
+    value keeps them agreeing if a helper is ever written back to a plain open.
+    """
+    try:
+        return bool(path.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, PermissionError):
+        # Not there yet, or being renamed over on Windows. Both mean "not yet".
+        return False
+
+
+def read_when_published(path: Path, timeout_s: float = 5.0) -> str:
+    """Wait for ``path`` to carry a value and return it, stripped.
+
+    The default budget is the one #390's review settled for the same shape: a
+    fresh interpreter under `pytest -n auto` can take seconds just to start, so a
+    one second wait is not a helper that failed to publish, it is a runner under
+    load. Five seconds is a generous multiple of an interpreter start and still
+    fails the test rather than hanging it when a helper really never publishes.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except (FileNotFoundError, PermissionError):
+            text = ""
+        if text:
+            return text
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"{path} carried no published value within {timeout_s}s")
+        time.sleep(0.01)
 
 
 def trusted_launcher() -> Path:
