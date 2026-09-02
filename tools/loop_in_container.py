@@ -836,10 +836,16 @@ def credential_evidence(line: str, pending: dict[str, str]) -> str | None:
         return None  # the command line the loop echoes: argv, not output
     exited = AGENT_EXIT.match(rest)
     if exited is None:
-        if agent not in pending:
-            phrase = authentication_failure(rest)
-            if phrase is not None:
-                pending[agent] = phrase
+        if agent not in pending and authentication_failure(rest) is not None:
+            # The whole line, not the substring authentication_failure() matched.
+            # The real Codex reuse line leads with the generic "Failed to refresh
+            # token" wording and only names reuse further along it, so the matched
+            # substring is that generic prefix. main() reads this value back
+            # through spent_refresh_token() to tell a spent credential from a
+            # transient outage; keep the line whole so the reuse wording that
+            # check needs -- and the provider's own instruction with it -- is
+            # still there rather than truncated to the prefix a timeout shares.
+            pending[agent] = rest.strip()
         return None
     phrase = pending.pop(agent, None)
     return phrase if exited.group("code") != "0" else None

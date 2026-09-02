@@ -814,6 +814,26 @@ def test_a_login_the_failing_agent_refused_is_still_reported() -> None:
     ]
 
 
+def test_a_spent_token_survives_attribution_and_still_reads_as_spent() -> None:
+    """The reuse wording reaches spent_refresh_token() through the report path.
+
+    The real Codex reuse line leads with the generic "Failed to refresh token"
+    wording, which authentication_failure() matches first; storing only that
+    substring drops the reuse wording, and the run that later re-reads the saved
+    failure calls a spent credential a merely stale one. credential_evidence()
+    keeps the whole line so the spent state that only this line proves survives to
+    the report. This is the path the stubbed report test cannot exercise.
+    """
+    pending: dict[str, str] = {}
+    spent_line = f"[codex  r1] {_spent().splitlines()[0]}\n"
+    exit_line = "[codex  r1] exit 1 after 12s (log: /repo/.agentic-loop/logs/round-01-codex.log)\n"
+
+    assert loop_in_container.credential_evidence(spent_line, pending) is None
+    failure = loop_in_container.credential_evidence(exit_line, pending)
+    assert failure is not None
+    assert spent_refresh_token(failure) is not None
+
+
 def _a_container_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     """The two paths the container's staging works between."""
     home = tmp_path / "home"
