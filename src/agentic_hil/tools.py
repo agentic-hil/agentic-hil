@@ -2543,7 +2543,9 @@ def _project_config_create(
                 # would be advice about the one thing that is not the problem.
                 "next_step": str(discovery.get("next_step") or "Attach exactly one supported probe and target, then call this tool again. Nothing was written."),
             }
-        state_root = provisionable_state_root(workspace)
+        # Decided from where the file is going, so the two roots this call writes
+        # cannot disagree about the profile they are both describing (#387).
+        state_root = provisionable_state_root(workspace, target_path)
         document = _generated_document(workspace, state_root, discovery)
         # Grant everything in both cases, so that "a generation decides the
         # permission state completely" holds by construction rather than by
@@ -2849,7 +2851,11 @@ def _regeneration_moves_state_root(current: AgenticHILConfig) -> bool:
     refused rather than spent.
     """
     try:
-        replacement = provisionable_state_root(Path(current.workspace_root))
+        # The file in force is the one a regeneration rewrites, and where it
+        # stands is half of what the replacement root is chosen from, so this
+        # asks the same question the write will ask rather than a neighbouring
+        # one that could answer "moves" about a root the write would not pick.
+        replacement = provisionable_state_root(Path(current.workspace_root), Path(current.config_path))
     except (ConfigError, OSError):
         return False
     return os.path.normcase(str(replacement)) != os.path.normcase(str(current.state_root))

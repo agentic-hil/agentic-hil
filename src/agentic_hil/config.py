@@ -656,16 +656,22 @@ def user_state_root() -> Path:
     return safe_directory(root / "agentic-hil")
 
 
-def ensure_safe_state_root() -> list[str]:
-    """Create the default state directory, or fail here rather than later.
+def ensure_safe_state_root(workspace: Path, config_target: Path | None = None) -> list[str]:
+    """Create the state directory this command will write, or fail here first.
 
     ``init`` runs this before it writes anything, so a state root that cannot be
     created (a component that is a file, a symlinked chain, a device that is not
     there) is reported while nothing has been changed, instead of at the first
     lease of the first run. It changes no permissions on anything that already
     exists, and returns the list of changes it made for the caller to report:
-    always empty, kept as a list because the caller publishes the field."""
-    user_state_root()
+    always empty, kept as a list because the caller publishes the field.
+
+    The root it creates is the one the file will name, asked of
+    ``provisionable_state_root`` with the same ``config_target`` the write uses.
+    It used to create the platform default unconditionally, which on a redirected
+    profile meant the command created one root, wrote a second into the
+    configuration and pre-flighted neither of the two the run would meet."""
+    provisionable_state_root(workspace, config_target)
     return []
 
 
@@ -1748,7 +1754,7 @@ def _config_target_outside_workspace(target: Path, workspace: Path) -> Path:
     return target
 
 
-def provisionable_state_root(workspace: Path) -> Path:
+def provisionable_state_root(workspace: Path, config_target: Path | None = None) -> Path:
     """A ``state_root`` this profile actually accepts, or the actionable refusal.
 
     The documented default lands under ``%LOCALAPPDATA%``/``$XDG_STATE_HOME``,
@@ -1760,7 +1766,19 @@ def provisionable_state_root(workspace: Path) -> Path:
     the same location every refusal already recommends, is tried next. When
     neither passes, the caller gets the same
     ``unsafe_configured_path`` refusal, carrying the same remediation, that the
-    CLI returns."""
+    CLI returns.
+
+    ``config_target`` is where the same command is putting the configuration
+    file, from ``authoritative_config_target``. A file that had to fall back to
+    ``~/.agentic-hil`` names a state root under that same root, because the two
+    walks are answering one question about one profile: a command that moved the
+    configuration and left ``state_root`` on the platform default wrote a file
+    the host it was generated on cannot run a plan under, generated cleanly,
+    reported healthy by ``doctor``, and refused at the first step of every plan
+    with ``audit_unavailable`` (#387). This reorders the preference and removes
+    nothing, so a profile whose platform default works keeps it, and one where
+    only the configuration root is redirected still gets a state root that
+    passes every check below."""
     candidates: list[Path] = []
     failure: ConfigError | None = None
     try:
@@ -1770,6 +1788,8 @@ def provisionable_state_root(workspace: Path) -> Path:
     fallback = absolute_without_symlinks(Path(safe_state_root_suggestion()))
     if not any(os.path.normcase(str(item)) == os.path.normcase(str(fallback)) for item in candidates):
         candidates.append(fallback)
+    if config_target is not None and is_path_within_frozen(config_target, absolute_without_symlinks(Path(safe_user_root()))):
+        candidates = [fallback, *(item for item in candidates if os.path.normcase(str(item)) != os.path.normcase(str(fallback)))]
     for candidate in candidates:
         if is_path_within_frozen(candidate, workspace) or is_path_within_frozen(workspace, candidate):
             failure = ConfigError(

@@ -438,6 +438,123 @@ def test_a_refusal_whose_diagnosis_is_a_list_of_objects_renders_the_entries() ->
     assert "{" not in out and "[" not in out
 
 
+# The one string a copy of the audit failure cannot be counted without. Prose
+# wraps to the terminal and a path never does, so this is what says how many
+# times the finding was printed.
+REDIRECTED_PARENT = "C:/Users/op/AppData/Local/Packages/host/LocalCache/Local/agentic-hil/projects/blinky/reports"
+
+
+def _audit_refusal() -> dict:
+    """A plan refused because its audit trail could not be written.
+
+    The shape `report.audit_unavailable` and `test_reactor.propagate_result_status`
+    build together, which is the one an operator met on the redirected profile of
+    #387: the step's own refusal, the aggregate's `audit_error`, and the
+    aggregate's `audit_errors` flattened from every step, all three holding the
+    same object.
+    """
+    audit_error = {
+        "ok": False,
+        "error_type": "unsafe_configured_path",
+        "summary": "Configured file's parent directory resolves to a different location than it names.",
+        "field": "state_root",
+        "path": "C:/Users/op/AppData/Local/agentic-hil/projects/blinky/reports/report-state.json",
+        "resolved_parent": REDIRECTED_PARENT,
+    }
+    step_result = {
+        "ok": False,
+        "tool": "flash_firmware",
+        "error_type": "audit_unavailable",
+        "summary": "Hardware action was not started because audit output is unavailable.",
+        "side_effect_committed": False,
+        "audit_ok": False,
+        "audit_error": audit_error,
+    }
+    return {
+        "ok": False,
+        "tool": "test_reactor",
+        "error_type": "audit_unavailable",
+        "summary": "Hardware action was not started because audit output is unavailable.",
+        "failed_step": 1,
+        "step_error_type": "audit_unavailable",
+        "steps": [{"index": 1, "route": "dut", "action": "flash", "result": step_result}],
+        "audit_ok": False,
+        "audit_error": audit_error,
+        "audit_errors": [audit_error],
+    }
+
+
+def test_an_audit_failure_is_printed_once_and_not_in_each_field_that_carries_it() -> None:
+    """Three fields, one finding, and a person reads it where it happened.
+
+    `audit_error` is `audit_errors[0]` wherever one is built, and a plan's
+    top-level `audit_errors` is its steps' flattened into one list. The document
+    is right to carry all three, and the rendering printed the same paragraph and
+    the same five remediation items three times over, the last two copies with no
+    step beside them to say which action they were about.
+    """
+    out = _rendered(_audit_refusal(), "test-reactor")
+
+    assert out.count(REDIRECTED_PARENT) == 1
+    # It survives where it explains something: under the step that met it.
+    before, _, _after = out.partition(REDIRECTED_PARENT)
+    assert "action  flash" in before
+    assert "\n  audit_error\n" not in out
+    assert "\n  audit_errors\n" not in out
+    # The remediation comes with the one copy that is left, rather than being the
+    # thing that was repeated.
+    assert out.count("agentic-hil init --force") == 1
+
+
+def test_an_audit_failure_no_step_carries_is_still_printed() -> None:
+    """The rule is "not twice", not "not at all".
+
+    A run that failed before its first step, or a cleanup whose record could not
+    be written, holds an audit failure nothing else in the document repeats. That
+    one has nowhere else to be read, so it stays exactly where it is.
+    """
+    document = _audit_refusal()
+    document.pop("steps")
+
+    out = _rendered(document, "test-reactor")
+
+    assert out.count(REDIRECTED_PARENT) == 1
+    assert "\n  audit_errors\n" in out
+
+
+def test_a_list_of_refusals_is_headed_by_what_each_refusal_says() -> None:
+    """`- no` is not a name, and it was the name every refusal list gave.
+
+    A list entry is headed by its first scalar field, and `ConfigError.to_dict`
+    opens with `ok: False`, so an `audit_errors` list opened each entry with the
+    rendering of that boolean and then folded five numbered remediation items
+    into one comma-joined row. A result-shaped entry is a result wherever it
+    stands, so it is rendered as one.
+    """
+    document = {
+        "ok": False,
+        "tool": "bench_run_stop",
+        "error_type": "audit_unavailable",
+        "summary": "The run was closed and its audit trail was not written.",
+        "audit_ok": False,
+        "audit_errors": [
+            {"ok": False, "error_type": "unsafe_configured_path", "summary": "The reports directory resolves elsewhere.", "field": "state_root"},
+            {"error_type": "OSError", "backend_error": "no space left on device"},
+        ],
+    }
+
+    out = _rendered(document, "bench-run-stop")
+
+    assert "- no" not in out
+    assert "\n    - The reports directory resolves elsewhere.\n" in out
+    # The numbered remediation the catalogue holds for it, as a refusal prints it
+    # anywhere else, rather than one comma-joined strip.
+    assert "\n          1. Read `resolved_parent` first" in out
+    # An entry that is not result-shaped keeps the older head, which is the field
+    # that names it rather than the first one that happens to be a boolean.
+    assert "\n    - OSError\n" in out
+
+
 def test_captured_output_that_is_enormous_says_how_much_it_cut_and_keeps_both_ends() -> None:
     """A truncation nobody can see is the same defect one level down.
 
