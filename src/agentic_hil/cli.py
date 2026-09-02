@@ -4006,6 +4006,17 @@ def doctor(config_path: str | None = None) -> JsonObject:
         identity_warnings = [*identity_warnings, f"{missing_extras['summary']} Reinstall with: {missing_extras['reinstall_command']}"]
     if identity_warnings:
         report["warnings"] = identity_warnings
+    # The same list of grants `init` reports for the file it wrote and the same
+    # one a reload compares, rather than the dataclass read off field by field.
+    # `asdict` cannot leave a key out, so it reported `allow_probe` and
+    # `allow_read` false on a version 2 file, where there is no read permission
+    # at all and the schema refuses the key: `doctor` listed the two as closed
+    # on a configuration `init` had just described as open for everything but
+    # the flashing interlock, and a newcomer who read `doctor` first went
+    # looking for a grant that does not exist. `permission_summary` omits them
+    # exactly where they decide nothing and still names them on a version 1
+    # file, where they gate probing and reading for real.
+    granted = permission_summary(config)
     return {
         **report,
         "config_path": config.config_path,
@@ -4018,15 +4029,15 @@ def doctor(config_path: str | None = None) -> JsonObject:
                 "type": entry.type,
                 "probe_id": entry.probe_id,
                 "bound": name == config.debugger_id,
-                "permissions": asdict(entry.permissions),
+                "permissions": granted["debuggers"][name],
                 **({"scripts": _doctor_debugger_scripts(entry)} if entry.type == "openocd" else {}),
                 **({"check": checks[name]} if name in checks else {}),
                 **({"target_support": target_support[name]} if name in target_support else {}),
             }
             for name, entry in config.debuggers.items()
         },
-        "com_ports": {port_id: {"device": port.device, "baudrate": port.baudrate, "encoding": port.encoding, **port_identity_fields(config, port_id), "permissions": asdict(port.permissions)} for port_id, port in config.com_ports.items()},
-        "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd, "permissions": asdict(bus.permissions)} for bus_id, bus in config.can_buses.items()},
+        "com_ports": {port_id: {"device": port.device, "baudrate": port.baudrate, "encoding": port.encoding, **port_identity_fields(config, port_id), "permissions": granted["com_ports"][port_id]} for port_id, port in config.com_ports.items()},
+        "can_buses": {bus_id: {"adapter": bus.adapter, "channel": bus.channel, "bitrate": bus.bitrate, "fd": bus.fd, "permissions": granted["can_buses"][bus_id]} for bus_id, bus in config.can_buses.items()},
         "debugger": debugger_info,
     }
 

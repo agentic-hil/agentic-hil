@@ -11,11 +11,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import write_config
+from conftest import DEFAULT_TEST_PERMISSIONS, write_authoritative_config, write_config
 
 from agentic_hil.can import CanBusService
+from agentic_hil.cli import doctor, init_config
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import ConfigError, load_config
+from agentic_hil.humanize import render_result
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import CURRENT_CONFIG_VERSION, LEGACY_CONFIG_VERSION, SUPPORTED_CONFIG_VERSIONS
 
@@ -235,6 +237,104 @@ def test_a_port_can_be_opened_without_touching_the_target(tmp_path: Path, monkey
     assert ("rts", False) in events
     assert events.index(("dtr", False)) < events.index(("open", True))
     assert events.index(("rts", False)) < events.index(("open", True))
+
+
+# --- one file, and every command that describes it says the same thing -------
+#
+# A permission that decides nothing is not "closed". `permission_summary` is
+# what `init` reports and what a reload compares, and it leaves the read grants
+# out of a read-free file rather than reporting them false, because `false`
+# beside a free read is a lie in the other direction. `doctor` built its
+# permission blocks out of the dataclass instead, so it listed `allow_probe` and
+# `allow_read` as closed on the very file `init` had just described as open for
+# everything but the flash interlock (#388).
+
+
+def test_doctor_does_not_call_a_read_free_permission_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The file `init` just generated, read back by `doctor`.
+
+    Through the real generation and the real report rather than a fixture: the
+    disagreement was between two commands over one file, so a document a test
+    wrote would not have had it."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    written = init_config()
+    assert written["ok"] is True, written
+
+    report = doctor()
+    rendered = " ".join(render_result(report, "doctor").split())
+
+    # Nothing withholds probing on a version 2 file, so no surface names a grant
+    # for it at all: neither as closed, nor as granted.
+    assert "allow_probe" not in rendered
+    assert "allow_probe" not in report["debuggers"]["dut"]["permissions"]
+    # And the whole line, which is `init`'s sentence about this file in the
+    # rendering's own words: everything granted but the two that are false so
+    # that flashing works. The pair that really is withheld is still named as
+    # withheld, or the fix would be "stop saying closed".
+    assert "granted: allow_debug_execution, allow_flash, allow_reset; closed: allow_mass_erase, allow_raw_debugger_commands" in rendered
+
+
+def test_doctor_reports_the_permissions_init_reported_for_the_same_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agreement itself, key for key, on the document both commands answer with."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    written = init_config()
+    assert written["ok"] is True, written
+
+    report = doctor()
+
+    assert report["debuggers"]["dut"]["permissions"] == written["permissions"]["debuggers"]["dut"]
+
+
+def test_doctor_does_not_call_a_read_free_port_or_bus_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of the same rendering, on the sections a bare `init` leaves empty."""
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        config_version=CURRENT_CONFIG_VERSION,
+        com_ports_yaml=COM_PORTS,
+        can_buses_yaml=CAN_BUSES,
+    )
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+    rendered = " ".join(render_result(report, "doctor").split())
+
+    assert "allow_read" not in rendered
+    assert "allow_read" not in report["com_ports"]["dut_uart"]["permissions"]
+    assert "allow_read" not in report["can_buses"]["bench"]["permissions"]
+    assert "granted: allow_write" in rendered
+
+
+def test_doctor_still_calls_a_version_one_read_permission_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbouring case this must not quieten.
+
+    On a version 1 file the two flags still decide whether this bench may probe
+    and may read a port, and a bench that granted neither is a bench where
+    `doctor` has to say so. Everything else is granted here so that each closed
+    list is exactly the read grant plus the interlocked pair: a file that
+    withheld everything would have hidden the one name under test in a crowd."""
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        permissions={**DEFAULT_TEST_PERMISSIONS, "allow_probe": False, "allow_com_read": False, "allow_can_read": False},
+        com_ports_yaml=COM_PORTS,
+        can_buses_yaml=CAN_BUSES,
+    )
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+    rendered = " ".join(render_result(report, "doctor").split())
+
+    assert report["debuggers"]["dut"]["permissions"]["allow_probe"] is False
+    assert report["com_ports"]["dut_uart"]["permissions"]["allow_read"] is False
+    assert "closed: allow_mass_erase, allow_probe, allow_raw_debugger_commands" in rendered
+    assert "granted: allow_write; closed: allow_read" in rendered
 
 
 def test_the_shipped_template_is_born_on_the_new_model(tmp_path: Path) -> None:
