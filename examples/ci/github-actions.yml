@@ -1,0 +1,216 @@
+# A worked GitHub Actions workflow for a project whose tests run on a real
+# bench. Copy it to `.github/workflows/hardware.yml` in your own repository and
+# change four things: the board label, the plan paths, the build command, and
+# the pinned version. Everything else is the shape, and the shape is the point.
+#
+# Two jobs, because there are two paths and a reader has to see both in one
+# file. `hardware` runs the plans on a self-hosted runner that has the board.
+# `simulator` runs on a hosted runner, has no bench, establishes nothing
+# electrical, and checks that the plans themselves are loadable: the cheapest
+# place to find a broken plan is here, and the most expensive is the bench.
+#
+# What the runner has to provide before this workflow can run at all is in
+# docs/ci-examples.md. Nothing here installs Agentic HIL, writes a
+# configuration, or grants a permission. The authoritative configuration is the
+# bench operator's, it lives outside the workspace, and a workflow that could
+# write it would be the hole the whole safety model is built around.
+name: Hardware
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The exact release this workflow is written against. The hardware job holds
+  # the bench's own installation to it and stops when they disagree; the
+  # simulator job installs exactly it. No range, no `latest`, no git reference:
+  # a version a resolver picked is a version nobody reviewed, and the two jobs
+  # would stop being about the same code.
+  AGENTIC_HIL_VERSION: "0.21.1"
+
+jobs:
+  hardware:
+    # Trust rule, first condition: only a self-hosted runner has a bench.
+    # `agentic-hil` says this machine is one; the board label says which board,
+    # so a plan written for a Nucleo-F446RE never lands on the bench beside it.
+    runs-on: [self-hosted, agentic-hil, nucleo-f446re]
+
+    # Trust rule, fourth condition, as far as a workflow can state it: no pull
+    # request from a fork, no `pull_request_target`, and no `workflow_run`. The
+    # last two are refused by name rather than inspected, because both hand
+    # base-repository trust to code that arrived from a head repository, which
+    # is the exact shape this rule exists to stop. They are refused here even
+    # though this workflow subscribes to neither, so the refusal survives being
+    # copied into a workflow that does. A fork's change reaches the bench by
+    # being pushed to a branch in this repository first, where a human looked
+    # at it.
+    #
+    # The first two conditions are not expressible here at all. Who may reach
+    # this runner is a runner group and the repository's fork-pull-request
+    # approval setting, and those settings, not this `if:`, are what stops fork
+    # code from executing. See docs/ci-examples.md for the split.
+    if: >-
+      github.event_name != 'pull_request_target'
+      && github.event_name != 'workflow_run'
+      && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+
+    timeout-minutes: 20
+
+    # One bench, one run at a time. The device locks are machine-wide, so a
+    # second run would be refused with `device_busy` naming the holder rather
+    # than interleaved; this group turns that refusal into a queue. Never
+    # `cancel-in-progress: true`: cancelling a run in the middle of a plan is
+    # how a board is left half flashed.
+    concurrency:
+      group: bench-nucleo-f446re
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Trust rule, third condition, restated where a copy of this file cannot
+      # lose it. `runs-on` above selects a self-hosted runner; this is what
+      # happens when somebody edits that line. A hosted runner has no probe, no
+      # serial port and no configuration, so a plan there would fail at its
+      # first hardware action anyway. Failing here instead means the reason is
+      # one sentence rather than a report nobody reads.
+      - name: Refuse a hosted runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_ENVIRONMENT:-unset}" != "self-hosted" ]; then
+            echo "This job drives hardware and RUNNER_ENVIRONMENT is ${RUNNER_ENVIRONMENT:-unset}." >&2
+            exit 1
+          fi
+
+      # The bench's own installation answers here. This step downloads nothing
+      # and installs nothing: a bench may be deliberately offline, and an
+      # installation the operator pinned is not a workflow's to move. What the
+      # workflow does own is the number, so a bench that has drifted off it
+      # fails here rather than producing evidence nobody can place.
+      - name: Hold the bench to the pinned Agentic HIL version
+        shell: bash
+        run: |
+          set -euo pipefail
+          installed="$(agentic-hil --version)"
+          if [ "$installed" != "$AGENTIC_HIL_VERSION" ]; then
+            echo "This workflow is pinned to Agentic HIL $AGENTIC_HIL_VERSION and this bench has $installed." >&2
+            echo "Update the bench, or update AGENTIC_HIL_VERSION in this workflow after reading the changelog." >&2
+            exit 1
+          fi
+
+      # Doctor first, before a plan gets near the board: it resolves the
+      # authoritative configuration, names the probe and the port it bound, and
+      # spawns the debugger toolchain. A missing toolchain or an unreadable
+      # bench is a clearer failure here than half way through a plan.
+      - name: Report the bench
+        run: agentic-hil doctor
+
+      # The one project-specific step. Yours will differ; what matters is that
+      # the image exists before a plan is asked to flash it.
+      - name: Build the firmware
+        run: |
+          cmake --preset Debug
+          cmake --build --preset Debug
+
+      # Each plan runs, and a red one does not stop the ones after it: a job
+      # that stopped at the first failure could not show whether the rest of
+      # the bench still works. This is one step rather than one step per plan
+      # because the evidence for each run has to be collected before the next
+      # plan overwrites `.agentic-hil/reports/last-report.json`.
+      #
+      # `run-evidence` turns that report into the bundle a reviewer without
+      # access to this bench can read: `run-summary.json`, `job-summary.md` and
+      # a `logs/` copy, beside the JUnit file `--junit-xml` wrote.
+      - name: Run the test plans on the board
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          for plan in tests/hil/nominal.testconfig.yaml tests/hil/diagnostic.testconfig.yaml; do
+            name="$(basename "$plan" .testconfig.yaml)"
+            echo "::group::$name"
+            agentic-hil test-reactor --test-config "$plan" --junit-xml "artifacts/junit-$name.xml" || status=1
+            agentic-hil run-evidence --report .agentic-hil/reports/last-report.json --out "artifacts/evidence/$name" || status=1
+            if [ -f "artifacts/evidence/$name/job-summary.md" ]; then
+              cat "artifacts/evidence/$name/job-summary.md" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+      # `if: always()` because the red run is the one whose evidence matters
+      # most, and a cancelled one still leaves what it got as far as. `warn`
+      # rather than `error`, because a job that never reached a report has
+      # already failed for a reason worth reading, and a second failure from
+      # the upload step would sit on top of it.
+      #
+      # The canonical, hash-chained copies of these logs stay under the bench's
+      # `state_root` and are not uploaded: they are the ledger the uploaded
+      # mirrors are checked against, and shipping them to an artifact store
+      # would publish the thing they exist to verify.
+      - name: Upload the run evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hardware-run-evidence
+          path: |
+            artifacts/
+            .agentic-hil/reports/
+          if-no-files-found: warn
+
+  simulator:
+    # The other path. No bench, no board, so any hosted runner will do, and it
+    # runs on every pull request including the ones from forks: there is
+    # nothing here for a fork to reach. It establishes nothing electrical. What
+    # it does establish is that every plan in this repository is one the
+    # reactor could load, which is the failure worth finding before anybody
+    # carries a board to it.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # The exact release from the index, so this job and the bench are
+      # checking the same code.
+      - name: Install the pinned Agentic HIL
+        run: python -m pip install "agentic-hil==${AGENTIC_HIL_VERSION}"
+
+      # The plan schema comes out of the installation that would run the plans,
+      # so the two cannot disagree about what a plan may say. `jsonschema` and
+      # `PyYAML` are Agentic HIL's own dependencies and are already here.
+      - name: Check the test plans against the plan schema
+        run: |
+          agentic-hil test-schema --output "$RUNNER_TEMP/testconfig.schema.json" --force
+          python - "$RUNNER_TEMP/testconfig.schema.json" tests/hil/*.testconfig.yaml <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          import jsonschema
+          import yaml
+
+          schema = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          validator = jsonschema.validators.validator_for(schema)(schema)
+          refused = False
+          for plan in sys.argv[2:]:
+              document = yaml.safe_load(Path(plan).read_text(encoding="utf-8"))
+              errors = sorted(validator.iter_errors(document), key=str)
+              for error in errors:
+                  where = "/".join(str(part) for part in error.path) or "the document"
+                  print(f"{plan}: {where}: {error.message}")
+              refused = refused or bool(errors)
+              if not errors:
+                  print(f"{plan}: valid against the plan schema")
+          sys.exit(1 if refused else 0)
+          PY

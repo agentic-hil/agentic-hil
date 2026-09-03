@@ -102,6 +102,11 @@ TAG_PIN = re.compile(r"""([^\s"'`@]+)@v(\d+\.\d+\.\d+)(?![\w.])""")
 # follow the release for the transcript to be true.
 INSTALL_SH_RELEASE = re.compile(r'^RELEASE="(\d+\.\d+\.\d+)"$', re.MULTILINE)
 INSTALL_PS1_RELEASE = re.compile(r"^\$Release = '(\d+\.\d+\.\d+)'$", re.MULTILINE)
+# A pinned action in a shipped CI example: `uses: owner/name@<40 hex>` with the
+# tag that commit stood for in a trailing comment. The comment states somebody
+# else's release and must never follow ours, so the whole line is removed before
+# the sweep below reads what is left.
+ACTION_PIN_LINE = re.compile(r"^.*\buses:\s*\S+@[0-9a-f]{40}.*$", re.MULTILINE)
 # The MCP registry schema server.json names declares `maxLength: 100` on
 # `description`, and `mcp-publisher validate` enforces it. That validation runs
 # in the release job, after the tag exists and after PyPI has the wheel, so a
@@ -347,6 +352,24 @@ def _tag_pins(root: Path, relative: str) -> tuple[str, ...]:
     return tuple(match.group(2) for match in TAG_PIN.finditer(text) if "agentic-hil" in match.group(1))
 
 
+def _ci_example_versions(root: Path, relative: str) -> tuple[str, ...]:
+    """Every version a shipped CI example or its page states about this project.
+
+    Exhaustive, the way a skill body is, and for the same reason: these files
+    are copied into somebody else's repository and read by nobody who can check
+    them, so a second mention that drifted would be a pin a stranger installs.
+    `uncovered_files` skips a file this list already covers, which makes a
+    mention shape the extractor cannot see a mention nothing checks at all.
+
+    The one thing subtracted is the third-party action pins. A workflow pins an
+    action by commit and names the tag that commit stood for in a trailing
+    comment; that is another project's release number and must not be held to
+    ours.
+    """
+    body = ACTION_PIN_LINE.sub("", _read(root, relative))
+    return tuple(match.group(1) for match in SEMVER.finditer(body))
+
+
 def _changelog_release(root: Path) -> str:
     match = CHANGELOG_RELEASE.search(_read(root, "CHANGELOG.md"))
     if match is None:
@@ -467,6 +490,21 @@ def locations(root: Path) -> list[Location]:
             "evals/install/README.md",
             "expected_version in the documented matrix example a reader copies",
             tuple(EXPECTED_VERSION_FIELD.findall(_read(root, "evals/install/README.md"))),
+        ),
+        Location(
+            "examples/ci/github-actions.yml",
+            "AGENTIC_HIL_VERSION and every other version the shipped GitHub Actions example states",
+            _ci_example_versions(root, "examples/ci/github-actions.yml"),
+        ),
+        Location(
+            "examples/ci/gitlab-ci.yml",
+            "AGENTIC_HIL_VERSION and every other version the shipped GitLab CI example states",
+            _ci_example_versions(root, "examples/ci/gitlab-ci.yml"),
+        ),
+        Location(
+            "docs/ci-examples.md",
+            "the release the CI examples page tells a runner operator to pin and install",
+            _ci_example_versions(root, "docs/ci-examples.md"),
         ),
     ]
 
