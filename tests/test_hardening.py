@@ -60,6 +60,7 @@ from agentic_hil.report import (
     attach_canonical_audit_evidence,
     canonical_audit_evidence,
     canonical_audit_log_path,
+    canonical_run_report_path,
     ensure_audit_ready,
     logs_directory,
     overall_success,
@@ -2859,6 +2860,65 @@ def test_report_path_is_not_claimed_when_workspace_snapshot_write_fails(tmp_path
 
     assert result["audit_ok"] is False
     assert "report_path" not in result
+
+
+def test_canonical_report_is_not_left_green_when_the_workspace_mirror_write_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trusted per-run copy is written before the mirror; a mirror write that
+    fails afterwards must not leave that copy asserting a success the returned
+    result rejects. The archive is what an auditor enumerates, so it inspects the
+    file itself rather than only the stripped path field."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-mirror-fault")
+    original_write = report_module.safe_write_text
+
+    def fail_snapshot(config, path, text, **kwargs):
+        if Path(path).name == "last-report.json":
+            raise OSError("snapshot denied")
+        return original_write(config, path, text, **kwargs)
+
+    monkeypatch.setattr("agentic_hil.report.safe_write_text", fail_snapshot)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-mirror-fault"})
+
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
+    assert "canonical_report_path" not in result
+    # The per-run file is either gone or the audit-failed document, never the
+    # green record the failed call would otherwise have left standing.
+    if canonical.exists():
+        recorded = json.loads(canonical.read_text(encoding="utf-8"))
+        # Reconciled to the audit-failed result the call returned, so the trusted
+        # archive never carries the `audit_ok: true` the original green document
+        # had. `ok` tracks the returned result, which `mark_audit_failure` leaves
+        # untouched; `audit_ok` is the field the stale-green defect turned on.
+        assert recorded.get("audit_ok") is False
+        assert recorded.get("audit_ok") == result.get("audit_ok")
+
+
+def test_canonical_report_is_not_left_green_when_the_state_write_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same stale-green hole from the other required write: the per-run copy
+    and the mirror have both landed green by the time ``write_report_state``
+    fails, and the returned result is audit-failed, so the trusted copy must be
+    reconciled to it rather than left claiming success."""
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-state-fault")
+    monkeypatch.setattr("agentic_hil.report.write_report_state", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("state denied")))
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-state-fault"})
+
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
+    assert "canonical_report_path" not in result
+    if canonical.exists():
+        recorded = json.loads(canonical.read_text(encoding="utf-8"))
+        # Reconciled to the audit-failed result the call returned, so the trusted
+        # archive never carries the `audit_ok: true` the original green document
+        # had. `ok` tracks the returned result, which `mark_audit_failure` leaves
+        # untouched; `audit_ok` is the field the stale-green defect turned on.
+        assert recorded.get("audit_ok") is False
+        assert recorded.get("audit_ok") == result.get("audit_ok")
 
 
 def test_path_lock_registry_does_not_keep_short_lived_paths(tmp_path: Path) -> None:

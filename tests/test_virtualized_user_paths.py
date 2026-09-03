@@ -2256,6 +2256,83 @@ def test_an_open_run_on_a_root_that_can_be_read_still_refuses_force(tmp_path: Pa
     assert target.read_bytes() == before
 
 
+def _redirected_bench_naming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, serial: str, section: str, entry: dict) -> tuple[Path, Path]:
+    """A `generated_then_redirected` bench whose kept file also names one device.
+
+    `init` writes no `com_ports` or `can_buses`, so the entry the open-run check
+    has to catch is added to the file the operator would already have on a bench
+    that uses a UART or a CAN bus. The state root stays the redirected, unreadable
+    one, so the regeneration takes the repair path with no open-run check to fall
+    back on."""
+    workspace, redirected = generated_then_redirected(tmp_path, monkeypatch, serial)
+    target = project_config_path(workspace)
+    document = yaml.safe_load(target.read_text(encoding="utf-8"))
+    document[section] = entry
+    target.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return workspace, target
+
+
+def test_force_over_an_unreadable_state_root_is_refused_by_a_uart_only_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The repair path's own version of the UART-only open run.
+
+    The open-run check reads the lease record under the `state_root`, which on
+    this profile it cannot, so it is skipped and the regeneration falls back to
+    the device locks it takes for the read. A run in another workspace holding
+    only this bench's UART lock -- no probe, no CAN -- is what a probes-only
+    fallback walked straight past, replacing baud rates and permissions under a
+    live measurement. Every configured device lock is taken now, so it comes back
+    `device_busy` with nothing written."""
+    from agentic_hil.devices import config_devices
+
+    workspace, target = _redirected_bench_naming(
+        tmp_path, monkeypatch, "STLINK40210", "com_ports", {"dut_uart": {"device": "COM_FINDING2_UART", "identity_source": "device"}}
+    )
+    before = target.read_bytes()
+    uart = next(key for key in config_devices(load_authoritative_config(workspace)).lock_keys if key.startswith("com:"))
+
+    stranger = BenchMutex(frontend="stranger", label="uart-only-run")
+    stranger.acquire([uart])
+    try:
+        refused = init_config(force=True)
+    finally:
+        stranger.release_all()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "device_busy"
+    assert refused["resource"] == uart
+    # Nothing was rewritten: the file the run was taken under is byte-for-byte
+    # what it was, so no baud rate or permission moved beneath the held port.
+    assert target.read_bytes() == before
+
+
+def test_force_over_an_unreadable_state_root_is_refused_by_a_can_only_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """And the CAN bus, which shares no lock with the probe at all.
+
+    A UART on this bench at least sits on the same adapter as the probe; a CAN
+    bus does not, so a probes-only fallback protected it not at all. The same
+    repair path now holds this bus's machine-wide lock through the read and
+    refuses `device_busy` when another workspace is on it."""
+    from agentic_hil.devices import config_devices
+
+    workspace, target = _redirected_bench_naming(
+        tmp_path, monkeypatch, "STLINK40211", "can_buses", {"dut_can": {"adapter": "peak", "channel": "PCAN_USBBUS1", "bitrate": 250000}}
+    )
+    before = target.read_bytes()
+    bus = next(key for key in config_devices(load_authoritative_config(workspace)).lock_keys if key.startswith("can:"))
+
+    stranger = BenchMutex(frontend="stranger", label="can-only-run")
+    stranger.acquire([bus])
+    try:
+        refused = init_config(force=True)
+    finally:
+        stranger.release_all()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "device_busy"
+    assert refused["resource"] == bus
+    assert target.read_bytes() == before
+
+
 def test_a_corrupt_lease_record_on_a_healthy_root_still_stops_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The other half of the licence: only a refused root buys the note.
 

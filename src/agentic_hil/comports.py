@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import errno
 import math
 import os
@@ -1421,6 +1422,51 @@ def decode_bytes(data: bytes, encoding: str) -> str:
         return data.decode(encoding, errors="replace")
     except LookupError:
         return data.decode("utf-8", errors="replace")
+
+
+def matched_span_bytes(received: bytes, encoding: str, span: tuple[int, int]) -> bytes | None:
+    """The raw wire bytes a ``[start, end)`` character span was decoded from.
+
+    ``decode_bytes`` decodes with ``errors="replace"``, which is not reversible:
+    an invalid ``ff`` becomes ``�`` and a stateful codec can add a BOM, so
+    re-encoding a matched string invents bytes the port never sent. A green
+    report that documents ``matched_text`` in the same ``{hex, text, encoding}``
+    shape as the raw tail must not attest to fabricated wire bytes, so the byte
+    field is sliced out of ``received`` itself instead.
+
+    The map from character index to byte offset is built by feeding ``received``
+    to an incremental decoder one byte at a time, which pins each produced
+    character to the byte run it consumed even across a ``replace``. The whole
+    decode is checked against ``decode_bytes`` so the span indices align with the
+    string the match was made against; ``None`` when they do not (an encoding
+    whose incremental and one-shot decodes disagree), which the caller reads as
+    "omit the byte field" rather than as a reason to re-encode."""
+    start, end = span
+    if start < 0 or end < start:
+        return None
+    try:
+        make_decoder = codecs.getincrementaldecoder(encoding)
+    except LookupError:
+        make_decoder = codecs.getincrementaldecoder("utf-8")
+    decoder = make_decoder(errors="replace")
+    char_byte_starts: list[int] = []
+    produced: list[str] = []
+    pending = 0
+    for index in range(len(received)):
+        out = decoder.decode(received[index : index + 1])
+        for offset, character in enumerate(out):
+            char_byte_starts.append(pending if offset == 0 else index)
+            produced.append(character)
+        if out:
+            pending = index + 1
+    for character in decoder.decode(b"", final=True):
+        char_byte_starts.append(pending)
+        produced.append(character)
+    # A sentinel so an end index at the very end of the string maps to len().
+    char_byte_starts.append(len(received))
+    if end >= len(char_byte_starts) or "".join(produced) != decode_bytes(received, encoding):
+        return None
+    return received[char_byte_starts[start] : char_byte_starts[end]]
 
 
 def encode_text(text: str, encoding: str) -> bytes:

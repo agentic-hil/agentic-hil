@@ -2649,6 +2649,60 @@ steps:
     assert read["matched_text_truncated"] is False
 
 
+def test_a_met_pattern_over_invalid_utf8_reports_the_bytes_that_were_on_the_wire(tmp_path: Path) -> None:
+    # `matched_text.hex` is sliced out of the receive buffer, not re-encoded from
+    # the decoded string: a `replace` decode turns the invalid byte 0xff into `�`,
+    # and re-encoding that character would put `efbfbd` in the report as though it
+    # had arrived. A green record must never attest to bytes the port never sent.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: invalid-utf8
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "val=.Z"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"val=\xffZ\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    # The raw bytes the pattern matched, 0xff and all; not the codec's rendering
+    # of the replacement character it decoded to.
+    assert read["matched_text"]["hex"] == b"val=\xffZ".hex()
+    assert "efbfbd" not in read["matched_text"]["hex"]
+    assert bytes.fromhex(read["matched_text"]["hex"]) in b"val=\xffZ\r\n"
+
+
+def test_a_met_pattern_under_a_stateful_encoding_does_not_fabricate_a_bom(tmp_path: Path) -> None:
+    # A stateful codec is the other way a re-encoding invents bytes: `utf-8-sig`
+    # decodes a bufferless payload cleanly but re-encoding the match prepends a
+    # BOM (`efbbbf`) that was never on the wire. The raw slice carries only what
+    # arrived.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: stateful-encoding
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "READY v[0-9.]+"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"READY v2.4\r\n"], uart_encoding="utf-8-sig")
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["matched_text"]["hex"] == b"READY v2.4".hex()
+    assert not read["matched_text"]["hex"].startswith("efbbbf")
+    assert bytes.fromhex(read["matched_text"]["hex"]) in b"READY v2.4\r\n"
+
+
 def test_an_unmet_comparator_still_answers_with_the_tail_and_claims_no_match(tmp_path: Path) -> None:
     # The other direction of the same field: a step that matched nothing must not
     # carry a matched text at all, because absence is what says nothing met it.

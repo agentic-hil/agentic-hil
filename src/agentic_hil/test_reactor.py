@@ -13,7 +13,7 @@ from jsonschema import Draft202012Validator, SchemaError
 from agentic_hil.backends.common import DEBUG_SESSION_WAY_OUT
 from agentic_hil.backends.gdbdebug import INTEGER_VALUE_WIDTHS
 from agentic_hil.can import parse_can_id, parse_hex_bytes
-from agentic_hil.comports import data_result, decode_bytes, encode_text
+from agentic_hil.comports import data_result, decode_bytes, matched_span_bytes
 from agentic_hil.config import (
     ConfigError,
     UniqueKeyLoader,
@@ -180,14 +180,19 @@ def never_stopped() -> bool:
     return False
 
 
-def decoded_equals(decoded: str, expected: str, final: bool) -> str | None:
-    """What the line said that equals `expected`, or None when nothing did.
+def decoded_equals(decoded: str, expected: str, final: bool) -> tuple[str, tuple[int, int]] | None:
+    """What the line said that equals `expected` and where, or None if nothing did.
 
     The text rather than a boolean, because a met claim has to be able to say
     what met it: a green step that answers only "yes" leaves a reader who wants
     to see what the board actually replied with no place to look but the COM
     log. None rather than the empty string for "nothing did", so `equals: ""`
     stays a claim that can be met.
+
+    The character span alongside the text, because the raw wire bytes of the
+    match are sliced back out of the receive buffer by it: a decoded string is
+    not enough to find its own bytes once `errors="replace"` has made the decode
+    irreversible, but its position in the window is (see `matched_span_bytes`).
 
     A serial line has no end, so "the whole thing" is read two ways. Any one
     complete line of what was received counts at once: a terminator is the board
@@ -201,13 +206,21 @@ def decoded_equals(decoded: str, expected: str, final: bool) -> str | None:
     World", and a framework answering green to a value that was still arriving is
     worse than one that waits out its own timeout to be sure."""
     if final and decoded.strip() == expected:
-        return decoded
-    lines = decoded.splitlines()
-    if lines and not decoded.endswith(("\n", "\r")):
+        return decoded, (0, len(decoded))
+    position = 0
+    complete: list[tuple[str, int, int]] = []
+    for raw_line in decoded.splitlines(keepends=True):
+        # `splitlines(keepends=True)` splits on the same boundaries as
+        # `splitlines()`, so stripping the terminator off each element recovers
+        # the line content while `position` tracks where it began in the window.
+        content = (raw_line.splitlines() or [""])[0]
+        complete.append((content, position, position + len(content)))
+        position += len(raw_line)
+    if complete and not decoded.endswith(("\n", "\r")):
         # The last fragment has no terminator yet, so it is not a line: it is
         # the beginning of one, and matching it would be matching a prefix.
-        lines = lines[:-1]
-    return next((line for line in lines if line.strip() == expected), None)
+        complete = complete[:-1]
+    return next(((content, (begin, stop)) for content, begin, stop in complete if content.strip() == expected), None)
 
 
 class StepComparator:
@@ -244,6 +257,10 @@ class StepComparator:
         # value left over from an earlier pass can never be reported as this
         # pass's evidence.
         self.matched_text: str | None = None
+        # Where in the decoded window that text sat, so its raw wire bytes can be
+        # sliced back out of the receive buffer rather than re-encoded from a
+        # string a `replace` decode may have altered. Cleared with `matched_text`.
+        self.matched_span: tuple[int, int] | None = None
 
     @property
     def claim(self) -> str:
@@ -274,16 +291,20 @@ class StepComparator:
         Records what met the claim in `matched_text` on the way, so a met claim
         answers with the evidence rather than only with the verdict."""
         self.matched_text = None
+        self.matched_span = None
         if self.equals is not None:
-            self.matched_text = decoded_equals(decoded, self.equals, final)
-            return self.matched_text is not None
+            equal = decoded_equals(decoded, self.equals, final)
+            if equal is None:
+                return False
+            self.matched_text, self.matched_span = equal
+            return True
         if self._finditer is None:
             return False
         if self.bounds is None:
             match = next(self._finditer(decoded), None)
             if match is None:
                 return False
-            self.matched_text = match.group(0)
+            self.matched_text, self.matched_span = match.group(0), match.span()
             return True
         low, high = self.bounds
         matched = False
@@ -300,7 +321,7 @@ class StepComparator:
                 # The latest reading inside the bounds, for the same reason the
                 # loop does not stop at the first match: the one that settled is
                 # the one the step passed on.
-                matched, self.matched_text = True, match.group(0)
+                matched, self.matched_text, self.matched_span = True, match.group(0), match.span()
         return matched
 
     def report(self) -> JsonObject:
@@ -368,6 +389,12 @@ class UartReadOutcome:
     # unmet, and answering it as a timeout would send an operator to look at
     # firmware that never ran.
     read_failure: JsonObject | None = None
+    # The raw wire bytes the comparator matched, sliced out of the receive buffer
+    # rather than re-encoded from the decoded string: `errors="replace"` makes a
+    # decode irreversible, so re-encoding could put bytes in `matched_text.hex`
+    # the port never sent. None when there was no match, or when the encoding's
+    # byte span could not be established (see `matched_span_bytes`).
+    matched_raw: bytes | None = None
 
     @property
     def tail_result(self) -> JsonObject:
@@ -385,15 +412,29 @@ class UartReadOutcome:
         not put the megabyte in the report. Bounded from the front rather than
         the back, because a match begins where it begins.
 
+        The `hex` is the raw wire bytes of the match, taken from the receive
+        buffer: re-encoding the decoded string instead would fabricate bytes for
+        anything a `replace` decode altered (invalid `ff` reads back as
+        `efbfbd`), and the field sits in the same evidence shape as the raw tail,
+        so a green report cannot be made to attest to bytes the port never sent.
+        When the byte span cannot be established the text is still quoted and the
+        byte field is dropped, rather than re-encoded into a false one.
+
         Nothing at all when there is no matched text, rather than a null: the
         v2 `uart_expect` reports no comparator and a report that predates this
         carries no field, and only absence keeps those readable as what they
         are."""
         if matched is None:
             return {}
-        encoded = encode_text(matched, self.encoding)
-        kept = encoded[:UART_EXPECT_TAIL_BYTES]
-        return {"matched_text": data_result(kept, self.encoding), "matched_text_truncated": len(kept) < len(encoded)}
+        if self.matched_raw is not None:
+            kept = self.matched_raw[:UART_EXPECT_TAIL_BYTES]
+            return {"matched_text": data_result(kept, self.encoding), "matched_text_truncated": len(kept) < len(self.matched_raw)}
+        kept_text = matched[:UART_EXPECT_TAIL_BYTES]
+        return {
+            "matched_text": {"text": kept_text, "encoding": self.encoding},
+            "matched_text_bytes_unavailable": True,
+            "matched_text_truncated": len(kept_text) < len(matched),
+        }
 # What a step means is answered by one class per device kind (see StepDevice
 # below), and ACTION_SCHEMAS / ROUTE_FIELDS are merged from those classes rather
 # than written out here. Routing used to be a two-way split held in two
@@ -1507,8 +1548,14 @@ class UartRunner(SessionDevice):
             # the one that gets the last look, where a claim that can only be
             # settled by "nothing more is coming" is allowed to settle.
             expired = time.monotonic() >= deadline
-            if matches(decode_bytes(bytes(received), encoding), expired):
-                return UartReadOutcome(True, reads, received_bytes, bytes(received[-UART_EXPECT_TAIL_BYTES:]), encoding)
+            raw = bytes(received)
+            if matches(decode_bytes(raw, encoding), expired):
+                # The comparator recorded where in the decoded window it matched;
+                # slice the raw wire bytes out of the same buffer so the report's
+                # `matched_text.hex` is what arrived, never a re-encoding of it.
+                span = getattr(getattr(matches, "__self__", None), "matched_span", None)
+                matched_raw = matched_span_bytes(raw, encoding, span) if span is not None else None
+                return UartReadOutcome(True, reads, received_bytes, bytes(received[-UART_EXPECT_TAIL_BYTES:]), encoding, matched_raw=matched_raw)
             if expired:
                 return UartReadOutcome(False, reads, received_bytes, bytes(received[-UART_EXPECT_TAIL_BYTES:]), encoding)
             if not chunk:

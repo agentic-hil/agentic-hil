@@ -355,6 +355,11 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     # That would replace the one fact the record is for with a fact about the
     # re-commit.
     enriched.setdefault(CONFIG_IN_FORCE_KEY, config_in_force(config))
+    # The per-run copy, once it has actually landed on disk. Tracked so a mirror
+    # or state write that fails *after* it can no longer leave a green trusted
+    # record standing: an auditor enumerating the canonical archive must never
+    # find a success the live call turned around and rejected as unaudited.
+    committed_canonical: Path | None = None
     try:
         report_path = last_report_path(config)
         display_report_path = display_path(config, report_path)
@@ -381,6 +386,7 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
                     # so the two can be compared by digest rather than by field.
                     if canonical is not None:
                         atomic_write_text(canonical, document)
+                        committed_canonical = canonical
                     safe_write_text(config, report_path, document)
                 except (ConfigError, OSError, ValueError) as error:
                     enriched = mark_audit_failure(enriched, error)
@@ -397,8 +403,43 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
         # The per-run copy is stripped for the same reason and by the same rule.
         failed.pop("report_path", None)
         failed.pop(CANONICAL_REPORT_KEY, None)
+        # The state write is the one required write left outside the inner try, so
+        # a green per-run copy can already be on disk when it fails. Bring the
+        # trusted copy back in line with the audit-failed result before returning.
+        _revoke_stale_canonical(committed_canonical, failed)
         return failed
+    if committed_canonical is not None and enriched.get("audit_ok") is False:
+        # The per-run copy landed green and then the mirror write failed and
+        # turned the returned result audit-failed. The state write above still
+        # recorded the audit-failed `enriched`, so the trusted copy is the last
+        # thing on disk still claiming success: rewrite it to what is returned.
+        _revoke_stale_canonical(committed_canonical, {key: value for key, value in enriched.items() if key != CANONICAL_REPORT_KEY})
     return enriched
+
+
+def _revoke_stale_canonical(canonical: Path | None, result: JsonObject) -> None:
+    """Rewrite a green per-run copy to the audit-failed result, or remove it.
+
+    Called only on the failure paths of ``write_report``, where the trusted
+    per-run file has already been written with a successful, audited document
+    but a later required write failed and the returned result is now
+    ``audit_ok: false``. The archive under the state root is what an auditor
+    trusts, so a success it still records for a run the live call rejected is
+    the exact stale-green defect this repairs.
+
+    Best effort by construction, and safe in either outcome: the corrective
+    rewrite lands the audit-failed document; if even that cannot be written the
+    file is removed, and a run that has to be read back from ``last-report.json``
+    is strictly better than a false-green trusted attestation. A removal that
+    also fails leaves the file, but the returned result already carries the audit
+    failure, so the live answer is never the false green."""
+    if canonical is None:
+        return
+    try:
+        atomic_write_text(canonical, json.dumps(result, indent=2) + "\n")
+    except (ConfigError, OSError, ValueError):
+        with suppress(ConfigError, OSError, ValueError):
+            Path(canonical).unlink()
 
 
 def recommit_report_with_status(config: AgenticHILConfig, written: JsonObject, status: JsonObject) -> JsonObject:

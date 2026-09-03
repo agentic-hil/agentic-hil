@@ -125,10 +125,13 @@ def _dedicated_environment_root() -> Path | None:
 def _declared_extras() -> dict[str, list[str]]:
     """Every extra this distribution declares, and the distributions each one pulls in.
 
-    Read once and used for two different questions: which extras are installed
-    (every requirement of the extra is present), and which distributions those
-    extras brought onto this machine, whose own console scripts a manager
-    replaces alongside ours.
+    Read to answer which extras are installed (every requirement of the extra is
+    present), so the reinstall line an upgrade prints carries exactly the extras
+    the machine already has. It is deliberately not used to claim ownership of
+    those distributions' console scripts: an isolated manager does not expose a
+    dependency's launchers by default, so a same-named file in the shared bin is
+    not this installation's to move (review round 0, finding 3, and
+    `_entrypoint_names`).
     """
     from importlib.metadata import distribution
 
@@ -169,18 +172,6 @@ def _installed_extras() -> tuple[str, ...]:
         else:
             installed.append(extra)
     return tuple(sorted(installed))
-
-
-def _installed_extra_distributions() -> tuple[str, ...]:
-    """The distributions the installed extras brought, by name.
-
-    Asked only for their console scripts. `_installed_extras` is called rather
-    than inlined so that a caller which has replaced it -- every test that
-    describes an installation with `[can]` on it does -- describes this too, and
-    the two answers cannot disagree about one machine.
-    """
-    declared = _declared_extras()
-    return tuple(sorted({name for extra in _installed_extras() for name in declared.get(extra, ())}))
 
 
 def _requirement_name(requirement: str) -> str | None:
@@ -671,20 +662,30 @@ def _manager_bin_directory() -> Path | None:
 
 
 def _entrypoint_names() -> tuple[str, ...]:
-    """Every console script this installation put in that directory.
+    """Every console script this installation's own distribution declares.
 
-    This distribution's own, plus the ones the installed extras brought: a
-    manager reinstalling `agentic-hil[pyocd]` replaces whatever entry points
-    that resolution produces, and each of them is a file some process may have
-    mapped. `agentic-hil` is seeded rather than looked up so that unreadable
-    metadata costs the extras' names and not the one this module is about.
+    Only `agentic-hil`'s own entry points, and deliberately not the ones the
+    installed extras' distributions declare. The launchers this touches live in
+    the shared bin of an isolated manager -- `_manager_bin_directory` names one
+    only for `uv-tool` and `pipx` -- and neither exposes a dependency's
+    executables there by default: `uv tool` installs only the requested
+    package's scripts, and `pipx` exposes a dependency's only when it was
+    installed with `--include-deps`. So an ordinary `agentic-hil[can]`
+    installation does not own `can_logger`; a same-named file in the shared bin
+    belongs to whatever put it there, and renaming or sweeping it would move an
+    unrelated tool's launcher out of PATH (review round 0, finding 3). Deriving
+    the extras' scripts and assuming this installation owns them was exactly that
+    false inference.
+
+    `agentic-hil` is seeded rather than looked up so that unreadable metadata
+    still costs nothing but any further console scripts this package itself
+    declares, never the one name this module is about.
     """
     from importlib.metadata import distribution
 
     names = {"agentic-hil"}
-    for distribution_name in ("agentic-hil", *_installed_extra_distributions()):
-        with suppress(Exception):
-            names.update(entry.name for entry in distribution(distribution_name).entry_points if entry.group == "console_scripts")
+    with suppress(Exception):
+        names.update(entry.name for entry in distribution("agentic-hil").entry_points if entry.group == "console_scripts")
     return tuple(sorted(names))
 
 
@@ -765,7 +766,22 @@ def _launchers_moved_aside() -> list[tuple[Path, Path]]:
     return moved
 
 
-def _restore_unreplaced_launchers(moved: list[tuple[Path, Path]]) -> list[str]:
+class _RestoredLaunchers(NamedTuple):
+    """What restoring the moved-aside launchers left standing.
+
+    `superseded` are the sibling names kept because the manager did write the
+    launcher, so the old image sits under a name nothing on PATH resolves.
+    `unrecovered` are the launchers the manager did not write and the rename-back
+    could not put back either: PATH has no launcher under that name and only the
+    `.superseded` sibling beside it, so the CLI is off PATH until that sibling is
+    moved back by hand. Each is named as a `(launcher, sibling)` pair so a
+    result can tell an operator exactly which file to restore."""
+
+    superseded: list[str] = []
+    unrecovered: list[tuple[str, str]] = []
+
+
+def _restore_unreplaced_launchers(moved: list[tuple[Path, Path]]) -> _RestoredLaunchers:
     """Put back every launcher the manager did not write after all.
 
     The rename is only safe because of this: a manager that failed before it
@@ -773,8 +789,15 @@ def _restore_unreplaced_launchers(moved: list[tuple[Path, Path]]) -> list[str]:
     leave the installation with no launcher on PATH at all. So each name is
     asked once more after the manager stops, and one that is still missing gets
     its old image back under the name that was there before.
+
+    A rename-back that itself fails used to be swallowed, which left the CLI off
+    PATH with only its `.superseded` sibling to show for it and a result that
+    still called the installation intact (review round 0, finding 4). So the
+    launchers that stay missing are reported, for the caller to surface as
+    cleanup-required rather than to bury.
     """
     superseded: list[str] = []
+    unrecovered: list[tuple[str, str]] = []
     for launcher, aside in moved:
         replaced = False
         with suppress(OSError):
@@ -782,9 +805,45 @@ def _restore_unreplaced_launchers(moved: list[tuple[Path, Path]]) -> list[str]:
         if replaced:
             superseded.append(str(aside))
             continue
-        with suppress(OSError):
+        try:
             aside.rename(launcher)
-    return superseded
+        except OSError:
+            still_missing = True
+            with suppress(OSError):
+                still_missing = not launcher.exists()
+            if still_missing:
+                unrecovered.append((str(launcher), str(aside)))
+    return _RestoredLaunchers(superseded, unrecovered)
+
+
+def _with_unrecovered_launchers(outcome: JsonObject, restore: _RestoredLaunchers) -> JsonObject:
+    """Fail an outcome that left the CLI launcher off PATH, naming the sibling.
+
+    A launcher the manager did not write and the rename-back could not restore is
+    a broken installation whatever the version probe answered: the module still
+    imports, but the console script an operator types is gone and only its
+    `.superseded` sibling remains. So this outcome is failed and cleanup-required
+    even over an otherwise clean upgrade, and it names each file to move back
+    (review round 0, finding 4). A no-op when every launcher was restored, which
+    is every ordinary run."""
+    if not restore.unrecovered:
+        return outcome
+    off_path = ", ".join(launcher for launcher, _ in restore.unrecovered)
+    summary = str(outcome.get("summary") or "").rstrip()
+    note = (
+        f"The CLI launcher could not be put back after the upgrade: {off_path} is off PATH and only its "
+        "`.superseded` sibling remains, so the console script will not run. Rename each `recover_from` file back to "
+        "its `launcher` name before calling the CLI again."
+    )
+    return {
+        **outcome,
+        "ok": False,
+        "installation_intact": False,
+        "cleanup_required": True,
+        "restart_required": False,
+        "unrecovered_launchers": [{"launcher": launcher, "recover_from": sibling} for launcher, sibling in restore.unrecovered],
+        "summary": f"{summary} {note}" if summary else note,
+    }
 
 
 def _run_upgrade_process(command: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -1582,21 +1641,8 @@ def replace_installation(*, tool: str) -> JsonObject:
     try:
         installed, install_result, certificates = _manager_run(manager, command)
     except (OSError, subprocess.TimeoutExpired) as error:
-        _restore_unreplaced_launchers(moved_aside)
-        return _failed_upgrade(
-            tool,
-            manager,
-            command,
-            previous_version,
-            installed_extras,
-            reinstall_command,
-            summary="Agentic HIL package upgrade could not run.",
-            exception_type=type(error).__name__,
-            detail=str(error),
-        )
-    superseded = _restore_unreplaced_launchers(moved_aside)
-    if installed.returncode != 0:
-        return _with_certificate_note(
+        restore = _restore_unreplaced_launchers(moved_aside)
+        return _with_unrecovered_launchers(
             _failed_upgrade(
                 tool,
                 manager,
@@ -1604,10 +1650,39 @@ def replace_installation(*, tool: str) -> JsonObject:
                 previous_version,
                 installed_extras,
                 reinstall_command,
-                summary="Agentic HIL package manager reported an upgrade failure.",
-                install=install_result,
+                summary="Agentic HIL package upgrade could not run.",
+                exception_type=type(error).__name__,
+                detail=str(error),
             ),
-            certificates,
+            restore,
+        )
+    except BaseException:
+        # A KeyboardInterrupt, a SystemExit, or any unexpected error from the
+        # manager run would otherwise skip restoration entirely and leave the
+        # launchers renamed aside -- the CLI off PATH with only a `.superseded`
+        # sibling. Put them back before the exception propagates, so an
+        # interrupted upgrade never disarms the very command used to repair it
+        # (review round 0, finding 4).
+        _restore_unreplaced_launchers(moved_aside)
+        raise
+    restore = _restore_unreplaced_launchers(moved_aside)
+    superseded = restore.superseded
+    if installed.returncode != 0:
+        return _with_unrecovered_launchers(
+            _with_certificate_note(
+                _failed_upgrade(
+                    tool,
+                    manager,
+                    command,
+                    previous_version,
+                    installed_extras,
+                    reinstall_command,
+                    summary="Agentic HIL package manager reported an upgrade failure.",
+                    install=install_result,
+                ),
+                certificates,
+            ),
+            restore,
         )
 
     verification, current_version = _loaded_version()
@@ -1617,37 +1692,43 @@ def replace_installation(*, tool: str) -> JsonObject:
         # here named the verification step and stopped, which told an operator
         # that something could not be loaded without telling them their
         # installation was gone or what single command brings it back.
-        return _with_certificate_note(
-            _installation_broken(
-                {"ok": False, "tool": tool, "manager": manager, "command": command, "python": sys.executable, "previous_version": previous_version, "install": install_result},
-                installed_extras,
-                reinstall_command,
-                verification,
-                "Agentic HIL package manager completed, but the installation it left cannot be loaded.",
+        return _with_unrecovered_launchers(
+            _with_certificate_note(
+                _installation_broken(
+                    {"ok": False, "tool": tool, "manager": manager, "command": command, "python": sys.executable, "previous_version": previous_version, "install": install_result},
+                    installed_extras,
+                    reinstall_command,
+                    verification,
+                    "Agentic HIL package manager completed, but the installation it left cannot be loaded.",
+                ),
+                certificates,
             ),
-            certificates,
+            restore,
         )
 
     if current_version == previous_version:
-        return _with_certificate_note(_upgrade_changed_nothing(tool, manager, command, previous_version, current_version, install_result), certificates)
+        return _with_unrecovered_launchers(_with_certificate_note(_upgrade_changed_nothing(tool, manager, command, previous_version, current_version, install_result), certificates), restore)
 
-    return _with_certificate_note(
-        {
-            "ok": True,
-            "tool": tool,
-            "upgraded_on_disk": True,
-            "summary": f"Agentic HIL upgraded from {previous_version} to {current_version} on disk.",
-            "manager": manager,
-            "command": command,
-            "python": sys.executable,
-            "previous_version": previous_version,
-            "version": current_version,
-            "install": install_result,
-            "restart_required": True,
-            **({"superseded_entrypoints": superseded} if superseded else {}),
-            **_still_running_the_previous_version(still_running, previous_version),
-        },
-        certificates,
+    return _with_unrecovered_launchers(
+        _with_certificate_note(
+            {
+                "ok": True,
+                "tool": tool,
+                "upgraded_on_disk": True,
+                "summary": f"Agentic HIL upgraded from {previous_version} to {current_version} on disk.",
+                "manager": manager,
+                "command": command,
+                "python": sys.executable,
+                "previous_version": previous_version,
+                "version": current_version,
+                "install": install_result,
+                "restart_required": True,
+                **({"superseded_entrypoints": superseded} if superseded else {}),
+                **_still_running_the_previous_version(still_running, previous_version),
+            },
+            certificates,
+        ),
+        restore,
     )
 
 

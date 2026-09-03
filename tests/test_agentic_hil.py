@@ -1505,16 +1505,16 @@ def _uv_tool_bin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, launchers: dic
     """A uv tool bin directory holding these launchers, found the way uv's is.
 
     `UV_TOOL_BIN_DIR` rather than a patched lookup, so the discovery this
-    depends on is exercised instead of stubbed, and `_installed_extra_distributions`
-    is fixed at one distribution that is always installed with this suite, so
-    the entry point names are the same on every machine that runs it.
+    depends on is exercised instead of stubbed. The names this installation owns
+    come from `agentic-hil`'s own console scripts, which is this package (always
+    installed with the suite), so a uv tool bin is `agentic-hil` and whatever
+    unrelated launchers a test writes beside it, never a dependency's.
     """
     directory = tmp_path / "bin"
     directory.mkdir(parents=True, exist_ok=True)
     for name, payload in launchers.items():
         (directory / name).write_bytes(payload)
     monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: "uv-tool")
-    monkeypatch.setattr("agentic_hil.upgrade._installed_extra_distributions", lambda: ("pytest",))
     monkeypatch.setenv("UV_TOOL_BIN_DIR", str(directory))
     monkeypatch.setattr("agentic_hil.upgrade._host_locks_running_files", lambda: True)
     return directory
@@ -1584,13 +1584,16 @@ def test_the_launcher_a_running_process_maps_is_renamed_aside_before_the_manager
     has the old image mapped: the upgrade reached the end and then left a
     half-changed tree. Windows does not refuse to *rename* that file, so the
     launcher is moved to a sibling name first and the copy lands on a name
-    nothing holds. Every entry point the installed extras brought is moved the
-    same way, because the manager replaces those too.
+    nothing holds. Only this installation's own launcher is moved: a same-named
+    file a different tool put in the shared bin is left exactly where it is.
     """
     from agentic_hil.upgrade import _SUPERSEDED_SUFFIX
 
-    bin_directory = _uv_tool_bin(monkeypatch, tmp_path, {"agentic-hil.exe": b"old launcher", "pytest.exe": b"old pytest"})
-    _entrypoint_copying_manager(monkeypatch, bin_directory, names=("agentic-hil.exe", "pytest.exe"), version_after="9.9.9")
+    # `pytest.exe` stands in for an unrelated tool's launcher that happens to sit
+    # in the same uv bin. uv exposes no dependency executables, so this is never
+    # `agentic-hil`'s, and the upgrade must not touch it.
+    bin_directory = _uv_tool_bin(monkeypatch, tmp_path, {"agentic-hil.exe": b"old launcher", "pytest.exe": b"another tool"})
+    _entrypoint_copying_manager(monkeypatch, bin_directory, names=("agentic-hil.exe",), version_after="9.9.9")
 
     result = upgrade_installation()
 
@@ -1599,15 +1602,14 @@ def test_the_launcher_a_running_process_maps_is_renamed_aside_before_the_manager
     assert result["version"] == "9.9.9"
     # The manager's copy landed, which is the whole claim.
     assert (bin_directory / "agentic-hil.exe").read_bytes() == b"new launcher"
-    assert (bin_directory / "pytest.exe").read_bytes() == b"new launcher"
-    # And the old images are still there under a name nothing resolves, because
-    # the processes that mapped them are still running out of them.
+    # And the old image is still there under a name nothing resolves, because the
+    # process that mapped it is still running out of it.
     assert (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"old launcher"
-    assert (bin_directory / f"pytest.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"old pytest"
-    assert sorted(result["superseded_entrypoints"]) == [
-        str(bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}"),
-        str(bin_directory / f"pytest.exe{_SUPERSEDED_SUFFIX}"),
-    ]
+    assert result["superseded_entrypoints"] == [str(bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}")]
+    # The foreign launcher was neither moved aside nor replaced: untouched, and
+    # no `.superseded` sibling was ever created for it.
+    assert (bin_directory / "pytest.exe").read_bytes() == b"another tool"
+    assert not (bin_directory / f"pytest.exe{_SUPERSEDED_SUFFIX}").exists()
     # And it is no longer the half-changed outcome the reporter got.
     assert "error_type" not in result
 
@@ -1723,26 +1725,109 @@ def test_a_manager_that_fails_before_the_entrypoints_gets_its_launcher_back(
     assert "superseded_entrypoints" not in result
 
 
-def test_the_entry_points_moved_aside_are_this_distributions_and_the_extras_own(
-    monkeypatch: pytest.MonkeyPatch,
+def test_an_interrupted_upgrade_still_puts_the_launcher_back_on_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Which names are looked for, and where they come from.
+    """A KeyboardInterrupt during the manager run must not disarm the CLI.
 
-    `agentic-hil` is seeded rather than read, so unreadable metadata costs the
-    extras' names and never the one this module is about; the rest come off the
-    distributions the installed extras actually brought, because a manager
-    reinstalling `agentic-hil[pyocd]` replaces those entry points too."""
-    from agentic_hil.upgrade import _entrypoint_names
+    The launcher is renamed aside before the manager starts, so an interrupt that
+    skipped restoration would leave the console script off PATH with only its
+    `.superseded` sibling -- and the CLI is the command an operator would reach
+    for to recover. Restoration runs on the way out however the run ends."""
+    bin_directory = _uv_tool_bin(monkeypatch, tmp_path, {"agentic-hil.exe": b"old launcher"})
+    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: ("uv", ["uv.exe", "tool", "upgrade", "agentic-hil"]))
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", list)
 
-    monkeypatch.setattr("agentic_hil.upgrade._installed_extra_distributions", lambda: ("pytest",))
-    names = _entrypoint_names()
+    def interrupt(invoked: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None):
+        raise KeyboardInterrupt
 
-    assert "agentic-hil" in names
-    assert "pytest" in names
+    monkeypatch.setattr("agentic_hil.upgrade._run_upgrade_process", interrupt)
 
-    monkeypatch.setattr("agentic_hil.upgrade._installed_extra_distributions", tuple)
+    with pytest.raises(KeyboardInterrupt):
+        upgrade_installation()
+
+    # Back under the name PATH resolves, with no sibling left behind.
+    assert (bin_directory / "agentic-hil.exe").read_bytes() == b"old launcher"
+    assert [entry.name for entry in sorted(bin_directory.iterdir())] == ["agentic-hil.exe"]
+
+
+def test_a_launcher_that_cannot_be_put_back_is_surfaced_as_cleanup_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A rename-back that fails leaves the CLI off PATH; the result must say so.
+
+    The manager did not write the launcher and its old image could not be
+    renamed back, so PATH has only the `.superseded` sibling. Reporting that as
+    an intact installation -- which a module-import integrity check would, since
+    the module still loads -- hides a CLI that no longer runs. The outcome is
+    failed and cleanup-required and names the file to move back."""
+    from agentic_hil.upgrade import _SUPERSEDED_SUFFIX
+
+    bin_directory = _uv_tool_bin(monkeypatch, tmp_path, {"agentic-hil.exe": b"old launcher"})
+    # The manager fails without ever writing the launcher, so restoration has to
+    # rename the aside image back; `version_after` matches the running version so
+    # the base outcome is an otherwise-intact failure that the lost launcher alone
+    # turns cleanup-required.
+    _entrypoint_copying_manager(monkeypatch, bin_directory, names=("agentic-hil.exe",), version_after=__version__, reaches_entrypoints=False)
+    original_rename = Path.rename
+
+    def fail_restore(self: Path, target: object) -> Path:
+        # Move-aside renames the launcher to its sibling and must work; only the
+        # rename *back* (source carries the suffix) is made to fail.
+        if _SUPERSEDED_SUFFIX in self.name:
+            raise PermissionError(13, "cannot rename the sibling back")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_restore)
+
+    result = upgrade_installation()
+
+    assert result["ok"] is False
+    assert result["cleanup_required"] is True
+    assert result["installation_intact"] is False
+    assert result["unrecovered_launchers"] == [
+        {"launcher": str(bin_directory / "agentic-hil.exe"), "recover_from": str(bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}")}
+    ]
+    # The launcher really is off PATH, with only its sibling beside it.
+    assert not (bin_directory / "agentic-hil.exe").exists()
+    assert (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"old launcher"
+
+
+def test_the_entry_points_moved_aside_are_only_this_distributions_own(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Which names are looked for, and the foreign launcher that is never one.
+
+    Only `agentic-hil`'s own console scripts, because the isolated managers whose
+    shared bin this touches expose no dependency executable by default: an
+    ordinary `agentic-hil[can]` install does not own `can_logger`, so a
+    same-named file there belongs to whatever installed it. `agentic-hil` is
+    seeded so unreadable metadata still costs nothing but any further console
+    scripts this package itself declares."""
+    from agentic_hil.upgrade import (
+        _SUPERSEDED_SUFFIX,
+        _entrypoint_names,
+        _installation_launchers,
+        _remove_superseded_launchers,
+    )
 
     assert _entrypoint_names() == ("agentic-hil",)
+
+    # A dependency-named launcher another tool put in the shared bin is not this
+    # installation's, so it is never one of the launchers this sweeps or moves.
+    bin_directory = _uv_tool_bin(
+        monkeypatch,
+        tmp_path,
+        {"agentic-hil.exe": b"ours", "can_logger.exe": b"python-can's", f"can_logger.exe{_SUPERSEDED_SUFFIX}": b"not ours to sweep"},
+    )
+    assert [path.name for path in _installation_launchers()] == ["agentic-hil.exe"]
+
+    _remove_superseded_launchers()
+
+    # The foreign tool's launcher and even its own `.superseded` leftover are left
+    # untouched: the sweep only reaches names this module itself wrote.
+    assert (bin_directory / "can_logger.exe").read_bytes() == b"python-can's"
+    assert (bin_directory / f"can_logger.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"not ours to sweep"
 
 
 def test_rewriting_the_registration_block_survives_a_backslash_in_the_path() -> None:

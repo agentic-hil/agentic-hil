@@ -11,6 +11,7 @@ import yaml
 from agentic_hil import __version__
 from agentic_hil.adopt import (
     PROJECT_CONFIG_ADOPT,
+    configured_device_resources,
     configured_probe_resource,
     discover_under_hardware_lease,
     project_config_adopt_hardware,
@@ -2774,17 +2775,20 @@ def discover_for_generation(
         # does not repair reaches the leased path below and its `audit_unavailable`
         # refusal, rather than being read around here (review round 0, finding 1).
         #
-        # So this takes the route the first `init` takes, with one lock the first
+        # So this takes the route the first `init` takes, with locks the first
         # `init` has no way to hold: a first init has no configuration and so no
-        # aliases, but this bench does, and a board another owner holds through a
-        # configured `resource_id` must not be read out from under it just because
-        # the `state_root` that would record the read is broken. The same
-        # configured device locks the leased path acquires are taken here beside
-        # the host-wide enumeration lock and `probe:<serial>`, and a foreign holder
-        # on any of them comes back `device_busy` with nothing said to the board
-        # (review round 0, finding 2). The caller is told the read went unaudited
-        # rather than being left to infer it.
-        aliases = [key for name in current.debuggers for key in configured_probe_resource(current, name)]
+        # aliases, but this bench does, and a device another owner holds under a
+        # configured name must not have its policy rewritten out from under it
+        # just because the `state_root` that would record a lease is broken.
+        # Every machine-wide device lock this configuration names -- probe, UART
+        # and CAN, not the probes alone -- is taken here beside the host-wide
+        # enumeration lock and `probe:<serial>`. A UART- or CAN-only run in
+        # another workspace holds no probe alias, so a probes-only acquisition
+        # missed exactly the case the skipped open-run check existed to catch;
+        # now a foreign holder on any of them comes back `device_busy` with
+        # nothing said to the board (review round 0, finding 2). The caller is
+        # told the read went unaudited rather than being left to infer it.
+        aliases = configured_device_resources(current)
         return (*_discover_without_policy(tool=tool, frontend=frontend, resources=aliases), unusable.error_type)
     if coordinator is None:
         owned = HardwareCoordinator(current, frontend=frontend)
@@ -2883,10 +2887,15 @@ def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] |
     `init`. A first init knows no alias, but a configured bench does, and a run
     another owner holds through a debugger's `resource_id` locks
     ``physical:<resource_id>``, a key no enumeration derives, so the
-    `probe:<serial>` locks alone would read the board out from under it. Acquired
-    up front beside the enumeration lock and released with everything else, so the
-    regeneration honours the same aliases the leased path does even though it has
-    no `state_root` under which to record a lease (review round 0, finding 2).
+    `probe:<serial>` locks alone would read the board out from under it. On the
+    broken-`state_root` repair path the caller passes every machine-wide device
+    lock the configuration names -- UART and CAN as well as the probes -- because
+    the open-run check that would otherwise have caught a foreign UART- or
+    CAN-only run was skipped, and those runs hold no probe alias
+    (`configured_device_resources`). Acquired up front beside the enumeration
+    lock and released with everything else, so the regeneration honours the same
+    device exclusion a leased run would even though it has no `state_root` under
+    which to record a lease (review round 0, finding 2).
 
     Returns the discovery and, when a lock refused, the refusal that is the whole
     answer. A refusal from `before_connect` is surfaced as that refusal rather
