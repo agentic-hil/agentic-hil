@@ -2333,6 +2333,60 @@ def test_force_over_an_unreadable_state_root_is_refused_by_a_can_only_run(tmp_pa
     assert target.read_bytes() == before
 
 
+def test_repair_holds_the_device_lock_across_the_write_not_only_the_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-1 finding 2: the repair keeps its device locks from the read through the write.
+
+    The earlier pair proves a holder that predates the read is refused. This
+    proves the other seam the reviewer named: a foreign UART-only run that tries
+    to start *after* discovery but *before* the file is replaced is refused too,
+    because the repair holds the bench across document generation and the
+    authoritative write rather than releasing it the moment discovery returned.
+    Only once the replacement has landed can such a run take the lock."""
+    from agentic_hil.bench import DeviceBusyError
+    from agentic_hil.cli import secure_atomic_write_text as real_secure_atomic_write_text
+    from agentic_hil.devices import config_devices
+
+    workspace, target = _redirected_bench_naming(
+        tmp_path, monkeypatch, "STLINK40212", "com_ports", {"dut_uart": {"device": "COM_FINDING2_LATE", "identity_source": "device"}}
+    )
+    before = target.read_bytes()
+    uart = next(key for key in config_devices(load_authoritative_config(workspace)).lock_keys if key.startswith("com:"))
+
+    observed: dict[str, bool] = {}
+
+    def interpose(path: Path | str, text: str, **kwargs: object) -> None:
+        # Fires from the final-write seam, after the board has been read and the
+        # replacement document built. A UART-only run in another workspace trying
+        # to start here holds none of what discovery locked and everything the
+        # skipped open-run check would have caught, so it is exactly the case the
+        # repair must refuse while its write is in flight.
+        if Path(path) == target and "refused_during_write" not in observed:
+            latecomer = BenchMutex(frontend="late-uart-run")
+            try:
+                with pytest.raises(DeviceBusyError):
+                    latecomer.acquire([uart])
+            finally:
+                latecomer.release_all()
+            observed["refused_during_write"] = True
+        return real_secure_atomic_write_text(path, text, **kwargs)
+
+    monkeypatch.setattr("agentic_hil.cli.secure_atomic_write_text", interpose)
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    # The refusal happened at the write seam, not merely before the read.
+    assert observed.get("refused_during_write") is True
+    # The replacement really landed, and the lock is given back with it: a run
+    # that starts once the write is done takes the bench that was held throughout.
+    assert target.read_bytes() != before
+    after = BenchMutex(frontend="after-replacement")
+    try:
+        assert after.acquire([uart]) == [uart]
+    finally:
+        after.release_all()
+
+
 def test_a_corrupt_lease_record_on_a_healthy_root_still_stops_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The other half of the licence: only a refused root buys the note.
 

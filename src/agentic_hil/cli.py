@@ -96,6 +96,7 @@ from agentic_hil.tools import (
     AgenticHILToolService,
     UnprovisionedToolService,
     discover_for_generation,
+    generation_locks,
     narrowed_permissions,
     unbound_debugger_error,
 )
@@ -1948,7 +1949,13 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
                     **({"unusable_roots": kept_findings} if kept_findings else {}),
                 }
             else:
-                config_result = init_config(config_path, force=force, _locked=True, _target=target_path)
+                # Scoped to the write itself, not the `doctor` that follows: the
+                # repair path keeps the device locks it takes for the read held
+                # until the configuration is written, so a foreign UART- or
+                # CAN-only run cannot start in between (review round 1, finding 2),
+                # and releases before `doctor` probes the board through them.
+                with generation_locks(frontend="operator-cli") as generation_bench:
+                    config_result = init_config(config_path, force=force, _locked=True, _target=target_path, _generation_bench=generation_bench)
 
             if overall_success(config_result):
                 doctor_result = doctor(config_path)
@@ -2196,7 +2203,7 @@ def _discarded_narrowings(previous_text: str | None, written: JsonObject) -> tup
     closed = (path for path, permitted in permission_surface(previous).items() if not permitted)
     return sorted(path for path in closed if granted.get(path)), None
 
-def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, str | None, JsonObject | None]:
+def _init_bench_read(workspace: Path, generation_bench: BenchMutex | None = None) -> tuple[JsonObject, JsonObject | None, str | None, JsonObject | None]:
     """Read the attached board for `init`, holding what a probe read holds.
 
     `init` called `discover_attached_hardware` directly: no `before_connect`, no
@@ -2260,6 +2267,11 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
         tool=CLI_INIT,
         reason_prefix=CLI_INIT,
         frontend="operator-cli",
+        # Held past this read on the repair path so a foreign UART- or CAN-only
+        # run cannot start between it and the authoritative write below; the
+        # caller owns the bench and releases it once the write is done (review
+        # round 1, finding 2).
+        generation_bench=generation_bench,
     )
     # `unleased` is this function's own answer and is the more specific of the
     # two: it names why the file could not be loaded at all. `unaudited` is the
@@ -2394,7 +2406,7 @@ def _init_lease_note(unleased: str | None) -> JsonObject:
     }
 
 
-def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False, _target: Path | None = None) -> JsonObject:
+def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False, _target: Path | None = None, _generation_bench: BenchMutex | None = None) -> JsonObject:
     # Asked again rather than taken from the caller: this is the function that
     # writes `workspace_root`, so the one directory a project may not be rooted
     # in is settled here as well as in `init_project`, and a later caller cannot
@@ -2417,8 +2429,13 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     if _path_entry_exists(target_path) and not force:
         return {"ok": False, "error_type": "config_exists", "summary": "Agentic HIL configuration already exists. Use --force to overwrite it.", "path": str(target_path)}
     if not _locked:
-        with secure_user_file_lock(target_path):
-            return init_config(config_path, force, _locked=True, _target=target_path)
+        # `generation_locks` beside the file lock and held across the whole locked
+        # pass: on the repair path the read below takes its device locks into this
+        # bench and keeps them until the write is done, so a foreign UART- or
+        # CAN-only run cannot start between the read and the replacement (review
+        # round 1, finding 2). Empty and a no-op on every other path.
+        with secure_user_file_lock(target_path), generation_locks(frontend="operator-cli") as generation_bench:
+            return init_config(config_path, force, _locked=True, _target=target_path, _generation_bench=generation_bench)
     original_bytes, existing, unreadable_existing = _existing_config_text(target_path)
     # Look first, and let the profile decide only what is written down. A
     # workspace profile says how to name and narrow a bench that was found; it
@@ -2431,7 +2448,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # `project_config_create` has always used, so both paths now write one file for
     # one machine.
     profile = load_project_profile(workspace)
-    discovery, refusal, unleased, open_run_unchecked = _init_bench_read(workspace)
+    discovery, refusal, unleased, open_run_unchecked = _init_bench_read(workspace, _generation_bench)
     if refusal is not None:
         # Either the read was refused or it was never reached, and both leave
         # nothing to write a file from. Nothing was written; the refusal is the

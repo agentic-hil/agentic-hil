@@ -2921,6 +2921,68 @@ def test_canonical_report_is_not_left_green_when_the_state_write_fails(tmp_path:
         assert recorded.get("audit_ok") == result.get("audit_ok")
 
 
+def test_canonical_report_stays_non_green_when_both_cleanup_attempts_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-1 finding 1: even when BOTH the corrective rewrite and the removal
+    of the per-run copy fail after a required write faults, the trusted archive
+    must never be left standing as a success the returned result rejected.
+
+    The copy is staged as a non-green placeholder and promoted to the green
+    document only after every other required write commits, so a mirror-write
+    fault leaves the placeholder in place with no promotion. With both cleanup
+    attempts denied, that non-green placeholder is what remains -- never a green
+    attestation, which is what makes the guarantee independent of best-effort
+    cleanup succeeding."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-both-cleanups-fail")
+
+    original_atomic = report_module.atomic_write_text
+    canonical_writes = {"count": 0}
+
+    def flaky_atomic(path, text, **kwargs):
+        # The first write to the per-run path is the staged placeholder and must
+        # land so the file is genuinely on disk; every later write to it (the
+        # corrective rewrite) fails, standing in for a disk gone read-only.
+        if Path(path) == canonical:
+            canonical_writes["count"] += 1
+            if canonical_writes["count"] > 1:
+                raise OSError("canonical rewrite denied")
+        return original_atomic(path, text, **kwargs)
+
+    original_safe = report_module.safe_write_text
+
+    def fail_mirror(config, path, text, **kwargs):
+        if Path(path).name == "last-report.json":
+            raise OSError("mirror denied")
+        return original_safe(config, path, text, **kwargs)
+
+    original_unlink = Path.unlink
+
+    def fail_canonical_unlink(self, *args, **kwargs):
+        if self == canonical:
+            raise OSError("unlink denied")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(report_module, "atomic_write_text", flaky_atomic)
+    monkeypatch.setattr(report_module, "safe_write_text", fail_mirror)
+    monkeypatch.setattr(Path, "unlink", fail_canonical_unlink)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-both-cleanups-fail"})
+
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
+    assert "canonical_report_path" not in result
+    # Both cleanup attempts were denied, so the staged file is still on disk...
+    assert canonical.exists()
+    recorded = json.loads(canonical.read_text(encoding="utf-8"))
+    # ...but it is the non-green placeholder, never the green success the original
+    # green document would have been. The staged form is what protects the
+    # invariant when cleanup cannot run at all.
+    assert recorded.get("audit_ok") is False
+    assert not (recorded.get("ok") is True and recorded.get("audit_ok") is not False)
+
+
 def test_path_lock_registry_does_not_keep_short_lived_paths(tmp_path: Path) -> None:
     _PATH_LOCKS.clear()
 

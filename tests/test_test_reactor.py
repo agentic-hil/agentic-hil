@@ -2703,6 +2703,60 @@ steps:
     assert bytes.fromhex(read["matched_text"]["hex"]) in b"READY v2.4\r\n"
 
 
+def test_matched_span_bytes_omits_the_byte_field_for_an_interior_stateful_match() -> None:
+    """Round-1 finding 4: an interior character of a multi-character emission.
+
+    A stateful codec such as UTF-7 buffers a run and emits several characters
+    only when the byte closing the run arrives, so where inside the run each of
+    them began is not recoverable. A span that matches only an interior character
+    -- ``本`` inside ``日本語`` -- has no honest byte boundary, and must return
+    ``None`` (which the caller renders as "byte field unavailable") rather than
+    the empty slice it used to hand back and dress up as ``{"hex": "", ...}``. The
+    run's outer edges are still sound, so matching the whole run, or the ASCII
+    characters framing it, still yields the exact wire bytes."""
+    from agentic_hil.comports import decode_bytes, matched_span_bytes
+
+    raw = "x日本語y".encode("utf-7")
+    assert decode_bytes(raw, "utf-7") == "x日本語y"
+    # The interior character has no recoverable byte boundary: None, not b"".
+    assert matched_span_bytes(raw, "utf-7", (2, 3)) is None
+    # The whole run does, and it round-trips to the characters it stands for.
+    whole_run = matched_span_bytes(raw, "utf-7", (1, 4))
+    assert whole_run is not None and whole_run.decode("utf-7") == "日本語"
+    # The ASCII characters on either side of the run are unambiguous too.
+    assert matched_span_bytes(raw, "utf-7", (0, 1)) == b"x"
+    assert matched_span_bytes(raw, "utf-7", (4, 5)) == b"y"
+
+
+def test_a_met_pattern_on_an_interior_stateful_char_reports_honest_text_not_empty_bytes(tmp_path: Path) -> None:
+    # The reactor-level face of round-1 finding 4: a comparator that matches only
+    # `本` inside a UTF-7 `日本語` run has no honest byte slice, so the report
+    # quotes the matched text and marks the byte field unavailable rather than
+    # attesting to `{"hex": "", "text": "", ...}` -- an empty slice dressed up as
+    # evidence of a match that really happened.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: interior-stateful
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "本"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=["x日本語y\r\n".encode("utf-7")], uart_encoding="utf-7")
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    # The match is real and its text is quoted, but no fabricated byte field: the
+    # honest fallback rather than the empty-slice `{"hex": ""}` the bug produced.
+    assert read["matched_text"]["text"] == "本"
+    assert "hex" not in read["matched_text"]
+    assert read["matched_text_bytes_unavailable"] is True
+
+
 def test_an_unmet_comparator_still_answers_with_the_tail_and_claims_no_match(tmp_path: Path) -> None:
     # The other direction of the same field: a step that matched nothing must not
     # carry a matched text at all, because absence is what says nothing met it.

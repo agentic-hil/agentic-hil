@@ -1793,6 +1793,70 @@ def test_a_launcher_that_cannot_be_put_back_is_surfaced_as_cleanup_required(
     assert (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"old launcher"
 
 
+def test_an_interrupt_that_cannot_restore_the_launcher_surfaces_cleanup_not_a_bare_raise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-1 finding 3: interruption and a failed rename-back, together.
+
+    The two paths existed separately -- an interrupt restored and re-raised, a
+    manager that *returned* a failure whose restoration failed was surfaced as
+    cleanup-required -- but the combined case fell through the crack: an interrupt
+    whose restoration also failed re-raised the interruption and discarded the
+    `unrecovered` list, leaving the CLI off PATH with only a `.superseded` sibling
+    and the operator with no result and no recovery path. Now the interruption is
+    not re-raised when restoration fails; the structured cleanup failure is
+    returned instead, naming each launcher and the sibling to move back and
+    recording the interruption that caused it."""
+    from agentic_hil.upgrade import _SUPERSEDED_SUFFIX, _CertificateNote
+
+    bin_directory = _uv_tool_bin(monkeypatch, tmp_path, {"agentic-hil.exe": b"old launcher"})
+    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: ("uv", ["uv.exe", "tool", "upgrade", "agentic-hil"]))
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", list)
+    # Something to install, decided without a resolution query so the interrupt
+    # below lands in the install run -- after the launcher is moved aside -- rather
+    # than in the dry-run before it.
+    monkeypatch.setattr("agentic_hil.upgrade._would_install_nothing", lambda manager, command: (False, None, _CertificateNote("", {})))
+
+    def interrupt(manager: str, command: list[str]) -> None:
+        # The manager run is interrupted (Ctrl-C, a SystemExit, an unexpected
+        # error): the entry points are never written, so restoration has to rename
+        # the aside image back.
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("agentic_hil.upgrade._manager_run", interrupt)
+    # The post-interrupt integrity probe loads the still-installed version rather
+    # than shelling out, so the base outcome is otherwise-intact and the lost
+    # launcher alone is what turns it cleanup-required.
+    monkeypatch.setattr("agentic_hil.upgrade._run_upgrade_process", lambda command, *, cwd=None, env=None: subprocess.CompletedProcess(command, 0, f"{__version__}\n", ""))
+
+    original_rename = Path.rename
+
+    def fail_restore(self: Path, target: object) -> Path:
+        # Move-aside (launcher -> sibling) must work; only the rename *back*
+        # (sibling -> launcher) is denied, so the launcher stays off PATH.
+        if _SUPERSEDED_SUFFIX in self.name:
+            raise PermissionError(13, "cannot rename the sibling back")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_restore)
+
+    # Returned, not raised: the interruption is not allowed to carry away the one
+    # thing the operator needs, which is how to put the launcher back.
+    result = upgrade_installation()
+
+    assert result["ok"] is False
+    assert result["cleanup_required"] is True
+    assert result["installation_intact"] is False
+    # The interruption that caused it is recorded rather than dropped.
+    assert result["exception_type"] == "KeyboardInterrupt"
+    assert result["unrecovered_launchers"] == [
+        {"launcher": str(bin_directory / "agentic-hil.exe"), "recover_from": str(bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}")}
+    ]
+    # And the launcher really is off PATH, with only its sibling beside it.
+    assert not (bin_directory / "agentic-hil.exe").exists()
+    assert (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"old launcher"
+
+
 def test_the_entry_points_moved_aside_are_only_this_distributions_own(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

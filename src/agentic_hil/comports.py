@@ -1440,7 +1440,15 @@ def matched_span_bytes(received: bytes, encoding: str, span: tuple[int, int]) ->
     decode is checked against ``decode_bytes`` so the span indices align with the
     string the match was made against; ``None`` when they do not (an encoding
     whose incremental and one-shot decodes disagree), which the caller reads as
-    "omit the byte field" rather than as a reason to re-encode."""
+    "omit the byte field" rather than as a reason to re-encode.
+
+    One decoder call can emit several characters at once -- a stateful codec such
+    as UTF-7 buffers a run and yields it only when the closing byte arrives -- and
+    the interior byte boundaries of such a run are not recoverable. A span that
+    begins or ends on one of those interior boundaries also returns ``None`` (a
+    match on ``本`` alone inside a UTF-7 ``日本語`` run, for one), so the byte field
+    is omitted rather than reported as an empty or misaligned slice (review round
+    1, finding 4)."""
     start, end = span
     if start < 0 or end < start:
         return None
@@ -1451,20 +1459,39 @@ def matched_span_bytes(received: bytes, encoding: str, span: tuple[int, int]) ->
     decoder = make_decoder(errors="replace")
     char_byte_starts: list[int] = []
     produced: list[str] = []
+    # The boundaries that fall inside a run of characters one decoder call emitted
+    # at once. A stateful codec (UTF-7, an ISO-2022 escape run, any codec that
+    # buffers until a terminator) yields several characters only when the byte
+    # closing the run arrives, and which byte within the run each of them actually
+    # began at is not recoverable. The run's outer edges are sound -- it began
+    # where the codec resumed consuming and ended at the closing byte -- so only
+    # the interior starts are ambiguous, and a span that begins or ends on one
+    # cannot be sliced honestly (review round 1, finding 4).
+    ambiguous: set[int] = set()
     pending = 0
     for index in range(len(received)):
         out = decoder.decode(received[index : index + 1])
         for offset, character in enumerate(out):
+            if offset > 0:
+                ambiguous.add(len(char_byte_starts))
             char_byte_starts.append(pending if offset == 0 else index)
             produced.append(character)
         if out:
             pending = index + 1
-    for character in decoder.decode(b"", final=True):
+    for offset, character in enumerate(decoder.decode(b"", final=True)):
+        if offset > 0:
+            ambiguous.add(len(char_byte_starts))
         char_byte_starts.append(pending)
         produced.append(character)
     # A sentinel so an end index at the very end of the string maps to len().
     char_byte_starts.append(len(received))
     if end >= len(char_byte_starts) or "".join(produced) != decode_bytes(received, encoding):
+        return None
+    if start in ambiguous or end in ambiguous:
+        # The span begins or ends inside a multi-character emission, where the
+        # byte boundary is a guess. Report no byte evidence rather than invent a
+        # span -- an empty or misaligned slice -- and let the caller fall back to
+        # the honest text-only match (review round 1, finding 4).
         return None
     return received[char_byte_starts[start] : char_byte_starts[end]]
 

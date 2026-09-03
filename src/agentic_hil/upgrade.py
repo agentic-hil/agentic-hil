@@ -1656,14 +1656,43 @@ def replace_installation(*, tool: str) -> JsonObject:
             ),
             restore,
         )
-    except BaseException:
+    except BaseException as error:
         # A KeyboardInterrupt, a SystemExit, or any unexpected error from the
         # manager run would otherwise skip restoration entirely and leave the
         # launchers renamed aside -- the CLI off PATH with only a `.superseded`
         # sibling. Put them back before the exception propagates, so an
         # interrupted upgrade never disarms the very command used to repair it
         # (review round 0, finding 4).
-        _restore_unreplaced_launchers(moved_aside)
+        restore = _restore_unreplaced_launchers(moved_aside)
+        if restore.unrecovered:
+            # Restoration itself failed while the run was being interrupted, so
+            # re-raising would carry the interruption away and leave the CLI off
+            # PATH with no cleanup-required result and no recovery path -- the
+            # exact case round 0, finding 4 required to be surfaced rather than
+            # buried, now closed on the exceptional path too (review round 1,
+            # finding 3). Return the structured cleanup failure naming each
+            # launcher and its `recover_from` sibling, recording the interruption
+            # that caused it instead of dropping it. The original exception is not
+            # re-raised here on purpose: the operator must be told how to put the
+            # launcher back, and an interruption that propagated silently would be
+            # the disarmed-repair-command bug all over again.
+            return _with_unrecovered_launchers(
+                _failed_upgrade(
+                    tool,
+                    manager,
+                    command,
+                    previous_version,
+                    installed_extras,
+                    reinstall_command,
+                    summary="Agentic HIL package upgrade was interrupted before it finished.",
+                    exception_type=type(error).__name__,
+                    detail=str(error),
+                ),
+                restore,
+            )
+        # Every launcher went back, so nothing is left off PATH: the interruption
+        # has cost the run nothing a result would need to carry, and it propagates
+        # exactly as it would have (review round 0, finding 4).
         raise
     restore = _restore_unreplaced_launchers(moved_aside)
     superseded = restore.superseded
