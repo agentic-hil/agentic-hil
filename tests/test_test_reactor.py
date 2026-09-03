@@ -660,6 +660,67 @@ def test_cli_returns_failure_for_audit_failed_result(monkeypatch: pytest.MonkeyP
     assert json.loads(capsys.readouterr().out)["audit_ok"] is False
 
 
+def test_a_run_names_the_per_run_report_copy_the_next_run_will_not_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Three runs must leave three reports, and the run must say where its own is.
+
+    `last-report.json` is the newest run and nothing else, so a bench collecting
+    the evidence of three runs kept one of them and found out when the third had
+    already overwritten the first. The per-run copy under the state root is what
+    the earlier ones survive in, and it is only useful if the run names it: both
+    in the document, for whatever parses it, and in the one line the run prints,
+    for whoever is still standing at the terminal."""
+    import hashlib
+
+    from agentic_hil.cli import run_test_reactor
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # Its own copy of the fake backend, because the device lock is machine-wide
+    # and keyed on the hardware: a shared executable path would make this test
+    # declare the same board as its neighbours.
+    probe = tmp_path / "fake_openocd.py"
+    probe.write_bytes(FAKE_OPENOCD.read_bytes())
+    write_authoritative_config(workspace, monkeypatch, debugger_executable=probe)
+    monkeypatch.chdir(workspace)
+    plan = write_test_config(workspace, "version: 3\nname: keeps-evidence\nsteps:\n  - {device: dut, action: delay, duration_ms: 5}\n")
+
+    first = run_test_reactor(str(plan))
+
+    assert first["ok"] is True, first
+    workspace_report = workspace / ".agentic-hil" / "reports" / "last-report.json"
+    canonical = Path(first["canonical_report_path"])
+    assert first["summary"] == f"Test reactor sequence completed. This run's own report is kept at {canonical}; later runs do not overwrite it."
+    # The mirror in the workspace carries the same field, so a reader who finds
+    # only that file still learns where the earlier runs went.
+    assert json.loads(workspace_report.read_text(encoding="utf-8"))["canonical_report_path"] == str(canonical)
+    # It is a real file, outside the workspace, and the same document byte for
+    # byte as the mirror rather than a differently shaped summary of it.
+    assert canonical.is_file()
+    assert workspace.resolve() not in canonical.resolve().parents
+    assert hashlib.sha256(canonical.read_bytes()).hexdigest() == hashlib.sha256(workspace_report.read_bytes()).hexdigest()
+
+    second = run_test_reactor(str(plan))
+
+    assert second["run"] != first["run"]
+    assert Path(second["canonical_report_path"]) != canonical
+    # The workspace file is the second run's now; the first run's own copy is
+    # still the first run's, which is the whole of what this buys.
+    assert json.loads(workspace_report.read_text(encoding="utf-8"))["run"] == second["run"]
+    assert json.loads(canonical.read_text(encoding="utf-8"))["run"] == first["run"]
+
+    exit_code = entrypoint(["test-reactor", "--test-config", str(plan)])
+
+    # Printed, not merely returned: the summary is the line an operator reads.
+    printed = " ".join(capsys.readouterr().out.split())
+    assert exit_code == 0
+    assert f"This run's own report is kept at {canonical.parent}" in printed
+    assert "later runs do not overwrite it." in printed
+
+
 def test_reactor_builds_one_service_per_named_debugger(tmp_path: Path) -> None:
     # Multi-board: the bound probe shares the base service; every other named
     # probe drives its own service built for that debugger, sharing the base
@@ -2530,6 +2591,179 @@ steps:
 
     assert result["ok"] is True, result
     assert result["steps"][1]["result"]["captured_value"] == 25.0
+    # The reading that settled is also the text the step reports having matched,
+    # so a green record cannot show the value the bench had already left behind.
+    assert result["steps"][1]["result"]["matched_text"]["text"] == "temp=25C"
+
+
+def test_a_met_equals_comparator_records_the_line_it_matched(tmp_path: Path) -> None:
+    # The green half of `received_tail`. A red step quotes what the port did say;
+    # a green one used to quote nothing, so a report could not show what the
+    # board answered and the evidence lived only in the COM log.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: equals-green
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {equals: "DIAG ON"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"boot: stage 1\r\n", b"DIAG ON\r\nidle\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["summary"] == "The COM port output equalled the expected value."
+    # The line that met the claim, not the whole rolling window: the banner
+    # before it is what the port said, not what the step passed on.
+    assert read["matched_text"] == {"hex": b"DIAG ON".hex(), "text": "DIAG ON", "encoding": "utf-8"}
+    assert read["matched_text_truncated"] is False
+    # And the red path's field is not borrowed for it: a met claim is not a tail.
+    assert "received_tail" not in read
+
+
+def test_a_met_pattern_comparator_records_the_slice_that_satisfied_it(tmp_path: Path) -> None:
+    # A pattern matches somewhere inside the window, so what a green step has to
+    # show is the span it matched rather than everything that had arrived.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: pattern-green
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "READY v[0-9.]+"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"boot: stage 1\r\nREADY v2.4 (dut)\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["matched_text"]["text"] == "READY v2.4"
+    assert read["matched_text"]["hex"] == b"READY v2.4".hex()
+    assert read["matched_text_truncated"] is False
+
+
+def test_an_unmet_comparator_still_answers_with_the_tail_and_claims_no_match(tmp_path: Path) -> None:
+    # The other direction of the same field: a step that matched nothing must not
+    # carry a matched text at all, because absence is what says nothing met it.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: pattern-red
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "READY v[0-9.]+"}, timeout_s: 0.05}
+""",
+    )
+    service = RecordingService(uart_reads=[b"boot: stage 1\r\nHardFault\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "comparator_unmet"
+    assert read["received_tail"]["text"] == "boot: stage 1\r\nHardFault\r\n"
+    assert read["received_tail_truncated"] is False
+    assert "matched_text" not in read
+    assert "matched_text_truncated" not in read
+
+
+def test_a_match_longer_than_the_cap_is_bounded_and_says_so(tmp_path: Path) -> None:
+    # The cap the red path has, on the green one and for the same reason: a claim
+    # met by a value longer than the report should carry must not put all of it
+    # in the report, and a bounded quote that did not say it was bounded would
+    # read as the whole of what matched. A long unterminated answer is the case
+    # that reaches it, because the read window widens with what the plan wrote.
+    from agentic_hil.test_reactor import UART_EXPECT_TAIL_BYTES
+
+    long_value = "A" * (UART_EXPECT_TAIL_BYTES + 88)
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        f"""version: 3
+name: long-match
+steps:
+  - {{device: dut_uart, action: uart_open}}
+  - {{device: dut_uart, action: uart_read, comparator: {{equals: "{long_value}"}}, timeout_s: 0.05}}
+""",
+    )
+    service = RecordingService(uart_reads=[long_value.encode()])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert len(bytes.fromhex(read["matched_text"]["hex"])) == UART_EXPECT_TAIL_BYTES
+    # Kept from the front, because a match begins where it begins.
+    assert read["matched_text"]["hex"] == long_value.encode()[:UART_EXPECT_TAIL_BYTES].hex()
+    assert read["matched_text_truncated"] is True
+
+
+def test_a_met_range_comparator_records_the_reading_around_the_number(tmp_path: Path) -> None:
+    # The claim a `range` really makes: a reading inside the bounds, quoted whole
+    # rather than only as the number pulled out of it, so a green record shows
+    # the unit and the surrounding text the plan wrote the pattern against.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: range-green-text
+steps:
+  - {device: dut_uart, action: uart_open}
+  - device: dut_uart
+    action: uart_read
+    comparator:
+      pattern: "temp=(\\\\d+)C"
+      range: {min: 20, max: 30}
+    timeout_s: 5
+""",
+    )
+    service = RecordingService(uart_reads=[b"temp=", b"24C\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["captured_text"] == "24"
+    assert read["matched_text"]["text"] == "temp=24C"
+    assert read["matched_text_truncated"] is False
+
+
+def test_a_met_range_quotes_the_reading_that_met_it_not_a_later_one(tmp_path: Path) -> None:
+    # An in-range reading followed by an out-of-range one in the same window: the
+    # step passes, and what it says it matched must be the reading that met the
+    # bounds. `captured_value` is the last reading the pattern found, which is a
+    # different question and keeps its own answer.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: range-then-drift
+steps:
+  - {device: dut_uart, action: uart_open}
+  - device: dut_uart
+    action: uart_read
+    comparator:
+      pattern: "temp=(\\\\d+)C"
+      range: {min: 20, max: 30}
+    timeout_s: 5
+""",
+    )
+    service = RecordingService(uart_reads=[b"temp=24C\r\ntemp=91C\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["matched_text"]["text"] == "temp=24C"
+    assert read["captured_value"] == 91.0
 
 
 def test_a_range_without_a_capture_group_is_refused_before_the_run(tmp_path: Path) -> None:

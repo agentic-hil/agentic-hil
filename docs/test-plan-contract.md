@@ -75,8 +75,14 @@ was is a green another ECU can produce; on that medium `equals` and `pattern`
 read the payload as hexadecimal, and a `range` capture is read in that same base. The comparator
 is an object deliberately, so preprocessing keys (scale, convert) can be added
 later without breaking the format. `uart_expect` with `text`/`pattern` remains
-valid as the v2 spelling. Every other step states its expectation by existing:
-the step must succeed, and the plan stops at the first one that does not.
+valid as the v2 spelling. Either way the step answers with the evidence and not
+only the verdict: a serial comparator that was met records `matched_text` (the
+line that equalled the value, or the span the pattern matched, in the same
+`{hex, text, encoding}` shape and under the same cap as the `received_tail` an
+unmet one answers with, with `matched_text_truncated` when the cap applied), and
+a bus comparator that was met records the whole `frame` that met it. Every other
+step states its expectation by existing: the step must succeed, and the plan
+stops at the first one that does not.
 
 **A value in target memory is its own claim.** From plan format v5, `read_symbol`
 reads what one allowed symbol currently holds, through the debug session the plan
@@ -167,6 +173,15 @@ A run produces one JSON report, written to `.agentic-hil/reports/last-report.jso
 copy under the operator-pinned `state_root`. The workspace copies are untrusted
 mirrors, as everything in the workspace is. Five parts of that report are the
 attestation.
+
+The workspace file is the newest run and nothing else: the next run writes over
+it. The canonical copy is one file per run handle and nothing writes over it, so
+three runs leave three reports, and the run names the one it wrote in
+`canonical_report_path` and repeats it in the summary line it prints at the end.
+Both copies are the same document byte for byte, so the two can be compared by
+digest. The path is stated in full, unlike the canonical audit ledger's beside
+it, because here the path is the answer: the question it exists for is where the
+runs before this one went.
 
 **Which policy was in force.** `config_in_force` carries the digest of the exact
 configuration bytes the run was permitted by (`digest` under

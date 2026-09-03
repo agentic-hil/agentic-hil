@@ -1423,6 +1423,19 @@ def decode_bytes(data: bytes, encoding: str) -> str:
         return data.decode("utf-8", errors="replace")
 
 
+def encode_text(text: str, encoding: str) -> bytes:
+    """``decode_bytes`` the other way round, for text this port already spoke.
+
+    The port's own encoding, with the same fallback and the same refusal to
+    raise: a caller here is describing bytes that already arrived, so an
+    unconfigurable codec or a character the codec cannot write must produce a
+    poorer answer, never an exception in place of an answer."""
+    try:
+        return text.encode(encoding, errors="replace")
+    except LookupError:
+        return text.encode("utf-8", errors="replace")
+
+
 def serial_by_id_links(directory: str = SERIAL_BY_ID_DIRECTORY) -> dict[str, str]:
     """Every stable serial-port name this host publishes, keyed by what it resolves to.
 

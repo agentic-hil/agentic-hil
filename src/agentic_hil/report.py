@@ -238,6 +238,59 @@ def report_state_directory(config: AgenticHILConfig) -> Path:
     return safe_directory(project_state_directory(config) / "reports")
 
 
+def run_reports_directory(config: AgenticHILConfig) -> Path:
+    return safe_directory(report_state_directory(config) / "runs")
+
+
+def canonical_run_report_path(config: AgenticHILConfig, handle: str) -> Path:
+    """Where this run's own report is kept, under the trusted state root.
+
+    One file per run handle, and nothing ever writes over it: that is the whole
+    point of it existing beside ``last-report.json``, which the next run
+    replaces. A bench collecting the evidence of three runs used to keep one of
+    them and find out only when the third had already overwritten the first."""
+    return run_reports_directory(config) / f"{safe_filename(handle, 'run')}.json"
+
+
+# The field naming that file, and the sentence the run's summary carries it in.
+CANONICAL_REPORT_KEY = "canonical_report_path"
+
+
+def canonical_run_report(config: AgenticHILConfig, report: JsonObject) -> Path | None:
+    """This report's per-run copy, or None for a report that is not a run's.
+
+    Keyed on ``run``, which the reactor puts on every report it commits and
+    nothing else sets: a per-run copy of a report belonging to no run would be a
+    file with no reader and a state root that grows with every hardware call."""
+    handle = report.get("run")
+    if not isinstance(handle, str) or not handle:
+        return None
+    return canonical_run_report_path(config, handle)
+
+
+def naming_canonical_report(report: JsonObject, canonical: Path) -> JsonObject:
+    """``report`` with the per-run path in a field and in its summary.
+
+    Both, because the two are read by different people. A caller parsing the
+    document wants the field; an operator reading the one line a run prints at
+    the end wants it said there, which is the moment they still know which run
+    it was. Idempotent, so a report re-committed after a terminal lease
+    transition keeps one sentence rather than gaining another.
+
+    The absolute path is stated rather than withheld, which is the opposite of
+    what ``canonical_audit_evidence`` does with the ledger's path beside it.
+    They answer different questions: the ledger's evidence is its presence, its
+    sequence and its chain digest, and naming the file adds nothing a reader
+    needs; here the path *is* the answer, because the question is where the runs
+    before this one went. It is the same environment-derived kind of path as
+    ``config_in_force.path``, which a report has always carried."""
+    if CANONICAL_REPORT_KEY in report:
+        return report
+    summary = str(report.get("summary") or "").rstrip()
+    sentence = f"This run's own report is kept at {canonical}; later runs do not overwrite it."
+    return {**report, CANONICAL_REPORT_KEY: str(canonical), "summary": f"{summary} {sentence}" if summary else sentence}
+
+
 CONFIG_IN_FORCE_KEY = "config_in_force"
 
 
@@ -305,6 +358,7 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     try:
         report_path = last_report_path(config)
         display_report_path = display_path(config, report_path)
+        canonical = canonical_run_report(config, enriched)
         with safe_file_lock(report_lock_path(config)):
             state = load_or_initialize_report_state(config)
             snapshot_allowed = True
@@ -316,8 +370,18 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
                     snapshot_allowed = False
             if snapshot_allowed:
                 snapshot = {**enriched, "report_path": display_report_path}
+                if canonical is not None:
+                    snapshot = naming_canonical_report(snapshot, canonical)
+                document = json.dumps(snapshot, indent=2) + "\n"
                 try:
-                    safe_write_text(config, report_path, json.dumps(snapshot, indent=2) + "\n")
+                    # The per-run copy first, and byte for byte the same
+                    # document: the workspace file is the untrusted mirror, and a
+                    # mirror standing where the trusted copy does not is the one
+                    # arrangement this must never leave behind. Identical bytes
+                    # so the two can be compared by digest rather than by field.
+                    if canonical is not None:
+                        atomic_write_text(canonical, document)
+                    safe_write_text(config, report_path, document)
                 except (ConfigError, OSError, ValueError) as error:
                     enriched = mark_audit_failure(enriched, error)
                 else:
@@ -330,7 +394,9 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
         failed = mark_audit_failure(enriched, error)
         # report_path can't be trusted after a failed commit: strip it so the
         # result never advertises a path whose persisted content it cannot prove.
+        # The per-run copy is stripped for the same reason and by the same rule.
         failed.pop("report_path", None)
+        failed.pop(CANONICAL_REPORT_KEY, None)
         return failed
     return enriched
 

@@ -13,7 +13,7 @@ from jsonschema import Draft202012Validator, SchemaError
 from agentic_hil.backends.common import DEBUG_SESSION_WAY_OUT
 from agentic_hil.backends.gdbdebug import INTEGER_VALUE_WIDTHS
 from agentic_hil.can import parse_can_id, parse_hex_bytes
-from agentic_hil.comports import data_result, decode_bytes
+from agentic_hil.comports import data_result, decode_bytes, encode_text
 from agentic_hil.config import (
     ConfigError,
     UniqueKeyLoader,
@@ -180,8 +180,14 @@ def never_stopped() -> bool:
     return False
 
 
-def decoded_equals(decoded: str, expected: str, final: bool) -> bool:
-    """True when what the line said equals `expected`, not merely contains it.
+def decoded_equals(decoded: str, expected: str, final: bool) -> str | None:
+    """What the line said that equals `expected`, or None when nothing did.
+
+    The text rather than a boolean, because a met claim has to be able to say
+    what met it: a green step that answers only "yes" leaves a reader who wants
+    to see what the board actually replied with no place to look but the COM
+    log. None rather than the empty string for "nothing did", so `equals: ""`
+    stays a claim that can be met.
 
     A serial line has no end, so "the whole thing" is read two ways. Any one
     complete line of what was received counts at once: a terminator is the board
@@ -195,13 +201,13 @@ def decoded_equals(decoded: str, expected: str, final: bool) -> bool:
     World", and a framework answering green to a value that was still arriving is
     worse than one that waits out its own timeout to be sure."""
     if final and decoded.strip() == expected:
-        return True
+        return decoded
     lines = decoded.splitlines()
     if lines and not decoded.endswith(("\n", "\r")):
         # The last fragment has no terminator yet, so it is not a line: it is
         # the beginning of one, and matching it would be matching a prefix.
         lines = lines[:-1]
-    return any(line.strip() == expected for line in lines)
+    return next((line for line in lines if line.strip() == expected), None)
 
 
 class StepComparator:
@@ -232,6 +238,12 @@ class StepComparator:
         # a step that timed out can say what it did see against what it wanted.
         self.captured_text: str | None = None
         self.captured_value: float | None = None
+        # What satisfied the claim on the pass that satisfied it: the line that
+        # equalled the value, or the span the pattern matched. None whenever the
+        # claim is unmet, which is what `matches` returning False means, so a
+        # value left over from an earlier pass can never be reported as this
+        # pass's evidence.
+        self.matched_text: str | None = None
 
     @property
     def claim(self) -> str:
@@ -257,13 +269,22 @@ class StepComparator:
     def matches(self, decoded: str, final: bool) -> bool:
         """Whether what has been received meets this claim. `final` is true on
         the pass the step's deadline has run out on: the last look at the line,
-        where a value that never carried a terminator can still be judged."""
+        where a value that never carried a terminator can still be judged.
+
+        Records what met the claim in `matched_text` on the way, so a met claim
+        answers with the evidence rather than only with the verdict."""
+        self.matched_text = None
         if self.equals is not None:
-            return decoded_equals(decoded, self.equals, final)
+            self.matched_text = decoded_equals(decoded, self.equals, final)
+            return self.matched_text is not None
         if self._finditer is None:
             return False
         if self.bounds is None:
-            return next(self._finditer(decoded), None) is not None
+            match = next(self._finditer(decoded), None)
+            if match is None:
+                return False
+            self.matched_text = match.group(0)
+            return True
         low, high = self.bounds
         matched = False
         # Every match, not the first: a line that reported an out-of-range value
@@ -275,7 +296,11 @@ class StepComparator:
             except ValueError:
                 continue
             self.captured_text, self.captured_value = match.group(1), value
-            matched = matched or low <= value <= high
+            if low <= value <= high:
+                # The latest reading inside the bounds, for the same reason the
+                # loop does not stop at the first match: the one that settled is
+                # the one the step passed on.
+                matched, self.matched_text = True, match.group(0)
         return matched
 
     def report(self) -> JsonObject:
@@ -347,6 +372,28 @@ class UartReadOutcome:
     @property
     def tail_result(self) -> JsonObject:
         return {"received_tail": data_result(self.tail, self.encoding), "received_tail_truncated": self.bytes_received > len(self.tail)}
+
+    def matched_result(self, matched: str | None) -> JsonObject:
+        """What a met claim matched, in the shape the unmet one answers in.
+
+        The green half of `received_tail`. A red step already quotes what the
+        port did say; a green one used to quote nothing at all, so a report could
+        not show what the board answered and a reader had to open the COM log to
+        see the line the step passed on. The same `{hex, text, encoding}` shape
+        as the tail, so one reader reads both, and bounded by the same cap for
+        the same reason: a claim met by a line inside a megabyte of banner must
+        not put the megabyte in the report. Bounded from the front rather than
+        the back, because a match begins where it begins.
+
+        Nothing at all when there is no matched text, rather than a null: the
+        v2 `uart_expect` reports no comparator and a report that predates this
+        carries no field, and only absence keeps those readable as what they
+        are."""
+        if matched is None:
+            return {}
+        encoded = encode_text(matched, self.encoding)
+        kept = encoded[:UART_EXPECT_TAIL_BYTES]
+        return {"matched_text": data_result(kept, self.encoding), "matched_text_truncated": len(kept) < len(encoded)}
 # What a step means is answered by one class per device kind (see StepDevice
 # below), and ACTION_SCHEMAS / ROUTE_FIELDS are merged from those classes rather
 # than written out here. Routing used to be a two-way split held in two
@@ -1412,7 +1459,7 @@ class UartRunner(SessionDevice):
             return outcome.read_failure
         common = {"port_id": self.id, **comparator.report(), "timeout_s": timeout_s, "bytes_received": outcome.bytes_received, "reads": outcome.reads}
         if outcome.matched:
-            return {"ok": True, "tool": "test_reactor", "summary": met, **common}
+            return {"ok": True, "tool": "test_reactor", "summary": met, **common, **outcome.matched_result(comparator.matched_text)}
         return {"ok": False, "tool": "test_reactor", "error_type": "comparator_unmet", "summary": unmet, **common, **outcome.tail_result}
 
     def _read_until(self, timeout_s: float, written: str, matches: Callable[[str, bool], bool]) -> UartReadOutcome:
