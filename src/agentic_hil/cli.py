@@ -90,6 +90,7 @@ from agentic_hil.knowledge import (
 from agentic_hil.reactorrun import run_plan, start_plan_detached
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success
+from agentic_hil.runevidence import write_run_evidence
 from agentic_hil.runlifecycle import request_run_stop, run_status
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH
@@ -433,6 +434,13 @@ def build_parser() -> argparse.ArgumentParser:
     # be a second process claiming a run it did not start.
     reactor_parser.add_argument("--run-handle", default=None, help=argparse.SUPPRESS)
 
+    run_evidence_parser = subparsers.add_parser(
+        "run-evidence",
+        help="turn a run report into the CI evidence the action design specifies: a JSON run summary, a job summary in Markdown, and a copy of the run's event logs. Reads the report and this workspace only, needs no configuration and touches no hardware",
+    )
+    run_evidence_parser.add_argument("--report", required=True, metavar="PATH", help="the run report JSON, as test-reactor wrote it")
+    run_evidence_parser.add_argument("--out", required=True, metavar="DIR", help="the directory the evidence is written to; created if it is not there")
+
     reactor_status_parser = subparsers.add_parser("test-reactor-status", help="say what a test run handle is doing: running (which step), finished, stopped, or its worker gone")
     reactor_status_parser.add_argument("--run", default=None, help="the handle the run was started under; without it, list the runs this bench still has records of")
 
@@ -529,6 +537,12 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
                 return detached_junit_refusal(args.junit_xml)
             return start_detached_test_reactor(args.test_config, wait_s=args.wait_s)
         return run_test_reactor(args.test_config, wait_s=args.wait_s, run_handle=args.run_handle, junit_xml=args.junit_xml)
+    if args.command == "run-evidence":
+        # No configuration is loaded on the way in, and that is the point: the
+        # evidence step of a workflow runs after a run that may have been
+        # refused for having no configuration at all, and a command that needed
+        # one to explain that would leave exactly that job with nothing.
+        return write_run_evidence(args.report, args.out)
     if args.command == "test-reactor-status":
         return run_status(load_cli_authoritative_config(None), args.run)
     if args.command == "test-reactor-stop":

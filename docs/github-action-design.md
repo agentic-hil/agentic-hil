@@ -166,7 +166,14 @@ produces it:
 
 ### The JSON run summary
 
-The one file a downstream consumer should need. Its shape:
+The one file a downstream consumer should need. Its shape, and the shape of the
+two documents beside it, is implemented and it is the CLI's:
+`agentic-hil run-evidence --report <run report> --out <directory>` writes
+`run-summary.json`, `job-summary.md` and `logs/` out of one report, so the action
+passes two paths and maps nothing. See
+[testing.md](testing.md#the-evidence-bundle-for-ci) for the command itself.
+
+The shape:
 
 ```json
 {
@@ -214,6 +221,22 @@ summary. That exclusion has to include the lock keys a refused run reports in
 identities the rest of this file is careful not to publish. When a run is
 refused because a device is busy, the summary says which logical name was
 unavailable, not which key.
+
+Five things the implementation settled that the shape above left open, and all
+five follow the same rule: a field nothing supplied is absent, never invented.
+`firmware` comes from `GITHUB_REPOSITORY`, `GITHUB_SHA` and `GITHUB_REF`, from
+`CI_PROJECT_PATH`, `CI_COMMIT_SHA` and `CI_COMMIT_REF_NAME` on GitLab, and from
+`GITHUB_EVENT_PATH`'s `pull_request.head.sha` for the head commit, which is
+published only when it is a commit id because it is the one value here that a
+fork's own event wrote; a shell outside CI produces no `firmware` block at all.
+`tools` always carries the installed version and this interpreter's, and carries
+a debugger's version line only where the report it is given holds that
+debugger's `debugger_info` result, which is what `agentic-hil doctor` produces
+and a plain run report does not. `bench.runner` comes from `RUNNER_NAME` and
+`RUNNER_LABELS`. `bench.devices` is read from the plan in the workspace, which
+is why a refused run still names its devices: the run recorded no steps, so the
+names exist only in the plan that never ran. And `bench.target` is the report's
+own, absent for a report that names none.
 
 ### The JUnit mapping
 

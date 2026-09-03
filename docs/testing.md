@@ -103,6 +103,24 @@ The file is written wherever the command answers at all, which includes every wa
 
 The one combination it refuses is `--detach`, and it says so: a detached start returns before the run has a report, so there is nothing to map yet, and no later command owns the path the start command was given. Run the plan synchronously to get the file, or follow the detached run with `test-reactor-status` and read the JSON report it names. The mapping itself is specified in [the GitHub action design](github-action-design.md#the-junit-mapping), which is what the planned action will pass a path to instead of holding a copy of.
 
+### The evidence bundle for CI
+
+The JUnit file is one of four things [the action design](github-action-design.md#what-the-job-leaves-behind) says a hardware job leaves behind. The other three come from one command, which reads a run report and writes them beside it:
+
+```text
+agentic-hil run-evidence --report .agentic-hil/reports/last-report.json --out artifacts/evidence
+```
+
+It writes `run-summary.json` in the shape that document gives (the outcome, the plan with its path, name and sha256, the firmware the CI environment named, the tool versions, the bench by configuration digest and logical device name, and the run's failed step, error type, cleanup, audit and recovery), `job-summary.md` for a reviewer to read, and `logs/`, a copy of the JSONL event logs the report names: one `com-*.jsonl` per serial session, one `can-*.jsonl` per bus session, and the debugger backend's own per-invocation logs. On GitHub the job summary is appended to the file `GITHUB_STEP_SUMMARY` names as well, so it renders on the job page; it is always written under `--out` too, which is what makes the same command serve a GitLab job and an operator at a shell.
+
+The exclusions are the command's, not the caller's. A run summary is world-readable on a public repository, so `config_in_force.path`, `executable`, `probe_id`, any absolute path from outside the workspace and every lock key are absent from both documents and from the names beside them: a device another run was holding is named by the logical name its plan gave it, never by the `probe:<serial>` the mutex took. Where one of those values sat inside a sentence a backend wrote, it is replaced by `[withheld]` and the sentence is kept, because the failing step's own words are what the artifact exists for.
+
+The logs are the one thing that is copied rather than derived, and they are copied byte for byte. A backend writes its own command line into its own log, so a device path can stand there; editing it out would leave a mirror that can no longer be checked against the hash-chained copy under `state_root`, which is the only reason the mirror is worth uploading. The rule is therefore the design's own: the summaries carry no identity, the collected evidence is what the run recorded, and a bundle from a private bench is uploaded on the terms the repository is published under.
+
+Nothing in it is invented. A field the environment did not supply is absent rather than empty: no `firmware` block outside CI, no `bench.runner` without `RUNNER_NAME`, no debugger version line unless the report carries that debugger's `debugger_info` result. The command loads no configuration and touches no hardware, so a report that records a preflight refusal, a missing configuration or a bench held by another run produces the same three outputs with `outcome: refused`, and a workflow's evidence step never has to special-case it. Its own exit code is about the evidence and not about the run, which is what makes `if: always()` safe to write.
+
+It reads two things: the report, and the workspace it is running in. A report written by a run in another workspace is served rather than refused, and says so: the logs it names are not here, so they are listed under `logs_missing`, and any it names by an absolute path from elsewhere are counted under `logs_outside_workspace` without being published, because those paths are identities.
+
 ### Detached runs, status and a cooperative stop
 
 A time-bounded endurance plan runs for hours, and a caller that has to sit in front of it for that long is a caller that cannot do anything else. `--detach` runs the plan in its own process and returns at once with a run handle and the path the report will be written to:
