@@ -570,11 +570,47 @@ class ComPortSession:
         self.reader_error: JsonObject | None = None
         self.lock = threading.Lock()
         self.io_lock = threading.Lock()
+        # The one writer for this session's log. Re-entrant, because the write
+        # path holds it across the line as well as across its own append: see
+        # `append_audit` for what that buys and `ComPortService.write_bytes`
+        # for why the append alone was not enough.
+        self.audit_lock = threading.RLock()
         self.reader: threading.Thread | None = None
         self.audit_broken = False
         self.lease = lease or DetachedHardwareLease()
         if start_reader:
             self.start_reader()
+
+    def append_audit(self, event: JsonObject, config: AgenticHILConfig | None = None) -> Exception | None:
+        """Append one entry to this session's log, in the order it happened.
+
+        Every appender goes through here: the reader thread recording what
+        arrived, and the write path recording what was sent. They used to
+        append on their own, so the file's line order was the order two threads
+        reached it rather than the order of the events, and a `tx` entry could
+        land behind the `rx` entry of the answer it caused. `safe_append_text`
+        already keeps each line whole; what was missing is which line goes
+        first, which is what a reader of the log actually follows.
+
+        The timestamp is taken inside this same section, by `append_jsonl`, so
+        the line order and the timestamps are one order rather than two, and a
+        log read top to bottom says what a log sorted by its own `time` field
+        says.
+
+        Returns exactly what `append_jsonl` returns and raises exactly what it
+        raises: the lock decides when a line is written, never whether, so the
+        audit-failure handling at every call site (quarantine, and the
+        `mark_audit_failure` the caller puts on its result) is untouched.
+
+        ``config`` marks an agent-initiated hardware effect, whose line is
+        mirrored into the trusted canonical ledger as well as the workspace
+        log. The reader's own feedback lines pass none and stay in the
+        workspace log, as they always have.
+        """
+        with self.audit_lock:
+            if config is None:
+                return append_jsonl(self.log_path, event)
+            return append_jsonl_audited(config, self.log_path, event)
 
     def start_reader(self) -> None:
         if self.reader is not None:
@@ -606,7 +642,7 @@ class ComPortSession:
                 if not data:
                     time.sleep(0.01)
                     continue
-                audit_error = append_jsonl(self.log_path, {"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
+                audit_error = self.append_audit({"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
                 if audit_error is not None:
                     self.reader_error = {"error_type": "audit_write_failed", "summary": "COM port feedback could not be audited.", "backend_error": str(audit_error)}
                     self.audit_broken = True
@@ -621,7 +657,7 @@ class ComPortSession:
                         "backend_error": str(error),
                         "likely_causes": likely_causes("serial_read_failed"),
                     }
-                    append_jsonl(self.log_path, {"event": "error", **self.reader_error})
+                    self.append_audit({"event": "error", **self.reader_error})
                 break
 
 
@@ -786,7 +822,7 @@ class ComPortService:
             return self._write_unattached_lease_report(opened, lease, release_if_safe=True)
         session = opened["session"]
         self.sessions[port_id] = session
-        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
+        audit_error = session.append_audit({"event": "start", "port_id": port_id, "device": session.port_config.device}, self.config)
         if audit_error is not None:
             session.audit_broken = True
             with suppress(BaseException):
@@ -878,25 +914,39 @@ class ComPortService:
         session = session_result["session"]
         if len(data) > session.port_config.max_write_bytes:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "COM port write exceeds configured max_write_bytes.", "bytes_requested": len(data), "max_write_bytes": session.port_config.max_write_bytes}
-        try:
-            sent = _write_with_bounded_retry(session.serial_handle, data)
-            flush = getattr(session.serial_handle, "flush", None)
-            if callable(flush):
-                flush()
-        except BaseException as error:
-            result = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "serial_write_failed", "summary": "COM port write failed.", "backend_error": str(error), "likely_causes": likely_causes("serial_write_failed"), "log_path": display_path(self.config, session.log_path)}
-            session.lease.quarantine("com_write_effect_unconfirmed", error)
-            result.update({"side_effect_status": "unknown", "retry_safe": False, "cleanup_required": True, "quarantined": True})
-            audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", **result})
-            if audit_error is not None:
-                session.audit_broken = True
-                session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
-                return mark_audit_failure(result, audit_error)
-            if not isinstance(error, Exception):
-                raise
-            return result
-        sent_data = data[:sent]
-        audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "tx", "bytes": len(sent_data), "hex": sent_data.hex(), "text": decode_bytes(sent_data, session.port_config.encoding)})
+        # The bytes on the line and the entry that records them are one section,
+        # not two. A target can answer while the write is still in flight, and
+        # the reader appends what it received the moment it has it, so with only
+        # the appends serialised the answer still reaches the file first and the
+        # log reads as a board replying before it was asked. Held from before
+        # the write, the entry for a stimulus is in the file ahead of the entry
+        # for anything that stimulus provoked.
+        #
+        # What waits here is the reader's next line, for the length of one
+        # write, which `write_timeout_s` already bounds. Not the feedback
+        # itself: the reader puts received bytes in the session buffer before it
+        # reaches its append, so a `com_read` during that window hands out
+        # everything that arrived.
+        with session.audit_lock:
+            try:
+                sent = _write_with_bounded_retry(session.serial_handle, data)
+                flush = getattr(session.serial_handle, "flush", None)
+                if callable(flush):
+                    flush()
+            except BaseException as error:
+                result = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "serial_write_failed", "summary": "COM port write failed.", "backend_error": str(error), "likely_causes": likely_causes("serial_write_failed"), "log_path": display_path(self.config, session.log_path)}
+                session.lease.quarantine("com_write_effect_unconfirmed", error)
+                result.update({"side_effect_status": "unknown", "retry_safe": False, "cleanup_required": True, "quarantined": True})
+                audit_error = session.append_audit({"event": "error", **result}, self.config)
+                if audit_error is not None:
+                    session.audit_broken = True
+                    session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
+                    return mark_audit_failure(result, audit_error)
+                if not isinstance(error, Exception):
+                    raise
+                return result
+            sent_data = data[:sent]
+            audit_error = session.append_audit({"direction": "tx", "bytes": len(sent_data), "hex": sent_data.hex(), "text": decode_bytes(sent_data, session.port_config.encoding)}, self.config)
         if sent < len(data):
             # Confirmed short, not unknown: every attempt returned normally,
             # nothing raised, and pyserial's own return values, read this
@@ -1258,7 +1308,9 @@ class ComPortService:
                 errors.append(("reader", error))
                 if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupt = error
-        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "stop", "reason": reason})
+        # After the reader has been joined above, so the stop entry is the last
+        # line rather than one racing whatever the reader had left to write.
+        audit_error = session.append_audit({"event": "stop", "reason": reason}, self.config)
         if audit_error is not None or session.audit_broken:
             session.audit_broken = True
             session.lease.quarantine("com_audit_broken", audit_error, audit_broken=True)

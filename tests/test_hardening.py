@@ -743,6 +743,170 @@ def test_com_write_that_stays_short_after_retry_records_event_without_quarantine
     assert service.coordinator.blocked is False
 
 
+class AnswersDuringTheWriteSerialHandle:
+    """A target whose answer is on the line before the write that asked returns.
+
+    This is the ordering a reactor plan produces at every send-then-match step,
+    and it is the one the session log used to record backwards. The reader is
+    parked on empty reads until `write` puts the answer there, and `write` then
+    waits until the reader has taken it and is at the log with it before
+    returning, so the answer is provably in the reader's hands while the write
+    is still in flight instead of whenever the scheduler got round to it.
+
+    The pause before returning is what leaves the ordering to the fix rather
+    than to the machine: with nothing serialising the log, the reader's line is
+    in the file long before the write path has built its own, whichever thread
+    the interpreter happens to be running.
+    """
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self, answer: bytes = b"ready\n") -> None:
+        self.answer = answer
+        self.answered = False
+        self.writes: list[bytes] = []
+        self.answer_on_the_line = threading.Event()
+        self.reader_at_the_log = threading.Event()
+        self.reader_arrived = False
+
+    def read(self, size: int) -> bytes:
+        if self.answered or not self.answer_on_the_line.wait(POLL_INTERVAL_S):
+            return b""
+        self.answered = True
+        return self.answer
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(bytes(data))
+        self.answer_on_the_line.set()
+        self.reader_arrived = self.reader_at_the_log.wait(WAIT_TIMEOUT_S)
+        time.sleep(0.05)
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def log_entries(log_path: Path) -> list[dict]:
+    return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_com_write_logs_the_command_before_the_answer_it_provoked(tmp_path: Path) -> None:
+    """The bug this pins: the reader thread and the write path appended to the
+    session log independently, so the file's line order was the order two
+    threads reached it rather than the order the events happened in. A target
+    that answers while the write is still in flight, which is what every
+    command a plan sends does, put its `rx` entry in the file ahead of the `tx`
+    entry for the command that caused it, and a log read top to bottom showed a
+    board replying before it was asked. Those lines are the evidence a plan
+    leaves behind, and validation's recovery item is checked against them, so
+    an out-of-order log is read wrong or has to be re-sorted before it can be
+    read at all.
+
+    Both halves of the invariant are pinned here: the `tx` entry is in the file
+    ahead of the `rx` it provoked, and the timestamps the entries carry are in
+    the same order as the lines, because the timestamp is now taken inside the
+    same section as the append rather than before a canonical mirror another
+    thread can append across.
+    """
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-log-order.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = AnswersDuringTheWriteSerialHandle()
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), start_reader=False)
+    service.sessions["dut"] = session
+
+    session_append = session.append_audit
+
+    def announce_the_reader(event, event_config=None):
+        # Announced before the append, not after: what decides the order of the
+        # file is which line reaches it, so the write is released while the
+        # reader still has its line to write rather than once it has written
+        # it. Announcing afterwards would ask the fix to let the reader finish
+        # first, which is the ordering being refused.
+        if event.get("direction") == "rx":
+            handle.reader_at_the_log.set()
+        return session_append(event, event_config)
+
+    session.append_audit = announce_the_reader  # type: ignore[method-assign]
+    session.start_reader()
+    reader = session.reader
+    assert reader is not None
+    try:
+        result = service.write_bytes("dut", b"version\n")
+
+        assert result["ok"] is True, result
+        assert handle.reader_arrived, "the answer never reached the reader while the write was in flight"
+        assert wait_until(lambda: len(log_entries(log_path)) == 2), log_entries(log_path)
+    finally:
+        session.active = False
+        reader.join(WAIT_TIMEOUT_S)
+    assert not reader.is_alive(), "reader thread never finished"
+
+    entries = log_entries(log_path)
+    assert [entry.get("direction") for entry in entries] == ["tx", "rx"], entries
+    assert entries[0]["text"] == "version\n"
+    assert entries[1]["text"] == "ready\n"
+    # The line order is the timestamp order, so a reader who follows the lines
+    # and one who sorts by `time` read the same session.
+    assert [entry["time"] for entry in entries] == sorted(entry["time"] for entry in entries), entries
+
+
+class AcceptingSerialHandle:
+    """Takes every write whole and never answers."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self) -> None:
+        self.writes: list[bytes] = []
+
+    def read(self, size: int) -> bytes:
+        return b""
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(bytes(data))
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def test_com_write_whose_tx_entry_cannot_be_written_still_quarantines(tmp_path: Path) -> None:
+    """Serialising the log changed when a line is written, never whether, and
+    an unwritable log still means what it always did. The bytes went out and
+    the entry recording them did not, which is a committed effect with no audit
+    behind it: the result carries the audit failure, the session is
+    audit-broken, and the port is held for cleanup instead of being handed to
+    the next call."""
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    # A directory, so the append cannot be written.
+    log_path = tmp_path / ".agentic-hil" / "logs"
+    log_path.mkdir(parents=True, exist_ok=True)
+    handle = AcceptingSerialHandle()
+    lease = service.coordinator.acquire(uart_device(config, "dut"))
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), lease, start_reader=False)
+    service.sessions["dut"] = session
+
+    result = service.write_bytes("dut", b"version\n")
+
+    assert handle.writes == [b"version\n"]
+    assert result["audit_ok"] is False, result
+    assert overall_success(result) is False
+    assert result["audit_error"]["backend_error"]
+    assert session.audit_broken is True
+    assert session.lease.state == "cleanup_required"
+    assert service._active_session("dut", "com_write")["error_type"] == "resource_quarantined"
+
+
 class DyingMidReadSerialHandle:
     """Answers a few empty reads, proving the session was genuinely alive
     when the wait started, then fails like a device unplugged while
