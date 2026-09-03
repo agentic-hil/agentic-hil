@@ -963,10 +963,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "default cannot be used. `agentic-hil init` and `project_config_create` fall back to it on their own for "
             "both the configuration and the state_root, so re-running either is usually the whole fix.",
             "This refusal is about a path, so it is deterministic: the same command with nothing changed is refused "
-            "again, with a new run id and the same two spellings. Repair the setting instead. When `field` is "
-            "`state_root`, the configuration names a root this profile will not accept and `agentic-hil init --force` "
-            "(or `project_config_create`) rewrites the file with one it will; anything else here is a path an operator "
-            "set, and it is changed in the file before the command is run again.",
+            "again, with a new run id and the same two spellings. Repair the setting instead. Which setting is read "
+            "off `path`, against the two roots `agentic-hil doctor` prints as `config_path` and under `State root`: a "
+            "`path` under the configured `state_root` (every report, log, lease and audit record is written there) "
+            "means the configuration names a root this profile will not accept, and `agentic-hil init --force` (or "
+            "`project_config_create`) rewrites the file with one it will. Any other `path` is one an operator set, and "
+            "it is changed in the file before the command is run again.",
             "Where each file may live: MCP resource " + PLATFORM_PATHS_URI + ".",
         ),
         do_not=(

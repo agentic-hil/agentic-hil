@@ -864,6 +864,26 @@ def render_doctor(result: JsonObject) -> list[str]:
     if _summary(status) and status.get("state") not in {None, "current"}:
         lines.extend(_wrap(_summary(status), indent=_INDENT))
 
+    # Beside the configuration and before anything about devices, because this is
+    # the root the audit trail, the leases and the reports are written under: a
+    # bench whose state root the enforcer refuses cannot record a hardware action
+    # at all, whatever every device below says about itself.
+    state_root = _mapping(result.get("state_root"))
+    if state_root:
+        verdict = "ok" if state_root.get("ok") is True else "FAILED"
+        body = _fields([("path", state_root.get("path")), ("verdict", verdict)])
+        body.extend(_wrap(_summary(state_root), indent=_INDENT))
+        error_type = _error_type(state_root)
+        if error_type:
+            body.extend(_fields([("error_type", error_type)], indent=_INDENT))
+            resolved = state_root.get("resolved_parent")
+            if isinstance(resolved, str) and resolved:
+                body.extend(_fields([("resolved_parent", resolved)], indent=_INDENT))
+            remedy, avoid = _remediation(dict(state_root))
+            body.extend(_numbered(remedy, indent=_INDENT * 2))
+            body.extend(_bullets([f"do not: {item}" for item in avoid], indent=_INDENT * 2))
+        lines.extend(_section("State root", body))
+
     installation = _mapping(result.get("installation"))
     if installation:
         body = _fields([("version", installation.get("version")), ("package_path", installation.get("package_path")), ("editable", installation.get("editable"))])

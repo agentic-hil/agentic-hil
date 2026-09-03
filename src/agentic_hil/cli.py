@@ -62,6 +62,7 @@ from agentic_hil.config import (
     tool_owned_user_roots,
     trusted_persistent_executable,
     user_file_lock_path,
+    writable_stable_directory,
 )
 from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOAD, RELOADED_SECTIONS, reload_description
 from agentic_hil.configstate import config_status, with_config_status
@@ -306,7 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted but the two flashing is interlocked against, and verify it with doctor. A config that is already there is kept, unchanged, and only the steps that do not touch it run")
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root; on a config that is already there, adding or refreshing those rules is the whole of what this command does")
-    init_parser.add_argument("--force", action="store_true")
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="regenerate this workspace's config from the attached hardware, replacing the file that is there: every permission goes back to the generated set, and `state_root` and the file's own location are rewritten to roots this profile accepts. That last part is the repair for a config naming a state root this host refuses, which `doctor` reports and which every plan is otherwise refused at its first step for. It is not the way to open one permission; `agentic-hil grant` moves one and leaves the rest of the file alone",
+    )
 
     adopt_parser = subparsers.add_parser(
         "adopt-hardware",
@@ -1772,6 +1777,84 @@ _NO_AGENT_ON_EXISTING_CONFIG = (
 )
 
 
+def _kept_configuration_roots(target_path: Path) -> list[tuple[str, Path]]:
+    """The two roots an existing configuration commits this bench to.
+
+    Its own directory, which every lock and every rewrite of the file goes
+    through, and the `state_root` the document names, which every report, log,
+    lease and audit record is written under. The state root is read out of the
+    file rather than taken from a load, because the question is what *this file*
+    names and a load can be refused for a dozen reasons that say nothing about
+    it; `_configured_state_root` already normalises one the way the loader does
+    and answers None for a document that names none this rule could be applied
+    to.
+    """
+    roots: list[tuple[str, Path]] = [("config_path", target_path.parent)]
+    state_root = _configured_state_root(target_path)
+    if state_root is not None:
+        roots.append(("state_root", state_root))
+    return roots
+
+
+def _kept_configuration_findings(target_path: Path) -> list[JsonObject]:
+    """A kept configuration's roots, each held to the rule a write is held to.
+
+    A plain `init` over an existing file writes nothing, which is right, and used
+    to say nothing either: the run ended `config skipped ... unchanged` and exit
+    0 over a file naming a `state_root` this host refuses every write under, and
+    every plan under it was then refused `audit_unavailable` at its first
+    hardware action (#399, #387). The one command that repairs it, `--force`, was
+    the one the report never mentioned.
+
+    `writable_stable_directory` is the same pair of tests `provisionable_state_root`
+    picks a generated root by, so what is asked of a file being kept is exactly
+    what would have been asked of one being written. Nothing is written and
+    nothing is repaired: each finding names the root, the spelling it resolves to
+    and the command that rewrites the file, and the verdict on the run is left to
+    `doctor`, which asks the same question about the same bench.
+    """
+    findings: list[JsonObject] = []
+    for field, directory in _kept_configuration_roots(target_path):
+        try:
+            writable_stable_directory(directory, field=field, config_path=str(target_path))
+        except ConfigError as error:
+            findings.append({"field": field, **error.to_dict()})
+    return findings
+
+
+# What a kept root being unusable costs, per root, because the two cost
+# different things: one stops the bench recording anything, the other stops the
+# file itself being locked and rewritten in place.
+_KEPT_ROOT_COST = {
+    "state_root": "No hardware action can be recorded under it, so every plan is refused at its first step with `audit_unavailable`.",
+    "config_path": "The configuration cannot be locked or rewritten where it stands, so every command that changes a permission is refused.",
+}
+
+
+def _kept_root_warning(finding: JsonObject) -> str:
+    """One finding as the sentence a person reads, with the repair named.
+
+    Both spellings where there are two, because the resolved one is the answer:
+    it is where the writes would actually land, and a reader who has only the
+    configured spelling goes looking for a symlink that is not there. Where there
+    is one spelling the refusal's own sentence says why instead. `--force` last,
+    because it is what to type.
+    """
+    resolved = finding.get("resolved_parent")
+    field = str(finding.get("field"))
+    because = (
+        f" It resolves to {resolved}, which is where a write under it would actually land, so the enforcer refuses every one of them."
+        if isinstance(resolved, str) and resolved
+        else f" {finding.get('summary')}"
+    )
+    return (
+        f"This configuration is kept exactly as it is, and the `{field}` it names is a root this profile will not "
+        f"accept: {finding.get('path')}.{because} {_KEPT_ROOT_COST.get(field, 'Nothing can be written under it.')} "
+        f"`{CONFIG_REOPEN_COMMAND}` regenerates the file with roots this profile does accept; it rewrites every "
+        f"permission in the file too, so read the file first."
+    )
+
+
 def init_project(config_path: str | None = None, agent: str | None = None, force: bool = False) -> JsonObject:
     """Set up one project: its authoritative config, verified by doctor.
 
@@ -1816,6 +1899,7 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
     permission_changes: list[str] = []
     state_actions = ensure_safe_state_root(workspace, target_path)
     config_result: JsonObject
+    kept_findings: list[JsonObject] = []
     doctor_result = _skipped_setup_step("Doctor was not reached.")
     permission_result: JsonObject
     if resolved_agent is None:
@@ -1832,7 +1916,20 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
         snapshots = _capture_file_snapshots(mutation_paths)
         try:
             if keep_existing:
-                config_result = {"ok": True, "skipped": True, "existing": True, "summary": "Existing authoritative config, unchanged: not a byte of it was written, and this never replaces operator policy.", "path": str(target_path)}
+                # The file stays as it is either way. What the check decides is
+                # whether the report says which of its roots this profile
+                # refuses; a kept file whose `state_root` is unusable is still
+                # kept, and is now named.
+                kept_findings = _kept_configuration_findings(target_path)
+                config_result = {
+                    "ok": True,
+                    "skipped": True,
+                    "existing": True,
+                    "summary": "Existing authoritative config, unchanged: not a byte of it was written, and this never replaces operator policy."
+                    + (f" One of the roots it names is a root this profile will not accept; see the warnings and `{CONFIG_REOPEN_COMMAND}`." if kept_findings else ""),
+                    "path": str(target_path),
+                    **({"unusable_roots": kept_findings} if kept_findings else {}),
+                }
             else:
                 config_result = init_config(config_path, force=force, _locked=True, _target=target_path)
 
@@ -1859,6 +1956,10 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
             "summary": "Agentic HIL project configured." if ok else "Agentic HIL project setup failed; its own committed file changes were rolled back.",
             "agent": agent,
             "config_path": str(target_path),
+            # A warning rather than a failure of this step: the file is kept, and
+            # keeping it is what was asked. The verdict on the bench belongs to
+            # `doctor`, which checks the same root and is a step of this run.
+            **({"warnings": [_kept_root_warning(finding) for finding in kept_findings]} if kept_findings else {}),
             "state_root_changes": state_actions,
             "permission_changes": permission_changes,
             "rollback": {"attempted": not ok, "ok": not rollback_errors, "errors": rollback_errors},
@@ -3943,6 +4044,37 @@ def _section_preview(config: AgenticHILConfig, section: str) -> object:
     return sorted(getattr(config, section))
 
 
+def _doctor_state_root(config: AgenticHILConfig) -> JsonObject:
+    """Whether this bench can record a hardware action, asked before one is tried.
+
+    `doctor` is the command a newcomer runs to find out whether the bench will
+    work, and it never read `state_root` at all. The audit trail, the leases and
+    the reports all live under that root, so a root the enforcer refuses refuses
+    the first hardware action of every plan with `audit_unavailable` (#387) while
+    `doctor` reported the bench healthy and nine commands ran against a file two
+    of them had called sound (#399).
+
+    Asked with `writable_stable_directory`, which is the pair of tests each of
+    those writes actually meets: the audit gate's `safe_file_path` refuses any
+    file whose parent resolves elsewhere, and redirection is a property of the
+    tree, so the root answers for everything under it. Not by running
+    `ensure_audit_ready`, which would initialize this project's report state and
+    take the report lock; `doctor` reports on a bench and does not open one.
+    """
+    root = Path(config.state_root)
+    try:
+        writable_stable_directory(root, field="state_root", config_path=config.config_path)
+    except ConfigError as error:
+        refusal = error.to_dict()
+        return {
+            **refusal,
+            "field": "state_root",
+            "path": str(root),
+            "summary": f"{error.summary} The audit trail, the leases and the reports are all written under this root, so no hardware action can be recorded and every plan is refused at its first step with `audit_unavailable`. `{CONFIG_REOPEN_COMMAND}` rewrites the configuration with a state root this profile accepts.",
+        }
+    return {"ok": True, "field": "state_root", "path": str(root), "summary": "The configured state root accepts the writes every hardware action is recorded by."}
+
+
 def doctor(config_path: str | None = None) -> JsonObject:
     try:
         config = load_cli_authoritative_config(config_path)
@@ -3950,6 +4082,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         result = error.to_dict()
         result["tool"] = "agentic_hil_doctor"
         return result
+    state_root_check = _doctor_state_root(config)
     # Check every probe whose toolchain this configuration required to resolve,
     # not only a bound one. Reporting a green doctor because nothing was bound
     # would hide an unplugged board, a wrong probe_id, or a broken toolchain on
@@ -3982,7 +4115,13 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # debugger toolchain installed yet.
     unsupported = sorted(name for name, support in target_support.items() if support.get("ok") is not True)
     undetermined = sorted(name for name, support in target_support.items() if support.get("status") == "undetermined")
-    all_ok = all(result.get("ok") is True for result in checks.values()) and not unsupported
+    # The state root counts against the verdict, and it is the one check here
+    # that decides whether *any* hardware action can happen: a probe that will
+    # not answer breaks one debugger, and a state root the enforcer refuses
+    # refuses the whole bench before it touches anything. A green doctor over
+    # exactly that is what #387 was, and what let nine more commands run.
+    state_root_ok = state_root_check.get("ok") is True
+    all_ok = all(result.get("ok") is True for result in checks.values()) and not unsupported and state_root_ok
     if not checked:
         summary = "Agentic HIL authoritative configuration loaded; debugger check skipped."
     elif all_ok:
@@ -3994,7 +4133,17 @@ def doctor(config_path: str | None = None) -> JsonObject:
             parts.append(f"the debugger check failed for: {', '.join(failed)}")
         if unsupported:
             parts.append(f"the configured target_type is not resolvable for: {', '.join(unsupported)}")
-        summary = f"Agentic HIL configuration loaded, but {'; and '.join(parts)}."
+        summary = f"Agentic HIL configuration loaded, but {'; and '.join(parts)}." if parts else "Agentic HIL configuration loaded."
+    if not state_root_ok:
+        # Compact here and complete under `state_root`: the headline has to carry
+        # the verdict, the path and the repair, because that is what a person
+        # reads before anything else and what a caller that keeps only `summary`
+        # is left with. The enforcer's own sentence stays with the check.
+        summary = (
+            f"{summary} This bench cannot record a hardware action: the configured state_root {state_root_check.get('path')} is a root this "
+            f"profile will not accept, so every plan is refused at its first step with `audit_unavailable`. `{CONFIG_REOPEN_COMMAND}` rewrites "
+            "the configuration with a state root it does accept."
+        )
     if undetermined:
         summary += f" Target support could not be determined here for: {', '.join(undetermined)}; that is unknown, not broken."
     # Checked at the end, against the configuration this run was decided by. The
@@ -4047,6 +4196,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
     return {
         **report,
         "config_path": config.config_path,
+        "state_root": state_root_check,
         **({"missing_extras": missing_extras} if missing_extras is not None else {}),
         "installation": _doctor_installation_report(),
         "mcp": _doctor_mcp_report(),
