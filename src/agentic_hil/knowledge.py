@@ -97,6 +97,12 @@ CONFIG_REVOKE_COMMAND = "agentic-hil revoke"
 # `bench_run_stop`; this is a command line refusing because *another* process
 # holds the bench, and what an operator does about that is find out whose it is.
 PERMISSION_CHANGE_IN_OPEN_RUN = "permission_change_in_open_run"
+# The rendering refusing to publish a result it cannot vouch for. Every result
+# rendered as prose is redacted first, and a redaction that hands back something
+# other than a document leaves nothing standing behind that claim, so the
+# command line prints this in place of the result. Nothing on the bench failed,
+# which is why it is its own error_type rather than one of the failures above.
+REDACTION_UNAVAILABLE_ERROR = "redaction_unavailable"
 
 # Both of these act on flash outside the path this server validates (a raw
 # debugger command writes whatever it is given, a mass erase clears whatever a
@@ -1116,6 +1122,34 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "instead: the same request failing one layer later for a reason that is not the real one.",
             "Do not read this as a hardware or a permission problem. Nothing was contacted, so there is no state to "
             "recover and no permission to ask the operator for.",
+        ),
+    ),
+    # The only entry here that is about this server's own output rather than
+    # about a bench, a policy or a payload. It is what a reader gets in place of
+    # a result the rendering could not vouch for, so it has to say that the
+    # command itself is not what went wrong.
+    REDACTION_UNAVAILABLE_ERROR: ErrorRemedy(
+        meaning=(
+            "Nothing on the bench failed and nothing was refused. The command produced its result, and the step that "
+            "replaces secret-named values before a result is rendered for a person did not hand back a document, so "
+            "the rendering had nothing it could vouch for and printed this in place of the result. The result itself "
+            "is intact and is still what `--json` prints; what was withheld is the prose."
+        ),
+        remediation=(
+            "Repeat the command with `--json`. That half is the document itself, redacted at its own sink and "
+            "unaffected by this, so it is how to read the result the rendering withheld.",
+            "Then report it, with the command that produced it and `agentic-hil --version`. Redaction answers a "
+            "document with a document for every document it is given, so no result's own contents can reach this: "
+            "what it names is an installation whose `agentic_hil.redact` is not the one this server ships.",
+            "Check for a second copy of the package while collecting that: `python -c \"import agentic_hil; "
+            "print(agentic_hil.__file__)\"` names the one actually imported, and a user-site install shadowing the "
+            "intended one is the way two versions end up in a single process.",
+        ),
+        do_not=(
+            "Do not read this as a hardware, permission or configuration failure. It says nothing about what the "
+            "command did or left behind; it says only that the result was not rendered.",
+            "Do not reach for another way to print the result. The one thing known about it here is that nothing has "
+            "vouched for its secret-named values, which is what the rendering declined to publish.",
         ),
     ),
     "target_not_detected:openocd": ErrorRemedy(

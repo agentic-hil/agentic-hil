@@ -83,6 +83,7 @@ from agentic_hil.knowledge import (
     CONFIG_GRANT_COMMAND,
     CONFIG_REOPEN_COMMAND,
     CONFIG_REVOKE_COMMAND,
+    REDACTION_UNAVAILABLE_ERROR,
     RUNNING_SERVER_COMPARISON,
     remediation_fields,
 )
@@ -287,12 +288,45 @@ def emit_result(result: JsonObject, command: str | None, *, human: bool) -> None
     byte-identical. The human half redacts through the same function first, so a
     rendering can never publish a secret-named value the document would have
     replaced.
+
+    A redaction that hands back something other than a document is the one case
+    that second step exists for, and it is exactly the case in which the
+    original must not be printed: rendering it would publish the values nothing
+    has vouched for. So the fallback fails closed and the rendering gets the
+    refusal below instead, never the result.
     """
     if not human:
         print_json(result)
         return
     redacted = redact_sensitive(result)
-    write_rendered(sys.stdout, render_result(redacted if isinstance(redacted, dict) else result, command))
+    document = redacted if isinstance(redacted, dict) else redaction_unavailable(command)
+    write_rendered(sys.stdout, render_result(document, command))
+
+
+def redaction_unavailable(command: str | None) -> JsonObject:
+    """What is rendered when redacting a result did not hand back a document.
+
+    Built from the command name and nothing else. Carrying over a field of the
+    result, even one that reads as harmless, would be the fail-open branch again
+    in a smaller shape: what is not known here is precisely which of that
+    document's values the redaction would have replaced.
+
+    It carries no `remediation` of its own because it is rendered and never
+    returned: `render_refusal` looks the error_type up in the same catalogue
+    that would have been merged in here, so a copy would only be a second one to
+    keep in step.
+    """
+    refusal: JsonObject = {
+        "ok": False,
+        "error_type": REDACTION_UNAVAILABLE_ERROR,
+        "summary": (
+            "This result was not rendered. Redacting it did not produce a document, so nothing can say its "
+            "secret-named values were replaced, and the unredacted result is not what gets printed instead."
+        ),
+    }
+    if command:
+        refusal["command"] = command
+    return refusal
 
 
 def result_succeeded(result: JsonObject) -> bool:

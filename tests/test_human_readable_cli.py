@@ -859,6 +859,30 @@ def test_a_secret_named_value_is_redacted_before_it_is_rendered(monkeypatch: pyt
     assert "[redacted]" in out
 
 
+@pytest.mark.parametrize("answer", [None, ["ok", "auth_token", "hunter2"]])
+def test_a_redaction_that_answers_with_no_document_withholds_the_result(monkeypatch: pytest.MonkeyPatch, answer: object) -> None:
+    """The fallback is the one case the guard exists for, so it fails closed.
+
+    `redact_sensitive` answers a document with a document, which is why this has
+    to be forced rather than provoked: the branch cannot be reached from a
+    result's own contents, and it is precisely the branch that must not print
+    the unredacted document. It used to, and a guard that falls back to the
+    thing it guards against says the opposite of what it guards.
+    """
+    document = {"ok": True, "summary": "Bridge opened.", "auth_token": "hunter2", "nested": {"api_key": "hunter2"}}
+    monkeypatch.setattr(cli, "redact_sensitive", lambda value: answer)
+
+    _, out = _run(monkeypatch, ["lease-status"], document, tty=True)
+
+    # Not the secret, and not one field of the document that carried it.
+    assert "hunter2" not in out
+    assert "Bridge opened." not in out
+    # What is there instead names the refusal, the command, and what to do.
+    assert "redaction_unavailable" in out
+    assert "lease-status" in out
+    assert "What to do" in out and "--json" in out
+
+
 def test_a_stream_that_cannot_spell_the_text_still_gets_the_answer() -> None:
     class Narrow(io.StringIO):
         encoding = "ascii"
