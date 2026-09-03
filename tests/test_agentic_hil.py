@@ -1436,31 +1436,313 @@ def test_nothing_is_reported_where_the_platform_replaces_a_running_executable(
     assert _processes_holding_installation() == []
 
 
-def test_upgrade_refuses_before_removing_anything_when_the_installation_is_in_use(
+def test_an_operator_upgrade_runs_while_servers_are_up_and_names_them_for_the_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The whole point: no package manager runs, so both installations survive.
+    """An upgrade the operator typed is never blocked by their own working bench.
 
-    Windows refuses to delete a file mapped as a running image, and uv removes
-    the tool environment before it rebuilds it. Failing there leaves neither the
-    old installation nor the new one, so the only safe move is to stop first.
+    The refusal this replaces sent them to close sessions they cannot always
+    see, over a danger the swap does not have: a server that is already running
+    keeps the files it has mapped and goes on answering with the release it
+    imported until the host that started it restarts. So the manager runs, the
+    new release lands on disk, and the result says which hosts to restart and
+    nothing else.
     """
     holder = {"pid": 4242, "image": f"{_TOOL_ENV}/Scripts/python.exe"}
+    calls = _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+    )
+    # After `_recording_manager`, which empties this list for every other test.
     monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [holder])
-    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: pytest.fail("must not select a manager"))
-    monkeypatch.setattr("agentic_hil.upgrade._run_upgrade_process", lambda *_args, **_kwargs: pytest.fail("must not run"))
 
-    result = upgrade_installation(["opencode"])
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert result["upgraded_on_disk"] is True
+    assert result["previous_version"] == __version__
+    assert result["version"] == "9.9.9"
+    # The manager was reached and did the work: nothing stopped in front of it.
+    assert calls[1][0] == PIP_UPGRADE_COMMAND
+    # The holders are reported where the restart is, in the shape the old
+    # refusal named them in, so an operator reads pid and image and closes those
+    # hosts rather than hunting for what is holding anything.
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [holder]
+    assert result["restart_required_by_count"] == 1
+    assert __version__ in result["restart_notice"]
+    assert "until the host that started it restarts" in result["restart_notice"]
+
+
+def test_an_upgrade_with_nothing_running_out_of_it_says_nothing_about_restarting_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neighbouring case, unchanged: no holders, no list, no sentence.
+
+    A field that appeared empty on every POSIX upgrade would be one more thing
+    to read on a result that has nothing to say, so it is absent rather than
+    empty."""
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+    )
+
+    result = upgrade_installation()
+
+    assert result["upgraded_on_disk"] is True
+    assert result["restart_required"] is True
+    assert "restart_required_by" not in result
+    assert "restart_required_by_count" not in result
+    assert "restart_notice" not in result
+
+
+# ---------------------------------------------------------------------------
+# The launcher on PATH, and the rename that lets the manager's copy land.
+
+
+def _uv_tool_bin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, launchers: dict[str, bytes]) -> Path:
+    """A uv tool bin directory holding these launchers, found the way uv's is.
+
+    `UV_TOOL_BIN_DIR` rather than a patched lookup, so the discovery this
+    depends on is exercised instead of stubbed, and `_installed_extra_distributions`
+    is fixed at one distribution that is always installed with this suite, so
+    the entry point names are the same on every machine that runs it.
+    """
+    directory = tmp_path / "bin"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, payload in launchers.items():
+        (directory / name).write_bytes(payload)
+    monkeypatch.setattr("agentic_hil.upgrade.owning_manager", lambda: "uv-tool")
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extra_distributions", lambda: ("pytest",))
+    monkeypatch.setenv("UV_TOOL_BIN_DIR", str(directory))
+    monkeypatch.setattr("agentic_hil.upgrade._host_locks_running_files", lambda: True)
+    return directory
+
+
+def _entrypoint_copying_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    bin_directory: Path,
+    *,
+    names: tuple[str, ...],
+    version_after: str,
+    reaches_entrypoints: bool = True,
+    refuses_occupied: bool = True,
+) -> list[list[str]]:
+    """A manager that installs its entry points the way uv does, and fails as uv fails.
+
+    uv writes each entry point by copying it over the name in its bin
+    directory, and Windows refuses that copy while a running process still has
+    the old image mapped:
+
+        Caused by: Failed to install entrypoint
+        Caused by: failed to copy file ... (os error 32)
+
+    So this fake refuses in exactly that place: a name that is still occupied is
+    os error 32 and nothing is written; a name that is free gets the new
+    launcher. `refuses_occupied=False` is the same manager on a host that
+    replaces a running file, where the copy simply lands on top of the old one,
+    and `reaches_entrypoints=False` is the other failure, the one that stops
+    before the entry points for a reason of its own.
+    """
+    calls: list[list[str]] = []
+
+    def run(invoked: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append(invoked)
+        if invoked[-1] == "--version":
+            return subprocess.CompletedProcess(invoked, 0, f"{version_after}\n", "")
+        if "agent-install" in invoked:
+            pytest.fail(f"the upgrade refreshed an agent this test never installed: {invoked}")
+        if not reaches_entrypoints:
+            return subprocess.CompletedProcess(invoked, 1, "", "error: Failed to upgrade agentic-hil\n  Caused by: the resolution step failed")
+        occupied = [name for name in names if (bin_directory / name).exists()] if refuses_occupied else []
+        if occupied:
+            return subprocess.CompletedProcess(
+                invoked,
+                1,
+                "",
+                f"Updated agentic-hil v{__version__} -> v{version_after}\nerror: Failed to upgrade agentic-hil\n"
+                f"  Caused by: Failed to install entrypoint\n  Caused by: failed to copy file to {bin_directory / occupied[0]}: (os error 32)",
+            )
+        for name in names:
+            (bin_directory / name).write_bytes(b"new launcher")
+        return subprocess.CompletedProcess(invoked, 0, "installed\n", "")
+
+    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: ("uv", ["uv.exe", "tool", "upgrade", "agentic-hil"]))
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", list)
+    monkeypatch.setattr("agentic_hil.upgrade._run_upgrade_process", run)
+    return calls
+
+
+def test_the_launcher_a_running_process_maps_is_renamed_aside_before_the_manager_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The reported failure, and the one move that gets past it.
+
+    `uv tool upgrade` copies the console script into its bin directory as the
+    last step, and on Windows that copy is refused while a live session still
+    has the old image mapped: the upgrade reached the end and then left a
+    half-changed tree. Windows does not refuse to *rename* that file, so the
+    launcher is moved to a sibling name first and the copy lands on a name
+    nothing holds. Every entry point the installed extras brought is moved the
+    same way, because the manager replaces those too.
+    """
+    from agentic_hil.upgrade import _SUPERSEDED_SUFFIX
+
+    bin_directory = _uv_tool_bin(monkeypatch, tmp_path, {"agentic-hil.exe": b"old launcher", "pytest.exe": b"old pytest"})
+    _entrypoint_copying_manager(monkeypatch, bin_directory, names=("agentic-hil.exe", "pytest.exe"), version_after="9.9.9")
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    assert result["version"] == "9.9.9"
+    # The manager's copy landed, which is the whole claim.
+    assert (bin_directory / "agentic-hil.exe").read_bytes() == b"new launcher"
+    assert (bin_directory / "pytest.exe").read_bytes() == b"new launcher"
+    # And the old images are still there under a name nothing resolves, because
+    # the processes that mapped them are still running out of them.
+    assert (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"old launcher"
+    assert (bin_directory / f"pytest.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"old pytest"
+    assert sorted(result["superseded_entrypoints"]) == [
+        str(bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}"),
+        str(bin_directory / f"pytest.exe{_SUPERSEDED_SUFFIX}"),
+    ]
+    # And it is no longer the half-changed outcome the reporter got.
+    assert "error_type" not in result
+
+
+def test_the_launcher_is_left_where_it_is_on_a_host_that_replaces_running_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """POSIX unlinks the old file and the running process keeps its own copy.
+
+    There is nothing to rename around there: the manager's copy lands on the
+    occupied name and the upgrade completes. Renaming anyway would leave a
+    second file behind on every upgrade, for a failure that platform does not
+    have."""
+    bin_directory = _uv_tool_bin(monkeypatch, tmp_path, {"agentic-hil": b"old launcher"})
+    monkeypatch.setattr("agentic_hil.upgrade._host_locks_running_files", lambda: False)
+    _entrypoint_copying_manager(monkeypatch, bin_directory, names=("agentic-hil",), version_after="9.9.9", refuses_occupied=False)
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    assert "superseded_entrypoints" not in result
+    # One file, replaced in place, and no sibling left beside it.
+    assert [entry.name for entry in sorted(bin_directory.iterdir())] == ["agentic-hil"]
+    assert (bin_directory / "agentic-hil").read_bytes() == b"new launcher"
+
+
+def test_a_renamed_leftover_is_deleted_by_the_next_upgrade_once_nothing_maps_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The second half of the rename: the file does not stay there forever.
+
+    The host that mapped the old image has restarted by the time the next
+    upgrade runs, so the delete that was impossible then succeeds now, and it is
+    this command that does it rather than the operator."""
+    from agentic_hil.upgrade import _SUPERSEDED_SUFFIX
+
+    bin_directory = _uv_tool_bin(
+        monkeypatch,
+        tmp_path,
+        {"agentic-hil.exe": b"current", f"agentic-hil.exe{_SUPERSEDED_SUFFIX}": b"two upgrades ago", f"agentic-hil.exe{_SUPERSEDED_SUFFIX}.1": b"one upgrade ago"},
+    )
+    _entrypoint_copying_manager(monkeypatch, bin_directory, names=("agentic-hil.exe",), version_after="9.9.9")
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    # Swept before the manager ran, so the fresh rename gets the first free name
+    # back rather than piling up behind the leftovers of earlier runs.
+    assert (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"current"
+    assert not (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}.1").exists()
+    assert (bin_directory / "agentic-hil.exe").read_bytes() == b"new launcher"
+
+
+def test_a_leftover_that_is_still_mapped_is_left_alone_and_is_not_an_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ordinary state of a bench whose sessions have not restarted yet.
+
+    A delete refused because the image is still mapped says only that the
+    process using it is still running, which is the case this whole mechanism
+    exists to serve. The file is harmless where it is, nothing resolves that
+    name, and the next upgrade asks again; reporting it would be an error notice
+    about a working machine."""
+    from agentic_hil.upgrade import _SUPERSEDED_SUFFIX
+
+    bin_directory = _uv_tool_bin(monkeypatch, tmp_path, {"agentic-hil.exe": b"current", f"agentic-hil.exe{_SUPERSEDED_SUFFIX}": b"still mapped"})
+    _entrypoint_copying_manager(monkeypatch, bin_directory, names=("agentic-hil.exe",), version_after="9.9.9")
+    unlink = Path.unlink
+
+    def refuse_while_mapped(self: Path, *args: object, **kwargs: object) -> None:
+        if _SUPERSEDED_SUFFIX in self.name:
+            raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+        unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse_while_mapped)
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert "warnings" not in result
+    # Untouched, and the fresh rename simply took the next free name beside it.
+    assert (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"still mapped"
+    assert (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}.1").read_bytes() == b"current"
+    assert (bin_directory / "agentic-hil.exe").read_bytes() == b"new launcher"
+
+
+def test_a_manager_that_fails_before_the_entrypoints_gets_its_launcher_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The half-changed outcome stays for a manager that genuinely fails mid-way.
+
+    It must not be the outcome of a copy this command could have made succeed,
+    and it must still be the outcome when the manager fails for a reason of its
+    own. The rename is only safe because of the other half asserted here: a
+    manager that never wrote the replacement leaves the installation with the
+    launcher it had, back under the name PATH resolves.
+    """
+    from agentic_hil.upgrade import _SUPERSEDED_SUFFIX
+
+    bin_directory = _uv_tool_bin(monkeypatch, tmp_path, {"agentic-hil.exe": b"old launcher"})
+    _entrypoint_copying_manager(monkeypatch, bin_directory, names=("agentic-hil.exe",), version_after="9.9.9", reaches_entrypoints=False)
+
+    result = upgrade_installation()
 
     assert result["ok"] is False
-    assert result["error_type"] == "installation_in_use"
-    assert result["held_by"] == [holder]
-    assert result["held_by_count"] == 1
-    assert "Nothing was changed." in result["summary"]
-    # The refusal has to say what to do, or it reads as an obstacle to clear,
-    # and the wrong way through is the command that destroys the installation.
-    assert any("Close the agent host" in step for step in result["remediation"])
-    assert any("uv tool install --upgrade" in step for step in result["do_not"])
+    assert result["error_type"] == "installation_changed_after_failed_upgrade"
+    assert result["changed_on_disk"] is True
+    assert (bin_directory / "agentic-hil.exe").read_bytes() == b"old launcher"
+    assert [entry.name for entry in sorted(bin_directory.iterdir())] == ["agentic-hil.exe"]
+    assert not (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}").exists()
+    assert "superseded_entrypoints" not in result
+
+
+def test_the_entry_points_moved_aside_are_this_distributions_and_the_extras_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Which names are looked for, and where they come from.
+
+    `agentic-hil` is seeded rather than read, so unreadable metadata costs the
+    extras' names and never the one this module is about; the rest come off the
+    distributions the installed extras actually brought, because a manager
+    reinstalling `agentic-hil[pyocd]` replaces those entry points too."""
+    from agentic_hil.upgrade import _entrypoint_names
+
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extra_distributions", lambda: ("pytest",))
+    names = _entrypoint_names()
+
+    assert "agentic-hil" in names
+    assert "pytest" in names
+
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extra_distributions", tuple)
+
+    assert _entrypoint_names() == ("agentic-hil",)
 
 
 def test_rewriting_the_registration_block_survives_a_backslash_in_the_path() -> None:

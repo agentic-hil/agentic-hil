@@ -423,28 +423,6 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not treat an unreadable file as an unchanged one and carry on as if the answers were current.",
         ),
     ),
-    "installation_in_use": ErrorRemedy(
-        meaning=(
-            "A process is running out of the installation this upgrade would replace, and on Windows a file mapped as "
-            "a running image cannot be deleted. A package manager that removes the environment before it rebuilds it "
-            "fails on that delete and stops in between, leaving neither the old installation nor the new one. The "
-            "refusal comes before anything is removed, so the installation is untouched and still works."
-        ),
-        remediation=(
-            "Close the agent host. It starts the Agentic HIL MCP server itself, so that server runs for as long as "
-            "the host does, which is why a working setup is exactly the state this fails in.",
-            "Run `agentic-hil upgrade` again, then start the host, which picks up the new server.",
-            "If no host is open, the refusal names each holding process by pid and image path. End those processes, "
-            "then run the upgrade again.",
-        ),
-        do_not=(
-            "Do not reach for `uv tool install --upgrade` or `uv tool install --force` to get past this. Those are "
-            "the commands the refusal protects you from: they remove the environment first, and that removal is what "
-            "fails while the server holds it.",
-            "Do not delete the environment by hand to unblock the upgrade. The running server is what holds it, and "
-            "an installation destroyed around a live process is the outcome being refused.",
-        ),
-    ),
     "installation_broken": ErrorRemedy(
         meaning=(
             "An upgrade stopped part way and this installation did not survive it. The check that produced this ran "
@@ -564,8 +542,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Close the agent host first. The command below reinstalls the environment, which on Windows means deleting "
-            "it, and that delete fails while the MCP server the host started is still running out of it: the failure "
-            "`installation_in_use` exists to prevent, and this command has no such check of its own.",
+            "it, and that delete fails while the MCP server the host started is still running out of it. `agentic-hil "
+            "upgrade` moves the launcher on PATH out of the manager's way before it runs; a reinstall typed by hand "
+            "has nothing of the kind, and the delete it starts with is the step that fails.",
             "Run the command in `reinstall_command` on this result. It is the one that clears the pin *and* keeps this "
             "installation's extras: `installed_extras` says which ones were found, and reinstalling without them "
             "removes what they installed. On a bench with `can`, that silently takes CAN support away. The hint `uv` "
@@ -598,8 +577,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Report the refusal, name `permissions.allow_upgrade`, and say which file carries it. The operator opens "
             "it by editing that file; you cannot, and `project_config_set` writes only `false` into a permission.",
             "The command line does the same job for a person and needs no permission at all: `agentic-hil upgrade` "
-            "from any directory. It preserves the extras the installation was created with, and it refuses while this "
-            "server is still running out of the installation, so it is run with the agent host closed.",
+            "from any directory. It preserves the extras the installation was created with, and it is not refused "
+            "because this server is running: it names this server under `restart_required_by` and the host restart "
+            "is what adopts the new release.",
             "`agentic-hil --version` beside this result's `running_version` is how an operator checks whether a newer "
             "release is even the difference they are chasing.",
         ),
@@ -647,12 +627,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "refusal exists to prevent."
         ),
         remediation=(
-            "Ask the operator to run `agentic-hil upgrade` at a shell with the agent host closed. It runs as a "
-            "separate process, so it can replace this installation; it upgrades through the manager that owns the "
-            "installation and keeps the extras it was created with; and if a server is still running out of it, it "
-            "refuses with `installation_in_use` and names the holding process rather than breaking the environment.",
-            "Then the host is started again, which loads the new server. Report `running_version` from this result as "
-            "the version still in force until that has happened.",
+            "Ask the operator to run `agentic-hil upgrade` at a shell. It runs as a separate process, so the "
+            "environment it replaces is not the one it is running out of; it upgrades through the manager that owns "
+            "the installation and keeps the extras it was created with; and it moves the launcher on PATH aside first, "
+            "so the copy that used to fail against a mapped image lands.",
+            "That command is not refused because this server is running. It names this server under "
+            "`restart_required_by`, which says what is left to do: restart the host, which is what loads the new "
+            "release. Report `running_version` from this result as the version still in force until that has happened.",
         ),
         do_not=(
             "Do not retry this tool after closing a run or a session. The refusal is about the platform, not about "

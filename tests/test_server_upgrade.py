@@ -183,6 +183,12 @@ def test_a_host_that_locks_running_files_is_told_the_upgrade_is_the_command_line
 ) -> None:
     """The Windows answer, and it is a refusal rather than a deferred swap.
 
+    The one guard that survives the rule that an operator's own upgrade is never
+    blocked, because it is not about other people's servers but about this one:
+    the interpreter answering this call is inside the environment the manager has
+    to remove, and Windows refuses to delete a mapped image. What the command
+    line does about the launcher on PATH does not reach that, and could not.
+
     A helper that replaced the files after this server exits would outlive the
     result that announced it: a failure would have nobody left to report to, and
     would leave the half-replaced environment the whole guard exists to prevent.
@@ -210,6 +216,46 @@ def test_a_host_that_locks_running_files_is_told_the_upgrade_is_the_command_line
     assert refused["retry_safe"] is False
     assert any("agentic-hil upgrade" in step for step in refused["remediation"])
     assert any("--force" in step for step in refused["do_not"])
+    # And what it sends the operator to is no longer described as a command that
+    # refuses while this server is up: it is not, and an answer that said so
+    # would send them to close the very host they are being told to use.
+    assert "not refused because this server is running" in refused["summary"]
+    assert not any("installation_in_use" in step for step in refused["remediation"])
+    assert any("restart_required_by" in step for step in refused["remediation"])
+
+
+def test_the_mcp_path_reports_the_other_servers_the_same_way_the_command_line_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where the platform guard does not stand, the shared implementation is shared.
+
+    `server_upgrade` and `agentic-hil upgrade` run the same
+    `replace_installation`, and a second copy of the running-server answer on one
+    of the two surfaces is how one of them learns about a fact the other reports.
+    So the same fields appear here, under the same `restart_required` this
+    tool has always been honest about, with `running_version` beside them saying
+    that this server is one of the processes still on the old release."""
+    fake_manager(
+        monkeypatch,
+        installed=subprocess.CompletedProcess([], 0, "installed\n", ""),
+        version_after="9.9.9",
+    )
+    holder = {"pid": 4242, "image": "C:/Users/op/AppData/Roaming/uv/tools/agentic-hil/Scripts/python.exe"}
+    # After `fake_manager`, which empties this list for every other test here.
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [holder])
+    tools = AgenticHILToolService(upgradable_config(tmp_path))
+    try:
+        result = tools.call(SERVER_UPGRADE)
+    finally:
+        tools.close()
+
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [holder]
+    assert result["restart_required_by_count"] == 1
+    assert result["running_version"] == __version__
+    assert any("restart the MCP server" in step for step in result["next_steps"])
 
 
 def test_a_pinned_installation_is_refused_with_a_command_that_keeps_the_extras(
