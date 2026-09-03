@@ -4,6 +4,12 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Fixed
+
+- The suite's spawned helpers now publish a pid or a readiness marker by writing it under a temporary name in the same directory and renaming it into place, and the parents that wait on those files wait for the value rather than for the name, with a budget that survives a slow interpreter start; a helper that created its pid file with a plain open left the name on the disk before the pid was in it, so a process-cleanup test on a loaded runner read a file that existed and was empty and failed converting it, and the same shape stood in every other pid and marker handshake across the process, loop, bench-mutex and coordination tests. (#395)
+
 ## [0.21.1] - 2026-09-03
 
 ### Changed

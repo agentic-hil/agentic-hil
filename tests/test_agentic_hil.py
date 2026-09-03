@@ -29,7 +29,7 @@ from conftest import (
     write_config,
 )
 from fixtures import fake_openocd
-from support import trusted_launcher
+from support import PUBLISH_ATOMICALLY_SOURCE, publish_atomically, read_when_published, trusted_launcher
 
 from agentic_hil import __version__
 from agentic_hil import process as process_module
@@ -6160,23 +6160,86 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def test_a_published_pid_never_carries_its_name_before_its_value(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The window issue #395 was read through, closed at the writer.
+
+    `open(path, "w").write(pid)` publishes the name first and the value after it,
+    and every helper below is read by a parent that polls for that name: on a
+    loaded runner the parent won a race nobody meant to run and converted an
+    empty string. The publisher writes under another name in the same directory
+    and renames it over the target, so at the moment before the name appears the
+    whole value is already on the disk. The rename is watched rather than raced,
+    which is what makes this hold on an idle machine as firmly as on a loaded
+    one: with no rename there is no moment to watch, and the assertion below has
+    nothing to say about.
+    """
+    pid_file = tmp_path / "descendant.pid"
+    name_seen_before_the_value: list[bool] = []
+    real_replace = os.replace
+
+    def watched_replace(source: str, target: str) -> None:
+        if Path(target) == pid_file:
+            name_seen_before_the_value.append(pid_file.exists())
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", watched_replace)
+    publish_atomically(str(pid_file), "4321")
+
+    assert name_seen_before_the_value == [False], "the value reached its own name before the rename"
+    assert pid_file.read_text(encoding="utf-8") == "4321"
+    # And the name the value travelled under is gone, so a helper's directory is
+    # left exactly as a plain write would have left it.
+    assert list(tmp_path.iterdir()) == [pid_file]
+
+
+def test_a_pid_file_that_appears_before_its_value_is_waited_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of #395: what the parent does if the window opens anyway.
+
+    The failure was `int()` over whatever the name held the instant it appeared.
+    The reader waits for a value instead, so a name that arrives before its
+    content costs a wait rather than a `ValueError`. The value here is written
+    from inside the reader's own wait, which is what makes the proof exact: a
+    reader that converted the first thing it saw would never reach the write.
+    """
+    pid_file = tmp_path / "descendant.pid"
+    pid_file.write_text("", encoding="utf-8")
+    # The state the old parent stopped its poll on, and what it then converted.
+    assert pid_file.exists()
+    with pytest.raises(ValueError):
+        int(pid_file.read_text(encoding="utf-8"))
+
+    waits: list[float] = []
+
+    def fill_the_file_on_the_first_wait(seconds: float) -> None:
+        waits.append(seconds)
+        pid_file.write_text("4321", encoding="utf-8")
+
+    monkeypatch.setattr(time, "sleep", fill_the_file_on_the_first_wait)
+
+    assert int(read_when_published(pid_file)) == 4321
+    assert waits == [0.01], "the reader took the empty file rather than waiting for the pid"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup regression")
 def test_process_cleanup_kills_sigterm_ignoring_descendant(tmp_path: Path) -> None:
     pid_file = tmp_path / "descendant.pid"
-    code = """
+    code = (
+        PUBLISH_ATOMICALLY_SOURCE
+        + """
 import signal, subprocess, sys, time
 descendant = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])
-open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
+publish_atomically(sys.argv[1], str(descendant.pid))
 signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(0)))
 time.sleep(30)
 """
+    )
     child = spawn_managed_process([sys.executable, "-c", code, str(pid_file)])
     try:
-        for _ in range(100):
-            if pid_file.exists():
-                break
-            time.sleep(0.01)
-        descendant_pid = int(pid_file.read_text(encoding="utf-8"))
+        # The pid, not the name: the helper's file used to appear empty and fill
+        # a moment later, and a poll that stopped at the name read "" off it
+        # (issue #395). One second was too short for the name as well, since a
+        # fresh interpreter under load can take longer than that just to start.
+        descendant_pid = int(read_when_published(pid_file))
 
         terminate_process_tree(child, 1.0)
 
@@ -6190,15 +6253,18 @@ time.sleep(30)
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup regression")
 def test_process_cleanup_handles_exited_group_leader(tmp_path: Path) -> None:
     pid_file = tmp_path / "descendant.pid"
-    code = """
+    code = (
+        PUBLISH_ATOMICALLY_SOURCE
+        + """
 import signal, subprocess, sys
 descendant = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])
-open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
+publish_atomically(sys.argv[1], str(descendant.pid))
 """
+    )
     child = spawn_managed_process([sys.executable, "-c", code, str(pid_file)])
     try:
         child.wait(timeout=5)
-        descendant_pid = int(pid_file.read_text(encoding="utf-8"))
+        descendant_pid = int(read_when_published(pid_file))
 
         terminate_process_tree(child, 1.0)
 
@@ -6305,14 +6371,17 @@ def test_process_cleanup_takes_an_already_gone_group_that_answers_esrch(monkeypa
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object regression")
 def test_registered_windows_process_cleanup_kills_descendant_after_leader_exit(tmp_path: Path) -> None:
     pid_file = tmp_path / "descendant.pid"
-    code = """
+    code = (
+        PUBLISH_ATOMICALLY_SOURCE
+        + """
 import subprocess, sys
 descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
-open(sys.argv[1], 'w', encoding='utf-8').write(str(descendant.pid))
+publish_atomically(sys.argv[1], str(descendant.pid))
 """
+    )
     child = spawn_managed_process([sys.executable, "-c", code, str(pid_file)])
     child.wait(timeout=5)
-    descendant_pid = int(pid_file.read_text(encoding="utf-8"))
+    descendant_pid = int(read_when_published(pid_file))
 
     terminate_process_tree(child, 1.0)
 
@@ -6404,7 +6473,7 @@ child = {function}(
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
 )
-open(sys.argv[1], "w", encoding="utf-8").write(str(child.pid))
+publish_atomically(sys.argv[1], str(child.pid))
 """
 
 
@@ -6424,9 +6493,11 @@ def grandchild_pid_after_spawner_exit(function: str, pid_file: Path) -> int:
     rather than a pipe. And the pid travels through a file rather than that
     stream, so nothing here depends on a descriptor the grandchild shares.
     """
-    spawner = subprocess.Popen([sys.executable, "-c", SPAWNER_SOURCE.format(function=function), str(pid_file)])
+    # Only the tail is formatted: the publisher's source carries braces of its own.
+    source = PUBLISH_ATOMICALLY_SOURCE + SPAWNER_SOURCE.format(function=function)
+    spawner = subprocess.Popen([sys.executable, "-c", source, str(pid_file)])
     assert spawner.wait(timeout=60) == 0
-    return int(pid_file.read_text(encoding="utf-8"))
+    return int(read_when_published(pid_file))
 
 
 def pid_alive_after_settling(pid: int, *, awaiting: bool, timeout_s: float = 5.0) -> bool:

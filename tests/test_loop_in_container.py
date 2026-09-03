@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from support import PUBLISH_ATOMICALLY_SOURCE, published, read_when_published
 
 from evals.install import refresh_login
 from evals.install.credentials import authentication_failure, credential_health, spent_refresh_token
@@ -1519,8 +1520,10 @@ entrypoint.os.geteuid = lambda: 1000
 
 # The loop the entrypoint starts: announce that main() has reached its own
 # subprocess.run (so the stop signal below lands during the wait, with the
-# handler already installed) and then block until the signal kills it.
-blocker = "import pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text('ready'); time.sleep(120)"
+# handler already installed) and then block until the signal kills it. The
+# announcement is renamed into place, like every other file this suite waits
+# on, so the waiter cannot be released by a name that is still empty.
+blocker = "import os, sys, time; open(sys.argv[1] + '.publishing', 'w').write('ready'); os.replace(sys.argv[1] + '.publishing', sys.argv[1]); time.sleep(120)"
 entrypoint.loop_command = lambda forwarded: [sys.executable, "-c", blocker, str(ready)]
 
 raise SystemExit(entrypoint.main(["--kinds", "codex-auth", "--", "--task", "x"]))
@@ -1553,7 +1556,7 @@ def _run_until_stopped_by(tmp_path: Path, sig: int) -> tuple[subprocess.Popen[by
         )
     try:
         deadline = time.monotonic() + 30
-        while not ready.exists():
+        while not published(ready):
             if process.poll() is not None:
                 pytest.fail(f"the harness exited before it started the loop:\n{log.read_text(errors='replace')}")
             if time.monotonic() > deadline:
@@ -5280,7 +5283,8 @@ def test_a_timed_out_agents_descendant_is_dead_and_silent_before_salvage(tmp_pat
     # write nothing now -- no post-kill wait has to guess when its write was due.
     grandchild_dormant = startup_budget + 10.0
     script.write_text(
-        "import os, pathlib, subprocess, sys, time\n"
+        PUBLISH_ATOMICALLY_SOURCE
+        + "import os, pathlib, subprocess, sys, time\n"
         "devnull = open(os.devnull, 'w')\n"
         # A grandchild that would write to the tree only long after the timeout,
         # then stay alive -- so a survivor is both a late write and a live process.
@@ -5291,7 +5295,10 @@ def test_a_timed_out_agents_descendant_is_dead_and_silent_before_salvage(tmp_pat
         "     \"time.sleep(120)\"],\n"
         "    stdout=devnull, stderr=devnull,\n"
         ")\n"
-        "pathlib.Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+        # Renamed into place rather than written into: the kill this test exists
+        # to fire can land between a plain open and its write, and then the read
+        # below has a name with nothing in it (issue #395).
+        "publish_atomically('child.pid', str(child.pid))\n"
         "sys.stdout.write('spawned\\n')\n"
         "sys.stdout.flush()\n"
         "time.sleep(120)\n",
@@ -5313,7 +5320,7 @@ def test_a_timed_out_agents_descendant_is_dead_and_silent_before_salvage(tmp_pat
     # _terminate_tree confirmed the group gone before run_agent raised, so the
     # descendant is dead here; having stayed dormant until well past the timeout,
     # it never wrote the marker before the kill and cannot write it now.
-    child_pid = int(child_pid_file.read_text())
+    child_pid = int(read_when_published(child_pid_file))
     assert not _pid_alive(child_pid), "a descendant survived the timeout"
     assert not marker.exists(), "a descendant wrote to the working tree after the timeout"
 
@@ -5338,7 +5345,8 @@ def test_terminate_tree_kills_a_child_that_outlived_its_reaped_group_leader(tmp_
     child_pid_file = workdir / "child.pid"
     script = tmp_path / "leader_that_exits.py"
     script.write_text(
-        "import os, pathlib, subprocess, sys\n"
+        PUBLISH_ATOMICALLY_SOURCE
+        + "import os, subprocess, sys\n"
         "devnull = open(os.devnull, 'w')\n"
         # A child left in the leader's own process group (no start_new_session), so
         # it stays in the group whose id is the leader's pid once the leader exits.
@@ -5346,7 +5354,7 @@ def test_terminate_tree_kills_a_child_that_outlived_its_reaped_group_leader(tmp_
         "    [sys.executable, '-c', 'import time; time.sleep(120)'],\n"
         "    stdout=devnull, stderr=devnull,\n"
         ")\n"
-        "pathlib.Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+        "publish_atomically('child.pid', str(child.pid))\n"
         # The leader returns here, leaving the child alive behind it.
         ,
         encoding="utf-8",
@@ -5364,7 +5372,7 @@ def test_terminate_tree_kills_a_child_that_outlived_its_reaped_group_leader(tmp_
     # the old code returned early on -- while its child lives on in the group whose
     # id is the leader's pid, which the kernel keeps reserved while a member remains.
     process.wait(timeout=30)
-    child_pid = int(child_pid_file.read_text())
+    child_pid = int(read_when_published(child_pid_file))
     assert _pid_alive(child_pid), "the child must outlive its leader for this test to mean anything"
     with pytest.raises(ProcessLookupError):
         os.getpgid(process.pid)
@@ -6332,7 +6340,10 @@ def _exploding_reader_thread(monkeypatch: pytest.MonkeyPatch, error: Exception, 
 
         def start(self) -> None:
             deadline = time.monotonic() + 30
-            while not_before is not None and not not_before.exists() and time.monotonic() < deadline:
+            # The published value, not the name: a name that appeared before its
+            # pid would release the failure a moment early, which is the one thing
+            # `not_before` exists to prevent.
+            while not_before is not None and not published(not_before) and time.monotonic() < deadline:
                 time.sleep(0.02)
             raise error
 
@@ -6455,25 +6466,30 @@ def _agent_with_a_descendant(tmp_path: Path, *, descendant_ignores_sigterm: bool
     members the reaper has not collected yet."""
     descendant = tmp_path / "descendant.py"
     descendant.write_text(
-        "import pathlib, signal, time\n"
+        PUBLISH_ATOMICALLY_SOURCE
+        + "import signal, time\n"
         + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if descendant_ignores_sigterm else "")
-        + "pathlib.Path('child.ready').write_text('1', encoding='utf-8')\n"
+        + "publish_atomically('child.ready', '1')\n"
         "time.sleep(120)\n",
         encoding="utf-8",
     )
     script = tmp_path / "agent_with_a_descendant.py"
     script.write_text(
-        "import os, pathlib, subprocess, sys, time\n"
+        PUBLISH_ATOMICALLY_SOURCE
+        + "import os, pathlib, subprocess, sys, time\n"
         "devnull = open(os.devnull, 'w')\n"
         "child = subprocess.Popen(\n"
         "    [sys.executable, str(pathlib.Path(__file__).with_name('descendant.py'))],\n"
         "    stdout=devnull, stderr=devnull,\n"
         ")\n"
-        "pathlib.Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+        # Every name here is renamed into place, so a waiter that sees one has the
+        # whole value behind it: the pids the assertions convert, and the readiness
+        # this poll and the injected failure below both time themselves by.
+        "publish_atomically('child.pid', str(child.pid))\n"
         "ready, deadline = pathlib.Path('child.ready'), time.monotonic() + 30\n"
         "while not ready.exists() and time.monotonic() < deadline:\n"
         "    time.sleep(0.02)\n"
-        "pathlib.Path('agent.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
+        "publish_atomically('agent.pid', str(os.getpid()))\n"
         "sys.stdin.read()\n",
         encoding="utf-8",
     )
@@ -6513,8 +6529,8 @@ def test_run_agent_kills_a_posix_agent_that_a_failure_after_the_launch_left_runn
             heartbeat=0,
         )
 
-    agent_pid = int((workdir / "agent.pid").read_text())
-    child_pid = int((workdir / "child.pid").read_text())
+    agent_pid = int(read_when_published(workdir / "agent.pid"))
+    child_pid = int(read_when_published(workdir / "child.pid"))
     assert not _pid_alive(agent_pid), "the agent survived the failure that ended its round"
     assert not _pid_alive(child_pid), "a descendant survived the failure that ended its round"
 

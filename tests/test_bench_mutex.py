@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 from conftest import write_config
+from support import PUBLISH_ATOMICALLY_SOURCE, publish_atomically, published, read_when_published
 
 from agentic_hil.bench import BenchMutex, DeviceBusyError, device_lock_root, is_physical_resource, resource_digest
 from agentic_hil.config import ConfigError, load_config
@@ -43,10 +44,15 @@ def child_environment(state_root: Path) -> dict[str, str]:
 
 
 def wait_for_file(path: Path, child: subprocess.Popen, timeout_s: float = 20) -> bool:
+    """Wait until the child has published `path`, or until it dies trying.
+
+    The wait is for the value rather than for the name: this file carries the
+    child's pid, and a name that is there is not yet a pid that is there unless
+    the writer renamed it into place (issue #395)."""
     deadline = time.monotonic() + timeout_s
-    while not path.exists() and child.poll() is None and time.monotonic() < deadline:
+    while not published(path) and child.poll() is None and time.monotonic() < deadline:
         time.sleep(0.02)
-    return path.exists()
+    return published(path)
 
 
 def holder_pid(ready: Path) -> int:
@@ -54,12 +60,7 @@ def holder_pid(ready: Path) -> int:
 
     On Windows a venv's ``python.exe`` re-launches the real interpreter, so
     Popen's pid is a redirector and not the owner; the child reports its own."""
-    for _ in range(200):
-        text = ready.read_text(encoding="utf-8").strip()
-        if text:
-            return int(text)
-        time.sleep(0.02)
-    raise AssertionError("child never reported its pid")
+    return int(read_when_published(ready))
 
 
 def test_device_lock_lives_outside_state_root_and_under_the_user_home(tmp_path: Path) -> None:
@@ -205,7 +206,9 @@ def test_two_state_roots_on_one_board_see_each_other(tmp_path: Path, monkeypatch
     config_path = write_config(tmp_path)
     ready = tmp_path / "child-ready"
     stop = tmp_path / "child-stop"
-    script = """
+    script = (
+        PUBLISH_ATOMICALLY_SOURCE
+        + """
 import os, sys, time
 from pathlib import Path
 from agentic_hil.config import load_config
@@ -213,12 +216,13 @@ from agentic_hil.coordination import HardwareCoordinator
 config = load_config(sys.argv[1])
 coordinator = HardwareCoordinator(config, 'child')
 coordinator.begin_run(['physical:bench-board'], label='child-plan')
-Path(sys.argv[2]).write_text(str(os.getpid()), encoding='utf-8')
+publish_atomically(sys.argv[2], str(os.getpid()))
 while not Path(sys.argv[3]).exists():
     time.sleep(0.02)
 coordinator.end_run()
 coordinator.close()
 """
+    )
     environment = child_environment(tmp_path / "child-state")
     child = subprocess.Popen([sys.executable, "-c", script, str(config_path), str(ready), str(stop)], env=environment)
     try:
@@ -234,7 +238,7 @@ coordinator.close()
         assert result["holder"]["label"] == "child-plan"
         assert result["side_effect_committed"] is False
     finally:
-        stop.write_text("stop", encoding="utf-8")
+        publish_atomically(str(stop), "stop")
         child.wait(timeout=20)
 
 
@@ -246,17 +250,19 @@ def test_a_killed_run_frees_its_devices_without_operator_recovery(tmp_path: Path
     board back the moment the owner dies."""
     config_path = write_config(tmp_path)
     ready = tmp_path / "child-ready"
-    script = """
+    script = (
+        PUBLISH_ATOMICALLY_SOURCE
+        + """
 import os, sys, time
-from pathlib import Path
 from agentic_hil.config import load_config
 from agentic_hil.coordination import HardwareCoordinator
 config = load_config(sys.argv[1])
 coordinator = HardwareCoordinator(config, 'child')
 coordinator.begin_run(['physical:bench-board'], label='doomed-plan')
-Path(sys.argv[2]).write_text(str(os.getpid()), encoding='utf-8')
+publish_atomically(sys.argv[2], str(os.getpid()))
 time.sleep(600)
 """
+    )
     environment = child_environment(tmp_path / "child-state")
     child = subprocess.Popen([sys.executable, "-c", script, str(config_path), str(ready)], env=environment)
     try:
