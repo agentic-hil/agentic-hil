@@ -1855,6 +1855,23 @@ def _kept_root_warning(finding: JsonObject) -> str:
     )
 
 
+def _unchecked_open_run_warning(config_result: JsonObject) -> list[str]:
+    """A regeneration's unasked open-run question, lifted into the run's warnings.
+
+    The note is written where the question is asked, and the sentence it carries
+    is the one a person needs, so it is carried up rather than restated: two
+    spellings of one finding are two spellings that drift. It has to reach the
+    rendering, though. `--json` is not where an operator reads `agentic-hil
+    init`, and a check that silently did not happen is exactly the shape of
+    finding that gets missed.
+    """
+    note = config_result.get("open_run_check")
+    if not isinstance(note, dict) or note.get("checked") is not False:
+        return []
+    summary = note.get("summary")
+    return [summary] if isinstance(summary, str) and summary else []
+
+
 def init_project(config_path: str | None = None, agent: str | None = None, force: bool = False) -> JsonObject:
     """Set up one project: its authoritative config, verified by doctor.
 
@@ -1949,6 +1966,14 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
 
         ok = all(overall_success(result) for result in (config_result, doctor_result, permission_result))
         rollback_errors = [] if ok else _restore_file_snapshots(snapshots)
+        # A kept file's unusable roots and a regeneration's unasked open-run
+        # question are the same kind of fact about one run: the command did what
+        # it was told to do and something beside it could not be established.
+        # Only one of the two can arise, because keeping and regenerating are the
+        # two halves of `--force`, and both belong in the sentences a person
+        # reads rather than in `--json` alone.
+        warnings = [_kept_root_warning(finding) for finding in kept_findings]
+        warnings.extend(_unchecked_open_run_warning(config_result))
         return {
             "ok": ok and not rollback_errors,
             "tool": "agentic_hil_init",
@@ -1956,10 +1981,11 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
             "summary": "Agentic HIL project configured." if ok else "Agentic HIL project setup failed; its own committed file changes were rolled back.",
             "agent": agent,
             "config_path": str(target_path),
-            # A warning rather than a failure of this step: the file is kept, and
-            # keeping it is what was asked. The verdict on the bench belongs to
-            # `doctor`, which checks the same root and is a step of this run.
-            **({"warnings": [_kept_root_warning(finding) for finding in kept_findings]} if kept_findings else {}),
+            # A warning rather than a failure of this step: the file is kept (or
+            # rewritten), and that is what was asked. The verdict on the bench
+            # belongs to `doctor`, which checks the same root and is a step of
+            # this run.
+            **({"warnings": warnings} if warnings else {}),
             "state_root_changes": state_actions,
             "permission_changes": permission_changes,
             "rollback": {"attempted": not ok, "ok": not rollback_errors, "errors": rollback_errors},
@@ -2170,7 +2196,7 @@ def _discarded_narrowings(previous_text: str | None, written: JsonObject) -> tup
     closed = (path for path, permitted in permission_surface(previous).items() if not permitted)
     return sorted(path for path in closed if granted.get(path)), None
 
-def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, str | None]:
+def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, str | None, JsonObject | None]:
     """Read the attached board for `init`, holding what a probe read holds.
 
     `init` called `discover_attached_hardware` directly: no `before_connect`, no
@@ -2202,9 +2228,11 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
     answers the question the other write sites ask, so this asks it too.
 
     Returns the discovery, the refusal that is the whole answer when the read did
-    not happen or did not end cleanly, and (when the board was read without a
-    lease) the reason it could not be leased.
+    not happen or did not end cleanly, (when the board was read without a lease)
+    the reason it could not be leased, and (when the open-run question could not
+    be asked at all) the note saying so.
     """
+    unchecked: JsonObject | None = None
     try:
         current: AgenticHILConfig | None = load_authoritative_config(workspace)
     except ConfigError as error:
@@ -2223,9 +2251,9 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
         current, unleased = None, error.error_type
     else:
         unleased = None
-        holds = bench_open_holds(current)
+        holds, unchecked = _init_open_holds(current)
         if holds is not None:
-            return {}, _init_open_run_refusal(current, holds), unleased
+            return {}, _init_open_run_refusal(current, holds), unleased, unchecked
     discovery, refusal, unaudited = discover_for_generation(
         current,
         None,
@@ -2237,7 +2265,74 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
     # two: it names why the file could not be loaded at all. `unaudited` is the
     # case where it loaded and nothing can be written under the `state_root` it
     # names, which is the other way a generation reads a board with no lease.
-    return discovery, refusal, unleased or unaudited
+    return discovery, refusal, unleased or unaudited, unchecked
+
+
+def _init_open_holds(existing: AgenticHILConfig) -> tuple[JsonObject | None, JsonObject | None]:
+    """The open-run question, and the answer when it cannot be asked at all.
+
+    The question is read out of the lease record, and the lease record lives
+    under the `state_root` this configuration names. On a file whose `state_root`
+    is a root this profile refuses (#387, #399) that read cannot happen: the
+    enforcer refuses it, and the coordinator turns the refusal into
+    `coordination_state_invalid`. So `init --force`, the one command every one of
+    those messages names as the repair, died reading state under the state root
+    it exists to replace, before it generated anything (#402).
+
+    The check is there to protect a run in progress. A run records itself under
+    the very root that cannot be written, so on this profile there is no run it
+    could be protecting, and a question with no answer is not a refusal. It is
+    reported as not asked, and the regeneration goes on.
+
+    Held to `writable_stable_directory`, the same rule `provisionable_state_root`
+    picks a root by and `doctor` judges one by, and it is the whole of the
+    licence: a root that passes it can be read under, so anything that failed
+    above is a real fault in the coordination state and is raised exactly as it
+    was before. Corruption on a healthy root still answers
+    `coordination_state_invalid`; that is what a repair may not paper over.
+    """
+    try:
+        return bench_open_holds(existing), None
+    except (CoordinationError, ConfigError):
+        root = Path(existing.state_root)
+        try:
+            writable_stable_directory(root, field="state_root", config_path=existing.config_path)
+        except ConfigError as refusal:
+            return None, _init_open_run_unchecked(root, refusal)
+        raise
+
+
+def _init_open_run_unchecked(root: Path, refusal: ConfigError) -> JsonObject:
+    """The pre-flight that could not look, as a finding instead of a traceback.
+
+    Both spellings where the refusal carries two, for the same reason
+    `_kept_root_warning` carries them: the resolved one is where a read under the
+    root would actually have landed, and a reader holding only the configured
+    spelling goes looking for a symlink that is not there. What it cost is stated
+    too, because "no open run was found" and "nobody could look" are different
+    answers and only one of them is a promise about the bench.
+    """
+    resolved = refusal.details.get("resolved_parent")
+    because = (
+        f" It resolves to {resolved}, which is where a read under it would actually land, so the enforcer refuses it."
+        if isinstance(resolved, str) and resolved
+        else f" {refusal.summary}"
+    )
+    return {
+        "checked": False,
+        "tool": CLI_INIT,
+        "field": "state_root",
+        "path": str(root),
+        **({"resolved_parent": resolved} if isinstance(resolved, str) and resolved else {}),
+        "error_type": refusal.error_type,
+        "summary": (
+            "Whether a bench run is open could not be checked, because that reads the lease record under the "
+            f"`state_root` this configuration names, {root}, and that is a root this profile will not accept.{because} "
+            "A run records itself under that same root, so there is no run this check could have been protecting, and "
+            "replacing that root is what this command does: the configuration was regenerated. If a run is open on "
+            "this bench, `agentic-hil lease-status` names it."
+        ),
+    }
 
 
 def _init_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObject:
@@ -2336,7 +2431,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # `project_config_create` has always used, so both paths now write one file for
     # one machine.
     profile = load_project_profile(workspace)
-    discovery, refusal, unleased = _init_bench_read(workspace)
+    discovery, refusal, unleased, open_run_unchecked = _init_bench_read(workspace)
     if refusal is not None:
         # Either the read was refused or it was never reached, and both leave
         # nothing to write a file from. Nothing was written; the refusal is the
@@ -2493,6 +2588,10 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         "available_com_ports": available_com_ports,
         "hardware_discovery": discovery,
         "hardware_lease": _init_lease_note(unleased),
+        # Only when it could not be made. The check passing is the ordinary case
+        # and says nothing a reader needs; the check not happening is a promise
+        # this result would otherwise be making silently.
+        **({"open_run_check": open_run_unchecked} if open_run_unchecked is not None else {}),
         "next_steps": next_steps,
     }
 

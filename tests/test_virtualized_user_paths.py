@@ -74,6 +74,7 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.configwrite import config_document_snapshot, load_config_document
+from agentic_hil.coordination import CoordinationError, HardwareCoordinator
 from agentic_hil.humanize import render_result
 from agentic_hil.knowledge import remediation_fields
 from agentic_hil.report import overall_success, report_state_path
@@ -1967,7 +1968,11 @@ def test_a_plain_init_names_the_state_root_it_keeps_and_will_not_accept(tmp_path
     assert findings[0]["error_type"] == "unsafe_configured_path"
     assert findings[0]["path"] == str(redirected)
     assert findings[0]["resolved_parent"] == str(tmp_path / "package-local-cache" / "agentic-hil")
-    # Both spellings and the repair, in the sentence a person reads.
+    # Both spellings and the repair, in the sentence a person reads. One
+    # sentence, too: a plain `init` never reaches the open-run pre-flight, so the
+    # note #402 added to a regeneration may not appear over a file being kept.
+    assert len(result["warnings"]) == 1, result["warnings"]
+    assert "open_run_check" not in config_step
     warning = " ".join(result["warnings"])
     assert str(redirected) in warning
     assert str(tmp_path / "package-local-cache" / "agentic-hil") in warning
@@ -2162,6 +2167,122 @@ def test_the_remediation_names_the_path_rather_than_a_field_no_refusal_carries(t
     assert "`path`" in guidance
     assert "`state_root`" in guidance
     assert "`agentic-hil init --force`" in guidance
+
+
+# ---------------------------------------------------------------------------
+# #402: the repair every one of those messages names, run on the profile they
+# name it for. Before generating anything `init --force` asks whether a bench run
+# is open, and that question is read out of the lease record under the very
+# `state_root` the command is about to replace. On this profile that read is
+# refused, the coordinator turns the refusal into `coordination_state_invalid`,
+# and the command died on state under the state root it exists to rewrite.
+
+
+def test_force_regenerates_when_the_open_run_check_cannot_read_the_old_state_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The defect, stated as the command that was supposed to be the way out.
+
+    Nothing had been written when it died, so the file naming the unusable root
+    was still there afterwards and the repair the refusals name was unreachable
+    from this profile. What the pre-flight protects is a run in progress, and a
+    run records itself under the same root nothing can be read from, so there is
+    none to protect: the question is reported as unasked and the regeneration
+    goes on to write the root this profile does accept.
+    """
+    workspace, redirected = generated_then_redirected(tmp_path, monkeypatch, "STLINK40201")
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    assert written_state_root(result) == fallback_state_root()
+    assert Path(load_authoritative_config(workspace).state_root) == fallback_state_root()
+    note = result["open_run_check"]
+    assert note["checked"] is False
+    assert note["field"] == "state_root"
+    # Both spellings, for the reason the kept-root finding carries both: the
+    # resolved one is where the read would actually have landed.
+    assert note["path"] == str(redirected)
+    assert note["resolved_parent"] == str(tmp_path / "package-local-cache" / "agentic-hil")
+    assert note["error_type"] == "unsafe_configured_path"
+    assert "could not be checked" in note["summary"]
+    assert "lease-status" in note["summary"], "a check that did not happen has to name what can still answer it"
+
+
+def test_the_unchecked_open_run_reaches_the_person_reading_the_regeneration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check that silently did not happen is the shape of finding that is missed.
+
+    `agentic-hil init --force` is read at a terminal, so the note rides the run
+    as a warning and survives the rendering: the root, the spelling it resolves
+    to and the fact that nobody looked. The run itself is green, because the
+    regeneration is what was asked for and it happened.
+    """
+    _, redirected = generated_then_redirected(tmp_path, monkeypatch, "STLINK40202")
+
+    result = init_project(force=True)
+
+    assert result["ok"] is True, result
+    assert result["steps"]["config"]["open_run_check"]["checked"] is False
+    rendered = reflowed(render_result(result, "init"))
+    assert "Warnings" in rendered
+    assert "Whether a bench run is open could not be checked" in rendered
+    assert str(redirected) in rendered
+    assert str(tmp_path / "package-local-cache" / "agentic-hil") in rendered
+
+
+def test_an_open_run_on_a_root_that_can_be_read_still_refuses_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal the repair may not take with it.
+
+    Nothing about this profile is a licence to write over somebody's run. Where
+    the record can be read and names a bench that is held, `--force` answers
+    `config_write_in_open_run` exactly as it did, nothing is written, and no note
+    claims the question went unasked.
+    """
+    bench(tmp_path, monkeypatch)
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK40203")
+    created = init_config()
+    assert created["ok"] is True, created
+    target = Path(created["path"])
+    before = target.read_bytes()
+
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire([f"probe:{fold_hardware_id('STLINK40203')}"])
+    try:
+        refused = init_config(force=True)
+    finally:
+        stranger.release_all()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "config_write_in_open_run"
+    assert "open_run_check" not in refused
+    assert target.read_bytes() == before
+
+
+def test_a_corrupt_lease_record_on_a_healthy_root_still_stops_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of the licence: only a refused root buys the note.
+
+    A root this profile accepts can be read under, so a record that will not
+    parse there is a real fault in the coordination state and not a question that
+    could not be asked. `coordination_state_invalid` still comes out, and the
+    configuration is still standing untouched behind it. Swallowing every
+    `CoordinationError` here would regenerate over a bench whose state nobody
+    understands.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK40204")
+    created = init_config()
+    assert created["ok"] is True, created
+    target = Path(created["path"])
+    before = target.read_bytes()
+    coordinator = HardwareCoordinator(load_authoritative_config(workspace), "operator-cli")
+    try:
+        coordinator._record_path(coordinator.project_key).write_text('{"version": 999}\n', encoding="utf-8")
+    finally:
+        coordinator.close()
+
+    with pytest.raises(CoordinationError) as raised:
+        init_config(force=True)
+
+    assert raised.value.result["error_type"] == "coordination_state_invalid"
+    assert target.read_bytes() == before
 
 
 def test_every_flag_init_offers_is_explained_in_its_own_help() -> None:
