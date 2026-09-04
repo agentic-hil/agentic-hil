@@ -39,7 +39,6 @@ from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS, remediation_field
 from agentic_hil.report import read_last_report
 from agentic_hil.tools import AgenticHILToolService, project_config_create
 from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, fold_hardware_id
-from evals.install.verifier import every_declared_permission_granted
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -403,6 +402,10 @@ def test_a_shipped_profile_generates_a_configuration_the_install_check_calls_saf
     satisfy is now enforced here and enforced by the eval that reads the
     starter's own generated configuration in a matrix run.
     """
+    # Repository tooling, not package content: imported here so the shipped
+    # test module still collects from a source distribution without evals/.
+    from evals.install.verifier import every_declared_permission_granted
+
     generated = _generated_from(profile_path)
 
     findings = []
