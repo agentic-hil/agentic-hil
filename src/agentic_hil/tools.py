@@ -531,14 +531,18 @@ class AgenticHILToolService:
                 # the incident; None is a reason no action could settle, left for
                 # the stand-down below or the operator.
                 #
-                # The probe the just-finished call quarantined is carried in so the
-                # reset and probe re-read run against that exact board. An adoption
-                # bootstrap read selects a physical probe the startup backend is not
-                # necessarily bound to (its `probe_id` argument overrides the entry's
-                # configured id, and an unbound entry gives the startup backend no
-                # selector at all), so recovering through the startup binding would
-                # otherwise reset, and clear the incident from, the wrong probe.
-                recovered = self._attempt_machine_recovery(self._bootstrap_selected_probe(result)) is not None
+                # The entry and probe the just-finished call quarantined are carried
+                # in so the reset and probe re-read run against that exact board. An
+                # adoption bootstrap read selects a physical probe the startup
+                # backend is not necessarily bound to (its `probe_id` argument
+                # overrides the entry's configured id, and an unbound entry gives the
+                # startup backend no selector at all), and a multi-debugger file is
+                # loaded unbound entirely, so recovering through the startup binding
+                # would otherwise reset the wrong probe or refuse through the unbound
+                # backend and settle nothing. The `debugger_id` says which entry the
+                # `probe_id` belongs to.
+                selected_debugger, selected_probe = self._bootstrap_selection(result)
+                recovered = self._attempt_machine_recovery(selected_probe, selected_debugger) is not None
             except Exception as error:
                 # Same rule as everywhere else recovery runs: a fault inside it
                 # never fails open, and never replaces the call's own answer.
@@ -1251,53 +1255,80 @@ class AgenticHILToolService:
         return None
 
     @staticmethod
-    def _bootstrap_selected_probe(result: JsonObject) -> str | None:
-        """The probe an adoption's bootstrap read selected, for recovery to bind to.
+    def _bootstrap_selection(result: JsonObject) -> tuple[str | None, str | None]:
+        """The entry and probe an adoption's bootstrap read selected, for recovery to bind to.
 
         Only an adoption/create/init read carries a `hardware_discovery` block, and
         only such a read selects a physical probe the startup backend may not be
         bound to. Every other call's incident is raised on the configured probe the
-        startup backend already targets, so this returns None and recovery keeps
-        that backend. The enumerated spelling is carried, never the folded resource
-        id: it is what a toolchain's `adapter serial`/`sn=` selector is matched
-        against, so a case-folded copy could select nothing."""
+        startup backend already targets, so this returns ``(None, None)`` and
+        recovery keeps that backend.
+
+        The probe is the enumerated spelling, never the folded resource id: it is
+        what a toolchain's `adapter serial`/`sn=` selector is matched against, so a
+        case-folded copy could select nothing. The entry is the `debugger_id` the
+        read named: a configuration with several debuggers is loaded unbound, so the
+        probe alone cannot say which toolchain and grants to recover the board
+        under. The two travel together and both come off the adoption result."""
         if not isinstance(result, dict):
-            return None
+            return None, None
         discovery = result.get("hardware_discovery")
         if not isinstance(discovery, dict):
-            return None
+            return None, None
         probe_id = discovery.get("probe_id")
-        return probe_id if isinstance(probe_id, str) and probe_id else None
+        probe = probe_id if isinstance(probe_id, str) and probe_id else None
+        debugger_id = result.get("debugger_id")
+        debugger = debugger_id if isinstance(debugger_id, str) and debugger_id else None
+        return debugger, probe
 
-    def _recovery_backend(self, selected_probe: str | None) -> tuple[DebuggerBackend, bool]:
-        """The backend a recovery action drives, bound to the probe that raised it.
+    def _recovery_config(self, selected_probe: str | None, selected_debugger: str | None) -> AgenticHILConfig | None:
+        """The config a recovery action drives, bound to the entry and probe that raised it.
 
-        Returns the backend and whether this call owns it (and must close it). The
-        startup backend is kept, and nothing new is built, when it already targets
-        the right probe: there is no ``selected_probe``, or it folds equal to the
-        configured id the startup backend selects on.
+        Returns None to mean "keep the startup config and its backend": there is no
+        ``selected_probe``, or the startup config already targets exactly it. Any
+        other answer is a throwaway config bound to the probe the read left in an
+        unknown state, and it is both the permission the recovery is checked against
+        and the binding its backend is built from.
 
-        A ``selected_probe`` the startup backend is not bound to is the adoption
-        case the finding named: the read gave its `probe_id` argument precedence
-        over the entry's configured id, or an unbound entry gave the startup
-        backend no selector at all. Resetting and probing through that binding
-        would drive, and clear the incident from, the wrong board, so a backend
-        bound to exactly the selected probe is built for the recovery instead.
-        Building one spawns no process and opens no probe (its work is in its
-        calls), and the caller closes it.
+        Two shapes need binding. When the startup config is bound to one entry, a
+        ``selected_probe`` that does not fold equal to that entry's configured id is
+        the read giving its `probe_id` argument precedence, or an unbound entry that
+        gave the startup backend no selector at all: the entry is kept and only its
+        probe is re-pointed. When the startup config is unbound -- a file with
+        several debuggers, deliberately loaded with `config.debugger is None` -- the
+        `probe_id` alone names no toolchain, so the entry adoption selected
+        (``selected_debugger``) is bound with `bind_debugger` and then pointed at the
+        probe. Recovering through the startup binding in either case would reset, and
+        clear the incident from, the wrong board or no particular board at all.
 
-        Two bindings keep the startup backend regardless: an injected one is the
-        caller's, not ours to rebuild (see `__init__`), and a configuration with no
-        bound debugger has no toolchain to bind a probe onto."""
+        A configuration with no debugger to name (none configured, or the read
+        named none) has nothing to bind a probe onto, so the startup config stands."""
+        if selected_probe is None:
+            return None
         debugger = self.config.debugger
-        if selected_probe is None or not self._owns_backend or debugger is None:
-            return self.backend, False
-        if debugger.probe_id is not None and fold_hardware_id(debugger.probe_id) == fold_hardware_id(selected_probe):
-            return self.backend, False
-        bound = replace(self.config, debugger=replace(debugger, probe_id=selected_probe))
-        return create_debugger_backend(bound), True
+        if debugger is not None:
+            if debugger.probe_id is not None and fold_hardware_id(debugger.probe_id) == fold_hardware_id(selected_probe):
+                return None
+            return replace(self.config, debugger=replace(debugger, probe_id=selected_probe))
+        if selected_debugger is None or selected_debugger not in self.config.debuggers:
+            return None
+        bound = bind_debugger(self.config, selected_debugger)
+        return replace(bound, debugger=replace(bound.debugger, probe_id=selected_probe))
 
-    def _attempt_machine_recovery(self, selected_probe: str | None = None) -> JsonObject | None:
+    def _recovery_backend(self, recovery_config: AgenticHILConfig | None) -> tuple[DebuggerBackend, bool]:
+        """The backend a recovery action drives, and whether this call owns it.
+
+        The startup backend is kept when there is nothing to rebind
+        (``recovery_config`` is None; see `_recovery_config`), and when the backend
+        was injected: an injected one is the caller's, not ours to rebuild (see
+        `__init__`). Otherwise a backend is built for exactly the bound
+        ``recovery_config``. Building one spawns no process and opens no probe (its
+        work is in its calls), and the caller closes it."""
+        if recovery_config is None or not self._owns_backend:
+            return self.backend, False
+        return create_debugger_backend(recovery_config), True
+
+    def _attempt_machine_recovery(self, selected_probe: str | None = None, selected_debugger: str | None = None) -> JsonObject | None:
         """Clear a recoverable incident without an operator, or refuse to.
 
         Two safe-state predicates, and the weakest one that can settle the open
@@ -1310,19 +1341,28 @@ class AgenticHILToolService:
         flash, reset, or session start: a physical act, gated on the bench's
         recovery.auto_recover policy and on allow_reset.
 
-        ``selected_probe`` is the physical probe the just-finished call
-        quarantined, when the call named one an adoption bootstrap read does. The
-        reset and probe run through a backend bound to exactly that probe, so the
-        incident is both settled and cleared from the board that raised it and no
-        other; without it the startup binding could reset, and clear the incident
-        from, a different probe. Every other incident is raised on the configured
-        probe the startup backend already targets, so ``None`` keeps that backend.
+        ``selected_probe`` and ``selected_debugger`` are the physical probe and
+        the configured entry the just-finished call quarantined, when the call named
+        them -- an adoption bootstrap read does. The reset and probe run through a
+        backend bound to exactly that entry and probe, so the incident is both
+        settled and cleared from the board that raised it and no other; without them
+        the startup binding could reset, and clear the incident from, a different
+        probe, or (a multi-debugger file loaded unbound) refuse through the startup
+        `UnboundDebuggerBackend` and settle nothing at all. That same bound config
+        is the permission this recovery is checked against, so an unbound service
+        config does not withhold a probe the selected entry in fact grants. Every
+        other incident is raised on the configured probe the startup backend already
+        targets, so both being None keeps that backend and config.
 
         Returns the recovery report, or None when the incident is not machine
         recoverable or a predicate did not confirm the safe state."""
         allowed = self.coordinator.recoverable_reasons()
         reason = self.coordinator.retryable_incident(allowed) if allowed else None
-        if reason is None or not self.config.probe_allowed():
+        # Resolved once: it is both the grant the recovery is authorized by and the
+        # binding its backend is built from, so the two can never disagree about
+        # which board is being driven.
+        recovery_config = self._recovery_config(selected_probe, selected_debugger)
+        if reason is None or not (recovery_config or self.config).probe_allowed():
             return None
         if not self._machine_recovery_attempt_allowed():
             return None
@@ -1331,7 +1371,7 @@ class AgenticHILToolService:
         needs_reset = reason not in RETRYABLE_CLEANUP_REASONS
         if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
             return None
-        backend, owns_backend = self._recovery_backend(selected_probe)
+        backend, owns_backend = self._recovery_backend(recovery_config)
         try:
             if needs_reset:
                 reset = self._invoke_dispatch(lambda: backend.reset_target("halt"))

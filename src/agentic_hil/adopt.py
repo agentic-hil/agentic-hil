@@ -793,7 +793,12 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
         profile=DEFAULT_PROJECT_PROFILE,
     )
     if refusal is not None:
-        return {**refusal, "path": str(target_path), "workspace_root": existing.workspace_root}
+        # `debugger_id` rides alongside `hardware_discovery` so a quarantined read
+        # tells the service's recovery which configured entry it selected. A
+        # configuration with several debuggers is loaded unbound, so the enumerated
+        # `probe_id` alone is not enough to bind a recovery backend: only the named
+        # entry says which toolchain and grants that probe is driven under.
+        return {**refusal, "path": str(target_path), "workspace_root": existing.workspace_root, "debugger_id": debugger_name}
     if not overall_success(discovery):
         return {
             **discovery,
