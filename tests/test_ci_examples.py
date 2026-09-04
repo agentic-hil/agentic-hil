@@ -403,9 +403,13 @@ def test_every_command_the_examples_invoke_is_one_this_build_defines() -> None:
     `run-evidence` while the pin still named the release before the one that
     introduced them, so an isolated install of that release rejected both at
     argument parsing. Verifying the published artifact's own CLI is a
-    release-time step, done by the hardware job's `agentic-hil --version` gate
-    and the simulator job's install of the exact pin, not something a hermetic
-    unit test can do.
+    release-time step the publish workflow now performs: its
+    `verify-published-examples` job installs the exact pinned distribution from
+    PyPI and runs `tools/verify_published_examples.py`, which asserts the
+    installed CLI reports that version and answers every command the examples
+    invoke (`tests/test_verify_published_examples.py` covers that tool). That is
+    the download-and-inspect no hermetic unit test can do; what this test does is
+    hold this checkout -- which the pin equals at release -- to defining them.
     """
     available = cli_subcommands()
     invoked = invoked_subcommands(

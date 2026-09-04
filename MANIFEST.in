@@ -22,6 +22,7 @@ exclude tests/test_loop_in_container.py
 exclude tests/test_shipped_references.py
 exclude tests/test_version_consistency.py
 exclude tests/test_ci_examples.py
+exclude tests/test_verify_published_examples.py
 exclude tests/test_ci_linux.py
 # The one-line installers sit at the repository root and are fetched from there
 # rather than from the distribution, so the pins on them have nothing to read in

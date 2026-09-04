@@ -1,7 +1,7 @@
 # CI examples: running a plan on a self-hosted bench
 
 Two worked files, shipped in this repository and runnable as written once the
-runner is set up:
+runner is set up and the release they pin is published:
 
 - [`examples/ci/github-actions.yml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/ci/github-actions.yml):
   a GitHub Actions workflow with a hardware job on a self-hosted runner and a
@@ -82,6 +82,21 @@ commands these examples invoke rather than the release before it, so the pin
 names the distribution the examples were tested against and cannot drift off it:
 `python tools/check_version_consistency.py --list` prints all three files among
 the positions a release stamps.
+
+That "builds toward" is why the caveat above says *once the release they pin is
+published*. On a release commit the release being cut is the one the examples
+pin, so the file a reader receives in that release pins a version already on the
+index. On `master` between releases the pin names the next release, which the
+index does not carry yet: copying the simulator job before that release exists
+installs nothing, and the previous release does not expose the commands these
+examples were written to show. Pinning the previous release instead would name a
+distribution a reader can install today but that rejects `check-plan` and
+`run-evidence` at argument parsing, which is the worse of the two. The publish
+workflow closes the loop rather than leaving it to trust: after PyPI accepts a
+release, `tools/verify_published_examples.py` installs exactly the pinned
+distribution and confirms its CLI reports that version and answers every command
+the examples invoke, so a release whose artifact does not match its own examples
+is an alarm on the release and not a stranger's failed copy.
 
 The same rule reaches everything else the jobs fetch. Actions are pinned by
 commit SHA with the tag they stood for in a trailing comment, not by tag. No
