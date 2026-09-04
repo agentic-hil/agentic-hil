@@ -35,10 +35,11 @@ from agentic_hil.config import (
 )
 from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
 from agentic_hil.devices import config_devices, debugger_device
-from agentic_hil.knowledge import remediation_fields
+from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS, remediation_fields
 from agentic_hil.report import read_last_report
 from agentic_hil.tools import AgenticHILToolService, project_config_create
 from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, fold_hardware_id
+from evals.install.verifier import every_declared_permission_granted
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -324,6 +325,76 @@ def test_a_shipped_profile_names_nothing_that_would_be_read_past(profile_path: P
 def test_the_guard_over_shipped_profiles_has_a_profile_to_guard() -> None:
     """A walk that finds nothing parametrizes to nothing and proves nothing."""
     assert _shipped_profiles()
+
+
+# The bench the profiles below are filled in against. It decides no permission,
+# which is the point: what is under test is what the profile and the generation
+# agree to write, never what happened to be plugged in.
+_PROFILE_BENCH = {
+    "ok": True,
+    "executable": str(Path(__file__).resolve()),
+    "probe_id": "STLINK123",
+    "target": {"probe_id": "STLINK123", "controller": "STM32F446RE"},
+    "com_port": {"device": "COM3", "serial_number": "STLINK123"},
+}
+
+
+def _generated_from(profile_path: Path) -> JsonObject:
+    """The configuration `agentic-hil init` writes for a bench with this profile."""
+    profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    assert isinstance(profile, dict), profile_path
+    template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
+    assert isinstance(template, dict)
+    return apply_discovery_to_template(template, profile, _PROFILE_BENCH)
+
+
+@pytest.mark.parametrize("profile_path", _shipped_profiles(), ids=lambda path: path.parent.name)
+def test_a_shipped_profile_generates_a_configuration_the_install_check_calls_safe(profile_path: Path) -> None:
+    """A profile this project publishes may not produce a bench its own eval refuses.
+
+    The install evaluation holds a generated configuration to "every declared
+    `allow_*` is true except the two flash interlocks", and the demo profile
+    shipped `com_ports.dut_uart.permissions.allow_write: false` while the STM32
+    starter's copy of the same file shipped `true`. An agent that fetched the
+    example from this repository and ran `agentic-hil init --force` therefore
+    failed `authoritative config is safe :: com_ports.dut_uart.permissions were
+    not all granted by the install: ['allow_write']`, and a stranger following
+    the same trail landed on a bench whose serial line could not be written to,
+    which surfaces much later as a refused test plan rather than here.
+
+    Stated against the verifier's own function rather than against a restatement
+    of its rule, so the two published profiles cannot come apart again and a
+    change to the rule reaches this guard on the day it is made.
+
+    Only the profiles in this checkout are walked. The starter's copy lives in
+    `agentic-hil/stm32-starter`, a separate repository this suite has no offline
+    reach into, so what pins the two together is that the rule they both have to
+    satisfy is now enforced here and enforced by the eval that reads the
+    starter's own generated configuration in a matrix run.
+    """
+    generated = _generated_from(profile_path)
+
+    findings = []
+    for section in ("debuggers", "com_ports", "can_buses"):
+        for name, entry in (generated.get(section) or {}).items():
+            granted, detail = every_declared_permission_granted(section, name, entry["permissions"])
+            if not granted:
+                findings.append(detail)
+    assert findings == [], f"{profile_path} generates a configuration the install check refuses"
+
+
+@pytest.mark.parametrize("profile_path", _shipped_profiles(), ids=lambda path: path.parent.name)
+def test_a_shipped_profile_still_generates_a_bench_that_can_flash(profile_path: Path) -> None:
+    """The other half, or "grant everything" would satisfy the guard above.
+
+    The two interlocked flags stay false, so the invariant is not met by writing
+    `true` everywhere: a profile that reopened either would ship a bench whose
+    `flash_firmware` is refused on that probe, which is the failure the pair
+    exists to make impossible rather than one it would report."""
+    permissions = _generated_from(profile_path)["debuggers"]["dut"]["permissions"]
+
+    assert permissions["allow_flash"] is True
+    assert [flag for flag in EXCLUSIVE_FLASH_PERMISSIONS if permissions[flag]] == []
 
 
 def test_the_profile_that_fills_in_for_a_missing_one_is_held_to_the_same_rule() -> None:
