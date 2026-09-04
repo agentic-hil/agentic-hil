@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentic-hil"
-version = "0.21.2"
-description = "A green build is not enough: Agentic HIL lets an AI agent probe, flash, reset and exchange UART and CAN traffic with a real STM32 or other embedded target, through policy-gated MCP tools instead of a raw debugger shell, so hardware-in-the-loop tests run unattended in CI."
+version = "0.21.3.dev0"
+description = "Hardware-in-the-loop MCP server for AI coding agents: flash, reset and drive UART and CAN on a real STM32 or other embedded target, plus a pytest plugin for the same loop in CI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -40,13 +40,17 @@ classifiers = [
   "Environment :: Console",
   "Framework :: Pytest",
   "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Embedded Systems",
-  "Topic :: Software Development :: Testing"
+  "Topic :: Software Development :: Testing",
+  "Topic :: System :: Hardware"
 ]
 dependencies = [
   "jsonschema>=4.22",

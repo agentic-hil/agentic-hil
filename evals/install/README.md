@@ -105,7 +105,10 @@ Options:
 - `-NonInteractive`: forbid UAC, license, and other UI prompts; setup exits `20`
   before the first mutation when user action would be required;
 - `-AcceptPackageAgreements`: explicitly permit non-interactive winget source
-  and package agreement acceptance when Git or Python must be installed.
+  and package agreement acceptance when Git or Python must be installed;
+- `-DockerWaitSeconds`: how long to wait for Docker Desktop to answer `docker
+  info`, forwarded to the Docker-only helper below (default 240, between 30 and
+  900). The license dialog has to be accepted inside that window.
 
 Docker-only helper:
 
@@ -189,6 +192,68 @@ verifier compares every artifact against is what the install produces. Published
 mode installs the release from the index and stays pinned to the release. It is
 also why the refusal above does not fire on a tree that carries a suffix, since
 nothing is being reported as the release any more.
+
+### Reasoning effort
+
+How hard the model is told to think is a matrix axis of its own.
+`reasoning_effort` takes `low`, `medium`, `high`, `xhigh`, or `max`, the
+intersection of what all three agent CLIs understand, and any other value is
+refused when the matrix loads. Set it beside `repetitions` to hold every job to
+one level, or on a single job to override that default:
+
+```json
+{
+  "reasoning_effort": "high",
+  "jobs": [
+    {
+      "agent": "codex",
+      "model": "gpt-5.6-sol",
+      "credentials": ["OPENAI_API_KEY"]
+    },
+    {
+      "agent": "codex",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "max",
+      "credentials": ["OPENAI_API_KEY"]
+    }
+  ]
+}
+```
+
+Those are two jobs and not a duplicated one: agent, model, effort, and
+repetition together are what the loader holds unique, so the same model at two
+levels is two jobs, while a real collision is still refused.
+
+Leaving the field out is not a level. No flag is passed at all and the CLI's own
+default applies, which is why the report writes `(default)` there instead of a
+name.
+
+Both sessions of a run are given the level, or the measured session answers as a
+different model from the one that installed. Each CLI is told in its own way
+(`--config model_reasoning_effort=` for codex, `--effort` for Claude Code,
+`--variant` for opencode), and a CLI that accepted the flag and ignored it would
+hand back a default-effort measurement wearing the requested label. Nothing here
+proves the requested level ran; two checks look for a contradiction of it
+instead. A run whose pinned CLI no longer carries the flag at all is refused in
+the container before any budget is spent, which is a check on the CLI's help text
+and not on the model. And every run that requested a level gets one extra check
+beside the verifier's own, `requested reasoning effort not contradicted`, which
+fails the run when the transcript says the flag was ignored, or when a CLI that
+counts reasoning tokens counted zero for the run. Where a CLI reports no reasoning
+count at all (Claude Code folds thinking into its output count), absence of a
+contradiction is all there is, and the check says so. That count is also a run
+total across both sessions, so reasoning spent installing can hide a measured
+session that did none: the check catches a level refused or ignored outright, not
+one silently downgraded.
+
+The level travels with the evidence. `result.json` records it under `agent`, a
+run directory carries it in its name when there is one, and `summary.json` names
+it in `repetitions` and in `unstable`. The report keys its combinations by it,
+so `Repetitions per combination` and `Unstable` read `... (max): n=3`, with
+`(default)` for a combination that requested none; the pass rates above them
+stay per case and per agent. Escalation then repeats the level that disagreed
+rather than another level of the same model, and the routing report prints the
+level only where one was set.
 
 ## What decides a verdict
 
@@ -401,13 +466,30 @@ Default cases:
   naming a `*-without-skill` case on its own is refused, because a control
   measured without its treatment answers nothing.
 
+## Target modes
+
+`target.mode` decides two things at once: which guide the agents read, and what
+they are told to install from. The three answer different questions.
+
+| Mode | Guide the agents read | What they install | What that measures |
+|---|---|---|---|
+| `published` | the `guide_url` handed over, verbatim | "the current release", by whichever published path that guide names | the route a reader is actually handed, against the release |
+| `remote` | the commit-pinned raw guide derived from `install_spec` | `git+https://github.com/agentic-hil/agentic-hil@<commit>` | one immutable commit, before it is a release and without the published path |
+| `local` | the guide inside the mounted snapshot | the allowlisted snapshot of this working tree | uncommitted work, with nothing pushed and nothing published |
+
+Only published mode exercises the published install path, because it is the only
+one that names no install source: the guide's own route to the current release
+is the thing under test. The other two hand the agent the source to install from
+and measure what the guide does with it.
+
 `target.mode: "local"` creates a temporary allowlisted snapshot containing only
 `pyproject.toml`, package/build metadata, public guide/readme/license files, and
 `src/agentic_hil/**`. `.git`, `.env`, unrelated untracked files, artifacts, and
 the rest of the host checkout are not mounted. This supports uncommitted
 documentation work without exposing repository-local secrets.
 
-For release evaluation, use `target.mode: "remote"` with immutable values:
+`target.mode: "remote"` pins an immutable commit, which is what measures a guide
+revision that has no release behind it yet:
 
 ```json
 {
@@ -423,7 +505,40 @@ commit. If `guide_url` is present for readability, it must exactly equal the
 official commit-pinned raw URL. Remote evaluation also requires
 `--source-root` at that commit with clean `pyproject.toml` and
 `src/agentic_hil`, plus clean `evals/install/tools.list.expected`, so the host
-can produce trusted package and target-specific MCP contract evidence.
+can produce trusted package and target-specific MCP contract evidence. What it
+installs is a `git+` reference, so the index and the release the guide sends a
+reader to are not exercised, and the version every artifact is held to is the
+tree's own, development suffix and all.
+
+`target.mode: "published"` is the release route, and it names no install source
+at all. The prompt says "the current release", the guide handed over is normally
+the published one the README points at, and whatever that guide's own path
+installs is what gets verified:
+
+```json
+{
+  "mode": "published",
+  "expected_version": "0.21.2",
+  "guide_url": "https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/AI_AGENT_QUICKSTART.md"
+}
+```
+
+`expected_version` stays the release here, because this is the one mode that
+installs the release instead of this tree. An install that left no
+`direct_url.json` came from a package index and passes; one that names this
+repository passes too, since a reader handed a link that names a ref has a
+defensible reason to take it; the same package name from anywhere else fails.
+No source is mounted here, so the trusted reference is the release tag in this
+clone, and a published run is refused at `source_gates`, before any budget is
+spent, unless the pinned `expected_version` is the newest `vX.Y.Z` tag this clone
+carries. Without a matching tag nothing offline can say what the release shipped:
+the installed bytes and the agent skill would have no trusted reference to be held
+against, and `matching agent skill installed` would fail every run. A version
+older than the newest tag names a release the index has moved past, and a version
+newer than it (or a clone with no release tag at all) has nothing here to verify
+against; both are refused rather than passed through. A clone whose tags are
+behind the index is told to fetch the tag rather than run a verdict it cannot
+reach.
 
 ## Inspect plan
 
@@ -492,7 +607,7 @@ skill lists the raw commands it replaces, so counting text would mark every run
 as reaching for `openocd`. A `make` target the workspace fixture drives the
 debugger from counts as a raw command, because that is what it is: `make flash`
 is `openocd` with a Makefile in front of it. The Windows script runs this
-automatically whenever the `firmware-routing` case is part of the selection.
+automatically whenever a `firmware-*` case is part of the selection.
 
 Runs whose `MCP registration uses trusted launcher` check did not pass are left
 out of the with-and-without comparison and reported on their own line with their
@@ -509,8 +624,8 @@ matrix, run it, print the report) runs from a single script:
 powershell -ExecutionPolicy Bypass -File .\evals\install\run-install-eval-windows.ps1
 ```
 
-It defaults to Codex and OpenCode across all three cases. Select a subset,
-change models, or repeat runs for a pass rate:
+It defaults to Codex and OpenCode across the four default cases. Select a
+subset, change models, or repeat runs for a pass rate:
 
 ```powershell
 .\evals\install\run-install-eval-windows.ps1 `
@@ -521,12 +636,18 @@ change models, or repeat runs for a pass rate:
 Options:
 
 - `-Agents`, `-Cases`: comma-separated selections;
+- `-WithControlArms`: also run the `*-without-skill` control arm of every
+  selected case that has one, derived from the selection (see above);
 - `-CodexModels`, `-ClaudeModels`, `-OpencodeModels`: comma-separated model
   lists; every model becomes its own job for that agent CLI;
+- `-ReasoningEfforts`: comma-separated levels from `low`, `medium`, `high`,
+  `xhigh`, `max`; every level becomes its own job for every model. Empty, the
+  default, passes no flag at all and each CLI's own default applies;
 - `-Repetitions`: repetitions per combination, minimum 2;
 - `-MaxRepetitions`: ceiling while repetitions disagree (default 5);
 - `-Output`: artifact directory; defaults to a timestamped directory under
-  `evals/install/artifacts/`;
+  `evals/install/artifacts/`. An existing directory is refused, so a run cannot
+  overwrite earlier evidence;
 - `-SkipBuild`: reuse the current image. The image embeds the evaluator and
   verifier, so skip the build only when `evals/` is unchanged;
 - `-NoFileLogin`: refuse a stored interactive login and require an evaluation
@@ -535,7 +656,48 @@ Options:
 - `-RefreshLogin`: write a token the agent CLI refreshed back over the stored
   login it came from, so a rotated token is not lost (see below);
 - `-DryRun`: print the expanded plan without starting a container;
-- `-TimeoutSeconds`: per-job timeout.
+- `-TimeoutSeconds`: per-job timeout, the whole budget one run may take
+  (default 1800);
+- `-IdleTimeoutSeconds`: how long one run may say nothing at all before it is
+  stopped (default 300). A provider that stops answering leaves a process alive
+  and silent, which the total budget notices only at its very end;
+- `-Concurrency`: how many runs may be in flight at once (default 1). Each one
+  is capped at 2 CPUs and 2 GB, so the machine is rarely what limits this;
+- `-PerModelConcurrency`: how many runs of one model may be in flight at once
+  (default 2). The provider is what limits a matrix: six workers sending four
+  runs of one model off within 21 seconds left every one of them silent for the
+  full idle timeout, though that model needs under a minute on its own;
+- `-OrderFrom`: an earlier artifact directory whose measured durations decide
+  what starts first, slowest first and rotating between models. Without it the
+  order is as declared, and one long run started late leaves every other worker
+  idle at the end;
+- `-FromBranch`: remote mode. Read the guide from the remote at the current
+  `HEAD` and install from that commit, so what is measured is what anyone else
+  pulling this branch gets. The commit has to be pushed;
+- `-Guide`: published mode. Hand the agents this guide URL verbatim and let its
+  own published path install the current release. The version every artifact is
+  held to is that release, read from the newest `vX.Y.Z` tag in this clone
+  rather than from `pyproject.toml`, whose development version between releases
+  the published release does not carry. Cannot be combined with `-FromBranch`,
+  which names a different source;
+- `-ExpectedVersion`: an assertion of the release `-Guide` pins, as `X.Y.Z`.
+  Left empty, the release is read from the newest release tag; naming it confirms
+  which release that is and is accepted only when it matches the newest tag, so a
+  stale clone fails loudly here instead of quietly measuring the wrong release.
+  Published mode installs the guide's own unpinned "current release", so a release
+  the newest tag has already superseded would be fetched as the current one and
+  fail every exact-version check; that release, and a version this clone has no
+  tag for, are both refused before the matrix starts. A matching `vX.Y.Z` tag has
+  to be present either way: published mode reads it to stage the trusted package
+  the install's bytes and the agent skill are checked against, and it cannot stand
+  in for tags that were never fetched (run `git fetch --tags` for that). Measuring
+  an older release needs a mode that installs exactly it, which the unpinned
+  published route is not. It applies only with `-Guide`, and is refused with local
+  or remote mode, which install this tree and take its own version.
+
+Without `-FromBranch` or `-Guide` the script builds a local-mode matrix against
+the working tree, which is why the one-command path needs one of those two to
+reach the mode a release is judged in.
 
 For each agent the script prefers an environment credential and falls back to
 the documented Codex or OpenCode file login. It stops before spending model

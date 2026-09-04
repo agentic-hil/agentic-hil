@@ -360,6 +360,62 @@ def test_a_refusal_that_carries_no_remediation_still_gets_the_catalogue_one() ->
     assert first.split(";")[0].split(",")[0] in " ".join(out.split())
 
 
+def _missing_configuration_refusal() -> dict:
+    """The refusal `agentic-hil doctor` produces before anything is configured."""
+    return {
+        "ok": False,
+        "error_type": "config_file_not_found",
+        "summary": "Agentic HIL configuration file could not be found.",
+        **remediation_fields("config_file_not_found"),
+    }
+
+
+def test_the_missing_configuration_refusal_leads_with_the_route_its_reader_has() -> None:
+    """#416: a person at a shell was handed the agent's job description.
+
+    `agentic-hil doctor` before any configuration exists is where a stranger
+    meets this refusal, and it opened with "Over MCP, call
+    `project_config_create` once" and went on to "report what it granted ... and
+    ask the operator", which is what the agent is told to do, read out to the
+    operator. The command that person could actually run stood second and spoke
+    about them in the third person.
+
+    Nothing is withheld from either reader: the two orderings are made of the
+    same steps, so the other route moves down the list rather than out of it."""
+    at_a_shell = _reflowed(_rendered(_missing_configuration_refusal(), "doctor"))
+    as_a_document = _reflowed(render_result(_missing_configuration_refusal()))
+
+    assert "1. At a shell, run `agentic-hil init` from the project root" in at_a_shell
+    assert "2. Over MCP, call `project_config_create` once." in at_a_shell
+    assert "1. Over MCP, call `project_config_create` once." in as_a_document
+    assert "2. At a shell, run `agentic-hil init` from the project root" in as_a_document
+
+
+def test_the_shell_route_names_the_command_that_registers_the_agent_too() -> None:
+    """`init` is the project half; the other half is why `setup` exists.
+
+    A person whose agent on this machine is theirs to register needs the command
+    that does both, and being sent to `init` alone leaves the skill uninstalled
+    and no MCP server registered, which is the state this refusal is about."""
+    at_a_shell = _reflowed(_rendered(_missing_configuration_refusal(), "doctor"))
+
+    assert "`agentic-hil setup --agent <claude-code|codex|opencode>`" in at_a_shell
+
+
+def test_a_refusal_carrying_a_list_of_its_own_is_printed_in_the_order_it_carries() -> None:
+    """The reordering is the catalogue's, and only over the catalogue's own steps.
+
+    `REFUSAL` names the same `error_type` and carries two steps a caller wrote,
+    so there is nothing here for that entry's ordering to be an ordering of.
+    Applying it anyway would drop both of them and print four the caller never
+    sent."""
+    out = _reflowed(_rendered(REFUSAL, "doctor"))
+
+    assert "1. Run `agentic-hil setup --agent <agent>` from this project root." in out
+    assert "2. Or point AGENTIC_HIL_CONFIG at its absolute path." in out
+    assert "project_config_create" not in out
+
+
 def test_a_refusal_the_catalogue_does_not_cover_invents_no_advice() -> None:
     bare = {"ok": False, "error_type": "no_such_error_anybody_wrote", "summary": "Something went wrong."}
     out = _rendered(bare, "doctor")

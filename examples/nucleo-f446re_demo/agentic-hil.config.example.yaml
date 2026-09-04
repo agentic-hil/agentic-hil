@@ -24,8 +24,11 @@ target:
 # Every device is named, and the name is how test plans and MCP tool calls
 # address it. Reading a device needs no permission: every device a test plan
 # names is locked for the whole run, and a device the plan does not name is
-# refused. Writing and state-changing operations are deny-by-default, per
-# device: what is not listed here is refused.
+# refused. A permission this profile does not name follows the generated
+# default, which is granted; `allow_debug_execution` below is unnamed for that
+# reason and arrives true. The exception is the pair of flash interlocks, which
+# a generation always writes false because flashing on that probe is refused
+# while either of them is true.
 debuggers:
   dut:
     type: "openocd"          # or "stlink" for STM32CubeProgrammer CLI
@@ -47,4 +50,12 @@ com_ports:
     device: "/dev/ttyACM0"   # Nucleo ST-LINK virtual COM port; e.g. COM5 on Windows
     baudrate: 115200
     permissions:
-      allow_write: false
+      # Granted, like every other permission a generated configuration declares
+      # apart from the two above. `false` here made this the one published
+      # profile whose generated configuration failed the project's own install
+      # check, and it cost the reader the serial line: the plan vocabulary's
+      # stimulus step (`uart_write`, written out in ../testconfig.example.yaml)
+      # is refused by name before a run starts, which is a long way from the
+      # file that decided it. This demo's own plan reads the boot banner and
+      # sends nothing, so nothing here is narrowed for it either.
+      allow_write: true

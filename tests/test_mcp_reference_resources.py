@@ -516,6 +516,41 @@ def test_the_removed_trust_check_leaves_no_advice_behind_it(tmp_path: Path) -> N
         assert gone not in served, f"the catalogue still explains {gone}"
 
 
+def test_a_second_ordering_is_a_reordering_and_never_a_second_text() -> None:
+    """`cli_remediation` may move the steps; it may not be a different list.
+
+    An entry that answers two readers is one text read twice, so what a person
+    at a shell is told and what an agent over MCP is told can differ only in
+    which move comes first. A step added to one tuple and forgotten in the other
+    would be advice one reader never sees, and `command_line_remediation`
+    silently declines a reordering whose steps are not the entry's, so the
+    forgetting would be invisible at the surface: the shell reader would go back
+    to the agent's ordering with nothing saying why.
+    """
+    from agentic_hil.knowledge import ERROR_CATALOGUE as catalogue
+
+    ordered = {key: entry for key, entry in catalogue.items() if entry.cli_remediation}
+    assert ordered, "nothing declares a command-line ordering; this guard is not reading the catalogue any more"
+    for key, entry in ordered.items():
+        assert sorted(entry.cli_remediation) == sorted(entry.remediation), key
+        assert entry.cli_remediation != entry.remediation, f"{key} declares an ordering identical to the default"
+
+
+def test_the_missing_configuration_entry_answers_both_of_its_readers() -> None:
+    """#416: `config_file_not_found` is the one refusal that reaches both.
+
+    An agent meets it on its first tool call and a person meets it on their
+    first `agentic-hil doctor`, and each has a route the other does not have.
+    Each ordering has to open with the route its own reader can take."""
+    from agentic_hil.knowledge import ERROR_CATALOGUE as catalogue
+
+    entry = catalogue["config_file_not_found"]
+
+    assert entry.remediation[0].startswith("Over MCP, call `project_config_create` once.")
+    assert entry.cli_remediation[0].startswith("At a shell, run `agentic-hil init` from the project root")
+    assert "agentic-hil setup --agent <claude-code|codex|opencode>" in entry.cli_remediation[0]
+
+
 def test_an_error_nobody_wrote_a_fix_for_grows_no_invented_advice() -> None:
     refusal = ConfigError("config_invalid", "state_root and workspace_root must not overlap.", {"field": "state_root"}).to_dict()
 

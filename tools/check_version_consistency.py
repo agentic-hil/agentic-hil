@@ -770,7 +770,7 @@ def contract_problems(root: Path) -> list[str]:
             "source": "github",
             "id": "1278450589",
         },
-        "websiteUrl": "https://github.com/agentic-hil/agentic-hil",
+        "websiteUrl": "https://github.com/agentic-hil/stm32-starter",
         "packages": [
             {
                 "registryType": "pypi",

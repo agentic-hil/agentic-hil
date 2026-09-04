@@ -83,6 +83,7 @@ from agentic_hil.knowledge import (
     CONFIG_GRANT_COMMAND,
     CONFIG_REOPEN_COMMAND,
     CONFIG_REVOKE_COMMAND,
+    EXCLUSIVE_FLASH_PERMISSIONS,
     REDACTION_UNAVAILABLE_ERROR,
     RUNNING_SERVER_COMPARISON,
     remediation_fields,
@@ -2106,6 +2107,99 @@ def _refused_project_scope(error: ConfigError) -> JsonObject:
     return scope
 
 
+def _placeholder_discovery(config_step: JsonObject) -> JsonObject | None:
+    """The failed discovery a placeholder configuration was written from, or None.
+
+    Read off the discovery that step carries rather than off its sentence: that
+    `hardware_discovery` is the very thing `init_config` branched on when it
+    chose the skeleton over a filled-in template, so this is the same fact and
+    not a second reading of it.
+
+    A step that was skipped answers None whatever it carries. An existing
+    configuration is kept unread and untouched, and calling that file a
+    placeholder would be a claim about somebody else's bench.
+    """
+    if config_step.get("skipped") is True or not overall_success(config_step):
+        return None
+    discovery = config_step.get("hardware_discovery")
+    if isinstance(discovery, dict) and not overall_success(discovery):
+        return discovery
+    return None
+
+
+def _placeholder_reason(discovery: JsonObject) -> str:
+    """Why the placeholder was written, named from discovery's own answer.
+
+    `adapter_not_found` is the single result "No attached bench was found"
+    describes truthfully: enumeration ran and listed no probe. A missing or
+    broken STM32CubeProgrammer, more than one probe attached, an ST-Link that
+    named no target, or a timeout each failed with a bench that may be plugged
+    in the whole time, so calling any of those "no attached bench" would send an
+    operator to reseat a board that is already there. Those name what discovery
+    reported instead, so the headline agrees with the reason its `config` step
+    carries rather than overwriting every failure with the one it is not.
+    """
+    if discovery.get("error_type") == "adapter_not_found":
+        return "No attached bench was found"
+    reason = str(discovery.get("summary") or "hardware discovery identified no bench").rstrip(".")
+    return f"Hardware discovery did not configure a bench ({reason})"
+
+
+_ADOPT_FILLS = (
+    "the probe id, the toolchain executable, the detected controller and the probe's own COM port without "
+    "anything being retyped"
+)
+
+
+def _placeholder_next_step(discovery: JsonObject) -> str:
+    """The first next step for a placeholder file, matched to why it was written.
+
+    Every branch opens the same way -- the file describes no board yet and the
+    whole result is under `hardware_discovery` -- and then names the remedy the
+    discovery result actually calls for. "Attach the bench" is the right move for
+    `adapter_not_found`, where enumeration ran and listed no probe. It is the
+    wrong move for a missing toolchain, two attached probes, a target that did
+    not answer, or a timeout: each of those can happen with the board plugged in
+    the whole time, so telling the operator to attach one sends them to reseat
+    hardware that is already there instead of to the fix. Each names its own
+    remedy and keeps `agentic-hil adopt-hardware` as the command that fills the
+    file in once the reason is cleared. This is the `next_steps` sibling of
+    `_placeholder_reason`, which does the same for the headline (#416).
+    """
+    summary = discovery.get("summary") or "no attached bench was identified"
+    preamble = (
+        "This file describes no board yet, because hardware discovery ran without configuring one: "
+        f"{summary} (the whole result is under `hardware_discovery`). "
+    )
+    error_type = discovery.get("error_type")
+    if error_type == "debugger_not_found":
+        remedy = (
+            "Install STM32CubeProgrammer so its CLI resolves on this host (the board itself may already be "
+            f"attached), then run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
+        )
+    elif error_type == "ambiguous_hardware":
+        remedy = (
+            "More than one probe is attached, so leave one connected or name the board this project is about "
+            "with `agentic-hil adopt-hardware --probe-id <serial>`; the attached serials are listed under "
+            f"`hardware_discovery.probes`. Adoption then fills in {_ADOPT_FILLS}."
+        )
+    elif error_type == "target_not_detected":
+        remedy = (
+            "The ST-Link answered but named no target, so check the board is powered and wired to the probe, "
+            f"then run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
+        )
+    elif error_type == "timeout":
+        remedy = (
+            "Discovery timed out before it could read the bench, so run `agentic-hil adopt-hardware` once the "
+            f"board responds, which fills in {_ADOPT_FILLS}."
+        )
+    elif error_type == "adapter_not_found":
+        remedy = f"Attach the bench and run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
+    else:
+        remedy = f"Run `agentic-hil adopt-hardware` once the bench is ready, which fills in {_ADOPT_FILLS}."
+    return preamble + remedy
+
+
 def setup_project(agent: str, force: bool = False) -> JsonObject:
     """First run in one command: the user-wide half, then the project half.
 
@@ -2134,7 +2228,20 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
     user_ok = overall_success(user_result)
     ok = user_ok and overall_success(project_result)
     if ok:
-        summary = "Agentic HIL project set up."
+        # The headline agrees with the `config` step it summarises. A green
+        # `setup` that looked for a board, found none and wrote the skeleton
+        # said only "project set up" to a reader whom the README had told this
+        # command discovers their ST-LINK (#416). The reason is read off the same
+        # discovery the step reports, so a run that failed for a reason other
+        # than an empty bench -- a missing toolchain, two probes, a target that
+        # did not answer -- names that reason here instead of telling an operator
+        # their attached board is absent.
+        placeholder_discovery = _placeholder_discovery(project_result["steps"]["config"])
+        summary = "Agentic HIL project set up." + (
+            f" {_placeholder_reason(placeholder_discovery)}, so the project configuration written is the placeholder."
+            if placeholder_discovery is not None
+            else ""
+        )
     elif user_ok:
         summary = "Agentic HIL is installed for this agent under this user account; the project half failed and only its own file changes were rolled back."
     else:
@@ -2602,31 +2709,37 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # profile or no profile, and are stated once here instead.
     written_document = yaml.safe_load(text) or {}
     narrowed = narrowed_permissions(written_document)
-    granted_clause = (
-        "with every permission granted except the two that are false so that flashing works"
-        if not narrowed
-        else f"with every permission granted except the two that are false so that flashing works, and {len(narrowed)} the project profile set to false"
-    )
+    # The two flash interlocks default false on every generated bench and are
+    # stated once as "the two that are false so that flashing works" -- but only
+    # while they are actually false. A project profile is the one input `init`
+    # honours that can write one true (its default is false, so naming it is a
+    # widening, not a narrowing), and either one true refuses `flash_firmware` on
+    # that probe. The fixed clause then told an operator whose profile opened one
+    # the opposite of both the file it just wrote and the bench it describes
+    # (review round 2, finding 1), so the clause is read off the surface actually
+    # written. `narrowed` is the false-beyond-default set and an opened interlock
+    # is true, so the two are disjoint and are reported apart.
+    opened = opened_flash_interlocks(written)
+    granted_clause = _init_granted_clause(sorted(narrowed), opened)
     discarded, unreadable_previous = _discarded_narrowings(existing, written_document)
     unreadable_previous = unreadable_existing or unreadable_previous
     next_steps = init_next_steps(
         available_com_ports,
         target_path,
         narrowed=sorted(narrowed),
+        opened_interlocks=opened,
         drives_hardware=any(debugger_drives_hardware(written, entry) for entry in written.debuggers.values()),
     )
     if not discovered:
         # The placeholders are a finding, not a default. An operator who is not
         # told that discovery ran and came back empty reads the same file as
-        # "detection is broken", which is exactly how this was reported.
-        next_steps.insert(
-            0,
-            "This file describes no board yet, because hardware discovery ran and found none: "
-            f"{discovery.get('summary') or 'no attached bench was identified'} "
-            "(the whole result is under `hardware_discovery`). Attach the bench and run "
-            "`agentic-hil adopt-hardware`, which fills in the probe id, the toolchain executable, the detected "
-            "controller and the probe's own COM port without anything being retyped.",
-        )
+        # "detection is broken", which is exactly how this was reported. The
+        # remedy is matched to what discovery reported: only `adapter_not_found`
+        # is answered with "attach the bench", because only there is the bench
+        # the thing that is missing. The others -- a missing toolchain, two
+        # probes, a target that did not answer, a timeout -- can happen with the
+        # board plugged in the whole time, and name their own fix (#416).
+        next_steps.insert(0, _placeholder_next_step(discovery))
     # First, and before anything about COM ports or OpenOCD scripts: a bench that
     # was narrowed and is open again is the one thing here that changes what this
     # machine may be told to do.
@@ -2655,7 +2768,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
             (
                 f"Attached hardware was discovered and configured, {granted_clause}."
                 if discovered
-                else f"No attached bench was found, so the placeholder Agentic HIL project configuration was written, {granted_clause}."
+                else f"{_placeholder_reason(discovery)}, so the placeholder Agentic HIL project configuration was written, {granted_clause}."
             )
             + (
                 f" The file it replaced had {len(discarded)} {'permission' if len(discarded) == 1 else 'permissions'} "
@@ -2935,18 +3048,83 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
     return run_plan(config, test_config_path, wait_s=wait_s, run_handle=run_handle, junit_xml=junit_xml)
 
 
-def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
-    granted_step = (
-        "Every permission in this file is true, including probing, flashing, resetting, resuming a halted debug "
-        "session, and serial and CAN writes, except allow_raw_debugger_commands and allow_mass_erase, which are "
-        "false so that flashing works. Read the permissions blocks and decide which of the rest this bench should "
-        "not have."
-        if not narrowed
-        else "Every permission in this file is true, including probing, flashing, resetting, resuming a halted "
-        "debug session, and serial and CAN writes, except allow_raw_debugger_commands and allow_mass_erase, which "
-        "are false so that flashing works, and the ones your project profile set to false (" + ", ".join(narrowed) + "). "
-        "Read the permissions blocks and decide which of the rest this bench should not have."
+def opened_flash_interlocks(config: AgenticHILConfig) -> list[str]:
+    """The flash interlocks a loaded configuration leaves *true*, by dotted path.
+
+    `allow_raw_debugger_commands` and `allow_mass_erase` default false on every
+    generated bench, and either one true refuses `flash_firmware` on that probe:
+    validated flashing and unrestricted debugger access are mutually exclusive.
+    A project profile is the one input `agentic-hil init` honours that can write
+    one true, so `init`'s own summary and next step read this off the file it
+    wrote rather than repeating "the two that are false so that flashing works"
+    on a bench where the profile opened one and flashing is therefore disabled
+    (review round 2, finding 1)."""
+    return sorted(
+        f"debuggers.{name}.permissions.{flag}"
+        for name, entry in config.debuggers.items()
+        for flag in EXCLUSIVE_FLASH_PERMISSIONS
+        if getattr(entry.permissions, flag)
     )
+
+
+def _init_granted_clause(narrowed: list[str], opened_interlocks: list[str]) -> str:
+    """The permission sentence `init`'s summary carries, told off the written file.
+
+    Three shapes, because three things can be true of the file this command just
+    wrote. Both interlocks false is the ordinary bench and reads as it always
+    has. A profile that opened one is named explicitly, `allow_mass_erase` above
+    all, together with the fact that flashing is disabled on that probe while it
+    stands -- the one thing the fixed sentence got backwards. A narrowing the
+    profile made is appended to whichever of those two the interlocks produced,
+    since a profile can both open an interlock and close something else."""
+    if opened_interlocks:
+        # "probe" counts distinct debuggers, "interlock" counts flags: both
+        # interlocks can be open on one probe, so the two do not pluralise
+        # together. A dotted path here is always `debuggers.<name>.permissions.<flag>`.
+        probes = "those probes" if len({path.split(".")[1] for path in opened_interlocks}) > 1 else "that probe"
+        interlocks = "flash interlocks" if len(opened_interlocks) > 1 else "flash interlock"
+        base = (
+            f"with every other permission granted, but the project profile left the {interlocks} "
+            f"{', '.join(opened_interlocks)} true, so flashing is disabled on {probes}"
+        )
+    else:
+        base = "with every permission granted except the two that are false so that flashing works"
+    if not narrowed:
+        return base
+    return f"{base}, and {len(narrowed)} {'permission' if len(narrowed) == 1 else 'permissions'} the project profile set to false"
+
+
+def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, opened_interlocks: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
+    narrowed = narrowed or []
+    opened_interlocks = opened_interlocks or []
+    granted_prefix = (
+        "Every permission in this file is true, including probing, flashing, resetting, resuming a halted debug "
+        "session, and serial and CAN writes"
+    )
+    if opened_interlocks:
+        # A profile opened an interlock, so the fixed "which are false so that
+        # flashing works" is wrong twice over: the named flag is true, and
+        # flashing is off, not on. Say so and name the flags, `allow_mass_erase`
+        # first, rather than let the operator read the standing default.
+        probes = "those probes" if len({path.split(".")[1] for path in opened_interlocks}) > 1 else "that probe"
+        they_are = "they are" if len(opened_interlocks) > 1 else "it is"
+        narrowed_note = f", and the ones your project profile also set to false ({', '.join(narrowed)})" if narrowed else ""
+        granted_step = (
+            f"{granted_prefix}, but your project profile left {', '.join(opened_interlocks)} true, so flash_firmware "
+            f"is refused on {probes} until {they_are} set false again{narrowed_note}. Read the permissions blocks and "
+            "decide which of the rest this bench should not have."
+        )
+    elif narrowed:
+        granted_step = (
+            f"{granted_prefix}, except allow_raw_debugger_commands and allow_mass_erase, which are false so that "
+            f"flashing works, and the ones your project profile set to false ({', '.join(narrowed)}). Read the "
+            "permissions blocks and decide which of the rest this bench should not have."
+        )
+    else:
+        granted_step = (
+            f"{granted_prefix}, except allow_raw_debugger_commands and allow_mass_erase, which are false so that "
+            "flashing works. Read the permissions blocks and decide which of the rest this bench should not have."
+        )
     next_steps = [
         f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
         "Edit target.name and target.controller for your board.",

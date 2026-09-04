@@ -437,9 +437,39 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
             promoting = committed_canonical is not None and enriched.get("audit_ok") is not False
             readback = staged_report_snapshot(enriched) if promoting else enriched
             state["last_report"] = readback
-            if is_failure_report(readback):
-                state["last_failure"] = readback
-            write_report_state(config, state)
+            # The failure record advances on the run's own verdict, never on the
+            # readback. The staging placeholder is non-green by construction, so
+            # reading the record off it filed every promoted success as the last
+            # failure and discarded the real one an operator looks up after a red
+            # run (#411). `enriched` is that verdict: a run that genuinely failed
+            # is recorded here with its own error type, and a success records
+            # nothing, leaving the previous failure standing.
+            if is_failure_report(enriched):
+                state["last_failure"] = enriched
+            try:
+                write_report_state(config, state)
+            except (ConfigError, OSError, ValueError) as error:
+                # `write_report_state` renames the new document into place and only
+                # then fsyncs the parent directory, so a failure raised here may
+                # already have committed the requested state: the same post-replace
+                # ambiguity the promotion below resolves by reading disk. Resolve it
+                # the same way here. When the state we asked for is on disk only the
+                # durability fsync failed, so the transaction continues unchanged.
+                # When it is not, this run's state never landed, and a run whose
+                # state write fails is a genuinely failed run: mark it audit-failed,
+                # drop the paths it can no longer prove, and record it as both the
+                # last report and the last failure, so an operator's failure lookup
+                # is never left stale for a call that returned `audit_ok: false`
+                # (review round 1, finding 1). The promotion below must not run on an
+                # audit-failed run, so it is disabled here.
+                if _report_state_on_disk(config) != json.dumps(state, indent=2) + "\n":
+                    enriched = mark_audit_failure(enriched, error)
+                    enriched.pop("report_path", None)
+                    enriched.pop(CANONICAL_REPORT_KEY, None)
+                    promoting = False
+                    state["last_report"] = enriched
+                    state["last_failure"] = enriched
+                    write_report_state(config, state)
             if promoting:
                 # `atomic_write_bytes` renames the finished document into place and
                 # only then fsyncs the parent directory, so a failure raised here
@@ -516,6 +546,25 @@ def _canonical_on_disk(canonical: Path) -> str | None:
     reconciles the leftover rather than trusting an unverifiable file."""
     try:
         return safe_read_text(canonical)
+    except (ConfigError, OSError, ValueError):
+        return None
+
+
+def _report_state_on_disk(config: AgenticHILConfig) -> str | None:
+    """The report-state document's current text, or ``None`` when it cannot be read.
+
+    The ``report-state.json`` mirror of ``_canonical_on_disk``.
+    ``write_report_state`` renames the finished document into place and only then
+    fsyncs the parent directory, so a failure it raises may already have committed
+    the requested state: the rename landed and the later durability fsync did not.
+    Reading the file back is how ``write_report`` tells a state whose replace
+    landed from one that never did, so the returned result is reconciled to what
+    is on disk rather than to an assumption that the failed write left the previous
+    contents in place. Any read error answers ``None``, which the caller reads as
+    "not the requested state", so it records the audit failure rather than trusting
+    an unverifiable file."""
+    try:
+        return safe_read_text(report_state_path(config))
     except (ConfigError, OSError, ValueError):
         return None
 
