@@ -105,6 +105,8 @@ Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI 
 
 Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), then have the operator set `debuggers.<name>.executable` in the authoritative config to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins the CMSIS pack is a second, separate step; see 5a below.
 
+The same `error_type` out of `agentic-hil init`, `agentic-hil debugger-probes` or `agentic-hil adopt-hardware` is about bootstrap discovery rather than a configured entry, and it now means neither toolchain is on the host: discovery uses STM32CubeProgrammer's CLI where it is installed, and otherwise enumerates the ST-Link out of this host's USB serial inventory and drives it with the `openocd` on `PATH`. Installing OpenOCD alone is enough, and is the smaller of the two. The refusal carries `tools_searched`, which says which binaries were looked for and where each resolved.
+
 ## 5. `debugger_config_not_found`
 
 Symptom: `backend_error_type` is `interface_config_not_found`, `target_config_not_found`, or `config_file_not_found`.
@@ -300,6 +302,8 @@ Likely cause: the port is not configured under `com_ports`, the device name is w
 Fix: run `agentic-hil com-ports`, have the operator add only the approved project port to the authoritative config, close other serial monitors, and use MCP COM tools with the configured `port_id`.
 
 Linux permission note: if opening the device fails with a permission error, the user typically needs membership in the `dialout` (Debian/Ubuntu) or `uucp` (Arch) group, or a udev rule for the adapter. This is the one setup step that may genuinely need an administrator once; Agentic HIL itself never needs admin rights.
+
+`com_port_not_bound` is the separate case: the port is configured, and its `device` is empty because `agentic-hil init` wrote the project profile's ports without a bench attached. The plan or the call is right and the file is not filled in, so plug the board in and run `agentic-hil adopt-hardware --apply`, which writes the device together with the adapter's serial number and USB ids. Do not delete the entry; that turns a precise refusal back into `com_port_not_configured`.
 
 ## 11a. The COM Port Moved To Another Board
 

@@ -2618,6 +2618,50 @@ FLASH_ADDRESS_RULE = {
 # place a document with several unnamed debuggers is allowed to load at all:
 # discovering the ids is exactly what an operator does before they can
 # write one down, which config load cannot ask of them.
+# What `agentic-hil init`, `agentic-hil debugger-probes`, `agentic-hil
+# adopt-hardware` and `project_config_create` do before any of the entries above
+# exists. Stated here rather than only in the per-backend matrix, because it is a
+# fact about the host rather than about a configured entry: which of the two
+# enumerations answered decides what the generated entry's `type` and
+# `executable` will be.
+BOOTSTRAP_DISCOVERY_RULE = {
+    "rule": (
+        "Bootstrap discovery has two enumerations, and the host decides which runs: STM32CubeProgrammer's "
+        "STM32_Programmer_CLI where it is installed, and otherwise this host's own USB serial inventory with OpenOCD "
+        "as the toolchain."
+    ),
+    "stm32cubeprogrammer_cli": (
+        "`-l st-link-only` lists the probes and a HOTPLUG connect reads the part number off the target. The generated "
+        "entry is `type: stlink` with that CLI as its `executable`."
+    ),
+    "usb_serial_inventory": (
+        "A host serial port whose USB vendor is 0483 and whose product is one of the ST-Link ids publishes the probe "
+        "serial in its descriptor, which is the string OpenOCD's `adapter serial` takes. The toolchain is the "
+        "`openocd` on PATH, and the generated entry is `type: openocd` with its interface_cfg and target_cfg. This is "
+        "the path on an ordinary Linux workstation, which normally has OpenOCD and not STM32CubeProgrammer."
+    ),
+    "target_identity_without_the_cli": (
+        "The workspace profile's `target.controller` when it names one, which is exact and says nothing to the board; "
+        "otherwise a read-only OpenOCD `init`, `targets`, `shutdown` against the selected adapter serial, which "
+        "reports the target script's family rather than the part number. Neither flashes, erases, resets nor halts. A "
+        "probe whose target could not be named is still written down, with `target.controller` left at the "
+        "placeholder."
+    ),
+    "reported_as": (
+        "`discovered_by` says which enumeration answered (`stm32cubeprogrammer_cli` or `usb_serial_inventory`), "
+        "`tools_searched` says which binaries were looked for and where each resolved, and `stlink_ports` lists the "
+        "ST-Link serial ports this host is showing."
+    ),
+    "neither_installed": (
+        "error_type `debugger_not_found`, naming both tools. OpenOCD alone is enough and is the smaller install; "
+        "STM32CubeProgrammer additionally reads the part number off the target."
+    ),
+    "ambiguity": (
+        "Unchanged either way: more than one attached ST-Link is `ambiguous_hardware`, and a requested probe_id "
+        "selects among what was enumerated and never adds to it."
+    ),
+}
+
 UNNAMED_PROBE_RULE = {
     "rule": "Once `debuggers` holds more than one entry, the bound one must carry a probe_id before a probe-addressing tool (flash_firmware, reset_target, probe_target, the typed debug tools) will drive it.",
     "why": "the bound entry's name alone does not prove which physical probe a call reaches once another configured entry could just as easily be meant; probe_id is what pyOCD and ST-Link verify against the attached hardware, and what OpenOCD opens by adapter serial.",
@@ -2653,6 +2697,7 @@ def debugger_backends_document() -> JsonObject:
             "refused": "this backend has no equivalent, so the values it cannot carry out are rejected at load instead of being read and ignored; `enum` lists what it does accept",
         },
         "backends": DEBUGGER_FIELD_MATRIX,
+        "bootstrap_discovery": BOOTSTRAP_DISCOVERY_RULE,
         "probe_id_when_multiple_probes": MULTI_PROBE_RULE,
         "probe_id_at_tool_call_time": UNNAMED_PROBE_RULE,
         "flash_address": FLASH_ADDRESS_RULE,
@@ -4208,7 +4253,7 @@ MCP_RESOURCES: list[JsonObject] = [
         DEBUGGER_BACKENDS_URI,
         "debugger-backends",
         "Required fields per debugger backend",
-        "Which of type, executable, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink and pyocd requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset.",
+        "Which of type, executable, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink and pyocd requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset; and which of bootstrap discovery's two enumerations answers on a given host, which decides the type and executable a generated entry gets.",
         JSON_MIME,
     ),
     _resource_descriptor(

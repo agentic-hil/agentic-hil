@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import re
 import sys
@@ -44,7 +45,12 @@ from agentic_hil.config import (
 )
 from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
 from agentic_hil.devices import config_devices, debugger_device, uart_device
-from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS, remediation_fields
+from agentic_hil.knowledge import (
+    DEBUGGER_BACKENDS_URI,
+    EXCLUSIVE_FLASH_PERMISSIONS,
+    read_resource,
+    remediation_fields,
+)
 from agentic_hil.report import read_last_report
 from agentic_hil.test_reactor import TestReactor, load_test_config
 from agentic_hil.tools import AgenticHILToolService, project_config_create
@@ -2298,3 +2304,26 @@ def test_version_3_does_not_demand_an_identity_from_a_port_with_no_device(tmp_pa
         load_config(str(refused))
     assert error.value.error_type == "config_invalid"
     assert "com_ports.dut_uart" in error.value.summary
+
+
+def test_the_reference_resource_states_which_enumeration_answers() -> None:
+    """An agent reading the backend matrix has to be able to predict the entry.
+
+    Which of the two enumerations answers on a host decides the `type` and the
+    `executable` a generated `debuggers` entry gets, so an agent that reads this
+    resource and then reads a generated file has to find them agreeing. It is
+    also where the answer to "why is this bench openocd" lives for an agent that
+    never sees `init`'s own output."""
+    served = read_resource(DEBUGGER_BACKENDS_URI)
+    assert served is not None
+    document = json.loads(str(served["text"]))
+
+    rule = document["bootstrap_discovery"]
+    assert "STM32_Programmer_CLI" in rule["rule"]
+    assert "USB serial inventory" in rule["rule"]
+    assert "type: openocd" in rule["usb_serial_inventory"]
+    assert "type: stlink" in rule["stm32cubeprogrammer_cli"]
+    assert "discovered_by" in rule["reported_as"]
+    # And the read that names the target without that CLI is stated as
+    # read-only, because an agent has to know what an `init` costs the board.
+    assert "Neither flashes, erases, resets nor halts." in rule["target_identity_without_the_cli"]
