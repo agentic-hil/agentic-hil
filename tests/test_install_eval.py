@@ -1432,6 +1432,61 @@ def test_a_published_run_pinned_to_a_superseded_release_is_refused(tmp_path: Pat
     assert payload["target"]["install_spec"] is None
 
 
+def test_a_published_run_with_no_trusted_reference_is_refused(tmp_path: Path) -> None:
+    """Review finding: without the release tag there is no offline reference.
+
+    Published mode mounts no source, so the trusted copy the installed bytes and
+    the agent skill are held against is `src/agentic_hil` at the
+    `v{expected_version}` tag in this clone. A version newer than the newest tag,
+    a non-release version, and a clone carrying no release tag at all all leave
+    `released_package_digest` at None, so `matching agent skill installed` would
+    fail every run after spending model time and API budget on it. `source_gates`
+    refuses all three before the matrix starts rather than passing them through.
+    """
+    from evals.install.config import Target
+    from evals.install.runner import source_gates
+
+    guide = "https://example.invalid/guide"
+
+    # 0.9.x rather than the real release line, so the version-consistency sweep
+    # does not read these literals as an untracked mention of the current release.
+    _multi_release_repository(tmp_path, ["0.9.1", "0.9.2"], "0.9.3.dev0")
+    # Newer than the newest tag: the clone may simply be behind the index, but it
+    # still cannot say what that release shipped, so the run cannot be verified.
+    newer = Target(mode="published", expected_version="0.9.3", guide_url=guide)
+    with pytest.raises(ValueError, match="no matching v0.9.3 release tag"):
+        source_gates(tmp_path, newer)
+    # A release that was never tagged here, older than the newest, is the same gap.
+    untagged = Target(mode="published", expected_version="0.9.0", guide_url=guide)
+    with pytest.raises(ValueError, match="no matching v0.9.0 release tag"):
+        source_gates(tmp_path, untagged)
+    # The newest tag is the one case that carries a reference and passes.
+    current = Target(mode="published", expected_version="0.9.2", guide_url=guide)
+    assert source_gates(tmp_path, current) == "0.9.3.dev0"
+
+    # A clone with the package but no release tag at all names no current release
+    # and no reference, so it is refused too.
+    untagged_clone = tmp_path / "no-tags"
+    _untagged_repository(untagged_clone, "0.9.2")
+    with pytest.raises(ValueError, match="carries no vX.Y.Z release tag"):
+        source_gates(untagged_clone, Target(mode="published", expected_version="0.9.2", guide_url=guide))
+
+
+def _untagged_repository(root: Path, version: str) -> None:
+    """A clone with the package, contract and pyproject but no release tag at all."""
+    import subprocess
+
+    package = root / "src" / "agentic_hil"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_bytes(f"__version__ = {version!r}\n".encode())
+    contract = root / "evals" / "install" / "tools.list.expected"
+    contract.parent.mkdir(parents=True)
+    contract.write_text("one_tool\ntwo_tools\n", encoding="utf-8")
+    (root / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    _states_version(root, version)
+    assert subprocess.run(["git", "-C", str(root), "init"], capture_output=True).returncode == 0
+
+
 def test_a_tree_that_is_neither_the_release_nor_a_development_version_is_refused(tmp_path: Path) -> None:
     """The refusal that stays: a matrix this tree cannot answer for at all."""
     from evals.install.config import Target

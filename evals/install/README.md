@@ -232,12 +232,19 @@ Both sessions of a run are given the level, or the measured session answers as a
 different model from the one that installed. Each CLI is told in its own way
 (`--config model_reasoning_effort=` for codex, `--effort` for Claude Code,
 `--variant` for opencode), and a CLI that accepted the flag and ignored it would
-hand back a default-effort measurement wearing the requested label. Two things
-stop that: a run whose pinned CLI no longer carries the flag is refused in the
-container before any budget is spent, and every run that requested a level gets
-one extra check beside the verifier's own, `requested reasoning effort reached
-the model`, which fails the run when the transcript reports the flag ignored or
-counts zero reasoning tokens.
+hand back a default-effort measurement wearing the requested label. Nothing here
+proves the requested level ran; two checks look for a contradiction of it
+instead. A run whose pinned CLI no longer carries the flag at all is refused in
+the container before any budget is spent, which is a check on the CLI's help text
+and not on the model. And every run that requested a level gets one extra check
+beside the verifier's own, `requested reasoning effort not contradicted`, which
+fails the run when the transcript says the flag was ignored, or when a CLI that
+counts reasoning tokens counted zero for the run. Where a CLI reports no reasoning
+count at all (Claude Code folds thinking into its output count), absence of a
+contradiction is all there is, and the check says so. That count is also a run
+total across both sessions, so reasoning spent installing can hide a measured
+session that did none: the check catches a level refused or ignored outright, not
+one silently downgraded.
 
 The level travels with the evidence. `result.json` records it under `agent`, a
 run directory carries it in its name when there is one, and `summary.json` names
@@ -522,11 +529,16 @@ installs the release instead of this tree. An install that left no
 repository passes too, since a reader handed a link that names a ref has a
 defensible reason to take it; the same package name from anywhere else fails.
 No source is mounted here, so the trusted reference is the release tag in this
-clone. Without that tag nothing offline can say what the release shipped: the
-digest check reports that it could not verify rather than failing, the installed
-bytes are then not staged as trusted either, and `matching agent skill
-installed` is left with nothing to compare against. Evaluate a published target
-from a clone that carries the tag.
+clone, and a published run is refused at `source_gates`, before any budget is
+spent, unless the pinned `expected_version` is the newest `vX.Y.Z` tag this clone
+carries. Without a matching tag nothing offline can say what the release shipped:
+the installed bytes and the agent skill would have no trusted reference to be held
+against, and `matching agent skill installed` would fail every run. A version
+older than the newest tag names a release the index has moved past, and a version
+newer than it (or a clone with no release tag at all) has nothing here to verify
+against; both are refused rather than passed through. A clone whose tags are
+behind the index is told to fetch the tag rather than run a verdict it cannot
+reach.
 
 ## Inspect plan
 

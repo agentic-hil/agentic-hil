@@ -44,10 +44,10 @@ TOOL_CONTRACT = Path("evals") / "install" / "tools.list.expected"
 # releases. `tools/check_version_consistency.py` owns the rule; here it is only
 # the shape that matters, because the question is what an install reports.
 DEVELOPMENT_VERSION = re.compile(r"^\d+\.\d+\.\d+\.dev\d+$")
-# A release, and the tag that names one. Published mode reads these to decide
-# which release this clone can stand for, so a pre-release or a `.devN` is
-# deliberately not a match.
-RELEASE_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+# The tag that names a release. Published mode reads these to decide which
+# release this clone can stand for, so a pre-release or a `.devN` is deliberately
+# not a match; a published `expected_version` is then held against this exact set
+# of tags rather than reparsed, so a version with no tag here has no reference.
 RELEASE_TAG = re.compile(r"^v\d+\.\d+\.\d+$")
 
 
@@ -290,32 +290,50 @@ def release_tag_versions(repository: Path) -> list[str]:
 
 
 def validate_published_release_is_current(source_root: Path, expected_version: str) -> None:
-    """Refuse a published run pinned to a release this clone has already superseded.
+    """Refuse a published run this clone cannot verify offline.
 
     Published mode hands the agent the guide and nothing else, so the install is
     the guide's own unpinned "current release"; the verifier then requires the
     installed distribution and the running server to report exactly
-    `target.expected_version`. That only holds when the pinned version is the
-    release the index actually serves as current. Offline, the newest `vX.Y.Z`
-    tag in this clone is what the runner reads as that release: a version older
-    than that tag names a release the index has moved past, so the current release
-    the guide installs would fail the exact-version checks in every run, after each
-    has spent model time and API budget. Refuse it here instead, before the matrix
-    starts.
+    `target.expected_version`, and holds the installed bytes and the agent skill
+    against `src/agentic_hil` as it stood at the `v{expected_version}` tag in this
+    clone. No source is mounted here, so that tag is the only trusted reference
+    there is offline. Two things have to hold, or every run spends model time and
+    API budget on a verdict it can never reach:
 
-    A version newer than the newest tag is left to run: the clone's tags may
-    simply be behind the index, `released_package_digest` already reports the
-    missing tag as unverified rather than as a mismatch, and the version could
-    still be the one the index serves. A clone with no release tag at all names no
-    current release to compare against, so there is nothing here to refuse.
+    - The tag has to be here at all. Without it `released_package_digest` returns
+      None: nothing offline can say what the release shipped, the installed bytes
+      are not staged as trusted, and `matching agent skill installed` is left with
+      no copy to compare against and fails every run. A non-release version, a
+      clone carrying no release tags, and a version newer than the newest tag all
+      land here.
+    - It has to be the current release. Offline, the newest `vX.Y.Z` tag in this
+      clone is what the runner reads as current: a version older than it names a
+      release the index has moved past, so the guide's unpinned install of the
+      current release would fail the exact-version checks.
+
+    Both reduce to one rule: the pinned version must be the newest release tag in
+    this clone. A clone whose tags are behind the index cannot evaluate a newer
+    release offline; it is told to fetch the tag rather than being passed through
+    to a run that cannot reach a verdict.
     """
-    if RELEASE_VERSION.fullmatch(expected_version) is None:
-        return
     versions = release_tag_versions(source_root)
     if not versions:
-        return
+        raise ValueError(
+            f"published target.expected_version {expected_version} cannot be evaluated: this clone "
+            f"carries no vX.Y.Z release tag, so nothing offline can say what the release shipped and the "
+            f"installed bytes and agent skill would have no trusted reference to be held against. Fetch "
+            f"the release tags into this clone, then rerun."
+        )
     newest = versions[-1]
-    if _release_version_key(expected_version) < _release_version_key(newest):
+    if expected_version not in versions:
+        raise ValueError(
+            f"published target.expected_version {expected_version} has no matching v{expected_version} "
+            f"release tag in this clone (newest is v{newest}), so nothing offline can say what it shipped "
+            f"and matching agent skill installed would fail every run. Pin the current release v{newest}, "
+            f"or fetch the tag for {expected_version} into this clone if the index already serves it."
+        )
+    if expected_version != newest:
         raise ValueError(
             f"published target.expected_version {expected_version} names a release this clone has "
             f"already superseded with v{newest}. Published mode installs the current release the guide "
@@ -371,7 +389,10 @@ def job_payload(
         # local mode, giving the verifier a real reference to hold the
         # installed bytes to instead of a check nothing can ever satisfy. A
         # clone without the tag still names no reference; the verifier treats
-        # that as unverified rather than as a mismatch.
+        # that as unverified rather than as a mismatch. A real run never reaches
+        # that state -- `source_gates` refuses a published target whose tag is
+        # missing before the matrix starts -- but a dry run and this function's
+        # direct callers do not go through the gate, so the None stays handled.
         target["expected_package_digest"] = released_package_digest(host_source_root, matrix.target.expected_version)
     else:
         target["expected_package_digest"] = committed_package_digest(host_source_root, matrix.target.expected_commit)
@@ -797,15 +818,18 @@ def token_usage(log_path: Path) -> dict[str, int] | None:
 
 
 def reasoning_effort_evidence(log_path: Path, requested: str | None) -> tuple[bool, str]:
-    """Whether the effort this run claims to have used actually reached the model.
+    """Whether anything in this run contradicts the reasoning effort it asked for.
 
-    A CLI that accepts the flag and silently ignores it would otherwise produce
-    a default-effort measurement wearing the requested label. Where the CLI
-    counts reasoning tokens the count answers it: across 356 measured runs every
-    transcript that carried the field reported between 127 and 8762, never zero,
-    so a zero is the CLI running the model without the reasoning that was asked
-    for. Where it does not count them, absence of a contradiction is all there
-    is, and the detail says which of the two this is.
+    This does not prove the requested level ran; it looks for a contradiction of
+    it. A CLI that accepts the flag and silently ignores it would otherwise
+    produce a default-effort measurement wearing the requested label. Where the
+    CLI counts reasoning tokens the count can answer it: across 356 measured runs
+    every transcript that carried the field reported between 127 and 8762, never
+    zero, so a zero is the CLI running the model without the reasoning that was
+    asked for. That count is a run total across both sessions, so reasoning spent
+    installing can hide a measured session that did none. Where the CLI does not
+    count them, absence of a contradiction is all there is, and the detail says
+    which of the two this is.
     """
     if requested is None:
         return True, "no reasoning effort requested"
@@ -1220,7 +1244,7 @@ def run_one(
             *(
                 []
                 if job.reasoning_effort is None
-                else [{"name": "requested reasoning effort reached the model", "ok": effort_ok, "detail": effort_detail}]
+                else [{"name": "requested reasoning effort not contradicted", "ok": effort_ok, "detail": effort_detail}]
             ),
         ],
         "artifacts": {

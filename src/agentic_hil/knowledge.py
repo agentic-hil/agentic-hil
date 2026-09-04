@@ -375,9 +375,12 @@ _CONFIG_MISSING_SHELL_ROUTE = (
     "project half in one command."
 )
 _CONFIG_MISSING_WHAT_IT_WRITES = (
-    "Either route writes every permission true except `allow_raw_debugger_commands` and `allow_mass_erase`, which are "
-    "written false so that flashing works, so the bench is workable from the file that comes out without anyone "
-    "editing YAML."
+    "Over MCP, `project_config_create` writes every permission true except `allow_raw_debugger_commands` and "
+    "`allow_mass_erase`, which it writes false so that flashing works, so the bench is workable from the file it "
+    "produces without anyone editing YAML. `agentic-hil init` starts from the project's "
+    "`agentic-hil.config.example.yaml` and honours any permission that file sets false, so it can hand back a "
+    "deliberately narrower bench; read the `permissions` and `narrowed_permissions` it reports rather than assuming "
+    "the open defaults, though the two flash interlocks are false there too."
 )
 _CONFIG_MISSING_REPORT_AND_ASK = (
     "The permissions in it are the operator's to narrow, so an agent reports what it granted (flashing and resetting "
