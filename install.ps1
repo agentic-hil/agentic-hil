@@ -32,6 +32,16 @@ $ErrorActionPreference = 'Stop'
 $Release = '0.21.2'
 $StepTotal = 5
 
+# The PATH this run was handed, recorded before anything of ours has prepended to
+# it. Step 3's report is about the operator's own terminal, and this script edits
+# $env:Path for its own use on the way there: Add-UserBinToPath puts the user bin
+# in front so a uv it has just fetched resolves for the rest of the run. Step 3
+# then compared against that edited value and could tell a reader whose terminal
+# has no user bin on PATH that the directory was already on it, withholding the
+# line they needed (#430). The report reads this snapshot instead, so it answers
+# for the terminal the reader is standing in.
+$StartupPath = $env:Path
+
 function Write-Say {
     param([string]$Message)
     Write-Host "agentic-hil install: $Message"
@@ -590,6 +600,10 @@ function Install-Uv {
 }
 
 function Add-UserBinToPath {
+    # For the rest of this run only: a uv just fetched into the user bin has to
+    # resolve for the steps that follow. Step 3 reports from $StartupPath rather
+    # than from this edit, so the edit never becomes a claim about the reader's
+    # own terminal.
     $userBin = Join-Path $env:USERPROFILE '.local\bin'
     if (Test-Path $userBin) { $env:Path = "$userBin;$env:Path" }
 }
@@ -771,7 +785,10 @@ if (-not $needsPackage) {
         # for the rest of the run: it, not an older agentic-hil earlier on PATH,
         # is what registers the skill and the MCP server.
         $AgenticHilCmd = Join-Path $found 'agentic-hil.exe'
-        if (($env:Path -split ';') -contains $found) {
+        # $StartupPath, never the live $env:Path: the live one may already carry
+        # this directory because this run put it there, and saying "already on
+        # your PATH" about our own edit is the claim #430 is about.
+        if (($StartupPath -split ';') -contains $found) {
             Write-Step 3 "PATH: agentic-hil is installed in $found, already on your PATH"
         } else {
             Write-Step 3 "PATH: agentic-hil landed in $found, which is not on your PATH"

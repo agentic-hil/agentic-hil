@@ -1117,6 +1117,87 @@ def test_both_scripts_ask_whether_a_discovered_python_has_pip_before_using_it() 
     assert "Test-PythonHasPip" in _the_branch_that_holds(powershell, "has no pip module")
 
 
+def test_step_three_does_not_call_our_own_path_edit_the_operators_path(tmp_path: Path) -> None:
+    """The newcomer's first stop, on the commonest Linux there is (#430).
+
+    This machine's only python3 is externally managed, so step 2 fetches uv and
+    installs with it, and the fetch prepends the user bin to PATH so that uv
+    resolves for the rest of the run. Step 3 then compared the copy's directory
+    against that edited PATH, found it, and printed `already on your PATH` about
+    a shell where `agentic-hil` resolves to nothing. Worse, the export line is
+    printed only on the other branch, so the reader was told the thing was fine
+    and handed nothing to fix it with.
+
+    The startup PATH here has no user bin in it, which is what a fresh account
+    looks like, so the honest report is the other branch: name the directory, say
+    it is not on PATH, and print the export line to copy.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, marker, _uv_log, _fetched = _machine_whose_only_python_is(tmp_path, _PYTHON_EXTERNALLY_MANAGED)
+    user_bin = Path(env["HOME"]) / ".local" / "bin"
+    assert str(user_bin) not in env["PATH"]
+
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    # The install itself is unchanged: uv wrote the copy into the user bin and
+    # that copy did the machine half. Only the sentence about it is at stake.
+    assert marker.read_text(encoding="utf-8").strip() == "uv", transcript
+    assert f"PATH: agentic-hil landed in {user_bin}, which is not on your PATH" in transcript, transcript
+    assert "already on your PATH" not in transcript, transcript
+    # The line the reader has to copy, printed on exactly the branch that admits
+    # the directory is missing.
+    assert f'export PATH="{user_bin}:$PATH"' in transcript, transcript
+
+
+def test_step_three_still_says_a_user_bin_that_is_really_on_path_is_on_path(tmp_path: Path) -> None:
+    """The other direction: the claim is kept where it is true.
+
+    Same machine, same uv route, same destination, and one difference: the shell
+    that started the installer already had the user bin on PATH. The reader's
+    `agentic-hil` will resolve in this shell, so step 3 says so and prints no
+    export line for them to paste over a PATH that already carries it.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, marker, _uv_log, _fetched = _machine_whose_only_python_is(tmp_path, _PYTHON_EXTERNALLY_MANAGED)
+    user_bin = Path(env["HOME"]) / ".local" / "bin"
+    env["PATH"] = f"{user_bin}:{env['PATH']}"
+
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert marker.read_text(encoding="utf-8").strip() == "uv", transcript
+    assert f"PATH: agentic-hil is installed in {user_bin}, already on your PATH" in transcript, transcript
+    assert "which is not on your PATH" not in transcript, transcript
+    assert "export PATH=" not in transcript, transcript
+
+
+def test_both_scripts_report_step_three_from_the_path_they_were_started_with() -> None:
+    """The snapshot, pinned on both scripts, because only one of them runs here.
+
+    Both installers put a directory of their own in front of PATH before step 3
+    reports, so both had the same way of calling their own edit the operator's
+    environment. The comparison has to read the value the run was handed, taken
+    before the first edit; the PowerShell side has no end-to-end run in every
+    checkout, so this static check is its regression guard.
+    """
+    shell = _code_only(_shell_source())
+    assert 'STARTUP_PATH="$PATH"' in shell
+    assert 'case ":$STARTUP_PATH:" in' in shell
+    assert 'case ":$PATH:" in' not in shell
+
+    powershell = _code_only(_powershell_source())
+    assert "$StartupPath = $env:Path" in powershell
+    assert "($StartupPath -split ';') -contains $found" in powershell
+    assert "($env:Path -split ';') -contains $found" not in powershell
+
+
 def test_an_exact_version_pin_refuses_a_mismatched_copy_in_the_managers_bin(tmp_path: Path) -> None:
     """An exact `--version` pin is proven by exact equality, not by "at least".
 
