@@ -90,7 +90,7 @@ def attached_hardware(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> d
     }
     discovery.update(overrides)
 
-    def discover(*, probe_id: object = None, before_connect: object = None) -> dict:
+    def discover(*, probe_id: object = None, before_connect: object = None, profile: object = None) -> dict:
         # Generation reads a board, so on a configured server it goes in under
         # that server's coordinator and announces the probe it selected before it
         # connects. The stand-in has to make that call, or a test would pass with
@@ -1225,7 +1225,7 @@ def test_a_regeneration_that_raises_comes_back_as_a_quarantine(tmp_path: Path, m
     path.write_bytes(path.read_bytes() + b"# an operator's note a regeneration does not carry over\n")
     before = path.read_bytes()
 
-    def exploding(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: object = None) -> dict:
+    def exploding(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: object = None, profile: object = None) -> dict:
         if callable(before_connect):
             before_connect("STLINK123")
         raise RuntimeError("STM32_Programmer_CLI died mid-connect")

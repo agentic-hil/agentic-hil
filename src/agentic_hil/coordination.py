@@ -1035,7 +1035,7 @@ class HardwareCoordinator:
             self._persist_project("cleanup_required" if self.blocked else "active")
             return True
 
-    def recoverable_reasons(self) -> frozenset[str]:
+    def recoverable_reasons(self, config: AgenticHILConfig | None = None) -> frozenset[str]:
         """The reasons this bench's policy and grants actually let the owner clear.
 
         The policy picks the predicate, and the predicate decides the set. A
@@ -1050,11 +1050,25 @@ class HardwareCoordinator:
 
         ``reset_halt`` degrades to the read-only set without ``allow_reset``: the
         config may permit the stronger predicate while the bound probe does not
-        authorize the reset it needs."""
-        policy = self.config.recovery.auto_recover
+        authorize the reset it needs.
+
+        ``config`` is the configuration the recovery will actually be driven
+        through, for the one caller that binds its own. A file with several
+        debuggers is loaded with ``config.debugger is None``, so this coordinator's
+        own config names no entry and carries no grant to read; a recovery bound to
+        the entry a call selected is authorized by that entry, and reading the set
+        off the unbound config instead would hand it the wide reset set whatever
+        the selected entry granted. Passing the bound config keeps the grant this
+        set is computed from and the binding the reset is executed through the same
+        one. The default is this coordinator's config, which is every other case:
+        the incident was raised on the probe the startup binding already targets.
+        A config with no entry bound at all still keeps the wide set, because there
+        is no grant to read and no probe the reset could reach either."""
+        bound = self.config if config is None else config
+        policy = bound.recovery.auto_recover
         if policy == "off":
             return frozenset()
-        debugger = self.config.debugger
+        debugger = bound.debugger
         if policy == "reset_halt" and (debugger is None or debugger.permissions.allow_reset):
             return RECOVERY_ACTION_REASONS
         return RETRYABLE_CLEANUP_REASONS

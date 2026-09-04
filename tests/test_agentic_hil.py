@@ -69,12 +69,14 @@ from agentic_hil.config import (
     CONFIG_ENV,
     ConfigError,
     authoritative_config_target,
+    is_user_private_group,
     load_config,
     project_config_directory,
     project_config_path,
     tighten_owned_writable_ancestors,
     trusted_persistent_executable,
     untrusted_launcher_directory,
+    untrusted_launcher_file,
     user_file_lock_path,
     user_state_root,
 )
@@ -242,9 +244,9 @@ def test_setup_headline_names_a_discovery_failure_that_is_not_an_absent_bench(
 ) -> None:
     """#416, refined: not every placeholder means the bench is absent.
 
-    The default run here has no STM32CubeProgrammer -- the autouse fixture hides
-    it -- so discovery fails with `debugger_not_found`, a missing tool and not a
-    missing board. The headline used to answer every such failure with "No
+    The default run here has neither STM32CubeProgrammer nor OpenOCD -- the
+    autouse fixture hides both -- so discovery fails with `debugger_not_found`,
+    a missing tool and not a missing board. The headline used to answer every such failure with "No
     attached bench was found", telling an operator to plug in a board that may
     already be there. It now names what discovery reported, so a green run's most
     prominent line agrees with the reason its `config` step carries."""
@@ -258,20 +260,21 @@ def test_setup_headline_names_a_discovery_failure_that_is_not_an_absent_bench(
     assert result["ok"] is True, result
     assert result["steps"]["config"]["hardware_discovery"]["error_type"] == "debugger_not_found"
     assert result["steps"]["config"]["summary"].startswith(
-        "Hardware discovery did not configure a bench (STM32CubeProgrammer CLI was not found), so the placeholder"
+        "Hardware discovery did not configure a bench (Neither STM32CubeProgrammer's CLI (STM32_Programmer_CLI) nor "
+        "OpenOCD (openocd) was found on this host"
     )
     # `startswith`, because a run that registered an MCP server appends the
     # restart notice to this same field; what is pinned is the headline itself.
     assert result["summary"].startswith(
         "Agentic HIL project set up. Hardware discovery did not configure a bench "
-        "(STM32CubeProgrammer CLI was not found), so the project configuration written is the placeholder."
+        "(Neither STM32CubeProgrammer's CLI (STM32_Programmer_CLI) nor OpenOCD (openocd) was found on this host"
     )
     # And it does not tell an operator their attached toolchain's board is gone.
     assert "No attached bench was found" not in result["summary"]
     # The nested config step's first next step is matched to the reason too:
     # install the toolchain, not attach a board.
     first_step = result["steps"]["config"]["next_steps"][0]
-    assert "Install STM32CubeProgrammer" in first_step
+    assert "OpenOCD is the smaller of the two" in first_step
     assert "Attach the bench" not in first_step
 
 
@@ -3275,7 +3278,7 @@ def test_the_mcp_command_refusal_says_what_each_candidate_was_rejected_for(monke
     """
     directory_refusal = ConfigError(
         "mcp_command_untrusted",
-        "The MCP server executable has a parent directory that is owned by another user.",
+        "The MCP server executable has a parent directory that is owned by deploy.",
         {"path": "/opt/shared/bin/agentic-hil", "directory": "/opt/shared/bin", "mode": "0755", "uid": 4242},
     )
     refusals: dict[str, Exception] = {
@@ -3298,7 +3301,7 @@ def test_the_mcp_command_refusal_says_what_each_candidate_was_rejected_for(monke
     assert rejected[0]["mode"] == "0755"
     assert rejected[0]["uid"] == 4242
     assert rejected[0]["error_type"] == "mcp_command_untrusted"
-    assert "owned by another user" in rejected[0]["reason"]
+    assert "owned by deploy" in rejected[0]["reason"]
     # An OSError carries no details and is still named, with its own message.
     assert "No such file" in rejected[1]["reason"]
     assert "mode" not in rejected[1]
@@ -5630,6 +5633,56 @@ def _directory_stat(mode: int, uid: int) -> SimpleNamespace:
     return SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=uid)
 
 
+def _file_stat(mode: int, uid: int, gid: int) -> SimpleNamespace:
+    """A stat of an opened launcher, as the POSIX executable check sees one."""
+    return SimpleNamespace(st_mode=stat.S_IFREG | mode, st_uid=uid, st_gid=gid)
+
+
+def _identity_database(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    users: dict[int, tuple[str, int]],
+    groups: dict[int, tuple[str, int, list[str]]],
+) -> None:
+    """Put a passwd and group database this test states in front of the rule.
+
+    The private-group rule reads `pwd` and `grp` as module attributes of
+    `agentic_hil.config`, so a whole host's identity layout can be stated here
+    and answered identically on every platform, Windows included, where neither
+    module exists and the POSIX walk that consults them never runs. `users` maps
+    a uid to (name, primary gid) and `groups` maps a gid to (name, gid, other
+    members); an id neither one holds raises `KeyError`, exactly as the real
+    databases do for an account that has been deleted.
+
+    `getpwall` answers the whole of `users`, because the rule enumerates the
+    passwd database to find a second account sharing a primary gid -- a member no
+    group's `gr_mem` ever lists -- so a host with two such accounts has to be
+    stateable here too.
+    """
+
+    def getpwuid(uid: int) -> SimpleNamespace:
+        name, primary = users[uid]
+        return SimpleNamespace(pw_name=name, pw_uid=uid, pw_gid=primary)
+
+    def getpwall() -> list[SimpleNamespace]:
+        return [SimpleNamespace(pw_name=name, pw_uid=uid, pw_gid=primary) for uid, (name, primary) in users.items()]
+
+    def getgrgid(gid: int) -> SimpleNamespace:
+        name, own, members = groups[gid]
+        return SimpleNamespace(gr_name=name, gr_gid=own, gr_mem=list(members))
+
+    monkeypatch.setattr("agentic_hil.config.pwd", SimpleNamespace(getpwuid=getpwuid, getpwall=getpwall))
+    monkeypatch.setattr("agentic_hil.config.grp", SimpleNamespace(getgrgid=getgrgid))
+
+
+# The host the refusal was reported from: a stock Ubuntu 24.04 profile after
+# `uv tool install "agentic-hil[can]"`, umask 0002, `alice` uid 1001 with the
+# private group `alice` gid 1001, and every directory and the console script
+# itself left group-writable by it, which is what that umask produces.
+UBUNTU_USERS = {1001: ("alice", 1001)}
+UBUNTU_GROUPS = {1001: ("alice", 1001, [])}
+
+
 @pytest.mark.parametrize("mode", [0o775, 0o777, 0o1777, 0o755])
 @pytest.mark.parametrize("final", [True, False])
 def test_a_launcher_ancestor_is_no_longer_untrusted_for_who_else_may_write_it(mode: int, final: bool) -> None:
@@ -5646,20 +5699,41 @@ def test_a_launcher_ancestor_is_no_longer_untrusted_for_who_else_may_write_it(mo
     assert untrusted_launcher_directory(_directory_stat(mode, 1000), final=final, trusted_uids=frozenset({0, 1000})) is None
 
 
-def test_the_launchers_own_parent_must_still_belong_to_root_or_this_user() -> None:
+def test_the_launchers_own_parent_must_still_belong_to_root_or_this_user(monkeypatch: pytest.MonkeyPatch) -> None:
     """What survives the removal: identity, not permissions.
 
     A directory a third account owns can have the validated file renamed out of
     it between the check and the registration, and no mode expresses that. Only
     the launcher's own parent is asked: an ancestor further up owned by another
     user is how every `/home/<user>` chain looks.
+
+    The refusal names the account. "Owned by another user" told a person that
+    something was wrong and not whose directory to go and look at, and a chain
+    can only be fixed by whoever the answer names.
     """
+    _identity_database(monkeypatch, users={4242: ("deploy", 4242)}, groups={4242: ("deploy", 4242, [])})
     foreign = _directory_stat(0o755, 4242)
     trusted = frozenset({0, 1000})
 
-    assert untrusted_launcher_directory(foreign, final=True, trusted_uids=trusted) == "owned by another user"
+    assert untrusted_launcher_directory(foreign, final=True, trusted_uids=trusted) == "owned by deploy"
     assert untrusted_launcher_directory(foreign, final=False, trusted_uids=trusted) is None
     assert untrusted_launcher_directory(_directory_stat(0o755, 0), final=True, trusted_uids=trusted) is None
+
+
+def test_an_owner_no_passwd_database_can_name_is_still_reported_by_its_number(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deleted account and a host with no passwd module answer the same way.
+
+    Naming the owner may not become a way for the refusal to stop arriving. The
+    number is worth less than a name and more than the phrase it replaced, and a
+    lookup that raises must not turn a refusal into an exception.
+    """
+    _identity_database(monkeypatch, users={}, groups={})
+
+    assert untrusted_launcher_directory(_directory_stat(0o755, 4242), final=True, trusted_uids=frozenset({0, 1000})) == "owned by uid 4242"
+
+    monkeypatch.setattr("agentic_hil.config.pwd", None)
+
+    assert untrusted_launcher_directory(_directory_stat(0o755, 4242), final=True, trusted_uids=frozenset({0, 1000})) == "owned by uid 4242"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX modes; the walk this exercises is POSIX-only")
@@ -5690,8 +5764,16 @@ def test_the_launcher_file_itself_may_still_not_be_writable_by_others(tmp_path: 
 
     It is the object that gets run under the hardware gate, so who may rewrite
     it is the one permission question still worth refusing on. The refusal
-    carries the mode and the owner it read, because a caller who is told only
-    that the file is untrusted has to go and stat it to learn why.
+    carries the failing condition, the path it failed on, and the mode and owner
+    it read, because a caller who is told only that the file is untrusted has to
+    go and stat it to learn why.
+
+    World write is the example here rather than the 0775 this used to use: group
+    write through the owner's own private group is one principal, the owner, and
+    is now trusted, so 0775 is a different answer on a Debian-family host than
+    on one whose accounts share a group. World write is somebody else on every
+    host there is, which is what makes it the condition this can assert on any
+    of them.
 
     Runs as root too: what refuses here is the mode this code reads, not the
     mode the kernel would enforce against the caller.
@@ -5701,14 +5783,255 @@ def test_the_launcher_file_itself_may_still_not_be_writable_by_others(tmp_path: 
     launcher = tmp_path / "home" / ".local" / "bin" / "agentic-hil"
     launcher.parent.mkdir(parents=True)
     launcher.write_text("#!/bin/sh\n", encoding="utf-8")
-    launcher.chmod(0o775)
+    launcher.chmod(0o777)
 
     with pytest.raises(ConfigError) as refused:
         trusted_persistent_executable(launcher, workspace=workspace)
 
     assert refused.value.error_type == "mcp_command_untrusted"
-    assert refused.value.details["mode"] == "0775"
+    assert refused.value.details["mode"] == "0777"
     assert refused.value.details["uid"] == os.geteuid()
+    assert refused.value.details["untrusted_because"] == "world-writable"
+    # The condition and the path element it failed on, in the sentence itself:
+    # one launcher chain holds several objects and only one of them is wrong.
+    assert "is world-writable" in refused.value.summary
+    assert str(launcher) in refused.value.summary
+
+
+def test_a_launcher_group_writable_by_its_owners_private_group_is_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reported refusal, at the rule that made it.
+
+    Debian and Ubuntu give every account a group of its own and ship
+    `umask 0002`, so everything a user writes is group-writable by a group whose
+    only member is that user. Write access there is write access for exactly one
+    principal, the owner, and refusing it rejected the installation this
+    project's own installer produces on every Debian-family host with default
+    settings.
+    """
+    _identity_database(monkeypatch, users=UBUNTU_USERS, groups=UBUNTU_GROUPS)
+
+    assert untrusted_launcher_file(_file_stat(0o775, 1001, 1001), trusted_uids=frozenset({0, 1001})) is None
+    assert is_user_private_group(1001, 1001) is True
+
+
+def test_a_group_that_holds_a_second_account_is_not_a_private_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One added member is one more principal, and the relaxation is gone.
+
+    Whether the group carries the owner's name and gid says nothing on its own:
+    `usermod -aG alice ci` leaves both intact and hands the build account write
+    access to everything the umask made group-writable. The member list is what
+    decides it, and the owner's own name in it is not a second member.
+    """
+    _identity_database(monkeypatch, users=UBUNTU_USERS, groups={1001: ("alice", 1001, ["ci"])})
+
+    assert is_user_private_group(1001, 1001) is False
+    assert untrusted_launcher_file(_file_stat(0o775, 1001, 1001), trusted_uids=frozenset({0, 1001})) == "group-writable by group alice, which is not your private group"
+
+    _identity_database(monkeypatch, users=UBUNTU_USERS, groups={1001: ("alice", 1001, ["alice"])})
+
+    assert is_user_private_group(1001, 1001) is True
+
+
+def test_a_foreign_group_writable_launcher_stays_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other two conditions, each one alone enough to keep the refusal.
+
+    A group named after somebody else is the ordinary shared group. A group
+    carrying the owner's name that is not the owner's primary group is the case
+    a name comparison on its own would have waved through, and it is the one an
+    administrator creates by hand. A shared group that *is* the owner's primary
+    group is the case the member list alone would have waved through, because an
+    account whose primary group this is holds it without being listed in it:
+    only the name separates such a group from a private one.
+    """
+    _identity_database(
+        monkeypatch,
+        users=UBUNTU_USERS,
+        groups={50: ("staff", 50, ["alice", "ci"]), 1001: ("alice", 1001, []), 2001: ("alice", 2001, [])},
+    )
+
+    assert untrusted_launcher_file(_file_stat(0o775, 1001, 50), trusted_uids=frozenset({0, 1001})) == "group-writable by group staff, which is not your private group"
+    assert untrusted_launcher_file(_file_stat(0o775, 1001, 2001), trusted_uids=frozenset({0, 1001})) == "group-writable by group alice, which is not your private group"
+    assert is_user_private_group(1001, 2001) is False
+
+    _identity_database(monkeypatch, users={1001: ("alice", 3001)}, groups={3001: ("developers", 3001, [])})
+
+    assert is_user_private_group(1001, 3001) is False
+    assert untrusted_launcher_file(_file_stat(0o775, 1001, 3001), trusted_uids=frozenset({0, 1001})) == "group-writable by group developers, which is not your private group"
+
+
+def test_a_second_account_with_the_same_primary_gid_is_not_a_private_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The member `gr_mem` never lists: a second account's own login group.
+
+    `gr_mem` carries supplementary members only, so an account whose *primary*
+    gid is this group does not appear in it. Two accounts sharing gid 1000 as
+    their login group -- `alice` and `bob` here, with an empty member list --
+    left the name, the gid and the member-list checks all satisfied, and the
+    relaxation trusted a `0775` file `alice` wrote that `bob` could rewrite. The
+    passwd database is enumerated for exactly this: a second account naming the
+    gid as its primary makes the group foreign, the same as a named supplementary
+    member does.
+    """
+    _identity_database(
+        monkeypatch,
+        users={1000: ("alice", 1000), 1001: ("bob", 1000)},
+        groups={1000: ("alice", 1000, [])},
+    )
+
+    assert is_user_private_group(1000, 1000) is False
+    assert untrusted_launcher_file(_file_stat(0o775, 1000, 1000), trusted_uids=frozenset({0, 1000})) == "group-writable by group alice, which is not your private group"
+
+    # And with `bob` gone from the passwd database, the very same group is the
+    # private group it always was: the enumeration is what decides it, not the
+    # name or the gid.
+    _identity_database(monkeypatch, users={1000: ("alice", 1000)}, groups={1000: ("alice", 1000, [])})
+
+    assert is_user_private_group(1000, 1000) is True
+
+
+def test_a_passwd_source_that_will_not_enumerate_leaves_group_write_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail closed where membership cannot be established, not just where it is unknown.
+
+    A `getpwuid` that answers for the owner beside a `getpwall` that raises (or
+    one that returns a set the owner is not even in, which is what an NSS source
+    declining enumeration looks like) cannot rule out a second account on the
+    gid. Reading that absence as "no other member" is the widening the whole rule
+    refuses, so both shapes keep the launcher refused.
+    """
+    owner = SimpleNamespace(pw_name="alice", pw_uid=1001, pw_gid=1001)
+
+    def raising_getpwall() -> list[SimpleNamespace]:
+        raise OSError("this NSS source does not enumerate")
+
+    monkeypatch.setattr(
+        "agentic_hil.config.pwd",
+        SimpleNamespace(getpwuid=lambda uid: owner, getpwall=raising_getpwall),
+    )
+    monkeypatch.setattr("agentic_hil.config.grp", SimpleNamespace(getgrgid=lambda gid: SimpleNamespace(gr_name="alice", gr_gid=1001, gr_mem=[])))
+
+    assert is_user_private_group(1001, 1001) is False
+
+    # An enumeration that comes back without the owner it just resolved is
+    # incomplete by construction, and is refused rather than read as empty.
+    monkeypatch.setattr(
+        "agentic_hil.config.pwd",
+        SimpleNamespace(getpwuid=lambda uid: owner, getpwall=lambda: []),
+    )
+
+    assert is_user_private_group(1001, 1001) is False
+
+
+def test_a_world_writable_launcher_stays_refused_whatever_its_group_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    """World write is somebody else by definition, and it is asked first.
+
+    A private group does not make `0777` safe: the relaxation is about who the
+    group is, and the other bits are a second writer no identity database can
+    talk out of the mode.
+    """
+    _identity_database(monkeypatch, users=UBUNTU_USERS, groups=UBUNTU_GROUPS)
+
+    assert untrusted_launcher_file(_file_stat(0o777, 1001, 1001), trusted_uids=frozenset({0, 1001})) == "world-writable"
+    assert untrusted_launcher_file(_file_stat(0o707, 1001, 1001), trusted_uids=frozenset({0, 1001})) == "world-writable"
+
+
+def test_a_launcher_owned_by_another_account_stays_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ownership is asked before any mode, and the answer names the account.
+
+    A file a third account owns can be rewritten by that account whatever its
+    mode says, so the private-group relaxation never reaches it.
+    """
+    _identity_database(monkeypatch, users={4242: ("deploy", 4242), 1001: ("alice", 1001)}, groups={4242: ("deploy", 4242, [])})
+
+    assert untrusted_launcher_file(_file_stat(0o755, 4242, 4242), trusted_uids=frozenset({0, 1001})) == "owned by deploy"
+
+
+def test_a_launcher_that_is_not_executable_is_still_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour the relaxation must not carry with it.
+
+    A private-group-writable file with no execute bit is trusted and unusable,
+    and it is named as what it is rather than folded into the writability
+    answer.
+    """
+    _identity_database(monkeypatch, users=UBUNTU_USERS, groups=UBUNTU_GROUPS)
+
+    assert untrusted_launcher_file(_file_stat(0o664, 1001, 1001), trusted_uids=frozenset({0, 1001})) == "not executable"
+
+
+def test_no_identity_database_leaves_group_write_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows, and any host whose databases cannot answer, are unchanged.
+
+    The relaxation rests on being able to confirm that the group holds nobody
+    but the owner. Where that cannot be confirmed the old refusal stands, which
+    is what "on platforms without them, behaviour is unchanged" has to mean for
+    a rule that decides who may rewrite the program behind the hardware gate.
+    """
+    monkeypatch.setattr("agentic_hil.config.pwd", None)
+    monkeypatch.setattr("agentic_hil.config.grp", None)
+
+    assert is_user_private_group(1001, 1001) is False
+    assert untrusted_launcher_file(_file_stat(0o775, 1001, 1001), trusted_uids=frozenset({0, 1001})) == "group-writable by group gid 1001, which is not your private group"
+
+    _identity_database(monkeypatch, users={}, groups={})
+
+    assert is_user_private_group(1001, 1001) is False
+
+
+def test_the_reported_uv_tool_installation_on_ubuntu_is_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The record this was reported from, element by element.
+
+    A stock Ubuntu 24.04 profile after `uv tool install "agentic-hil[can]"`:
+    `alice` uid 1001 with the private group `alice` gid 1001, umask 0002, both
+    directories and the console script left `drwxrwxr-x` / `-rwxrwxr-x` by it.
+    `agentic-hil doctor` refused both candidates and then recommended the
+    installer that had just written them, so `agentic-hil setup --agent <agent>`
+    had nothing left to register on a Debian-family host with default settings.
+
+    Host-independent on purpose: the directories and the file are stated as the
+    listing recorded them rather than created, so the case is answered the same
+    way on Windows, where the walk cannot run at all.
+    """
+    _identity_database(monkeypatch, users=UBUNTU_USERS, groups=UBUNTU_GROUPS)
+    trusted = frozenset({0, 1001})
+
+    # drwxrwxr-x alice alice: ~/.local/bin and the uv tool's own bin directory.
+    for final in (True, False):
+        assert untrusted_launcher_directory(_directory_stat(0o775, 1001), final=final, trusted_uids=trusted) is None
+    # -rwxrwxr-x alice alice: the console script the launcher symlink resolves to.
+    assert untrusted_launcher_file(_file_stat(0o775, 1001, 1001), trusted_uids=trusted) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes and symlinks; the walk this exercises is POSIX-only")
+def test_a_uv_tool_layout_under_a_private_group_registers_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same record through the real walk, symlink and all.
+
+    `~/.local/bin/agentic-hil` is a symlink into the uv tool directory, so the
+    chain the check reads is two directory walks and one console script, and the
+    file it actually judges is the symlink's target. The identity database is
+    stated because the running account's real group is whatever this host gives
+    it; the modes, the layout and the symlink are real.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    target = home / ".local" / "share" / "uv" / "tools" / "agentic-hil" / "bin" / "agentic-hil"
+    launcher = home / ".local" / "bin" / "agentic-hil"
+    target.parent.mkdir(parents=True)
+    launcher.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o775)
+    launcher.symlink_to(target)
+    for directory in (home, home / ".local", launcher.parent, target.parent):
+        directory.chmod(0o775)
+    owned = target.stat()
+    _identity_database(
+        monkeypatch,
+        users={owned.st_uid: ("alice", owned.st_gid)},
+        groups={owned.st_gid: ("alice", owned.st_gid, [])},
+    )
+
+    assert trusted_persistent_executable(launcher, workspace=workspace) == str(launcher)
+    # This validates, it does not repair: the layout the installer wrote is the
+    # layout that stays on disk.
+    assert stat.S_IMODE(target.stat().st_mode) == 0o775
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission smoothing")

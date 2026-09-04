@@ -13,6 +13,7 @@ from agentic_hil.backends.common import (
     command_for_log,
     contains_any,
     contains_failure_text,
+    failure_text_lines,
     invocation,
     programmer_output_fields,
     reports_reset_failure,
@@ -74,11 +75,40 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
 OPENOCD_ERASE_FAILURE_MARKERS = ["failed erasing sectors"]
 
 OPENOCD_DISABLE_TCP_SERVER_COMMANDS = ["gdb_port disabled", "tcl_port disabled", "telnet_port disabled"]
+# Each of these is `echo`ed by the command string *after* the one command the
+# tool exists for, and OpenOCD's interpreter stops evaluating a `-c` script at
+# the first command that fails. So a marker in the output is OpenOCD's own
+# statement that its operation returned success: `targets` after `init` opened
+# the adapter and examined the core, `program ... verify` after the image was
+# written and read back, `reset <mode>` after the core restarted. Nothing else
+# is claimed by any of them, and none of them moves.
 OPENOCD_SUCCESS_MARKERS = {
     "probe_target": "AGENTIC_HIL_RESULT:probe_target:ok",
     "flash_firmware": "AGENTIC_HIL_RESULT:flash_firmware:ok",
     "reset_target": "AGENTIC_HIL_RESULT:reset_target:ok",
 }
+# The classifications that outrank the marker, and the only ones (#425).
+#
+# `failed erasing sectors` is OpenOCD's own report that the operation it names
+# did not happen, and what it leaves behind is a flash whose contents nobody can
+# state. If a build ever logs it and still returns success out of `program`, a
+# run reported as a success would be telling a caller the new image is on the
+# board when it may not be, so this one keeps deciding. It costs nothing where it
+# does not belong: it is one measured phrase rather than a word class, it cannot
+# occur in a `reset_target` or `probe_target` transcript, and OpenOCD aborts the
+# script when the erase really fails, so on the flash path it is a guard against
+# a build nobody has measured rather than a rule that fires today.
+#
+# Nothing else is here, and the near miss says why. `verify_failed` matches the
+# word "verify" anywhere in the transcript beside any failure word, and every
+# verified flash prints it: OpenOCD's `program` proc announces the phase with
+# `** Verify Started **`. Keeping that rule ahead of the marker would therefore
+# read one incidental `Error:` line as a verify mismatch on every flash, which is
+# #425 again one tool over. A verify that really fails raises out of `program`
+# and takes the marker with it, while the CRC pass that logs `checksum mismatch -
+# attempting binary compare` before a byte compare that then succeeds is exactly
+# the line that has to stay a warning.
+OPENOCD_BACKEND_ERRORS_OUTRANKING_THE_MARKER = frozenset({"flash_erase_failed"})
 # OpenOCD has no `reset`, `targets` or `halt` until `init` has run: those live in
 # target_exec_command_handlers, which target_init registers while `init` executes,
 # so before that the Tcl interpreter answers `invalid command name "reset"` and
@@ -181,7 +211,7 @@ class OpenOCDBackend:
         result = self._run_openocd("probe_target", f'{OPENOCD_INIT_PREFIX}targets; echo "{marker}"; shutdown', marker)
         if result.get("ok"):
             result["target_detected"] = True
-            result["summary"] = "Target detected through OpenOCD."
+            result["summary"] = summary_with_carried_warnings(result, "Target detected through OpenOCD.")
         return self._write_action_report(result)
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
@@ -206,7 +236,7 @@ class OpenOCDBackend:
         result["verify"] = True
         result["reset_after_flash"] = reset_after_flash
         if result.get("ok"):
-            result["summary"] = "Firmware flashed, verified, and target reset." if reset_after_flash else "Firmware flashed and verified. Target was not reset."
+            result["summary"] = summary_with_carried_warnings(result, "Firmware flashed, verified, and target reset." if reset_after_flash else "Firmware flashed and verified. Target was not reset.")
         return self._write_action_report(result)
 
     def reset_target(self, mode: str = "run") -> JsonObject:
@@ -217,7 +247,7 @@ class OpenOCDBackend:
         result = self._run_openocd("reset_target", openocd_reset_command(mode, marker), marker)
         result["mode"] = mode
         if result.get("ok"):
-            result["summary"] = f"Target reset with mode '{mode}'."
+            result["summary"] = summary_with_carried_warnings(result, f"Target reset with mode '{mode}'.")
         return self._write_action_report(result)
 
     def debug_start_session(self, artifact: JsonObject, mode: str = "attach", timeout_s: float | None = None) -> JsonObject:
@@ -370,10 +400,11 @@ class OpenOCDBackend:
         rejected = rejected_openocd_commands(openocd_command, output)
         init_reached = OPENOCD_INIT_STAGE_MARKER in output
         if completed.returncode == 0:
-            backend_error_type = self._backend_error_from_output(output, tool)
+            marker_printed = success_marker is not None and success_marker in output
+            backend_error_type = self._backend_error_from_output(output, tool, marker_printed=marker_printed)
             if backend_error_type is not None:
                 return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, backend_error_type, log_path, completed, rejected, init_reached=init_reached), audit_error)
-            if success_marker is not None and success_marker not in output:
+            if success_marker is not None and not marker_printed:
                 # Only the success marker decides this branch, so the init-stage
                 # marker may well be in the output beside it: a run that
                 # completed `init`, examined the core and then lost the second
@@ -400,6 +431,17 @@ class OpenOCDBackend:
             result: JsonObject = {"ok": True, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "summary": "OpenOCD command completed successfully.", "log_path": display_path(self.config, log_path)}
             if success_marker is not None:
                 result["success_confirmed"] = True
+                # Whatever OpenOCD said on the way to a marker it did print is
+                # evidence about how the operation went, and never the verdict on
+                # whether it happened: the marker already answered that. Carried
+                # rather than dropped, because the line is real and a reader
+                # chasing a slow or noisy bench needs it (`Error setting register
+                # pc` on OpenOCD 0.12 over hla_swd is the measured one, #425), and
+                # the log at `log_path` keeps holding the whole capture besides.
+                warnings = failure_text_lines(output)
+                if warnings:
+                    result["backend_warnings"] = warnings
+                    result["summary"] = summary_with_carried_warnings(result, result["summary"])
             return self._finish_log_audit(result, audit_error)
         return self._finish_log_audit(self._failure_result(tool, started_at, finished_at, elapsed_ms, self._classify_output(output, tool), log_path, completed, rejected, init_reached=init_reached), audit_error)
 
@@ -487,8 +529,28 @@ class OpenOCDBackend:
             result.update(NOT_CONTACTED)
         return result
 
-    def _backend_error_from_output(self, output: str, tool: str) -> str | None:
+    def _backend_error_from_output(self, output: str, tool: str, *, marker_printed: bool = False) -> str | None:
+        """The failure this exit-0 run reported, or None when it reported none.
+
+        With the tool's success marker in the output there is almost nothing to
+        report: OpenOCD stops evaluating a `-c` script at the first command that
+        fails, so an `echo` placed after the operation could not have run unless
+        the operation's command returned success, and every failure word ahead of
+        it is a line OpenOCD wrote while succeeding. Reading those words as the
+        verdict is what refused a reset the board had already performed and the
+        same OpenOCD had already confirmed (#425): the Ubuntu 24.04 build writes
+        `Error: Error setting register pc` on `reset run` over hla_swd after the
+        core has restarted, and one incidental `Error:` line is all the
+        operation-anchored bucket at the bottom of `_classify_output` needs.
+
+        `OPENOCD_BACKEND_ERRORS_OUTRANKING_THE_MARKER` names what still decides,
+        and why. Without the marker nothing has changed: the classification
+        answers as it always has, and a run whose words say nothing at all is the
+        caller's `*_unconfirmed` branch rather than this one.
+        """
         backend_error_type = self._classify_output(output, tool)
+        if marker_printed:
+            return backend_error_type if backend_error_type in OPENOCD_BACKEND_ERRORS_OUTRANKING_THE_MARKER else None
         if backend_error_type != "unknown_debugger_error":
             return backend_error_type
         if contains_failure_text(output):
@@ -594,6 +656,22 @@ class OpenOCDBackend:
             "debugger_config_not_found": ["debugger interface configuration is missing", "debugger target configuration is missing", "debugger search path is incomplete"],
             "debugger_command_rejected": ["this OpenOCD build does not know the command that was sent", "a configuration script used a run-stage command before 'init'", "the installed OpenOCD is older or newer than the one the command was written for"],
         }.get(error_type, ["inspect the debugger log for details"])
+
+
+def summary_with_carried_warnings(result: JsonObject, summary: str) -> str:
+    """The tool's own summary, saying that failure-worded lines came with it.
+
+    The summary is the one line a person reads, so a run that succeeded while
+    OpenOCD printed something alarming has to say so there rather than only in a
+    field somebody may not open. It says how many and where they are; the lines
+    themselves stay verbatim in `backend_warnings`, and nothing is judged for the
+    reader beyond the outcome the marker already settled.
+    """
+    warnings = result.get("backend_warnings") or []
+    if not warnings:
+        return summary
+    lines = "line" if len(warnings) == 1 else "lines"
+    return f"{summary} OpenOCD printed {len(warnings)} failure-worded {lines} in a run its own success marker confirmed; they are carried verbatim in backend_warnings."
 
 
 def openocd_reset_command(mode: str, marker: str) -> str:

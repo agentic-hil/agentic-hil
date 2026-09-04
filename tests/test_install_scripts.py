@@ -876,6 +876,247 @@ def test_a_pip_install_answers_over_a_newer_stale_copy_in_a_guessed_bin(tmp_path
     assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
 
 
+def _machine_whose_only_python_is(tmp_path: Path, python_body: str) -> tuple[dict[str, str], Path, Path, Path, Path]:
+    """A fresh POSIX machine with no uv, no agentic-hil, and one Python of our own.
+
+    Step 2 reaches a discovered Python only on a machine where `uv` does not
+    resolve, so every uv fallback from that point has to fetch uv first. That
+    fetch is pinned to one release and checked against a hash this repository
+    carries, and no test may reach astral.sh for it, so the machine here supplies
+    the whole hop: a `curl` that writes an installer of our own instead of
+    downloading one, a `sha256sum` that answers with the digest the script
+    expects, and an installer that delivers a stub `uv` into `~/.local/bin` the
+    way Astral's does. The stub answers `tool dir --bin` with that directory and
+    `tool install` by writing a console script into it, so steps 3 to 5 run their
+    ordinary shape.
+
+    `python_body` is the whole difference between the cases: what this machine's
+    one interpreter answers to `-m pip --version` and to `-m pip install`.
+
+    Returns the environment, the project directory, and three files that record
+    what happened: which copy ran `agent-install`, the arguments the stub uv was
+    given, and whether the pinned installer was fetched at all.
+    """
+    home = tmp_path / "home"
+    project = home / "project"
+    early_bin = tmp_path / "early-bin"
+    staging = tmp_path / "staging"
+    user_bin = home / ".local" / "bin"
+    for directory in (project, early_bin, staging):
+        directory.mkdir(parents=True)
+
+    marker = tmp_path / "who-ran-agent-install"
+    uv_log = tmp_path / "uv-arguments"
+    fetched = tmp_path / "installer-was-fetched"
+
+    # A stub claude, so agent detection has a claude-code to register for.
+    _stub_executable(early_bin / "claude", "exit 0\n")
+    _stub_executable(early_bin / "python3", python_body)
+    # The uv the fake installer delivers. It sits outside PATH until then, so
+    # `have uv` is false where step 2 asks, which is the machine this is about.
+    _stub_executable(
+        staging / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        f'  echo "{user_bin}"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'  echo "$*" >> "{uv_log}"\n'
+        f'  cat > "{user_bin}/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "9.9.9" ;;\n'
+        f'  agent-install) echo "uv" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        f'  chmod +x "{user_bin}/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+    # curl, writing the pinned installer rather than downloading it, and recording
+    # that it was asked at all so a test can assert the fetch never happened.
+    _stub_executable(
+        early_bin / "curl",
+        'out=""\n'
+        'while [ $# -gt 0 ]; do\n'
+        '  if [ "$1" = "-o" ]; then out="$2"; fi\n'
+        "  shift\n"
+        "done\n"
+        '[ -n "$out" ] || exit 1\n'
+        f'echo "fetched" > "{fetched}"\n'
+        'cat > "$out" <<\'PAYLOAD\'\n'
+        "#!/bin/sh\n"
+        f'mkdir -p "{user_bin}"\n'
+        f'cp "{staging}/uv" "{user_bin}/uv"\n'
+        f'chmod +x "{user_bin}/uv"\n'
+        "PAYLOAD\n"
+        "exit 0\n",
+    )
+    # The digest the script carries, answered for whatever file it is handed. The
+    # hash check itself has its own tests; here it is the hop, not the subject.
+    digest = SHELL_UV_SHA256.search(_shell_source())
+    assert digest is not None
+    _stub_executable(early_bin / "sha256sum", f'echo "{digest.group(1)}  $1"\nexit 0\n')
+
+    env = {"HOME": str(home), "PATH": f"{early_bin}:/usr/bin:/bin"}
+    return env, project, marker, uv_log, fetched
+
+
+# A python3 that answers the version probe and then has no pip at all: the
+# default state of a Debian or Ubuntu server without python3-pip, and of most
+# minimal container images.
+_PYTHON_WITHOUT_PIP = (
+    'case "$*" in\n'
+    "  *version_info*) exit 0 ;;\n"
+    "esac\n"
+    'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
+    '  echo "/usr/bin/python3: No module named pip" >&2\n'
+    "  exit 1\n"
+    "fi\n"
+    "exit 0\n"
+)
+
+# A python3 whose pip is there and answers, and whose install is refused by the
+# distribution under PEP 668.
+_PYTHON_EXTERNALLY_MANAGED = (
+    'case "$*" in\n'
+    "  *version_info*) exit 0 ;;\n"
+    '  *"pip --version"*) echo "pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)"; exit 0 ;;\n'
+    '  *"pip install"*) echo "error: externally-managed-environment" >&2; exit 1 ;;\n'
+    "esac\n"
+    "exit 0\n"
+)
+
+# A python3 whose pip is there, answers, and then fails for a reason that is
+# nothing to do with who owns the interpreter.
+_PYTHON_WITH_A_FAILING_PIP = (
+    'case "$*" in\n'
+    "  *version_info*) exit 0 ;;\n"
+    '  *"pip --version"*) echo "pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)"; exit 0 ;;\n'
+    '  *"pip install"*) echo "ERROR: Could not find a version that satisfies the requirement agentic-hil"; exit 1 ;;\n'
+    "esac\n"
+    "exit 0\n"
+)
+
+
+def _install_on(env: dict[str, str], project: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [_posix_shell(), str(SHELL_SCRIPT), "--no-can"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+
+def test_a_python_without_a_pip_module_falls_back_to_uv(tmp_path: Path) -> None:
+    """The commonest Linux of all, run end to end through a POSIX shell.
+
+    Debian and Ubuntu ship `python3` with no pip module unless `python3-pip` is
+    installed, and so do most minimal container images. `find_python` accepts that
+    interpreter, because it is new enough, and step 2 then ran `-m pip install
+    --user` with it. pip answered `No module named pip` and exited 1, which
+    carries none of the words the PEP 668 branch reads, so the script stopped at
+    step 2 with `pip could not install` on the most ordinary host there is, while
+    it already knew how to fetch uv and install with that.
+
+    Now the question is asked before the install: an interpreter with no pip takes
+    the same uv route PEP 668 takes, and the line says which interpreter and why.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, marker, uv_log, fetched = _machine_whose_only_python_is(tmp_path, _PYTHON_WITHOUT_PIP)
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "has no pip module, so pip cannot install with it; falling back to uv" in transcript, transcript
+    assert "python3" in transcript, transcript
+    assert "pip could not install" not in transcript, transcript
+    # The whole uv route, not just the sentence: the pinned installer was fetched,
+    # uv was asked to install, and the copy it wrote is the one that registered.
+    assert fetched.is_file(), transcript
+    assert "tool install" in uv_log.read_text(encoding="utf-8"), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "uv", transcript
+
+
+def test_an_externally_managed_python_still_falls_back_to_uv(tmp_path: Path) -> None:
+    """The neighbour that must not move: PEP 668 keeps its own words and its route.
+
+    This interpreter has a pip that answers, so the new probe passes it through to
+    the install, which the distribution refuses. The transcript still says
+    `externally managed (PEP 668)` and not the missing-module line, and the run
+    still finishes through uv.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, marker, uv_log, fetched = _machine_whose_only_python_is(tmp_path, _PYTHON_EXTERNALLY_MANAGED)
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "this Python is externally managed (PEP 668), so pip cannot own it; falling back to uv" in transcript, transcript
+    assert "has no pip module" not in transcript, transcript
+    assert fetched.is_file(), transcript
+    assert "tool install" in uv_log.read_text(encoding="utf-8"), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "uv", transcript
+
+
+def test_a_pip_that_fails_for_another_reason_still_stops_the_run(tmp_path: Path) -> None:
+    """The other half of the fix: the fallback is not widened into a catch-all.
+
+    This interpreter's pip is there and answers, and then fails at the install for
+    a reason that is neither PEP 668 nor a missing module. That is a real pip
+    failure with a real message in it, and hiding it behind a silent uv install
+    would lose the diagnosis, so the run still stops with the recorded line. The
+    machine could have fallen back here: uv is one fetch away and every stub for
+    it is in place, and the assertions are that none of it was used.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, marker, uv_log, fetched = _machine_whose_only_python_is(tmp_path, _PYTHON_WITH_A_FAILING_PIP)
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode != 0, transcript
+    assert "pip could not install agentic-hil; TROUBLESHOOTING.md section 1 has the fallbacks" in transcript, transcript
+    assert "Could not find a version that satisfies" in transcript, transcript
+    assert "has no pip module" not in transcript, transcript
+    assert "falling back to uv" not in transcript, transcript
+    assert not fetched.exists(), transcript
+    assert not uv_log.exists(), transcript
+    assert not marker.exists(), transcript
+
+
+def test_both_scripts_ask_whether_a_discovered_python_has_pip_before_using_it() -> None:
+    """The probe, pinned on both scripts, because only one of them runs here.
+
+    A discovered Python with no pip module took the same fatal exit as a pip that
+    failed on the network, and that is the default state of Debian and Ubuntu
+    servers. Both installers now ask the interpreter whether it can run pip at all
+    before they install with it, and the branch that says so is the one that hands
+    the install to uv. The PowerShell side has no end-to-end run in every
+    checkout, so this static check is its regression guard.
+    """
+    shell = _code_only(_shell_source())
+    assert "python_has_pip" in shell
+    assert "-m pip --version" in shell
+    assert "python_has_pip" in _the_branch_that_holds(shell, "has no pip module")
+
+    powershell = _code_only(_powershell_source())
+    assert "Test-PythonHasPip" in powershell
+    assert "'-m', 'pip', '--version'" in powershell
+    assert "Test-PythonHasPip" in _the_branch_that_holds(powershell, "has no pip module")
+
+
 def test_an_exact_version_pin_refuses_a_mismatched_copy_in_the_managers_bin(tmp_path: Path) -> None:
     """An exact `--version` pin is proven by exact equality, not by "at least".
 

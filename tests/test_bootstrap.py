@@ -1,13 +1,15 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import inspect
+import json
 import os
 import re
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
-from conftest import FAKE_GDB, FAKE_STLINK, write_config
+from conftest import FAKE_GDB, FAKE_OPENOCD, FAKE_STLINK, write_config
 
 import agentic_hil.cli
 import agentic_hil.tools
@@ -16,15 +18,23 @@ from agentic_hil.backends.stlink import stlink_target_info
 from agentic_hil.bench import BenchMutex
 from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
+    DISCOVERED_BY_STLINK_CLI,
+    DISCOVERED_BY_USB_INVENTORY,
+    PLACEHOLDER_COM_PORTS_ANCHOR,
+    PLACEHOLDER_TARGET_ANCHOR,
     PROFILE_KEYS_READ,
     PROJECT_PROFILE,
     apply_discovery_to_template,
+    apply_profile_to_placeholder,
     autodetected_gdb,
     correlate_com_port,
     discover_attached_hardware,
+    enumerate_attached_probes,
+    openocd_target_name,
     select_probe_id,
+    usb_stlink_probe_ids,
 )
-from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, adopt_hardware, init_config
+from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, adopt_hardware, bootstrap_probe_listing, init_config
 from agentic_hil.config import (
     GDB_AUTODETECT_CANDIDATES,
     ConfigError,
@@ -34,11 +44,17 @@ from agentic_hil.config import (
     load_config,
 )
 from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
-from agentic_hil.devices import config_devices, debugger_device
-from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS, remediation_fields
-from agentic_hil.report import read_last_report
+from agentic_hil.devices import config_devices, debugger_device, uart_device
+from agentic_hil.knowledge import (
+    DEBUGGER_BACKENDS_URI,
+    EXCLUSIVE_FLASH_PERMISSIONS,
+    read_resource,
+    remediation_fields,
+)
+from agentic_hil.report import overall_success, read_last_report
+from agentic_hil.test_reactor import TestReactor, load_test_config
 from agentic_hil.tools import AgenticHILToolService, project_config_create
-from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, fold_hardware_id
+from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, com_port_is_unbound, fold_hardware_id
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -153,8 +169,8 @@ def test_a_requested_probe_is_matched_by_hardware_identity_not_by_spelling(monke
     """`abcdef` selects the probe enumerated as `ABCDEF`.
 
     A probe serial is an opaque hardware id, and every device lock key in this
-    repository folds it for that reason: one ST-Link is `0669FF…` to
-    STM32CubeProgrammer and `0669ff…` to udev. Exact string membership answered
+    repository folds it for that reason: one ST-Link is `0669FFâ€¦` to
+    STM32CubeProgrammer and `0669ffâ€¦` to udev. Exact string membership answered
     `adapter_not_found` ("plug the board in") for a board that is plugged in.
     The enumerated spelling is what goes on to the toolchain and into the file."""
     commands: list[list[str]] = []
@@ -793,15 +809,21 @@ def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(
     plugged in, concludes that detection is broken. The result now names what
     discovery answered and the one command that fills the file in afterwards.
 
-    Discovery here fails with `debugger_not_found`, a missing STM32CubeProgrammer
-    and not a missing board, so the summary names that reason rather than
-    reporting an absent bench: the toolchain, not the board, is what to install.
-    The first next step is matched to that too, and installing the toolchain,
-    not attaching a board, is what it tells the operator to do."""
+    Discovery here fails with `debugger_not_found`, a missing toolchain and not
+    a missing board, so the summary names that reason rather than reporting an
+    absent bench: the toolchain, not the board, is what to install. The first
+    next step is matched to that too, and installing a toolchain, not attaching
+    a board, is what it tells the operator to do.
+
+    Both toolchains, because discovery has two: `debugger_not_found` is now
+    reached only when neither STM32CubeProgrammer nor OpenOCD is on the host, so
+    the refusal and the remedy name both rather than sending an operator to
+    STM32CubeProgrammer when `apt install openocd` is enough."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
     monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: None)
+    monkeypatch.setattr("agentic_hil.bootstrap.find_openocd", lambda: None)
 
     result = init_config()
 
@@ -811,17 +833,25 @@ def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(
     assert result["hardware_discovery"]["ok"] is False
     assert result["hardware_discovery"]["error_type"] == "debugger_not_found"
     assert result["summary"].startswith(
-        "Hardware discovery did not configure a bench (STM32CubeProgrammer CLI was not found), so the placeholder"
+        "Hardware discovery did not configure a bench (Neither STM32CubeProgrammer's CLI (STM32_Programmer_CLI) nor "
+        "OpenOCD (openocd) was found on this host"
     )
     assert result["summary"].endswith("with every permission granted except the two that are false so that flashing works.")
     assert "No attached bench was found" not in result["summary"]
-    assert "STM32CubeProgrammer CLI was not found." in result["next_steps"][0]
+    assert "STM32_Programmer_CLI" in result["next_steps"][0]
     assert "agentic-hil adopt-hardware" in result["next_steps"][0]
     # The remedy is the missing tool, not the board: a `debugger_not_found`
     # placeholder no longer tells the operator to attach a bench that may be
     # plugged in the whole time.
-    assert "Install STM32CubeProgrammer" in result["next_steps"][0]
+    assert "OpenOCD is the smaller of the two" in result["next_steps"][0]
     assert "Attach the bench" not in result["next_steps"][0]
+    # And the second step is the evidence: which binaries were looked for, and
+    # that neither resolved. Without it "no bench" was a claim with nothing
+    # behind it.
+    assert result["next_steps"][1] == (
+        "Discovery looked for STM32_Programmer_CLI (STM32CubeProgrammer): not on this host; "
+        "openocd (OpenOCD): not on this host."
+    )
 
 
 def test_init_reserves_absent_bench_wording_for_the_empty_probe_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1142,7 +1172,7 @@ def test_first_init_refuses_a_probe_another_workspace_is_holding(tmp_path: Path,
 
     state = {"connected": False}
 
-    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, before_connect: object = None) -> JsonObject:
+    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, before_connect: object = None, profile: object = None) -> JsonObject:
         # Enumeration selected this probe; `before_connect` is the last gate before
         # HOTPLUG, and where the machine-wide probe lock is taken.
         if before_connect is not None:
@@ -1217,7 +1247,7 @@ def test_first_init_refuses_a_probe_another_workspace_holds_by_its_alias(tmp_pat
 
     state = {"connected": False}
 
-    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, before_connect: object = None) -> JsonObject:
+    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, before_connect: object = None, profile: object = None) -> JsonObject:
         # Enumeration selects the attached ST-Link by its serial, which is all the
         # bootstrap read can see of it; `before_connect` locks `probe:<serial>`.
         if before_connect is not None:
@@ -1613,3 +1643,785 @@ def test_the_first_init_of_a_workspace_reads_directly_and_says_so(tmp_path: Path
         "tool": "cli_init",
         "summary": "The attached probe was read under a hardware lease, and that read is in the audit trail.",
     }
+
+
+# ---------------------------------------------------------------------------
+# The host that has OpenOCD and no STM32CubeProgrammer.
+#
+# The supported first path this project documents (Nucleo-F446RE + ST-Link +
+# OpenOCD) on the platform it is usually run from. `apt install openocd` is one
+# command; STM32CubeProgrammer is a registration wall, and a Linux workstation
+# normally has the first and never the second. Discovery used to require the
+# second, so `init` on that host wrote a placeholder and `debugger-probes` and
+# `adopt-hardware` both refused `debugger_not_found`, with the ST-Link and its
+# virtual COM port sitting in `agentic-hil com-ports` the whole time.
+#
+# The record below is one, as pyserial reports it on Ubuntu 24.04.
+
+NUCLEO_VCP: JsonObject = {
+    "device": "/dev/ttyACM0",
+    "name": "ttyACM0",
+    "description": "STM32 STLink - ST-Link VCP Ctrl",
+    "hwid": "USB VID:PID=0483:374B SER=066AFF303435554157113106 LOCATION=1-2:1.2",
+    "manufacturer": "STMicroelectronics",
+    "product": "STM32 STLink",
+    "interface": "ST-Link VCP Ctrl",
+    "serial_number": "066AFF303435554157113106",
+    "vid": 0x0483,
+    "pid": 0x374B,
+    "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066AFF303435554157113106-if02",
+}
+
+# The 32 ttyS entries the same host lists, abbreviated: motherboard UARTs with
+# no USB descriptor at all. They are the noise the ST-Link has to be found in.
+HOST_SERIAL_NOISE: list[JsonObject] = [{"device": f"/dev/ttyS{index}", "name": f"ttyS{index}"} for index in range(4)]
+
+STARTER_PROFILE: JsonObject = {
+    "target": {"name": "nucleo-f446re-starter", "controller": "stm32f446ret6"},
+    "debuggers": {"dut": {"timeout_s": 60, "permissions": {}}},
+    "com_ports": {"dut_uart": {"baudrate": 115200, "permissions": {}}},
+}
+
+OPENOCD_TARGETS_OUTPUT = """Open On-Chip Debugger 0.12.0
+Info : clock speed 2000 kHz
+Info : STLINK V2J37M27 (API v2) VID:PID 0483:374B
+Info : Target voltage: 3.281853
+Info : stm32f4x.cpu: Cortex-M4 r0p1 processor detected
+    TargetName         Type       Endian TapName            State
+--  ------------------ ---------- ------ ------------------ ------------
+ 0* stm32f4x.cpu       cortex_m   little stm32f4x.cpu       halted
+"""
+
+
+# The binary the fallback path resolves to. A real file, because the generated
+# configuration is validated before it is written and an `executable` that does
+# not exist is refused there: the point of this path is a file that loads.
+FAKE_OPENOCD_PATH = str(FAKE_OPENOCD)
+
+
+def _linux_openocd_host(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ports: list[JsonObject] | None = None,
+    spawn: object = None,
+) -> list[list[str]]:
+    """A host with OpenOCD on PATH, no STM32CubeProgrammer, and one Nucleo.
+
+    Only the three host readings are replaced (which binaries resolve, what the
+    serial inventory holds, and what a spawned process answers); everything
+    discovery does with them runs for real. Returns the commands that were
+    spawned, which is normally empty: the whole point of this path is that a
+    probe is identified without a word being said to a board."""
+    commands: list[list[str]] = []
+
+    def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        commands.append(command)
+        if spawn is None:  # pragma: no cover - a test that spawns supplies one
+            raise AssertionError(f"nothing should have been spawned: {command}")
+        return spawn(command, cwd, timeout_s)  # type: ignore[operator]
+
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: None)
+    monkeypatch.setattr("agentic_hil.bootstrap.find_openocd", lambda: FAKE_OPENOCD_PATH)
+    monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
+    monkeypatch.setattr(
+        "agentic_hil.bootstrap.list_available_com_ports",
+        lambda tool: {"ok": True, "tool": tool, "ports": [*HOST_SERIAL_NOISE, *(ports if ports is not None else [NUCLEO_VCP])]},
+    )
+    return commands
+
+
+def test_an_stlink_is_enumerated_from_the_usb_inventory_without_the_cube_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reported host, answered.
+
+    OpenOCD cannot enumerate probes itself, which is why discovery only ever had
+    STM32CubeProgrammer's listing to ask. But the host already knows: an ST-Link
+    publishes its serial in the USB descriptor of the virtual COM port it
+    exposes, `agentic-hil com-ports` was already showing it, and that string is
+    exactly what OpenOCD's `adapter serial` takes. So the probe is read out of
+    the inventory, the toolchain is the OpenOCD on PATH, and nothing is said to a
+    board: the profile names the controller, and a profile is a person's
+    statement about their own bench."""
+    _linux_openocd_host(monkeypatch)
+
+    result = discover_attached_hardware(profile=STARTER_PROFILE)
+
+    assert result["ok"] is True, result
+    assert result["backend"] == "openocd"
+    assert result["discovered_by"] == DISCOVERED_BY_USB_INVENTORY
+    assert result["executable"] == FAKE_OPENOCD_PATH
+    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["target"] == {
+        "probe_id": "066AFF303435554157113106",
+        "controller": "stm32f446ret6",
+        "source": "workspace_profile",
+    }
+    # And the port that carries the same serial, by its replug-proof name.
+    assert result["com_port"]["stable_device"] == NUCLEO_VCP["stable_device"]
+
+
+def test_only_the_stlink_usb_products_are_read_as_probe_serials() -> None:
+    """A serial number is unique within a vendor and nowhere else.
+
+    So the match is the vendor *and* one of the ST-Link product ids. A CH340
+    that happens to publish the same string is not this probe, another ST device
+    on the same vendor id is not a debug probe at all, and an ST-Link that
+    published no serial is not something OpenOCD could be told to open."""
+    inventory: JsonObject = {
+        "ok": True,
+        "ports": [
+            NUCLEO_VCP,
+            {"device": "/dev/ttyUSB0", "serial_number": "066AFF303435554157113106", "vid": 0x1A86, "pid": 0x7523},
+            {"device": "/dev/ttyACM7", "serial_number": "SOMEOTHER", "vid": 0x0483, "pid": 0x5740},
+            {"device": "/dev/ttyACM8", "vid": 0x0483, "pid": 0x374B},
+        ],
+    }
+
+    assert usb_stlink_probe_ids(inventory) == ["066AFF303435554157113106"]
+    # An inventory that could not be taken enumerates nothing rather than
+    # guessing at an empty bench.
+    assert usb_stlink_probe_ids({"ok": False, "summary": "pyserial is not installed"}) == []
+
+
+def test_one_probe_on_several_interfaces_is_one_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A V2-1 enumerates more than one port under one serial.
+
+    Folded with the identity rule everything else here selects and locks by, so
+    two interfaces of one probe are one probe rather than `ambiguous_hardware`,
+    and the spelling written down is the one the host published."""
+    second = {**NUCLEO_VCP, "device": "/dev/ttyACM1", "stable_device": None, "serial_number": "066aff303435554157113106"}
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP, second])
+
+    listed = enumerate_attached_probes(com_ports={"ok": True, "ports": [NUCLEO_VCP, second]})
+
+    assert [entry["probe_id"] for entry in listed["probes"]] == ["066AFF303435554157113106"]
+
+
+def test_two_attached_stlinks_are_still_ambiguous_on_the_usb_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ambiguity rule is about boards, not about which enumeration found them."""
+    other = {**NUCLEO_VCP, "device": "/dev/ttyACM1", "stable_device": None, "serial_number": "0669FF495451"}
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP, other])
+
+    result = discover_attached_hardware(profile=STARTER_PROFILE)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "ambiguous_hardware"
+    assert sorted(entry["probe_id"] for entry in result["probes"]) == ["0669FF495451", "066AFF303435554157113106"]
+    # And naming one selects it, exactly as it does with the CLI.
+    selected = discover_attached_hardware(probe_id="0669ff495451", profile=STARTER_PROFILE)
+    assert selected["ok"] is True, selected
+    assert selected["probe_id"] == "0669FF495451"
+
+
+def test_discovery_refuses_naming_both_toolchains_when_the_host_has_neither(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal that names one tool sends an operator to the wrong install.
+
+    STM32CubeProgrammer is the heavier of the two and the only one the old
+    message mentioned. OpenOCD alone is enough for this bench, so the refusal
+    names both, says which is smaller, and records what was looked for."""
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: None)
+    monkeypatch.setattr("agentic_hil.bootstrap.find_openocd", lambda: None)
+    monkeypatch.setattr("agentic_hil.bootstrap.list_available_com_ports", lambda tool: {"ok": True, "ports": [NUCLEO_VCP]})
+
+    result = discover_attached_hardware(profile=STARTER_PROFILE)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "debugger_not_found"
+    assert "STM32_Programmer_CLI" in result["summary"]
+    assert "openocd" in result["summary"]
+    assert result["tools_searched"] == [
+        {"name": "STM32_Programmer_CLI", "provided_by": "STM32CubeProgrammer", "path": None, "found": False},
+        {"name": "openocd", "provided_by": "OpenOCD", "path": None, "found": False},
+    ]
+    # Nothing was enumerated, so nothing claims to have been: the inventory was
+    # never read, and the result does not say it was empty.
+    assert "stlink_ports" not in result
+
+
+def test_the_cube_programmer_path_is_untouched_where_that_cli_is_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The new route is taken only where the old one cannot run.
+
+    A host with STM32CubeProgrammer keeps the enumeration command, the HOTPLUG
+    connect, the backend and the controller read off the board, with the same
+    ST-Link sitting in the same inventory."""
+    commands: list[list[str]] = []
+    responses = iter(
+        [
+            CompletedCommand("ST-LINK SN : 066AFF303435554157113106\n", "", 0, False, False),
+            CompletedCommand("ST-LINK SN : 066AFF303435554157113106\nDevice name : STM32F446RE\n", "", 0, False, False),
+        ]
+    )
+
+    def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        commands.append(command)
+        return next(responses)
+
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: str(Path("C:/ST/STM32_Programmer_CLI.exe")))
+    monkeypatch.setattr("agentic_hil.bootstrap.find_openocd", lambda: FAKE_OPENOCD_PATH)
+    monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
+    monkeypatch.setattr("agentic_hil.bootstrap.list_available_com_ports", lambda tool: {"ok": True, "ports": [NUCLEO_VCP]})
+
+    result = discover_attached_hardware(profile=STARTER_PROFILE)
+
+    assert result["backend"] == "stlink"
+    assert result["discovered_by"] == DISCOVERED_BY_STLINK_CLI
+    assert result["executable"].endswith("STM32_Programmer_CLI.exe")
+    # The board named itself, and the profile did not decide it.
+    assert result["target"] == {"probe_id": "066AFF303435554157113106", "controller": "STM32F446RE"}
+    assert commands[0][-3:] == ["-q", "-l", "st-link-only"]
+    assert commands[1][-4:] == ["-c", "port=SWD", "mode=HOTPLUG", "sn=066AFF303435554157113106"]
+
+
+def test_openocd_names_the_target_when_the_profile_does_not(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second source, and it is read-only.
+
+    `init`, `targets`, `shutdown` with the probe selected by `adapter serial`:
+    no flash, no erase, no reset, no halt. What OpenOCD reports is the target the
+    script created, which is a family rather than a part number, and that is why
+    the profile is asked first."""
+
+    def spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand(OPENOCD_TARGETS_OUTPUT, "", 0, False, False)
+
+    commands = _linux_openocd_host(monkeypatch, spawn=spawn)
+
+    result = discover_attached_hardware(profile={"target": {"name": "demo"}})
+
+    assert result["ok"] is True, result
+    assert result["target"] == {"probe_id": "066AFF303435554157113106", "controller": "stm32f4x", "source": "openocd"}
+    assert commands == [
+        [
+            sys.executable,
+            FAKE_OPENOCD_PATH,
+            "-f",
+            "interface/stlink.cfg",
+            "-c",
+            "adapter serial 066AFF303435554157113106",
+            "-f",
+            "target/stm32f4x.cfg",
+            "-c",
+            "init",
+            "-c",
+            "targets",
+            "-c",
+            "shutdown",
+        ]
+    ]
+    assert not any(word in " ".join(commands[0]) for word in ("program", "flash", "erase", "reset", "halt"))
+    # The parser answers on OpenOCD's own table and refuses to pick between two,
+    # because naming one core of two would be a guess a reader takes for a fact.
+    assert openocd_target_name(OPENOCD_TARGETS_OUTPUT) == "stm32f4x"
+    assert openocd_target_name(f"{OPENOCD_TARGETS_OUTPUT} 1  stm32f4x.ap        mem_ap     little stm32f4x.cpu       unknown\n") is None
+    assert openocd_target_name("Error: init mode failed (unable to connect to the target)\n") is None
+
+
+def test_a_probe_that_answers_with_no_target_still_configures_the_bench(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A controller nobody could name is a field to fill in, not a bench to withhold.
+
+    The probe serial, the toolchain path and the board's own COM port were all
+    found, and each of them is a thing an operator cannot retype correctly. So
+    they are written, the controller is left at the placeholder, and the summary
+    says which of the two happened."""
+
+    def spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand("", "Error: init mode failed (unable to connect to the target)\n", 1, False, False)
+
+    _linux_openocd_host(monkeypatch, spawn=spawn)
+
+    result = discover_attached_hardware(profile={"target": {"name": "demo"}})
+
+    assert result["ok"] is True, result
+    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["target"] is None
+    assert "target was not identified" in result["summary"]
+    assert "no target" in result["target_discovery"]["summary"]
+
+
+def test_a_timed_out_openocd_read_is_a_failure_not_an_unnamed_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reaped OpenOCD read is a failed read whose effect is unknown.
+
+    `init` attaches over SWD before `targets` runs, and the process was killed
+    rather than allowed to reach its own `shutdown`, so a timeout can leave the
+    core halted with nothing to resume it. Collapsing that into "the ST-Link
+    answered with no target" returned `ok: true` about a bench that may be sitting
+    halted, from which `init`/adoption/creation would go on to write a file. Now
+    the read is `ok: false`, its `error_type` is `timeout`, and `hardware_state`
+    is `unknown` -- which `overall_success` refuses -- and no controller is
+    invented from the empty output."""
+
+    def spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand("", "", None, True, False)
+
+    _linux_openocd_host(monkeypatch, spawn=spawn)
+
+    result = discover_attached_hardware(profile={"target": {"name": "demo"}})
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "timeout"
+    assert result["hardware_state"] == "unknown"
+    assert result["side_effect_status"] == "unknown"
+    assert result.get("target") is None
+    assert overall_success(result) is False
+    # The probe and toolchain are still named, so the failure says which board it
+    # was about, and the timeout is carried where a reader can see it.
+    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["timed_out"] is True
+    assert result["source"] == "openocd"
+
+
+def test_openocd_gone_before_the_read_is_a_pre_contact_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`not_found` is told apart from `timeout`: nothing was said to the board.
+
+    The OpenOCD that resolved on PATH was gone by the time the read spawned, so
+    unlike a reaped attach this touched no target: the failure is
+    `debugger_not_found` and the bench stays `unchanged`. Lumping it in with the
+    timeout would quarantine a board a pre-contact miss never reached."""
+
+    def spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand("", "", None, False, True)
+
+    _linux_openocd_host(monkeypatch, spawn=spawn)
+
+    result = discover_attached_hardware(profile={"target": {"name": "demo"}})
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "debugger_not_found"
+    assert result["hardware_state"] == "unchanged"
+    assert result.get("target") is None
+    assert overall_success(result) is False
+
+
+def test_the_generated_entry_names_the_backend_that_actually_answered() -> None:
+    """A file that says `stlink` where there is no STM32CubeProgrammer is a file
+    that loads and refuses at the first call.
+
+    So the entry's `type` is the backend discovery ran on, and an OpenOCD entry
+    keeps the two scripts OpenOCD reaches a board through: without them the
+    entry names no route to the target at all. It is also the word
+    `plan_adoption` compares an existing entry's `type` against, so a bench
+    generated by `init` and one filled in by `adopt-hardware` agree."""
+    configured = apply_discovery_to_template(
+        yaml.safe_load(DEFAULT_CONFIG_TEMPLATE),
+        STARTER_PROFILE,
+        {
+            "backend": "openocd",
+            "executable": FAKE_OPENOCD_PATH,
+            "probe_id": "066AFF303435554157113106",
+            "target": {"controller": "stm32f446ret6"},
+            "com_port": NUCLEO_VCP,
+        },
+    )
+
+    entry = configured["debuggers"]["dut"]
+    assert entry["type"] == "openocd"
+    assert entry["executable"] == FAKE_OPENOCD_PATH
+    assert entry["probe_id"] == "066AFF303435554157113106"
+    assert entry["interface_cfg"] == "interface/stlink.cfg"
+    assert entry["target_cfg"] == "target/stm32f4x.cfg"
+    assert configured["target"] == {"name": "nucleo-f446re-starter", "controller": "stm32f446ret6"}
+    # The port the probe carries, by its replug-proof name, with the identity
+    # that makes the name checkable.
+    assert configured["com_ports"]["dut_uart"] == {
+        "device": NUCLEO_VCP["stable_device"],
+        "baudrate": 115200,
+        "serial_number": "066AFF303435554157113106",
+        "vid": 0x0483,
+        "pid": 0x374B,
+        "permissions": {"allow_write": True},
+    }
+
+
+def test_a_discovery_that_found_the_cube_cli_still_writes_an_stlink_entry() -> None:
+    """The neighbouring half: nothing about the Windows bench moved."""
+    configured = apply_discovery_to_template(
+        yaml.safe_load(DEFAULT_CONFIG_TEMPLATE),
+        STARTER_PROFILE,
+        {
+            "backend": "stlink",
+            "executable": "C:/ST/STM32_Programmer_CLI.exe",
+            "probe_id": "066AFF303435554157113106",
+            "target": {"controller": "STM32F446RE"},
+            "com_port": None,
+        },
+    )
+
+    assert configured["debuggers"]["dut"]["type"] == "stlink"
+    assert configured["debuggers"]["dut"]["interface"] == "SWD"
+    assert "interface_cfg" not in configured["debuggers"]["dut"]
+
+
+def test_init_on_a_linux_openocd_host_writes_the_bench_it_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End to end, on the host the report came from.
+
+    `init` from the starter root wrote `probe_id: null`, `executable: null`,
+    `com_ports: {}` and said no attached bench was found. It now writes the
+    probe, the OpenOCD on PATH and the board's own UART, and says which
+    enumeration answered and what it saw."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch)
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    assert result["summary"].startswith("Attached hardware was discovered and configured")
+    written = load_authoritative_config(workspace)
+    assert written.debuggers["dut"].type == "openocd"
+    assert written.debuggers["dut"].executable == FAKE_OPENOCD_PATH
+    assert written.debuggers["dut"].probe_id == "066AFF303435554157113106"
+    assert written.target.controller == "stm32f446ret6"
+    assert written.com_ports["dut_uart"].device == NUCLEO_VCP["stable_device"]
+    assert written.com_ports["dut_uart"].serial_number == "066AFF303435554157113106"
+    # And the account of what discovery did, which is what "No attached bench
+    # was found" left an operator no way to check.
+    assert result["next_steps"][0] == (
+        "Discovery looked for STM32_Programmer_CLI (STM32CubeProgrammer): not on this host; "
+        f"openocd (OpenOCD): found at {FAKE_OPENOCD_PATH}. ST-Link serial port(s) on this host: "
+        f"066AFF303435554157113106 on {NUCLEO_VCP['stable_device']}."
+    )
+
+
+def test_an_enumerated_stlink_is_never_reported_as_an_absent_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The absent-bench wording has to be true to be said.
+
+    An ST-Link that published no serial number enumerates no probe, so discovery
+    answers `adapter_not_found` while the host inventory is showing the probe and
+    its virtual COM port. Telling that operator no bench was found contradicts a
+    listing they can read; the ports are named instead."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[{key: value for key, value in NUCLEO_VCP.items() if key != "serial_number"}])
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    assert result["hardware_discovery"]["error_type"] == "adapter_not_found"
+    assert "No attached bench was found" not in result["summary"]
+    assert "No usable probe serial was enumerated" in result["summary"]
+    assert NUCLEO_VCP["stable_device"] in result["summary"]
+    assert "no serial on" in result["next_steps"][1]
+
+
+def test_adopt_hardware_fills_a_placeholder_on_a_host_with_only_openocd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The way back into a placeholder, on the host that could not take it.
+
+    `adopt-hardware --com-port dut_uart` refused `debugger_not_found` there for
+    the same reason `init` wrote a placeholder: both read the board through one
+    enumeration, and that enumeration needed a toolchain the host does not have.
+    They share the read, so fixing it fixes both, and this pins that they do
+    rather than that they happen to.
+
+    The three values it carries are the three nobody retypes correctly: the
+    24-character probe serial, the toolchain path, and which of the host's
+    thirty-odd serial devices is this board's.
+
+    The controller is read off the board through OpenOCD, never out of the
+    workspace profile: adoption is a tool reached over MCP, so a checkout does not
+    get to name the part. OpenOCD reports the family `stm32f4x`; the file already
+    holds the exact part the operator's own `init` carried out of the profile, so
+    adoption keeps that under `kept` rather than replacing it with the coarser
+    board read."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    # The ordinary order: the tool is installed, the board is plugged in after.
+    _linux_openocd_host(monkeypatch, ports=[])
+    placeholder = init_config()
+    assert placeholder["ok"] is True, placeholder
+    assert load_authoritative_config(workspace).debuggers["dut"].probe_id is None
+
+    def openocd_reads_the_target(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand(OPENOCD_TARGETS_OUTPUT, "", 0, False, False)
+
+    _linux_openocd_host(monkeypatch, spawn=openocd_reads_the_target)
+    result = adopt_hardware(com_port_id="dut_uart")
+
+    assert result["ok"] is True, result
+    assert result["applied"] is True
+    carried = {item["key"]: item["value"] for item in result["carried"]}
+    assert carried["debuggers.dut.probe_id"] == "066AFF303435554157113106"
+    assert carried["debuggers.dut.executable"] == FAKE_OPENOCD_PATH
+    # The board read (`stm32f4x`) and the operator's exact part (`stm32f446ret6`)
+    # differ, so the operator's value is kept and the coarser read is reported
+    # under `kept` rather than carried or waved through as current.
+    kept = {item["key"]: item for item in result["kept"]}
+    assert kept["target.controller"]["configured_value"] == "stm32f446ret6"
+    assert kept["target.controller"]["discovered_value"] == "stm32f4x"
+    assert carried["com_ports.dut_uart.device"] == NUCLEO_VCP["stable_device"]
+    assert carried["com_ports.dut_uart.serial_number"] == "066AFF303435554157113106"
+    # And nothing under `unavailable` is about the toolchain: the entry the
+    # skeleton wrote is `type: openocd`, and this discovery ran on openocd, so
+    # the executable belongs in it.
+    assert [item["key"] for item in result["unavailable"]] == []
+    written = load_authoritative_config(workspace)
+    assert written.debuggers["dut"].executable == FAKE_OPENOCD_PATH
+    assert written.target.controller == "stm32f446ret6", "the operator's exact part survives the coarser board read"
+    assert written.com_ports["dut_uart"].device == NUCLEO_VCP["stable_device"]
+
+
+# ---------------------------------------------------------------------------
+# The placeholder a project profile fills in, and the port it can declare
+# without binding.
+
+
+def test_the_placeholder_carries_the_profiles_names_instead_of_the_examples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workspace that says what its board is should not be handed `example-target`.
+
+    The profile is on disk and names the board and the ports; the placeholder
+    said `example-target`, `unknown-controller` and `com_ports: {}` anyway, so
+    every fact the project had already stated had to be typed again after
+    `adopt-hardware`. Now the names go in, and only the names: no device, which
+    is the one thing discovery did not find out."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[])
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    written = load_authoritative_config(workspace)
+    assert written.target.name == "nucleo-f446re-starter"
+    assert written.target.controller == "stm32f446ret6"
+    assert sorted(written.com_ports) == ["dut_uart"]
+    port = written.com_ports["dut_uart"]
+    assert port.baudrate == 115200
+    assert port.permissions.allow_write is True
+    # Declared and not bound: the entry says which port this project has and
+    # says nothing about which of the host's devices it is.
+    assert com_port_is_unbound(port) is True
+    assert port.device == ""
+    # The skeleton is still the annotated file an operator reads, which a YAML
+    # round trip of the document would have thrown away.
+    assert "# Every debug probe is a named entry" in Path(written.config_path).read_text(encoding="utf-8")
+
+
+def test_a_workspace_with_no_profile_still_gets_the_shipped_skeleton(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing to carry, nothing carried.
+
+    The built-in `DEFAULT_PROJECT_PROFILE` fills a *discovered* bench; it is not
+    consulted here, because putting a `dut_uart` into a workspace that declared
+    none would be this command inventing an entry rather than honouring one."""
+    workspace = tmp_path / "bare"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[])
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    written = load_authoritative_config(workspace)
+    assert written.target.name == "example-target"
+    assert written.target.controller == "unknown-controller"
+    assert written.com_ports == {}
+
+
+def test_the_placeholder_anchors_are_in_the_skeleton_they_quote() -> None:
+    """The substitution is textual, so what it quotes has to still be there.
+
+    A skeleton that reworded either region would silently stop carrying the
+    profile, which is the failure this whole change removes. `init` raises
+    instead of writing that file, and this is the check that keeps the raise
+    from ever being reached in the field."""
+    assert PLACEHOLDER_TARGET_ANCHOR in DEFAULT_CONFIG_TEMPLATE
+    assert PLACEHOLDER_COM_PORTS_ANCHOR in DEFAULT_CONFIG_TEMPLATE
+    with pytest.raises(ConfigError) as refused:
+        apply_profile_to_placeholder("target: {}\n", {"target": {"name": "demo"}})
+    assert refused.value.error_type == "config_invalid"
+
+
+def test_a_plan_naming_an_unbound_port_is_refused_by_the_port_not_by_the_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal the reported operator actually saw, corrected.
+
+    `test_config_invalid: Test step references a COM port that is not in the
+    authoritative config (steps[1].port_id dut_uart)` was wrong twice: the plan
+    named a port the project declares, and the thing that was missing was the
+    device. The plan is not the thing to fix, so the refusal names the port, the
+    key that is empty, and the command that fills it."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[])
+    assert init_config()["ok"] is True
+    config = load_authoritative_config(workspace)
+
+    plan = workspace / "nominal.testconfig.yaml"
+    plan.write_text(
+        yaml.safe_dump(
+            {
+                "version": 2,
+                "name": "nominal",
+                "steps": [{"action": "uart_open", "port_id": "dut_uart"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = AgenticHILToolService(config)
+    try:
+        refused = TestReactor(config, service).run(load_test_config(str(plan), str(workspace)))
+    finally:
+        service.close()
+
+    assert refused["ok"] is False
+    # The whole result, not only the finding nested in it: a caller branching on
+    # `error_type` reads the top level, and `test_config_invalid` there says the
+    # plan is the thing to correct.
+    assert refused["error_type"] == "com_port_not_bound"
+    validation = refused["validation_error"]
+    assert validation["error_type"] == "com_port_not_bound"
+    assert validation["port_id"] == "dut_uart"
+    assert validation["unbound_key"] == "com_ports.dut_uart.device"
+    assert "names no device yet" in validation["summary"]
+    assert "not in the authoritative config" not in validation["summary"]
+    assert "adopt-hardware" in validation["next_step"]
+
+
+def test_every_com_tool_refuses_an_unbound_port_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One gate, so the four tools cannot answer this differently.
+
+    `com_session_start` would otherwise reach an open on the empty string and
+    report whatever the operating system said about it, which is a backend error
+    about a bench that was never bound rather than a refusal about a
+    configuration."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[])
+    assert init_config()["ok"] is True
+    service = AgenticHILToolService(load_authoritative_config(workspace))
+    try:
+        for tool, arguments in (
+            ("com_session_start", {"port_id": "dut_uart"}),
+            ("com_write", {"port_id": "dut_uart", "text": "hello"}),
+            ("com_read", {"port_id": "dut_uart"}),
+        ):
+            refused = service.call(tool, arguments)
+            assert refused["ok"] is False, (tool, refused)
+            assert refused["error_type"] == "com_port_not_bound", tool
+            assert refused["field"] == "com_ports.dut_uart.device", tool
+            assert refused["side_effect_committed"] is False, tool
+            assert refused["retry_safe"] is True, tool
+    finally:
+        service.close()
+
+
+def test_a_bound_port_is_untouched_by_any_of_it(tmp_path: Path) -> None:
+    """The neighbouring behaviour: a configuration that names a device is read
+    exactly as it was, identity rule included."""
+    path = write_config(
+        tmp_path,
+        com_ports_yaml=(
+            "com_ports:\n"
+            "  dut_uart:\n"
+            '    device: "COM7"\n'
+            "    baudrate: 115200\n"
+            '    serial_number: "066AFF303435554157113106"\n'
+        ),
+    )
+    config = load_config(str(path))
+
+    port = config.com_ports["dut_uart"]
+    assert port.device == "COM7"
+    assert com_port_is_unbound(port) is False
+    assert uart_device(config, "dut_uart").lock_key == "com:serial:066aff303435554157113106"
+
+
+def test_an_unbound_port_locks_under_its_own_name_and_says_what_it_is(tmp_path: Path) -> None:
+    """A key that is always something, and a warning that is true.
+
+    `com:` for every unbound entry on the host would be one lock key shared by
+    unrelated benches; the volatile-name warning would tell an operator their
+    port may come to mean another board when it currently means none."""
+    path = write_config(
+        tmp_path,
+        com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n",
+    )
+    config = load_config(str(path))
+
+    device = uart_device(config, "dut_uart")
+    assert device.lock_key == "com:unbound:dut_uart"
+    assert "names no device yet" in str(device.identity_warning)
+    # And it does not name an empty key as the thing that identifies the port,
+    # which is what falling through to the shared rule reported.
+    assert device.identity_source == "unbound"
+
+
+def test_version_3_does_not_demand_an_identity_from_a_port_with_no_device(tmp_path: Path) -> None:
+    """Version 3 is about a name that can come to reach another board.
+
+    An entry with no device has no such name, so demanding it declare what
+    identifies it would refuse the very file `init` writes when no bench was
+    attached. The rule applies in full from the moment a device is named."""
+    path = write_config(
+        tmp_path,
+        config_version=CURRENT_CONFIG_VERSION,
+        com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n",
+    )
+
+    config = load_config(str(path))
+
+    assert com_port_is_unbound(config.com_ports["dut_uart"]) is True
+    # And the same file with a kernel name and nothing else is still refused,
+    # which is the rule this leaves alone.
+    refused = write_config(
+        tmp_path / "bound",
+        config_version=CURRENT_CONFIG_VERSION,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n    baudrate: 115200\n',
+    )
+    with pytest.raises(ConfigError) as error:
+        load_config(str(refused))
+    assert error.value.error_type == "config_invalid"
+    assert "com_ports.dut_uart" in error.value.summary
+
+
+def test_the_reference_resource_states_which_enumeration_answers() -> None:
+    """An agent reading the backend matrix has to be able to predict the entry.
+
+    Which of the two enumerations answers on a host decides the `type` and the
+    `executable` a generated `debuggers` entry gets, so an agent that reads this
+    resource and then reads a generated file has to find them agreeing. It is
+    also where the answer to "why is this bench openocd" lives for an agent that
+    never sees `init`'s own output."""
+    served = read_resource(DEBUGGER_BACKENDS_URI)
+    assert served is not None
+    document = json.loads(str(served["text"]))
+
+    rule = document["bootstrap_discovery"]
+    assert "STM32_Programmer_CLI" in rule["rule"]
+    assert "USB serial inventory" in rule["rule"]
+    assert "type: openocd" in rule["usb_serial_inventory"]
+    assert "type: stlink" in rule["stm32cubeprogrammer_cli"]
+    assert "discovered_by" in rule["reported_as"]
+    # And the read that names the target without that CLI is stated as
+    # read-only, because an agent has to know what an `init` costs the board.
+    assert "Neither flashes, erases, resets nor halts." in rule["target_identity_without_the_cli"]
+
+
+def test_debugger_probes_lists_the_stlink_on_a_host_with_only_openocd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The third command that refused, and the one an operator runs first.
+
+    Before the first `setup` there is no configuration, so `agentic-hil
+    debugger-probes` answers through bootstrap discovery, which is exactly where
+    "is the board visible, is there one of it, which serial" is asked. On a host
+    with no STM32CubeProgrammer that was `debugger_not_found` while the serial
+    the caller wanted was in `agentic-hil com-ports`. It answers now, and it
+    names the backend that answered rather than the one this host cannot run."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch)
+
+    result = bootstrap_probe_listing()
+
+    assert result["ok"] is True, result
+    assert result["source"] == "bootstrap"
+    assert result["backend"] == "openocd"
+    assert result["discovered_by"] == DISCOVERED_BY_USB_INVENTORY
+    assert [entry["probe_id"] for entry in result["probes"]] == ["066AFF303435554157113106"]
+    assert result["stlink_ports"][0]["stable_device"] == NUCLEO_VCP["stable_device"]

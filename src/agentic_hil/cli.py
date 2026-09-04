@@ -22,6 +22,7 @@ from agentic_hil.bootstrap import (
     BOOTSTRAP_BACKEND,
     DEFAULT_PROJECT_PROFILE,
     apply_discovery_to_template,
+    apply_profile_to_placeholder,
     enumerate_attached_probes,
     load_project_profile,
 )
@@ -2127,6 +2128,12 @@ def _placeholder_discovery(config_step: JsonObject) -> JsonObject | None:
     return None
 
 
+def _enumerated_stlink_ports(discovery: JsonObject) -> list[JsonObject]:
+    """The ST-Link-shaped host serial ports discovery saw, if it recorded any."""
+    ports = discovery.get("stlink_ports")
+    return [port for port in ports if isinstance(port, dict)] if isinstance(ports, list) else []
+
+
 def _placeholder_reason(discovery: JsonObject) -> str:
     """Why the placeholder was written, named from discovery's own answer.
 
@@ -2138,11 +2145,64 @@ def _placeholder_reason(discovery: JsonObject) -> str:
     operator to reseat a board that is already there. Those name what discovery
     reported instead, so the headline agrees with the reason its `config` step
     carries rather than overwriting every failure with the one it is not.
-    """
+
+    And not even every `adapter_not_found` earns the wording. Enumeration can
+    list no *probe* on a host whose serial inventory is showing the ST-Link and
+    its virtual COM port, which is a probe that published no serial rather than
+    an empty bench; telling that operator no bench was found contradicts a
+    listing they can read, which is how the whole of this was reported. The
+    ports are named instead."""
+    enumerated = _enumerated_stlink_ports(discovery)
     if discovery.get("error_type") == "adapter_not_found":
-        return "No attached bench was found"
+        if not enumerated:
+            return "No attached bench was found"
+        devices = ", ".join(str(port.get("stable_device") or port.get("device") or "?") for port in enumerated)
+        return (
+            f"No usable probe serial was enumerated, although this host is showing {len(enumerated)} "
+            f"ST-Link serial port(s) ({devices})"
+        )
     reason = str(discovery.get("summary") or "hardware discovery identified no bench").rstrip(".")
     return f"Hardware discovery did not configure a bench ({reason})"
+
+
+def _discovery_account(discovery: JsonObject) -> str | None:
+    """What discovery looked for, where it landed, and what it enumerated.
+
+    The sentence that was missing from the reported run. An operator with a
+    Nucleo plugged in, OpenOCD installed and no STM32CubeProgrammer read "No
+    attached bench was found" and had nothing in the result to check it
+    against: which tools were sought, whether either resolved, and which ST-Link
+    serial the host was already publishing were all facts discovery had and did
+    not say. None of it is a judgement, so it is reported whether the file is a
+    placeholder or a filled-in bench.
+
+    None when the result carries neither field, which is a discovery that never
+    reached enumeration (a lease refusal, an audit failure) and has nothing to
+    account for."""
+    parts: list[str] = []
+    tools = discovery.get("tools_searched")
+    if isinstance(tools, list) and tools:
+        looked = [
+            f"{tool.get('name')} ({tool.get('provided_by')}): " + (f"found at {tool['path']}" if tool.get("found") else "not on this host")
+            for tool in tools
+            if isinstance(tool, dict)
+        ]
+        if looked:
+            parts.append("Discovery looked for " + "; ".join(looked) + ".")
+    enumerated = _enumerated_stlink_ports(discovery)
+    if enumerated:
+        listed = ", ".join(
+            f"{port.get('serial_number') or 'no serial'} on {port.get('stable_device') or port.get('device') or '?'}" for port in enumerated
+        )
+        parts.append(f"ST-Link serial port(s) on this host: {listed}.")
+    elif "stlink_ports" in discovery:
+        # The key is present and empty, so the inventory was read and held no
+        # ST-Link. Branching on the key rather than on `discovered_by` is what
+        # keeps this from claiming an empty inventory for a run that refused
+        # before it ever read one, which is the difference between reporting a
+        # finding and inventing it.
+        parts.append("This host's serial inventory showed no ST-Link serial port.")
+    return " ".join(parts) if parts else None
 
 
 _ADOPT_FILLS = (
@@ -2174,8 +2234,10 @@ def _placeholder_next_step(discovery: JsonObject) -> str:
     error_type = discovery.get("error_type")
     if error_type == "debugger_not_found":
         remedy = (
-            "Install STM32CubeProgrammer so its CLI resolves on this host (the board itself may already be "
-            f"attached), then run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
+            "Install a debug toolchain so one of them resolves on this host (the board itself may already be "
+            "attached): OpenOCD is the smaller of the two and is enough on its own, because with it installed the "
+            "ST-Link is enumerated from this host's USB serial inventory; STM32CubeProgrammer also works and reads "
+            f"the part number off the target itself. Then run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
         )
     elif error_type == "ambiguous_hardware":
         remedy = (
@@ -2450,6 +2512,11 @@ def _init_bench_read(workspace: Path, generation_bench: BenchMutex | None = None
         # caller owns the bench and releases it once the write is done (review
         # round 1, finding 2).
         generation_bench=generation_bench,
+        # This workspace's own profile, and the same one the template is filled
+        # from below. On a host with no STM32CubeProgrammer it is what names the
+        # board, so a project that ships one is identified with nothing said to
+        # the target; where that CLI answers it decides nothing.
+        profile=load_project_profile(workspace),
     )
     # `unleased` is this function's own answer and is the more specific of the
     # two: it names why the file could not be loaded at all. `unaudited` is the
@@ -2662,7 +2729,27 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         document = {"workspace_root": str(workspace), "state_root": str(state_root), **configured}
         text = yaml.safe_dump(document, sort_keys=False, allow_unicode=False)
     else:
-        text = f"workspace_root: {json.dumps(str(workspace))}\nstate_root: {json.dumps(str(state_root))}\n\n{DEFAULT_CONFIG_TEMPLATE}"
+        # The placeholder, carrying whatever this project's own profile already
+        # states about the bench: the board's name and controller, and the ports
+        # it declares by name, baudrate and permissions. Not a device for any of
+        # them, which is precisely what discovery did not find out, so each entry
+        # is written unbound and every call that names one is refused
+        # `com_port_not_bound`.
+        #
+        # `com_ports: {}` was the expensive half of the old placeholder: a plan
+        # opening the `dut_uart` the project's own profile declares was refused
+        # "references a COM port that is not in the authoritative config", which
+        # sent the operator to look for a mistake in a plan that was right.
+        #
+        # Only with a profile on disk. Without one there is nothing to carry and
+        # the shipped skeleton is written exactly as it always has been; the
+        # built-in `DEFAULT_PROJECT_PROFILE` is deliberately not consulted here,
+        # because it would put entries into a workspace that asked for none.
+        try:
+            placeholder = DEFAULT_CONFIG_TEMPLATE if profile is None else apply_profile_to_placeholder(DEFAULT_CONFIG_TEMPLATE, profile)
+        except ConfigError as error:
+            return {**error.to_dict(), "summary": f"{error.summary} No configuration was written.", "path": str(target_path)}
+        text = f"workspace_root: {json.dumps(str(workspace))}\nstate_root: {json.dumps(str(state_root))}\n\n{placeholder}"
     safe_directory(target_path.parent)
     descriptor, temporary_name = tempfile.mkstemp(prefix=".agentic-hil-config-validate-", dir=target_path.parent)
     temporary_path = Path(temporary_name)
@@ -2740,6 +2827,13 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         # probes, a target that did not answer, a timeout -- can happen with the
         # board plugged in the whole time, and name their own fix (#416).
         next_steps.insert(0, _placeholder_next_step(discovery))
+    # What was looked for and what was seen, whichever file was written: the
+    # evidence behind the sentence above, which a reader who can see the board
+    # plugged in had no way to check. Behind the remedy rather than in front of
+    # it, because the first step is what to *do* and this is what was found.
+    account = _discovery_account(discovery)
+    if account is not None:
+        next_steps.insert(1 if not discovered else 0, account)
     # First, and before anything about COM ports or OpenOCD scripts: a bench that
     # was narrowed and is open again is the one thing here that changes what this
     # machine may be told to do.
@@ -4715,7 +4809,11 @@ def bootstrap_probe_listing() -> JsonObject:
         "ok": listed["ok"],
         "tool": "debugger_probes_list",
         "source": "bootstrap",
-        "backend": BOOTSTRAP_BACKEND,
+        # Whichever of bootstrap's two enumerations answered, not a fixed one:
+        # on a host with no STM32CubeProgrammer the probes come out of the USB
+        # serial inventory and the toolchain is OpenOCD, and a listing that said
+        # `stlink` there would name a backend this host cannot run.
+        "backend": listed.get("backend", BOOTSTRAP_BACKEND),
         **{key: value for key, value in listed.items() if key not in {"ok", "tool", "backend"}},
     }
     if listed["ok"]:

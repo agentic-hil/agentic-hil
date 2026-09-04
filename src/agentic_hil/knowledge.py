@@ -1115,6 +1115,34 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "board, and a stimulus sent to the wrong board is the failure the port identity check exists to prevent.",
         ),
     ),
+    "com_port_not_bound": ErrorRemedy(
+        meaning=(
+            "A configured `com_ports` entry names a port and no device, so there is nothing to open. `field` names the "
+            "key that is empty. The entry exists because the project declared this port (its name, its baudrate and "
+            "its permissions) before any bench was attached: `agentic-hil init` writes the project profile's ports "
+            "that way when discovery found no board. Nothing was contacted and nothing is in doubt.\n\n"
+            "It is deliberately not `com_port_not_configured`, which means the project declares no such port at all. "
+            "There the caller or the plan named a port that does not exist; here both are right and the bench is not "
+            "filled in, and telling an operator their plan referenced an unconfigured port sent them to look for a "
+            "mistake that was not there."
+        ),
+        remediation=(
+            "Plug the board in and run `agentic-hil adopt-hardware --apply`. It fills `com_ports.<name>.device` in "
+            "from the attached hardware, together with the serial number and USB ids that make the name checkable, "
+            "and it fills in the probe and the toolchain path in the same call.",
+            "If the port is not the probe's own virtual COM port, run `agentic-hil com-ports` to see what this host "
+            "has and name the device yourself. On Linux prefer the `/dev/serial/by-id/...` name, which survives a "
+            "replug.",
+            "Nothing needs recovering: `retry_safe` is true, no handle was created and no line was driven.",
+        ),
+        do_not=(
+            "Do not delete the entry to make the refusal go away. The entry is the project's statement that this bench "
+            "has a `dut_uart` at this baudrate with these permissions, and a plan that names it is correct; removing "
+            "it turns a precise refusal back into `com_port_not_configured`.",
+            "Do not point it at whichever device happens to be free. A serial device name is an enumeration order, so "
+            "a guess is a stimulus sent to whatever board took that name.",
+        ),
+    ),
     "undeclared_device": ErrorRemedy(
         meaning=(
             "A run reached for a device its test description does not name. `declared_devices` lists what it declared, "
@@ -1262,7 +1290,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "OpenOCD printed, which may be neither of them or the stage marker alone. Either way the outcome went "
             "unreported, and that is the absence of a verdict rather than a verdict that no target answered: `init` "
             "may have completed, examined the core and halted it. The board's run state is unknown, which is why this "
-            "quarantines the bench instead of refusing."
+            "quarantines the bench instead of refusing.\n\n"
+            "The success marker is what this branch turns on, and it settles the opposite case too: a run that exits 0 "
+            "*with* the marker is a success even when OpenOCD printed a failure-worded line on the way to it, because "
+            "OpenOCD stops evaluating its command string at the first command that fails and could not have reached the "
+            "`echo` otherwise. Those lines arrive verbatim on the successful result as `backend_warnings`, with the "
+            "summary saying how many came along, rather than deciding an outcome the marker already reported."
         ),
         remediation=(
             "Read `quarantine_guidance` in this result first: it names what is confirmed, what is not, and the physical "
@@ -2585,6 +2618,50 @@ FLASH_ADDRESS_RULE = {
 # place a document with several unnamed debuggers is allowed to load at all:
 # discovering the ids is exactly what an operator does before they can
 # write one down, which config load cannot ask of them.
+# What `agentic-hil init`, `agentic-hil debugger-probes`, `agentic-hil
+# adopt-hardware` and `project_config_create` do before any of the entries above
+# exists. Stated here rather than only in the per-backend matrix, because it is a
+# fact about the host rather than about a configured entry: which of the two
+# enumerations answered decides what the generated entry's `type` and
+# `executable` will be.
+BOOTSTRAP_DISCOVERY_RULE = {
+    "rule": (
+        "Bootstrap discovery has two enumerations, and the host decides which runs: STM32CubeProgrammer's "
+        "STM32_Programmer_CLI where it is installed, and otherwise this host's own USB serial inventory with OpenOCD "
+        "as the toolchain."
+    ),
+    "stm32cubeprogrammer_cli": (
+        "`-l st-link-only` lists the probes and a HOTPLUG connect reads the part number off the target. The generated "
+        "entry is `type: stlink` with that CLI as its `executable`."
+    ),
+    "usb_serial_inventory": (
+        "A host serial port whose USB vendor is 0483 and whose product is one of the ST-Link ids publishes the probe "
+        "serial in its descriptor, which is the string OpenOCD's `adapter serial` takes. The toolchain is the "
+        "`openocd` on PATH, and the generated entry is `type: openocd` with its interface_cfg and target_cfg. This is "
+        "the path on an ordinary Linux workstation, which normally has OpenOCD and not STM32CubeProgrammer."
+    ),
+    "target_identity_without_the_cli": (
+        "The workspace profile's `target.controller` when it names one, which is exact and says nothing to the board; "
+        "otherwise a read-only OpenOCD `init`, `targets`, `shutdown` against the selected adapter serial, which "
+        "reports the target script's family rather than the part number. Neither flashes, erases, resets nor halts. A "
+        "probe whose target could not be named is still written down, with `target.controller` left at the "
+        "placeholder."
+    ),
+    "reported_as": (
+        "`discovered_by` says which enumeration answered (`stm32cubeprogrammer_cli` or `usb_serial_inventory`), "
+        "`tools_searched` says which binaries were looked for and where each resolved, and `stlink_ports` lists the "
+        "ST-Link serial ports this host is showing."
+    ),
+    "neither_installed": (
+        "error_type `debugger_not_found`, naming both tools. OpenOCD alone is enough and is the smaller install; "
+        "STM32CubeProgrammer additionally reads the part number off the target."
+    ),
+    "ambiguity": (
+        "Unchanged either way: more than one attached ST-Link is `ambiguous_hardware`, and a requested probe_id "
+        "selects among what was enumerated and never adds to it."
+    ),
+}
+
 UNNAMED_PROBE_RULE = {
     "rule": "Once `debuggers` holds more than one entry, the bound one must carry a probe_id before a probe-addressing tool (flash_firmware, reset_target, probe_target, the typed debug tools) will drive it.",
     "why": "the bound entry's name alone does not prove which physical probe a call reaches once another configured entry could just as easily be meant; probe_id is what pyOCD and ST-Link verify against the attached hardware, and what OpenOCD opens by adapter serial.",
@@ -2620,6 +2697,7 @@ def debugger_backends_document() -> JsonObject:
             "refused": "this backend has no equivalent, so the values it cannot carry out are rejected at load instead of being read and ignored; `enum` lists what it does accept",
         },
         "backends": DEBUGGER_FIELD_MATRIX,
+        "bootstrap_discovery": BOOTSTRAP_DISCOVERY_RULE,
         "probe_id_when_multiple_probes": MULTI_PROBE_RULE,
         "probe_id_at_tool_call_time": UNNAMED_PROBE_RULE,
         "flash_address": FLASH_ADDRESS_RULE,
@@ -3713,6 +3791,8 @@ User scope is per user, per machine: all of it under the invoking user's home, i
 
 Each half owns its rollback set. A project step that fails leaves the installed skill and the MCP registration standing, and `agentic-hil init` alone is what re-runs.
 
+The executable that check accepts is one owned by you or by root, executable, and writable by nobody else, and it reads group write as another writer only when the group is not your own user-private group (its name is your account's, its gid is your primary gid, and it has no other member), so the group-writable console script a default Debian or Ubuntu `umask 0002` produces registers as it stands, while world write, a foreign group, and ownership by another account are refused with the failing condition and the path element it failed on named under `rejected_candidates` in `agentic-hil doctor`.
+
 ## Where things go
 
 | Item | Windows | POSIX |
@@ -4173,7 +4253,7 @@ MCP_RESOURCES: list[JsonObject] = [
         DEBUGGER_BACKENDS_URI,
         "debugger-backends",
         "Required fields per debugger backend",
-        "Which of type, executable, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink and pyocd requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset.",
+        "Which of type, executable, probe_id, target_type, interface, interface_cfg, target_cfg, connect_mode and flash_address each of openocd, stlink and pyocd requires, discovers, ignores, or refuses; when probe_id becomes mandatory; when flash_address is needed; which backend can connect under reset; and which of bootstrap discovery's two enumerations answers on a given host, which decides the type and executable a generated entry gets.",
         JSON_MIME,
     ),
     _resource_descriptor(

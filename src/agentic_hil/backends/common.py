@@ -230,6 +230,24 @@ def contains_failure_text(output: str) -> bool:
     return contains_any(output.lower(), ["error:", "failed", "failure", "mismatch"])
 
 
+def failure_text_lines(output: str) -> list[str]:
+    """The lines of a capture that carry the words a failure is read out of.
+
+    The same predicate `contains_failure_text` answers over a whole transcript,
+    asked line by line, so a caller that keeps such lines and a caller that
+    classifies on them are looking at exactly the same words.
+
+    Verbatim and in capture order, with nothing summarised away, for the reason
+    `programmer_output_fields` gives: the line is the evidence, and a shortened
+    or reworded copy of it is a second account of the run that nobody can check
+    against the first. Order is the order the streams were captured in, not a
+    reconstruction of the order the tool wrote them: stdout and stderr are read
+    as two separate pipes, so their interleaving is not recoverable from the
+    capture and no caller should read one into it.
+    """
+    return [line for line in output.splitlines() if contains_failure_text(line)]
+
+
 # The words that make a line a report of a failure rather than a mention of one.
 # Deliberately the same two every backend's reset and flash rules already match
 # on, so anchoring changes where a rule looks and nothing about what it looks for.

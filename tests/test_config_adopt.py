@@ -27,6 +27,8 @@ the failure mode that would make this path worse than the retyping.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import shutil
 from pathlib import Path
@@ -34,7 +36,7 @@ from typing import Any
 
 import pytest
 import yaml
-from conftest import FAKE_GDB, FAKE_STLINK, write_authoritative_config
+from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_GDB, FAKE_STLINK, write_authoritative_config
 
 from agentic_hil.adopt import (
     PROJECT_CONFIG_ADOPT,
@@ -44,11 +46,28 @@ from agentic_hil.adopt import (
     project_config_adopt_hardware,
 )
 from agentic_hil.bench import BenchMutex
+from agentic_hil.bootstrap import (
+    DEFAULT_PROJECT_PROFILE,
+    PROJECT_PROFILE,
+    load_project_profile,
+    profile_openocd_scripts,
+    profile_target_controller,
+)
 from agentic_hil.cli import adopt_hardware, doctor, init_config
-from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, GENERATED_PROJECT_PERMISSIONS, load_authoritative_config
+from agentic_hil.config import (
+    DEFAULT_CONFIG_TEMPLATE,
+    GENERATED_PROJECT_PERMISSIONS,
+    load_authoritative_config,
+    skeleton_debugger_scripts,
+)
 from agentic_hil.configstate import STATE_UNREADABLE
 from agentic_hil.configwrite import ACTOR_HUMAN, PROJECT_CONFIG_SET
-from agentic_hil.coordination import HardwareCoordinator, HardwareLease
+from agentic_hil.coordination import (
+    DEBUGGER_READONLY_TARGET_STATE_REASON,
+    RECOVERY_ACTION_VIA,
+    HardwareCoordinator,
+    HardwareLease,
+)
 from agentic_hil.knowledge import CONFIG_DESCRIPTION_RIGHT, CONFIG_PERMISSIONS_RIGHT, CONFIG_WRITE_RIGHT
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import fold_hardware_id
@@ -82,8 +101,11 @@ def attached(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict:
     discovery.update(overrides)
     seen: dict[str, Any] = {}
 
-    def discover(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None) -> dict:
+    def discover(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
         seen["probe_id"] = probe_id
+        # What discovery was handed to read the board with. Adoption must hand the
+        # package-owned default here, never the workspace's own profile.
+        seen["profile"] = profile
         if discovery.get("ok") is not True:
             return discovery
         if before_connect is not None:
@@ -850,7 +872,7 @@ def test_nothing_is_read_or_written_while_this_server_holds_hardware(tmp_path: P
     before = path.read_text(encoding="utf-8")
     reached: dict[str, bool] = {}
 
-    def discover(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None) -> dict:  # pragma: no cover - must not run
+    def discover(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:  # pragma: no cover - must not run
         reached["discovery"] = True
         return {"ok": True}
 
@@ -1013,7 +1035,7 @@ def test_a_read_that_raises_quarantines_the_probe_and_shuts_the_path(tmp_path: P
     workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     before = path.read_text(encoding="utf-8")
 
-    def exploding(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None) -> dict:
+    def exploding(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
         if before_connect is not None:
             before_connect(PROBE_SERIAL)
         raise RuntimeError("STM32_Programmer_CLI died mid-connect")
@@ -1037,6 +1059,620 @@ def test_a_read_that_raises_quarantines_the_probe_and_shuts_the_path(tmp_path: P
 
     assert retried["ok"] is True, retried
     assert path.read_text(encoding="utf-8") != before
+
+
+def test_adoption_never_hands_the_workspace_profile_to_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A checkout may not decide the read a tool reached over MCP makes.
+
+    A workspace `agentic-hil.config.example.yaml` naming its own controller and
+    its own two OpenOCD scripts is repository-controlled content. Forwarding it
+    into discovery would let a checkout name a board nobody read and hand
+    `interface_cfg`/`target_cfg` straight to a spawned `openocd -f`, past the
+    authoritative hardware permissions. So adoption hands discovery the
+    package-owned default instead: it names no controller and carries the shipped
+    skeleton's scripts, whatever the workspace file says. `agentic-hil init` is
+    the one place the workspace profile speaks, because there the operator ran it.
+    """
+    workspace, _ = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    # A checkout that would run its own scripts and adopt a made-up controller.
+    (workspace / PROJECT_PROFILE).write_text(
+        yaml.safe_dump(
+            {
+                "target": {"controller": "attacker-controller"},
+                "debuggers": {"dut": {"interface_cfg": "/tmp/workspace/attacker-interface.cfg", "target_cfg": "/tmp/workspace/attacker-target.cfg"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # The file really does name those values, so a path that read it would carry
+    # them: this is what adoption must decline to consult.
+    on_disk = load_project_profile(workspace)
+    assert profile_target_controller(on_disk) == "attacker-controller"
+    assert profile_openocd_scripts(on_disk) == ("/tmp/workspace/attacker-interface.cfg", "/tmp/workspace/attacker-target.cfg")
+
+    discovery = attached(monkeypatch)
+    tools = service(workspace)
+    try:
+        planned = tools.call(PROJECT_CONFIG_ADOPT)
+    finally:
+        tools.close()
+
+    assert planned["ok"] is True, planned
+    given = discovery["_selected"]["profile"]
+    # The package-owned default, read through the very helpers the OpenOCD path
+    # uses: no controller, and the shipped skeleton's scripts, never the
+    # workspace's `attacker-*.cfg` or its `attacker-controller`.
+    assert given == DEFAULT_PROJECT_PROFILE
+    assert profile_target_controller(given) is None
+    assert profile_openocd_scripts(given) == skeleton_debugger_scripts()
+    assert "attacker-controller" not in profile_openocd_scripts(given)
+
+
+def test_a_timed_out_openocd_read_quarantines_the_probe_and_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reaped OpenOCD read may have halted the core; the bench is held, not filled.
+
+    An OpenOCD `init` reaped mid-attach comes back `ok: false` with
+    `hardware_state: unknown`, so `overall_success` refuses it and no probe or
+    controller is carried into the file. And because the read may have left the
+    target halted with nothing to resume it, the lease is not handed back as a
+    clean release: it is quarantined `debugger_readonly_target_state_unconfirmed`,
+    the reason a read-only probe raises for a target state it could not confirm,
+    so the service's configured reset-into-halt/probe recovery can recognise and
+    settle it rather than the generic `safe_state_unconfirmed` incident nothing
+    but an operator could clear. The refusal is `resource_quarantined`, the audit
+    record says the same, and the file is untouched.
+    """
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_text(encoding="utf-8")
+
+    def timed_out(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
+        # The HOTPLUG/attach lock is taken exactly as the real read takes it, then
+        # the reaped read comes back with the board's state unknown.
+        if before_connect is not None:
+            before_connect(PROBE_SERIAL)
+        return {
+            "ok": False,
+            "tool": "bootstrap_hardware_discovery",
+            "error_type": "timeout",
+            "probe_id": PROBE_SERIAL,
+            "target": None,
+            "side_effect_committed": False,
+            "side_effect_status": "unknown",
+            "hardware_state": "unknown",
+            "cleanup_required": False,
+            "summary": "OpenOCD did not finish its read before it was reaped.",
+        }
+
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", timed_out)
+    coordinator = HardwareCoordinator(load_authoritative_config(workspace), "python")
+    try:
+        refused = project_config_adopt_hardware(workspace, load_authoritative_config(workspace), {"apply": True}, coordinator=coordinator)
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined"
+        assert refused["quarantined"] is True
+        assert refused["cleanup_required"] is True
+        # The read's own unknown effect survives into the refusal rather than
+        # being reported as an untouched bench.
+        assert refused["hardware_state"] == "unknown"
+        assert refused["side_effect_status"] == "unknown"
+        assert "debugger_readonly_target_state_unconfirmed" in refused["cleanup_reasons"]
+        # And not the generic release failure that RECOVERY_ACTION_REASONS does
+        # not cover: manufacturing that was the whole finding.
+        assert "safe_state_unconfirmed" not in refused["cleanup_reasons"]
+        # The lease was quarantined, not handed back: a clean release would have
+        # cleared `blocked`, and it is still held. (It is not an `audit_incident`,
+        # so it does not `stand` forever -- the target's state is what the next
+        # reset and probe say it is -- but this process did not vouch for it.)
+        assert coordinator.blocked is True
+        assert coordinator.incident_stands is False
+    finally:
+        # A close over a held incident leaves it persisted and may report the
+        # locks could not all come back; either way the file must be untouched.
+        with contextlib.suppress(Exception):
+            coordinator.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
+class _RecoveryBackend:
+    """A probe double that records what the end-of-call recovery drove.
+
+    The adopt read is monkeypatched at `discover_attached_hardware`, so this
+    backend is touched only by the recovery action `AgenticHILToolService`
+    attempts after the call: `reset_target("halt")` then `probe_target`. The
+    order the tests assert is read straight off `calls`."""
+
+    def __init__(self, *, reset_ok: bool = True, probe_ok: bool = True, target_detected: bool = True) -> None:
+        self.calls: list[str] = []
+        self.reset_ok = reset_ok
+        self.probe_ok = probe_ok
+        self.target_detected = target_detected
+
+    def probe_target(self) -> dict:
+        self.calls.append("probe_target")
+        return {"ok": self.probe_ok, "tool": "probe_target", "target_detected": self.target_detected if self.probe_ok else False}
+
+    def reset_target(self, mode: str = "run") -> dict:
+        self.calls.append(f"reset_target:{mode}")
+        return {"ok": self.reset_ok, "tool": "reset_target", "mode": mode}
+
+    def close(self) -> None:
+        return None
+
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        return frozenset()
+
+
+def _timed_out_read(discovery: dict | None = None, *, probe_serial: str = PROBE_SERIAL):
+    """A bootstrap discovery reaped mid-attach: the lock is taken, the state unknown.
+
+    ``probe_serial`` is the probe the read selected and left in an unknown state.
+    It is the id `before_connect` locks and the id the discovery reports, so the
+    incident names, and the recovery has to reach, exactly this board."""
+    result = {
+        "ok": False,
+        "tool": "bootstrap_hardware_discovery",
+        "error_type": "timeout",
+        "probe_id": probe_serial,
+        "target": None,
+        "side_effect_committed": False,
+        "side_effect_status": "unknown",
+        "hardware_state": "unknown",
+        "cleanup_required": False,
+        "summary": "OpenOCD did not finish its read before it was reaped.",
+        **(discovery or {}),
+    }
+
+    def timed_out(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
+        if before_connect is not None:
+            before_connect(probe_serial)
+        return result
+
+    return timed_out
+
+
+def _set_auto_recover(path: Path, policy: str) -> None:
+    """Name this bench's recovery policy in the authoritative file."""
+    document = document_of(path)
+    document["recovery"] = {"auto_recover": policy}
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+
+def test_a_timed_out_adopt_read_lets_the_service_run_its_configured_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """agentic-hil/agentic-hil#: the timeout reason a reset can actually settle.
+
+    Through `AgenticHILToolService.call`, not the bare function: the service is
+    the only place the configured reset-into-halt/probe recovery runs, and the
+    bare function stops at the quarantine. A read reaped mid-attach may have left
+    the core halted, so the probe is quarantined with
+    `debugger_readonly_target_state_unconfirmed`, a reason `RECOVERY_ACTION_REASONS`
+    covers, and the service's end-of-call handler drives the bench back into a
+    defined state (`reset_target("halt")`, then `probe_target`) before it hands
+    the locks back. It used to manufacture `safe_state_unconfirmed`, which no
+    recovery action recognises, so the incident was stood down with the core left
+    wherever the reaped `init` put it. Nothing is written to the configuration
+    either way: the read failed."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
+
+    backend = _RecoveryBackend()
+    tools = AgenticHILToolService(load_authoritative_config(workspace), backend=backend, frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined"
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        # The recovery action ran, and ran the reset before the probe: the whole
+        # point of the fix is that a physical settle happens rather than a stand
+        # down with the core left as the reaped read found it.
+        assert backend.calls == ["reset_target:halt", "probe_target"], backend.calls
+        # And it settled the incident: the coordinator is unblocked and the leases
+        # the read took (enumeration and probe) are back, so the next config write
+        # is not told this server is still holding the bench.
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+        ledger_path = Path(tools.coordinator.root) / "recovery.jsonl"
+        lines = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert any(
+            line.get("via") == RECOVERY_ACTION_VIA
+            and line.get("recovery") == "incident_resolved"
+            and line.get("reason") == DEBUGGER_READONLY_TARGET_STATE_REASON
+            for line in lines
+        ), lines
+    finally:
+        tools.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
+def test_a_timed_out_adopt_read_takes_no_target_action_when_the_policy_withholds_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The withheld half: `recovery.auto_recover: off` runs no reset.
+
+    The reason a reset could settle does not oblige one where the bench forbids
+    it. With recovery off, the service drives nothing: it stands the incident
+    down instead, because the reason does not name a damaged audit chain, and the
+    target's state is what the next reset and probe say it is. The board is left
+    for the next contact rather than held, and the reset the fix enables for a
+    permitting bench never touches this one."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _set_auto_recover(path, "off")
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
+
+    backend = _RecoveryBackend()
+    tools = AgenticHILToolService(load_authoritative_config(workspace), backend=backend, frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined"
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        # No physical action: the policy withheld the reset and there is no
+        # weaker predicate that settles a target-state reason.
+        assert backend.calls == [], backend.calls
+        # The incident does not stand (its audit chain is intact), so it is stood
+        # down and the locks come back rather than waiting for an operator.
+        assert refused["incident_stood_down"]["stood_down"] is True
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+    finally:
+        tools.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
+# A second attached probe, distinct from `PROBE_SERIAL`: the board a mis-routed
+# recovery would reset and clear the incident from instead of the one that timed
+# out. `066A...` is the spare this file already uses for a two-probe bench.
+DECOY_PROBE = "066AFF495451885087171450"
+
+
+class _BoundProbeBackend:
+    """A backend double that remembers which probe it was built for.
+
+    The routing tests assert the recovery's reset and probe re-read run through
+    the backend bound to the probe the read selected, and never through the one
+    the startup binding names. `probe_id` is read straight off the config
+    `create_debugger_backend` was handed, and `calls` records the order the
+    recovery drove it in, closing included."""
+
+    def __init__(self, probe_id: str | None) -> None:
+        self.probe_id = probe_id
+        self.calls: list[str] = []
+
+    def probe_target(self) -> dict:
+        self.calls.append("probe_target")
+        return {"ok": True, "tool": "probe_target", "backend": "fake", "target_detected": True}
+
+    def reset_target(self, mode: str = "run") -> dict:
+        self.calls.append(f"reset_target:{mode}")
+        return {"ok": True, "tool": "reset_target", "mode": mode}
+
+    def close(self) -> None:
+        self.calls.append("close")
+
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        return frozenset()
+
+
+def _record_backends(monkeypatch: pytest.MonkeyPatch) -> list[_BoundProbeBackend]:
+    """Make every backend the service builds a probe-remembering double.
+
+    `create_debugger_backend` is patched in the `tools` namespace, so the service
+    builds one of these for its startup backend and one for any bound backend the
+    recovery constructs. The returned list is them, in build order: the startup
+    backend first, the recovery backend (if one is built) second."""
+    built: list[_BoundProbeBackend] = []
+
+    def make(config: Any) -> _BoundProbeBackend:
+        backend = _BoundProbeBackend(config.debugger.probe_id if config.debugger is not None else None)
+        built.append(backend)
+        return backend
+
+    monkeypatch.setattr("agentic_hil.tools.create_debugger_backend", make)
+    return built
+
+
+def _bind_entry_probe(path: Path, serial: str | None) -> None:
+    """Name (or unset) the probe the `dut` entry is bound to in the file."""
+    document = document_of(path)
+    document["debuggers"]["dut"]["probe_id"] = serial
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+
+def test_a_timed_out_adopt_read_recovers_the_selected_probe_not_the_configured_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The entry names A, the request selects B, and only B is reset and cleared.
+
+    `project_config_adopt_hardware` gives its `probe_id` argument precedence over
+    the entry's configured id, so a read that times out did so attached to B while
+    the startup backend is bound to A. Recovering through that startup binding
+    would reset A, and -- because every adoption lease carries the one recoverable
+    reason -- clear B's incident from a check that never touched B: it could both
+    disturb the wrong board and falsely clear the one left in an unknown state. So
+    the reset and probe re-read run through a backend bound to exactly B, and A is
+    never contacted."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _bind_entry_probe(path, DECOY_PROBE)
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read(probe_serial=PROBE_SERIAL))
+    built = _record_backends(monkeypatch)
+
+    tools = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"probe_id": PROBE_SERIAL, "apply": True})
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined"
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        # Two backends were built: the startup one bound to the configured A, and
+        # the recovery one bound to the selected B.
+        assert len(built) == 2, [backend.probe_id for backend in built]
+        startup, recovery = built
+        assert startup.probe_id == DECOY_PROBE
+        assert recovery.probe_id == PROBE_SERIAL
+        # The recovery ran reset-then-probe against B, and closed the throwaway
+        # backend afterwards.
+        assert recovery.calls == ["reset_target:halt", "probe_target", "close"], recovery.calls
+        # A was never reset or probed: the mis-route the finding named does not
+        # happen.
+        assert "reset_target:halt" not in startup.calls
+        assert "probe_target" not in startup.calls
+        # And the incident B raised is the one that settled.
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+    finally:
+        tools.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
+def test_a_timed_out_adopt_read_binds_recovery_to_the_selected_probe_when_the_entry_is_unbound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unbound entry gives the startup backend no selector; recovery still binds B.
+
+    With `probe_id` unset the startup backend passes no `adapter serial`/`sn=` at
+    all, so a reset through it would drive whichever attached probe the toolchain
+    opens first -- not necessarily the B this read selected from several. The
+    recovery instead builds a backend bound to B, so it resets and clears exactly
+    the board the read left in an unknown state."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_text(encoding="utf-8")
+    assert document_of(path)["debuggers"]["dut"]["probe_id"] is None, "the placeholder entry is unbound"
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read(probe_serial=PROBE_SERIAL))
+    built = _record_backends(monkeypatch)
+
+    tools = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"probe_id": PROBE_SERIAL, "apply": True})
+
+        assert refused["ok"] is False, refused
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        assert len(built) == 2, [backend.probe_id for backend in built]
+        startup, recovery = built
+        # The startup backend had no probe to select on; the recovery one is bound
+        # to the selected B rather than left to open whatever answers first.
+        assert startup.probe_id is None
+        assert recovery.probe_id == PROBE_SERIAL
+        assert recovery.calls == ["reset_target:halt", "probe_target", "close"], recovery.calls
+        assert startup.calls == [] or startup.calls == ["close"], startup.calls
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+    finally:
+        tools.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
+# A distinct serial for the second configured entry, so a two-debugger file names
+# a probe apiece and loads without the collision `validate_debuggers` refuses.
+SPARE_PROBE = "066BFF505155657867082852"
+
+
+def _add_second_debugger(path: Path, *, dut_probe: str | None, spare_probe: str | None) -> None:
+    """Turn the single-`dut` placeholder into a two-debugger file.
+
+    Two configured debuggers is the case the round-3 finding named: such a file is
+    deliberately loaded unbound (`config.debugger is None`), so adoption names the
+    entry and only a bound recovery can drive the selected probe. The `spare` entry
+    is a copy of `dut` with its own probe and a fresh permissions dict, so a shared
+    reference cannot become a YAML alias that reads back as one entry."""
+    document = document_of(path)
+    dut = document["debuggers"]["dut"]
+    dut["probe_id"] = dut_probe
+    document["debuggers"]["spare"] = {**dut, "probe_id": spare_probe, "permissions": dict(dut.get("permissions") or {})}
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+
+def test_a_timed_out_adopt_read_binds_recovery_to_the_named_entry_in_a_multi_debugger_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two debuggers, `debugger_id` selects `spare`, and recovery drives that entry's probe.
+
+    A configuration with several debuggers is loaded with `config.debugger is
+    None`, so the startup backend is the unbound one that refuses every drive. The
+    round-3 finding is that recovery took that unbound fallback and stood the
+    incident down without touching the board: no reset reached the probe the read
+    left in an unknown state, and the leases were released over an unknown target.
+    So the recovery has to bind the entry adoption named (`spare`) and point it at
+    the selected probe before it can reset and clear the incident. `dut` is a
+    second attached board a mis-routed recovery would drive instead; here it is
+    never contacted, and the unbound startup backend never drives anything."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _add_second_debugger(path, dut_probe=DECOY_PROBE, spare_probe=SPARE_PROBE)
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read(probe_serial=PROBE_SERIAL))
+    built = _record_backends(monkeypatch)
+
+    config = load_authoritative_config(workspace)
+    assert config.debugger is None, "a two-debugger file is loaded unbound"
+    tools = AgenticHILToolService(config, frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"debugger_id": "spare", "probe_id": PROBE_SERIAL, "apply": True})
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined"
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        # The refusal carries the entry the read named alongside the probe it
+        # selected: without it the unbound config could not know which toolchain to
+        # bind the recovery to.
+        assert refused["debugger_id"] == "spare"
+        assert refused["hardware_discovery"]["probe_id"] == PROBE_SERIAL
+        # Two backends: the unbound startup one (no probe to select on), and the
+        # recovery one bound to `spare` and pointed at the selected B.
+        assert len(built) == 2, [backend.probe_id for backend in built]
+        startup, recovery = built
+        assert startup.probe_id is None, "a two-debugger file gives the startup backend no probe"
+        assert recovery.probe_id == PROBE_SERIAL
+        # The recovery ran reset-then-probe against B through the bound backend, and
+        # closed the throwaway afterwards.
+        assert recovery.calls == ["reset_target:halt", "probe_target", "close"], recovery.calls
+        # The unbound startup backend never drove anything: the fallback the finding
+        # named does not happen.
+        assert "reset_target:halt" not in startup.calls
+        assert "probe_target" not in startup.calls
+        # And the incident settled: the coordinator is unblocked and the leases the
+        # read took are back.
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+    finally:
+        tools.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
+def test_a_timed_out_adopt_read_recovers_a_multi_debugger_file_under_the_selected_entrys_grant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The version-1 half: the read grant is checked on the selected entry, not the unbound config.
+
+    A configuration written before the read-free model still gates a probe read on
+    `allow_probe`, and `probe_allowed()` on the unbound service config reads no
+    entry at all, so it returns False and withholds the recovery -- the incident is
+    stood down over an unknown target. The grant that matters is the selected
+    entry's, so the recovery's permission is checked against the bound `spare`
+    config, and a probe that entry may read is reset and cleared rather than left
+    for an operator."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, config_version=None, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _add_second_debugger(path, dut_probe=DECOY_PROBE, spare_probe=SPARE_PROBE)
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read(probe_serial=PROBE_SERIAL))
+    built = _record_backends(monkeypatch)
+
+    config = load_authoritative_config(workspace)
+    assert config.debugger is None, "a two-debugger file is loaded unbound"
+    assert config.probe_allowed() is False, "the unbound config grants no read on its own"
+    tools = AgenticHILToolService(config, frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"debugger_id": "spare", "probe_id": PROBE_SERIAL, "apply": True})
+
+        assert refused["ok"] is False, refused
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        assert len(built) == 2, [backend.probe_id for backend in built]
+        _, recovery = built
+        assert recovery.probe_id == PROBE_SERIAL
+        # The recovery ran, which it cannot do if the permission is read off the
+        # unbound config: the bound entry's `allow_probe` is what authorizes it.
+        assert recovery.calls == ["reset_target:halt", "probe_target", "close"], recovery.calls
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+    finally:
+        tools.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
+def _deny_reset(path: Path, name: str) -> None:
+    """Take `allow_reset` off one configured entry, leaving its other grants alone."""
+    document = document_of(path)
+    document["debuggers"][name]["permissions"]["allow_reset"] = False
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+
+def test_a_timed_out_adopt_read_does_not_reset_a_selected_entry_that_withholds_allow_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The permission half of the binding: `spare` denies `allow_reset`, so nothing is reset.
+
+    Binding the recovery to the selected entry decides which board is driven; it
+    does not decide whether that board may be driven. A multi-debugger file is
+    loaded unbound, so the reason set was computed off a service config with no
+    entry to read a grant from, and the wide reset set came back whatever the
+    selected entry said: a timed-out read against an entry configured
+    `allow_reset: false` was recovered with `reset_target("halt")` through the
+    newly bound backend, which is a physical state change nobody granted.
+
+    The grant now comes from the same bound entry the reset would run through, so
+    the stronger predicate degrades to the read-only set, no reset is attempted
+    (the target-state reason a re-read cannot settle is simply not admitted), and
+    the refusal names the withheld grant with `allow_reset_missing`, the same word
+    the run teardown's recovery block uses. The twin above, with the grant, still
+    resets: this refuses the act, not the routing."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _add_second_debugger(path, dut_probe=DECOY_PROBE, spare_probe=SPARE_PROBE)
+    _deny_reset(path, "spare")
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read(probe_serial=PROBE_SERIAL))
+    built = _record_backends(monkeypatch)
+
+    config = load_authoritative_config(workspace)
+    assert config.debugger is None, "a two-debugger file is loaded unbound"
+    assert config.debuggers["spare"].permissions.allow_reset is False
+    assert config.debuggers["dut"].permissions.allow_reset is True, "the entry that keeps the grant is not the selected one"
+    tools = AgenticHILToolService(config, frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"debugger_id": "spare", "probe_id": PROBE_SERIAL, "apply": True})
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined"
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        # No board was driven, and no recovery backend was even built: the reset
+        # the finding recorded (`['reset_target:halt', 'probe_target', 'close']`)
+        # does not happen against an entry that withholds the grant.
+        assert len(built) == 1, [backend.calls for backend in built]
+        assert built[0].calls == [], built[0].calls
+        # And the refusal says which withholding stopped it, beside the entry it
+        # applies to, so an operator reads the one decision they have: grant the
+        # reset on `spare`, or go to the board.
+        assert refused["reason_not_attempted"] == "allow_reset_missing"
+        assert refused["debugger_id"] == "spare"
+        # The incident owes no gate, so it is stood down exactly as it is when the
+        # bench's policy withholds the reset; what changed is that no reset ran.
+        assert refused["incident_stood_down"]["stood_down"] is True
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+    finally:
+        tools.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
+def test_a_timed_out_adopt_read_leaves_a_single_debugger_reset_grant_reading_as_it_did(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour: one configured entry without `allow_reset` was already refused.
+
+    A single-debugger file binds at load, so the reason set was always computed
+    off an entry with a grant on it and the read-only degrade already applied.
+    Nothing about that changes here, and this pins it: no reset is attempted, the
+    incident is stood down rather than machine-recovered, and the refusal names
+    the same withheld grant the multi-debugger case now names."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _deny_reset(path, "dut")
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
+
+    backend = _RecoveryBackend()
+    config = load_authoritative_config(workspace)
+    assert config.debugger is not None and config.debugger.permissions.allow_reset is False
+    tools = AgenticHILToolService(config, backend=backend, frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+
+        assert refused["ok"] is False, refused
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        assert backend.calls == [], backend.calls
+        assert refused["reason_not_attempted"] == "allow_reset_missing"
+        assert refused["incident_stood_down"]["stood_down"] is True
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+    finally:
+        tools.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
 
 
 def _probe_release_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1225,7 +1861,7 @@ def test_a_key_filled_while_the_probe_was_being_read_is_not_overwritten(tmp_path
     discovery = attached(monkeypatch)
     real = project_config_adopt_hardware.__globals__["discover_attached_hardware"]
 
-    def slow(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None) -> dict:
+    def slow(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
         # Somebody else writes this file while the board is being read.
         meanwhile = document_of(path)
         meanwhile["target"]["controller"] = "stm32f411re"
@@ -1268,7 +1904,7 @@ def test_an_entry_named_like_a_reserved_key_is_still_covered_by_the_document_che
     attached(monkeypatch)
     real = project_config_adopt_hardware.__globals__["discover_attached_hardware"]
 
-    def slow(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None) -> dict:
+    def slow(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
         # The entry is switched to another backend while this board is being
         # read. `type` is not a key adoption carries, so no per-key expectation
         # covers it, and the whole-document comparison is the only thing that can.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -9,7 +11,13 @@ import yaml
 from agentic_hil.backends.common import find_stm32_programmer_cli, invocation, spawn_command
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids, stlink_target_info
 from agentic_hil.comports import list_available_com_ports
-from agentic_hil.config import GDB_AUTODETECT_CANDIDATES, ConfigError, generated_permissions
+from agentic_hil.config import (
+    ADOPT_HARDWARE_COMMAND,
+    GDB_AUTODETECT_CANDIDATES,
+    ConfigError,
+    generated_permissions,
+    skeleton_debugger_scripts,
+)
 from agentic_hil.types import JsonObject, fold_hardware_id
 
 PROJECT_PROFILE = "agentic-hil.config.example.yaml"
@@ -49,9 +57,51 @@ DEFAULT_PROJECT_PROFILE: JsonObject = {
     "com_ports": {"dut_uart": {"baudrate": 115200, "permissions": {}}},
 }
 
-# The one backend bootstrap knows. Named once so that every caller reporting
-# which backend answered reports the same one this module actually ran.
+# The backend bootstrap runs when STM32CubeProgrammer's CLI is on the host: its
+# `-l st-link-only` listing enumerates the probes and its HOTPLUG connect names
+# the part. Named once so that every caller reporting which backend answered
+# reports the same one this module actually ran.
 BOOTSTRAP_BACKEND = "stlink"
+
+# The backend bootstrap runs when that CLI is absent. OpenOCD cannot enumerate
+# probes itself (`debugger_probes_list` answers `not_supported` on it), so the
+# probe serials come from the host's own USB serial inventory and OpenOCD is
+# only the toolchain the generated entry will drive. Both halves are on a plain
+# Ubuntu host with `apt install openocd` and nothing from ST, which is the
+# supported first path this project documents and the one that used to refuse.
+BOOTSTRAP_FALLBACK_BACKEND = "openocd"
+
+# The binary the fallback backend is, looked up on PATH exactly as the OpenOCD
+# backend's own `executable: null` fallback looks it up.
+OPENOCD_EXECUTABLE = "openocd"
+
+# Which enumeration answered, carried in every discovery result under
+# `discovered_by`. A caller reading a probe serial has to be able to tell which
+# of the two produced it: the CLI reads the probe, the inventory reads the USB
+# descriptor the probe published to the host, and only the first of those has
+# also spoken to a target.
+DISCOVERED_BY_STLINK_CLI = "stm32cubeprogrammer_cli"
+DISCOVERED_BY_USB_INVENTORY = "usb_serial_inventory"
+
+# STMicroelectronics' USB vendor id, and the product ids the ST-Link generations
+# enumerate under. One vendor and a closed set of products, because a serial
+# number is unique only within a vendor: matching on the vendor alone would read
+# any ST USB device's serial as a probe serial, and matching on "it has a
+# serial" would read a CH340's.
+#
+# The list is the ST-Link products whose composite device publishes a virtual
+# COM port, which is what puts them in a serial inventory at all: V2-1 and V3 in
+# their several personalities. An ST-Link this does not know is not enumerated
+# here, and the refusal says the CLI is the way to reach it, which is honest:
+# guessing from the vendor id would be the wrong-board failure this repository
+# spends its identity rules avoiding.
+STLINK_USB_VENDOR_ID = 0x0483
+STLINK_USB_PRODUCT_IDS = frozenset({0x3744, 0x3748, 0x374B, 0x374D, 0x374E, 0x374F, 0x3752, 0x3753, 0x3754})
+
+# One row of OpenOCD's `targets` table: an index, an optional `*` for the
+# current target, then the target's own name. The header and its rule of dashes
+# carry no leading number and are passed over by the same rule.
+OPENOCD_TARGET_ROW = re.compile(r"^\s*\d+\*?\s+(\S+)\s+\S+\s+\S+\s+\S+\s+\S+", re.MULTILINE)
 
 
 def load_project_profile(workspace: Path) -> JsonObject | None:
@@ -65,7 +115,150 @@ def load_project_profile(workspace: Path) -> JsonObject | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def enumerate_attached_probes(timeout_s: float = 10.0) -> JsonObject:
+def find_openocd() -> str | None:
+    """The OpenOCD this host answers with, or None.
+
+    The sibling of ``find_stm32_programmer_cli``, and a named function for the
+    same two reasons: it is the one place the fallback backend's binary is
+    looked up, and it is a name a test can replace so that what the suite
+    discovers does not depend on what the machine running it happens to have
+    installed. PATH only, which is the same lookup the OpenOCD backend's own
+    ``executable: null`` fallback makes, so a bench generated here names the
+    OpenOCD that bench would have resolved anyway."""
+    return shutil.which(OPENOCD_EXECUTABLE)
+
+
+def usb_stlink_ports(available: JsonObject) -> list[JsonObject]:
+    """The host serial ports that are an ST-Link, off one inventory reading.
+
+    The whole of the fallback enumeration's evidence, kept as records rather
+    than as bare serials so that a refusal can say *which port* carried each
+    one. That is the sentence the reported failure was missing: an operator
+    whose ST-Link and its VCP are both in the listing was told no bench was
+    found, with nothing in the result to argue against it.
+
+    Vendor *and* product, never vendor alone: a USB serial number is unique
+    within a vendor and nowhere else, so `0483` plus "it published a serial"
+    would read an ST sensor bridge's serial as a probe serial.
+
+    A port that publishes no serial number is still listed here, and is
+    deliberately *not* an enumerated probe below. The two answer different
+    questions: this one is what the host is showing, and that has to include the
+    ST-Link nobody can name, because "no bench was found" beside a listed
+    ST-Link VCP is exactly the contradiction this evidence exists to prevent.
+    """
+    ports = available.get("ports") if available.get("ok") is True else None
+    if not isinstance(ports, list):
+        return []
+    matched: list[JsonObject] = []
+    for port in ports:
+        if not isinstance(port, dict):
+            continue
+        vid, pid = port.get("vid"), port.get("pid")
+        if isinstance(vid, bool) or isinstance(pid, bool) or vid != STLINK_USB_VENDOR_ID or pid not in STLINK_USB_PRODUCT_IDS:
+            continue
+        matched.append(dict(port))
+    return matched
+
+
+def usb_stlink_probe_ids(available: JsonObject) -> list[str]:
+    """One serial per attached ST-Link, in the spelling the host published.
+
+    A V2-1 or V3 enumerates several interfaces under one serial (the VCP and,
+    on some hosts, a second port), so the same physical probe appears in the
+    inventory more than once. Folded with ``fold_hardware_id``, which is the
+    identity rule everything else here selects, locks and compares by, so two
+    interfaces of one probe collapse to one probe and never to
+    ``ambiguous_hardware``. The first spelling wins, so what is written into a
+    configuration is what the host actually said.
+
+    A port that published no serial number is not a probe this can name, and a
+    probe with no id is one OpenOCD cannot be told to open, so it is left out
+    rather than guessed at. It stays in ``usb_stlink_ports`` above, which is
+    what lets the refusal say the ST-Link is there and unnameable rather than
+    that no bench was found.
+    """
+    found: dict[str, str] = {}
+    for port in usb_stlink_ports(available):
+        serial = str(port.get("serial_number") or "")
+        if serial:
+            found.setdefault(fold_hardware_id(serial), serial)
+    return list(found.values())
+
+
+def _tools_searched(stlink_cli: str | None, openocd: str | None) -> list[JsonObject]:
+    """What discovery looked for and where it landed, as a result field.
+
+    Both tools every time, found or not, because "we looked for this and it was
+    not there" is the half an operator cannot reconstruct from a refusal that
+    names only what is missing."""
+    return [
+        {"name": "STM32_Programmer_CLI", "provided_by": "STM32CubeProgrammer", "path": stlink_cli, "found": stlink_cli is not None},
+        {"name": OPENOCD_EXECUTABLE, "provided_by": "OpenOCD", "path": openocd, "found": openocd is not None},
+    ]
+
+
+def _usb_enumeration(available: JsonObject, timeout_s: float) -> JsonObject:
+    """Enumerate ST-Link probes with no STM32CubeProgrammer on the host.
+
+    The half of `enumerate_attached_probes` that answers when ST's CLI is not
+    installed, which on a Linux workstation is the ordinary case: OpenOCD is one
+    `apt install` and STM32CubeProgrammer is a registration wall. The probe
+    serial is read out of the USB descriptor the probe published to the host,
+    which is the same string `adapter serial` takes, so nothing is invented
+    here and nothing is said to a board.
+
+    ``timeout_s`` is accepted and unused: no process is spawned. It is in the
+    signature so both halves are called the same way and a caller does not have
+    to know which one will answer.
+    """
+    del timeout_s
+    openocd = find_openocd()
+    tools = _tools_searched(None, openocd)
+    if openocd is None:
+        return _discovery_failure(
+            "debugger_not_found",
+            "Neither STM32CubeProgrammer's CLI (STM32_Programmer_CLI) nor OpenOCD (openocd) was found on this host, so "
+            "there is no toolchain to drive an ST-Link with and no way to enumerate one. Install OpenOCD (`apt install "
+            "openocd`, `brew install open-ocd`, or the Windows build on PATH) or STM32CubeProgrammer, then run this again.",
+            discovered_by=DISCOVERED_BY_USB_INVENTORY,
+            tools_searched=tools,
+        )
+    if available.get("ok") is not True:
+        # Without the CLI, the host's serial inventory *is* the enumeration.
+        # A listing that failed is therefore a discovery that could not run,
+        # and it says so rather than reporting an empty bench.
+        return _discovery_failure(
+            "probe_discovery_failed",
+            "STM32CubeProgrammer is not installed, so ST-Link probes are enumerated from this host's USB serial "
+            f"inventory, and that inventory could not be read: {available.get('summary', 'the serial backend did not answer')}",
+            discovered_by=DISCOVERED_BY_USB_INVENTORY,
+            executable=openocd,
+            backend=BOOTSTRAP_FALLBACK_BACKEND,
+            tools_searched=tools,
+        )
+    probe_ids = usb_stlink_probe_ids(available)
+    return {
+        "ok": True,
+        "tool": "bootstrap_hardware_discovery",
+        "backend": BOOTSTRAP_FALLBACK_BACKEND,
+        "discovered_by": DISCOVERED_BY_USB_INVENTORY,
+        "executable": openocd,
+        "tools_searched": tools,
+        "probes": [{"probe_id": found} for found in probe_ids],
+        "stlink_ports": usb_stlink_ports(available),
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "hardware_state": "unchanged",
+        "cleanup_required": False,
+        "summary": (
+            f"{len(probe_ids)} connected debugger probe(s) detected from this host's USB serial inventory; "
+            "STM32CubeProgrammer is not installed, so nothing was said to a board to find them."
+        ),
+    }
+
+
+def enumerate_attached_probes(timeout_s: float = 10.0, *, com_ports: JsonObject | None = None) -> JsonObject:
     """List the attached ST-Link probes, and stop there.
 
     The first half of ``discover_attached_hardware``, on its own, because two
@@ -84,25 +277,44 @@ def enumerate_attached_probes(timeout_s: float = 10.0) -> JsonObject:
     Whether nothing attached is a failure belongs to the caller: discovery needs
     a board and says `adapter_not_found`, while a probe listing that found none
     has answered the question it was asked.
+
+    Two enumerations, and which one runs is decided by one fact about the host:
+    whether STM32CubeProgrammer's CLI is installed. With it, everything below is
+    exactly what it has always been, down to the command line. Without it, the
+    probes are read out of the host's USB serial inventory and the toolchain is
+    OpenOCD (``_usb_enumeration``), because a missing vendor CLI is not a missing
+    bench: on the Nucleo + ST-Link + OpenOCD path this project documents as its
+    supported first one, a Linux host normally has OpenOCD and never has
+    STM32CubeProgrammer, and refusing there refused the documented bench. The
+    answer says which of the two produced it under ``discovered_by``, so nothing
+    downstream has to infer it from the presence of a field.
+
+    ``com_ports`` is the host inventory the caller has already taken, passed in
+    so that the fallback enumeration and the COM port correlation read one
+    reading of the host rather than two takes of it between which a board can be
+    unplugged. Omitted, this takes its own.
     """
     executable = find_stm32_programmer_cli()
     if executable is None:
-        return _discovery_failure("debugger_not_found", "STM32CubeProgrammer CLI was not found.")
+        return _usb_enumeration(com_ports if com_ports is not None else list_available_com_ports("bootstrap_com_ports"), timeout_s)
     cwd = str(Path(executable).parent)
+    found_by = {"discovered_by": DISCOVERED_BY_STLINK_CLI, "backend": BOOTSTRAP_BACKEND}
     listed = spawn_command([*invocation(executable), "-q", "-l", "st-link-only"], cwd, timeout_s)
     if listed.not_found:
-        return _discovery_failure("debugger_not_found", "STM32CubeProgrammer CLI disappeared during discovery.", executable=executable)
+        return _discovery_failure("debugger_not_found", "STM32CubeProgrammer CLI disappeared during discovery.", executable=executable, **found_by)
     if listed.timed_out:
-        return _discovery_failure("timeout", "ST-Link enumeration timed out after its process was reaped.", executable=executable)
+        return _discovery_failure("timeout", "ST-Link enumeration timed out after its process was reaped.", executable=executable, **found_by)
     output = f"{listed.stdout}{listed.stderr}"
     probe_ids = stlink_probe_ids(output)
     if listed.returncode != 0 or (not probe_ids and not stlink_empty_result(output)):
-        return _discovery_failure("probe_discovery_failed", "STM32CubeProgrammer returned an invalid probe listing.", executable=executable)
+        return _discovery_failure("probe_discovery_failed", "STM32CubeProgrammer returned an invalid probe listing.", executable=executable, **found_by)
     return {
         "ok": True,
         "tool": "bootstrap_hardware_discovery",
         "backend": BOOTSTRAP_BACKEND,
+        "discovered_by": DISCOVERED_BY_STLINK_CLI,
         "executable": executable,
+        "tools_searched": _tools_searched(executable, find_openocd()),
         "probes": [{"probe_id": found} for found in probe_ids],
         "side_effect_committed": False,
         "side_effect_status": "not_started",
@@ -112,11 +324,170 @@ def enumerate_attached_probes(timeout_s: float = 10.0) -> JsonObject:
     }
 
 
+def profile_target_controller(profile: JsonObject | None) -> str | None:
+    """The controller a workspace profile names for its own board, or None.
+
+    The profile is authoritative for the board it describes: it was written by
+    somebody holding that Nucleo, and it names the exact part
+    (``stm32f446ret6``), which is more than any read of the hardware produces.
+    The skeleton's own ``unknown-controller`` is not a name, and neither is a
+    profile that left the key at some other spelling of unknown, so both fall
+    through to the probe below. Exactly the test `apply_discovery_to_template`
+    already applies when it decides whether the profile or the detected
+    controller goes into the file, kept in one place so the two cannot disagree
+    about which of them is speaking."""
+    target = profile.get("target") if isinstance(profile, dict) else None
+    named = str(target.get("controller", "")) if isinstance(target, dict) else ""
+    return named if named and "unknown" not in named.lower() else None
+
+
+def profile_openocd_scripts(profile: JsonObject | None) -> tuple[str, str]:
+    """The interface and target scripts to read a target through, profile first.
+
+    The scripts are how OpenOCD reaches a board at all, so a profile that names
+    them for its own board is followed and the shipped skeleton's pair
+    (``interface/stlink.cfg``, ``target/stm32f4x.cfg``) is the fallback. Read
+    off the skeleton rather than restated here, so the read below and the entry
+    that gets written name the same two files."""
+    interface_cfg, target_cfg = skeleton_debugger_scripts()
+    debuggers = profile.get("debuggers") if isinstance(profile, dict) else None
+    entry = next((value for value in debuggers.values() if isinstance(value, dict)), {}) if isinstance(debuggers, dict) else {}
+    return str(entry.get("interface_cfg") or interface_cfg), str(entry.get("target_cfg") or target_cfg)
+
+
+def openocd_target_name(output: str) -> str | None:
+    """The one target OpenOCD's ``targets`` table names, or None.
+
+    What OpenOCD reports is the name of the target the script created
+    (``stm32f4x.cpu``), which is a family rather than a part number: it is what
+    this host can say about the board and it is less than a profile says, which
+    is why the profile is asked first. The ``.cpu`` suffix is the target's role
+    within the chip and not part of the chip's name, so it comes off.
+
+    More than one row is more than one core (a dual-core part, or a script that
+    declares an AP alongside the CPU), and this refuses to pick: naming one of
+    them would put a guess in the file where a caller can read it as a fact."""
+    names = list(dict.fromkeys(match.group(1) for match in OPENOCD_TARGET_ROW.finditer(output)))
+    if len(names) != 1:
+        return None
+    name = names[0]
+    return name[: -len(".cpu")] if name.endswith(".cpu") else name
+
+
+def _openocd_target_identity(
+    executable: str,
+    probe_id: str,
+    profile: JsonObject | None,
+    timeout_s: float,
+) -> tuple[JsonObject | None, JsonObject]:
+    """What the board behind this probe is, without STM32CubeProgrammer.
+
+    Two sources, asked in that order, and the answer says which one spoke.
+
+    The workspace profile first, because it is a person's statement about the
+    board this project drives and it names the part exactly. Nothing is said to
+    the board for it, which is the other reason it goes first: the cheapest read
+    of a target is the one that does not happen.
+
+    OpenOCD second, and read-only: `init`, `targets`, `shutdown`, with the
+    probe selected by `adapter serial`, through the same reaped-with-a-timeout
+    spawn every other process in this repository goes through. No flash, no
+    erase, no reset and no `reset halt`; `init` examines the target the scripts
+    declared and stops. It is the same class of contact the ST-Link HOTPLUG
+    connect is, which is why the caller has already taken the probe's lock
+    before this runs.
+
+    Returns the target, or None with a note under ``target_discovery`` saying
+    why the part could not be named. None is not a failure: an ST-Link that
+    answered is a probe worth writing down, and a controller nobody could name
+    is a field an operator fills in, not a reason to withhold the serial, the
+    toolchain path and the COM port that were found.
+    """
+    named = profile_target_controller(profile)
+    if named is not None:
+        return {"probe_id": probe_id, "controller": named, "source": "workspace_profile"}, {
+            "source": "workspace_profile",
+            "summary": f"The target was named by this workspace's {PROJECT_PROFILE} rather than read off the board.",
+        }
+    interface_cfg, target_cfg = profile_openocd_scripts(profile)
+    probed = spawn_command(
+        [
+            *invocation(executable),
+            "-f",
+            interface_cfg,
+            "-c",
+            f"adapter serial {probe_id}",
+            "-f",
+            target_cfg,
+            "-c",
+            "init",
+            "-c",
+            "targets",
+            "-c",
+            "shutdown",
+        ],
+        str(Path(executable).parent),
+        timeout_s,
+    )
+    attempt: JsonObject = {
+        "source": "openocd",
+        "interface_cfg": interface_cfg,
+        "target_cfg": target_cfg,
+        "timed_out": probed.timed_out,
+        "returncode": probed.returncode,
+    }
+    if probed.not_found:
+        # The OpenOCD that resolved on PATH was gone by the time this spawned, so
+        # nothing was said to the board: a pre-contact failure, the same one the
+        # ST-Link path reports when its own CLI disappears. The bench is
+        # untouched, so the state stays `unchanged`, but the read did not happen
+        # and this is not a probe that answered with no name.
+        return None, _discovery_failure(
+            "debugger_not_found",
+            f"OpenOCD (`{executable}`) disappeared before the target could be read. Nothing was said to the board.",
+            **attempt,
+        )
+    if probed.timed_out:
+        # A reaped read, not an answered one. OpenOCD's `init` attaches over SWD
+        # and can halt the target before `targets` and `shutdown` are ever
+        # reached, and the process was killed rather than allowed to run its own
+        # `shutdown`, so neither the point it stopped at nor the state it left the
+        # core in is known. `hardware_state: unknown` fails `overall_success` (so
+        # no configuration is generated or adopted from it) and is what the leased
+        # caller quarantines the probe on; collapsing this into "no target named"
+        # released a board that may be sitting halted.
+        return None, _discovery_failure(
+            "timeout",
+            (
+                f"OpenOCD did not finish its read-only init/targets/shutdown through `{interface_cfg}` and "
+                f"`{target_cfg}` before it was reaped, and its `init` attaches to the target, so what it left on the "
+                "board is not known."
+            ),
+            hardware_state="unknown",
+            side_effect_status="unknown",
+            **attempt,
+        )
+    controller = openocd_target_name(f"{probed.stdout}{probed.stderr}")
+    if controller is None:
+        return None, {
+            **attempt,
+            "summary": (
+                f"The ST-Link answered and OpenOCD named no target through `{interface_cfg}` and `{target_cfg}`, so the "
+                "controller was not identified. Nothing was written to the board."
+            ),
+        }
+    return {"probe_id": probe_id, "controller": controller, "source": "openocd"}, {
+        **attempt,
+        "summary": f"OpenOCD reported the target as '{controller}' through a read-only init/targets/shutdown.",
+    }
+
+
 def discover_attached_hardware(
     timeout_s: float = 10.0,
     *,
     probe_id: str | None = None,
     before_connect: Callable[[str], JsonObject | None] | None = None,
+    profile: JsonObject | None = None,
 ) -> JsonObject:
     """Discover one attached STM32 bench before runtime policy exists.
 
@@ -138,19 +509,36 @@ def discover_attached_hardware(
     which nothing has been said to that particular board yet. Returning a result
     from it aborts discovery and that result is the answer, which is how a caller
     takes the machine-wide lock on the probe it is about to talk to.
+
+    ``profile`` is the workspace's own ``agentic-hil.config.example.yaml``, and
+    it is read for one thing: what the board is. A profile that names its
+    controller settles the target with nothing said to the board at all, which is
+    the ordinary case on a project that ships one. It is consulted only on the
+    path that has no STM32CubeProgrammer to ask; where that CLI answers, the
+    board keeps naming itself exactly as before.
     """
     com_ports = list_available_com_ports("bootstrap_com_ports")
-    listed = enumerate_attached_probes(timeout_s)
+    listed = enumerate_attached_probes(timeout_s, com_ports=com_ports)
     if not listed["ok"]:
         # The host serial inventory travels with every enumeration failure, as
         # it always has: an operator whose probe did not enumerate still needs
         # to see what the host does have.
         return {**listed, "com_ports": com_ports}
     executable = str(listed["executable"])
-    cwd = str(Path(executable).parent)
+    backend = str(listed["backend"])
+    # Carried onto every refusal below so that a reader of a failure knows which
+    # enumeration produced the probes it names, and which ST-Link-shaped ports
+    # the host has: "no bench was found" beside a listed ST-Link VCP is the
+    # combination that sent the reported operator looking in the wrong place.
+    found_by: JsonObject = {
+        "backend": backend,
+        "discovered_by": listed.get("discovered_by"),
+        "tools_searched": listed.get("tools_searched", []),
+        **({"stlink_ports": listed["stlink_ports"]} if "stlink_ports" in listed else {}),
+    }
     probe_ids = [str(found["probe_id"]) for found in listed["probes"]]
     if not probe_ids:
-        return _discovery_failure("adapter_not_found", "No ST-Link probe is attached.", executable=executable, com_ports=com_ports)
+        return _discovery_failure("adapter_not_found", "No ST-Link probe is attached.", executable=executable, com_ports=com_ports, **found_by)
     if probe_id is not None:
         selected = select_probe_id(probe_id, probe_ids)
         if selected is None:
@@ -161,6 +549,7 @@ def discover_attached_hardware(
                 requested_probe_id=probe_id,
                 probes=[{"probe_id": found} for found in probe_ids],
                 com_ports=com_ports,
+                **found_by,
             )
     elif len(probe_ids) != 1:
         return _discovery_failure(
@@ -170,54 +559,92 @@ def discover_attached_hardware(
             probes=[{"probe_id": found} for found in probe_ids],
             next_step="Ask which board this is about and name its serial as probe_id; every attached serial is listed under `probes`.",
             com_ports=com_ports,
+            **found_by,
         )
     else:
         selected = probe_ids[0]
 
-    # The enumerated spelling from here on, never the caller's: it is what
-    # STM32CubeProgrammer is given below and what ends up in the configuration,
-    # so the file names the probe the way the toolchain does.
+    # The enumerated spelling from here on, never the caller's: it is what the
+    # toolchain is given below and what ends up in the configuration, so the file
+    # names the probe the way the host does.
     probe_id = selected
     if before_connect is not None:
         refusal = before_connect(probe_id)
         if refusal is not None:
             return refusal
-    probed = spawn_command(
-        [*invocation(executable), "-q", "-c", "port=SWD", "mode=HOTPLUG", f"sn={probe_id}"],
-        cwd,
-        timeout_s,
-    )
-    if probed.not_found:
-        return _discovery_failure("debugger_not_found", "STM32CubeProgrammer CLI disappeared during target discovery.", executable=executable, probe_id=probe_id, com_ports=com_ports)
-    if probed.timed_out:
-        return _discovery_failure("timeout", "Target discovery timed out after its process was reaped.", executable=executable, probe_id=probe_id, com_ports=com_ports)
-    target = stlink_target_info(f"{probed.stdout}{probed.stderr}")
-    if probed.returncode != 0 or target is None:
-        return _discovery_failure(
-            "target_not_detected",
-            "ST-Link was found, but no target identity was detected. Runtime permissions are not required for bootstrap discovery.",
-            executable=executable,
-            probe_id=probe_id,
-            com_ports=com_ports,
+    if backend == BOOTSTRAP_BACKEND:
+        target, target_discovery = _stlink_target_identity(executable, probe_id, timeout_s)
+        if target is None:
+            return {**target_discovery, "executable": executable, "probe_id": probe_id, "com_ports": com_ports, **found_by}
+        summary = "One attached STM32 target was identified through ST-Link HOTPLUG discovery."
+    else:
+        target, target_discovery = _openocd_target_identity(executable, probe_id, profile, timeout_s)
+        if target is None and target_discovery.get("ok") is False:
+            # A read that failed -- OpenOCD gone before it spawned, or reaped
+            # mid-attach -- is not a probe that answered with no target, and the
+            # ST-Link path above returns exactly this for the same case. Letting
+            # it fall through would build an `ok: true` bench from a read that
+            # never finished (and, on a timeout, from a board whose state is not
+            # known); the failure is the whole answer.
+            return {**target_discovery, "executable": executable, "probe_id": probe_id, "com_ports": com_ports, **found_by}
+        summary = (
+            f"One attached ST-Link was identified from this host's USB serial inventory and its target is "
+            f"'{target['controller']}'."
+            if target is not None
+            else (
+                f"An attached ST-Link ('{probe_id}') was identified from this host's USB serial inventory and its "
+                "target was not identified, so the configuration written names the probe, the toolchain and the port "
+                "and leaves the controller for you to name."
+            )
         )
 
     matched_port = correlate_com_port(probe_id, com_ports)
     return {
         "ok": True,
         "tool": "bootstrap_hardware_discovery",
-        "backend": BOOTSTRAP_BACKEND,
+        "backend": backend,
+        "discovered_by": listed.get("discovered_by"),
+        "tools_searched": listed.get("tools_searched", []),
+        **({"stlink_ports": listed["stlink_ports"]} if "stlink_ports" in listed else {}),
         "executable": executable,
         "gdb_executable": autodetected_gdb(),
         "probe_id": probe_id,
         "target": target,
+        "target_discovery": target_discovery,
         "com_port": matched_port,
         "available_com_ports": com_ports,
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "cleanup_required": False,
-        "summary": "One attached STM32 target was identified through ST-Link HOTPLUG discovery.",
+        "summary": summary,
     }
+
+
+def _stlink_target_identity(executable: str, probe_id: str, timeout_s: float) -> tuple[JsonObject | None, JsonObject]:
+    """The board behind this probe, read by STM32CubeProgrammer's HOTPLUG connect.
+
+    Unchanged from what discovery has always done, lifted out only so that the
+    two ways of naming a target sit side by side. Its second element is a
+    refusal rather than a note: with this CLI present, a probe that answers and a
+    target that does not is the failure it has always been, because the same call
+    reads both."""
+    probed = spawn_command(
+        [*invocation(executable), "-q", "-c", "port=SWD", "mode=HOTPLUG", f"sn={probe_id}"],
+        str(Path(executable).parent),
+        timeout_s,
+    )
+    if probed.not_found:
+        return None, _discovery_failure("debugger_not_found", "STM32CubeProgrammer CLI disappeared during target discovery.")
+    if probed.timed_out:
+        return None, _discovery_failure("timeout", "Target discovery timed out after its process was reaped.")
+    target = stlink_target_info(f"{probed.stdout}{probed.stderr}")
+    if probed.returncode != 0 or target is None:
+        return None, _discovery_failure(
+            "target_not_detected",
+            "ST-Link was found, but no target identity was detected. Runtime permissions are not required for bootstrap discovery.",
+        )
+    return target, {"source": BOOTSTRAP_BACKEND, "summary": "The target named itself through an ST-Link HOTPLUG connect."}
 
 
 def autodetected_gdb() -> str | None:
@@ -359,12 +786,31 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
     profile_debuggers = profile.get("debuggers") if isinstance(profile.get("debuggers"), dict) else {}
     profile_debugger = next((value for value in profile_debuggers.values() if isinstance(value, dict)), {})
     requested_permissions = profile_debugger.get("permissions") if isinstance(profile_debugger.get("permissions"), dict) else {}
+    # The backend that actually answered, never a fixed one. Discovery has two
+    # (STM32CubeProgrammer's CLI, and the USB inventory with OpenOCD as the
+    # toolchain), and writing `stlink` for both put an
+    # STM32CubeProgrammer-shaped entry on a host that has no
+    # STM32CubeProgrammer: a file that loads and refuses at the first call. It is
+    # also what `plan_adoption` compares an existing entry's `type` against, so a
+    # generated bench and an adopted one have to agree on the word.
+    backend = str(discovery.get("backend") or BOOTSTRAP_BACKEND)
+    skeleton_debugger = next((value for value in template.get("debuggers", {}).values() if isinstance(value, dict)), {})
+    if backend == BOOTSTRAP_FALLBACK_BACKEND:
+        # OpenOCD reaches a target through these two and through nothing else,
+        # so they are the keys that have to survive the entry being rewritten.
+        # The profile's pair when it names one, the skeleton's otherwise.
+        interface_cfg, target_cfg = profile_openocd_scripts(profile)
+        transport = {"interface_cfg": interface_cfg, "target_cfg": target_cfg}
+    else:
+        # `interface` is the stlink backend's transport and is ignored by the
+        # others; it stays exactly where it was.
+        transport = {"interface": str(skeleton_debugger.get("interface") or "SWD")}
     template["debuggers"] = {
         "dut": {
-            "type": "stlink",
+            "type": backend,
             "executable": discovery["executable"],
             "probe_id": discovery["probe_id"],
-            "interface": "SWD",
+            **transport,
             "timeout_s": profile_debugger.get("timeout_s", 60),
             # The template this fills in is a version 3 configuration, and from
             # version 2 on reading needs no grant and `allow_probe` is refused by name. A
@@ -450,6 +896,109 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             }
         }
     return template
+
+
+# The two regions of the shipped skeleton a profile can fill in when no bench
+# was found, quoted exactly. They are anchors rather than a re-parse of the
+# document because the skeleton's value to an operator is its comments, and a
+# YAML round trip drops every one of them: what is written when discovery finds
+# nothing has to stay the annotated file it has always been.
+#
+# `apply_profile_to_placeholder` refuses rather than silently skipping when
+# either is missing, and a test holds the skeleton to both, so the two cannot
+# come apart without something saying so.
+PLACEHOLDER_TARGET_ANCHOR = 'target:\n  name: "example-target"\n  controller: "unknown-controller"\n'
+PLACEHOLDER_COM_PORTS_ANCHOR = "com_ports: {}\n"
+
+
+def apply_profile_to_placeholder(template_text: str, profile: JsonObject) -> str:
+    """The skeleton, carrying the names this project's profile already states.
+
+    What `init` wrote when nothing was attached said `example-target`,
+    `unknown-controller` and `com_ports: {}` for a workspace whose own
+    `agentic-hil.config.example.yaml` names the board and names the ports. The
+    ports were the expensive half: a plan that opens `dut_uart` was refused
+    "references a COM port that is not in the authoritative config" for a port
+    the project declares, and the operator went looking for a mistake in the
+    plan.
+
+    So the profile's names go in, and only the names: the board's name and
+    controller, and each port's name, baudrate and permissions. Not a device,
+    because which of this host's serial devices a port is, is exactly what
+    discovery did not find out; the entry is written unbound (see
+    ``types.com_port_is_unbound``) and every call that names it is refused as
+    `com_port_not_bound`, which says the bench is not filled in rather than that
+    the plan is wrong.
+
+    Text rather than a document, so the comments survive. Both regions are
+    quoted from the skeleton and a missing one raises: the skeleton is shipped
+    with this module, and a silent no-op would leave an operator with the
+    placeholder this exists to replace and nothing saying why.
+    """
+    target_profile = profile.get("target") if isinstance(profile.get("target"), dict) else {}
+    name = str(target_profile.get("name") or "").strip()
+    controller = str(target_profile.get("controller") or "").strip()
+    text = template_text
+    if name or controller:
+        if PLACEHOLDER_TARGET_ANCHOR not in text:
+            raise ConfigError(
+                "config_invalid",
+                "The bundled configuration skeleton no longer carries the placeholder target block, so this project's "
+                f"{PROJECT_PROFILE} could not be applied to it.",
+                {"field": "target", "profile": PROJECT_PROFILE},
+            )
+        # `json.dumps` rather than a one-value `yaml.safe_dump`, which appends
+        # YAML's own document-end marker and would turn the rest of the skeleton
+        # into a second document. JSON is a subset of YAML, so this writes the
+        # same quoted scalar the anchor it replaces already was, and it is how
+        # `init` spells both roots a few lines further on.
+        text = text.replace(
+            PLACEHOLDER_TARGET_ANCHOR,
+            "target:\n"
+            f"  name: {json.dumps(name or 'example-target')}\n"
+            f"  controller: {json.dumps(controller or 'unknown-controller')}\n",
+        )
+    ports = _placeholder_com_ports(profile)
+    if ports:
+        if PLACEHOLDER_COM_PORTS_ANCHOR not in text:
+            raise ConfigError(
+                "config_invalid",
+                "The bundled configuration skeleton no longer carries the empty com_ports block, so this project's "
+                f"{PROJECT_PROFILE} could not be applied to it.",
+                {"field": "com_ports", "profile": PROJECT_PROFILE},
+            )
+        rendered = yaml.safe_dump({"com_ports": ports}, sort_keys=False, allow_unicode=False)
+        text = text.replace(
+            PLACEHOLDER_COM_PORTS_ANCHOR,
+            f"# Named by this project's {PROJECT_PROFILE}. No bench was attached when this file was written, so each\n"
+            "# entry carries the port's name, baudrate and permissions and no `device`: which of this host's serial\n"
+            "# devices it is, is what discovery did not find out. Nothing opens an entry in this state, and a call or\n"
+            f"# a plan step that names one is refused `com_port_not_bound`. `{ADOPT_HARDWARE_COMMAND}` fills the\n"
+            "# device in from the attached board.\n"
+            f"{rendered}",
+        )
+    return text
+
+
+def _placeholder_com_ports(profile: JsonObject) -> JsonObject:
+    """The profile's ports as unbound entries, permissions exactly as asked.
+
+    ``device`` is deliberately absent rather than null: both read as unbound, and
+    leaving the key out is what a file that has never been bound looks like.
+    ``allow_write`` follows the profile the way the discovered path follows it,
+    so a project that closed a port keeps it closed and one that said nothing
+    gets the generated default."""
+    profile_ports = profile.get("com_ports") if isinstance(profile.get("com_ports"), dict) else {}
+    entries: JsonObject = {}
+    for name, value in profile_ports.items():
+        if not isinstance(value, dict):
+            continue
+        requested = value.get("permissions") if isinstance(value.get("permissions"), dict) else {}
+        entries[str(name)] = {
+            "baudrate": profile_baudrate(value, str(name)),
+            "permissions": {flag: bool(requested.get(flag, default)) for flag, default in generated_permissions("com_ports").items()},
+        }
+    return entries
 
 
 def _discovery_failure(error_type: str, summary: str, **details: object) -> JsonObject:

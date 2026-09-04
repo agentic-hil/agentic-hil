@@ -14,8 +14,9 @@ from jsonschema import Draft202012Validator, SchemaError
 from agentic_hil.backends.common import DEBUG_SESSION_WAY_OUT
 from agentic_hil.backends.gdbdebug import INTEGER_VALUE_WIDTHS
 from agentic_hil.can import parse_can_id, parse_hex_bytes
-from agentic_hil.comports import data_result, decode_bytes, matched_span_bytes
+from agentic_hil.comports import COM_PORT_NOT_BOUND, data_result, decode_bytes, matched_span_bytes
 from agentic_hil.config import (
+    ADOPT_HARDWARE_COMMAND,
     ConfigError,
     UniqueKeyLoader,
     absolute_without_symlinks,
@@ -46,7 +47,7 @@ from agentic_hil.tools import (
     configured_sessionless_debug_reads,
     sessionless_capable_debug_tools,
 )
-from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
+from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject, com_port_is_unbound
 
 # The default plan path, the packaged schema and the marker its version gate
 # reads are re-exported from `knowledge`, which is where the reference document
@@ -1112,6 +1113,15 @@ class StepDevice:
             return cls.unnamed_refusal(reactor, location, step)
         if name not in entries:
             return preflight_error(location, step, cls.route_field, cls.unknown_name_summary, {cls.configured_field: sorted(entries)})
+        return cls.unbound_refusal(reactor, location, step, name)
+
+    @classmethod
+    def unbound_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, name: str) -> JsonObject | None:
+        """Refuse a step naming a configured entry that has no device yet, or None.
+
+        The name is right and the bench is not filled in, which the "not in the
+        authoritative config" refusal above says the opposite of. Only serial
+        ports can be in that state, so only `UartRunner` answers this."""
         return None
 
     @classmethod
@@ -1396,6 +1406,44 @@ class UartRunner(SessionDevice):
     @classmethod
     def build_device(cls, config: AgenticHILConfig, config_id: str) -> Device:
         return uart_device(config, config_id)
+
+    @classmethod
+    def unbound_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, name: str) -> JsonObject | None:
+        """Refuse a plan step whose port is declared and names no device yet.
+
+        The failure this replaces: `agentic-hil init` with no bench attached
+        wrote `com_ports: {}`, so a plan opening the `dut_uart` its own project
+        profile declares was refused "Test step references a COM port that is not
+        in the authoritative config", and the operator went looking for a mistake
+        in the plan. The plan was right; the bench was not filled in. The port
+        is declared now, and this says which of the two it is, names the key that
+        is empty and names the command that fills it.
+
+        At preflight, before any step runs, because it is a fact about the
+        configuration rather than about the run: a plan that cannot reach its own
+        port should not open the probe first."""
+        port = reactor.config.com_ports.get(name)
+        if port is None or not com_port_is_unbound(port):
+            return None
+        return preflight_error(
+            location,
+            step,
+            cls.route_field,
+            (
+                f"Test step opens COM port '{name}', which this project declares and which names no device yet, so "
+                "there is nothing to open. The plan is not wrong; the bench is not filled in."
+            ),
+            {
+                "error_type": COM_PORT_NOT_BOUND,
+                "port_id": name,
+                "unbound_key": f"com_ports.{name}.device",
+                "next_step": (
+                    f"Plug the board in and run `{ADOPT_HARDWARE_COMMAND}`, which fills `com_ports.{name}.device` in "
+                    "from the attached hardware, or name the device yourself. `agentic-hil com-ports` lists what this "
+                    "host has."
+                ),
+            },
+        )
 
     # --- the actions this kind serves ------------------------------------
 

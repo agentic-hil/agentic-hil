@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -56,9 +57,25 @@ from agentic_hil.types import (
     ValidationConfig,
     com_port_carries_hardware_identity,
     com_port_identity_source,
+    com_port_is_unbound,
     fold_device_path,
     fold_hardware_id,
 )
+
+
+def _identity_module(name: str) -> Any:
+    """The POSIX ``pwd``/``grp`` database module, or None where there is none."""
+    with suppress(ImportError):
+        return importlib.import_module(name)
+    return None
+
+
+# The passwd and group databases, resolved once and held as module attributes so
+# the answer stays the same for a whole process and so a test can put a fake
+# database in front of the rule below on any host, Windows included, where the
+# real modules do not exist and the walk that reads them never runs.
+grp = _identity_module("grp")
+pwd = _identity_module("pwd")
 
 CONFIG_ENV = "AGENTIC_HIL_CONFIG"
 CONFIG_DIGEST_ALGORITHM = "sha256"
@@ -1959,6 +1976,129 @@ def write_generated_config(target_path: Path, workspace: Path, text: str) -> Non
     secure_atomic_write_text(target_path, text)
 
 
+def owner_display_name(uid: int) -> str:
+    """The owning account's name, or its numeric id where nothing knows it.
+
+    A refusal that says "owned by another user" tells a person that something is
+    wrong and not which account to go and look at. Where the passwd database can
+    name the owner it is named; where it cannot (no such module, no such entry,
+    a database that errors) the number is still worth more than the phrase it
+    replaces.
+    """
+    if pwd is not None:
+        with suppress(KeyError, OSError, TypeError, ValueError):
+            return str(pwd.getpwuid(uid).pw_name)
+    return f"uid {uid}"
+
+
+def group_display_name(gid: int) -> str:
+    """The owning group's name, or its numeric id where nothing knows it."""
+    if grp is not None:
+        with suppress(KeyError, OSError, TypeError, ValueError):
+            return str(grp.getgrgid(gid).gr_name)
+    return f"gid {gid}"
+
+
+def is_user_private_group(uid: int, gid: int) -> bool:
+    """Whether ``gid`` is the private group of the user who owns ``uid``.
+
+    Debian and Ubuntu give every account a group of its own: same name as the
+    account, the account's primary gid, and no other member. They also ship
+    ``umask 0002``, so everything such a user writes is group-writable by that
+    group, which is the default state of a home directory, of ``~/.local/bin``,
+    and of the console script ``uv tool install`` or ``pipx install`` puts there.
+    Write access through a group whose only member is the file's own owner is
+    write access for exactly one principal, the owner, so it admits nobody the
+    owner's own write bit did not already admit, and reading it as a second
+    writer refused the installation this project's own installer produces.
+
+    All of these conditions have to hold, because each one alone is satisfiable
+    by a group that really does hold other people: the group carries the owner's
+    name, it is the owner's primary group, it lists no supplementary member but
+    the owner, and no other account names it as its own primary group. A group
+    merely named after somebody, the owner's primary group with a second account
+    added to it as a supplementary or as a login group, and any other group stay
+    foreign, and group write through them stays refused.
+
+    The last condition is the one ``gr_mem`` cannot answer: that member list
+    holds only *supplementary* members, so an account whose *primary* gid is this
+    group never appears in it. Two accounts sharing gid 1000 as their login
+    group, with an empty ``gr_mem``, would otherwise pass -- and a ``0775``
+    launcher the first writes would be writable by the second. So the passwd
+    database is enumerated and any second account with this primary gid refuses
+    the group, exactly as a named supplementary member does.
+
+    False wherever the passwd and group databases are unavailable (Windows,
+    which never reaches this) or cannot answer for these ids: an identity
+    nothing could confirm leaves the old refusal standing rather than widening
+    it on a guess. That extends to an enumeration that does not come back
+    complete -- one whose passwd source declines ``getpwall`` and so cannot even
+    list the owner it just resolved: membership that cannot be established is
+    refused rather than assumed empty.
+    """
+    if pwd is None or grp is None:
+        return False
+    try:
+        owner = pwd.getpwuid(uid)
+        group = grp.getgrgid(gid)
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+    if group.gr_name != owner.pw_name or group.gr_gid != owner.pw_gid:
+        return False
+    if [member for member in (group.gr_mem or []) if member != owner.pw_name]:
+        return False
+    try:
+        accounts = list(pwd.getpwall())
+    except (AttributeError, OSError, KeyError, TypeError, ValueError):
+        return False
+    if not any(account.pw_uid == uid for account in accounts):
+        # The owner is a real account -- getpwuid answered for it above -- so an
+        # enumeration that does not contain it did not enumerate completely (an
+        # NSS source that declines getpwall). Membership cannot be established,
+        # so fail closed rather than read the absence as "no other member".
+        return False
+    return not any(account.pw_gid == gid and account.pw_uid != uid for account in accounts)
+
+
+def untrusted_write_access(info: os.stat_result) -> str | None:
+    """Who other than the owner may write this object, named, or None.
+
+    One rule, stated once, for every path element whose mode this file reads, so
+    the executable and any other element cannot drift into two answers. World
+    write is somebody else by definition and is refused whatever the group says.
+    Group write is refused only where the group is not the owner's own private
+    group, which is the whole of the Debian and Ubuntu relaxation.
+    """
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & stat.S_IWOTH:
+        return "world-writable"
+    if mode & stat.S_IWGRP and not is_user_private_group(info.st_uid, info.st_gid):
+        return f"group-writable by group {group_display_name(info.st_gid)}, which is not your private group"
+    return None
+
+
+def untrusted_launcher_file(info: os.stat_result, *, trusted_uids: frozenset[int]) -> str | None:
+    """Why a POSIX MCP launcher's executable cannot be trusted, or None.
+
+    Three refusals and one requirement, each named separately, because a caller
+    told only that the file is untrusted has to go and stat it to find out which
+    of them to fix: owned by an account that is neither root nor this user,
+    writable by the world, writable by a group that is not the owner's private
+    group, and, last, not executable at all.
+
+    ``info`` is a stat of an already-opened file and ``trusted_uids`` is supplied
+    by the caller, so this stays answerable on hosts with no ``os.geteuid``.
+    """
+    if info.st_uid not in trusted_uids:
+        return f"owned by {owner_display_name(info.st_uid)}"
+    reason = untrusted_write_access(info)
+    if reason is not None:
+        return reason
+    if not stat.S_IMODE(info.st_mode) & 0o111:
+        return "not executable"
+    return None
+
+
 def untrusted_launcher_directory(info: os.stat_result, *, final: bool, trusted_uids: frozenset[int]) -> str | None:
     """Why a POSIX MCP launcher's ancestor directory cannot be trusted, or None.
 
@@ -1981,9 +2121,16 @@ def untrusted_launcher_directory(info: os.stat_result, *, final: bool, trusted_u
     ``info`` is a stat of an already-opened directory descriptor, and
     ``trusted_uids`` is supplied by the caller so this stays answerable on hosts
     that have no ``os.geteuid``.
+
+    No ancestor mode is read here, so the private-group rule that
+    ``untrusted_write_access`` applies to the executable has nothing to relax on
+    a directory: a group-writable ``~`` or ``~/.local/bin``, private group or
+    not, is already accepted. The one answer this gives names the account that
+    owns the component, because "another user" tells a person that something is
+    wrong and not whose directory to go and look at.
     """
     if final and info.st_uid not in trusted_uids:
-        return "owned by another user"
+        return f"owned by {owner_display_name(info.st_uid)}"
     return None
 
 
@@ -2075,15 +2222,18 @@ def trusted_persistent_executable(
             with safe_open_binary(candidate) as handle:
                 opened = os.fstat(handle.fileno())
                 mode = stat.S_IMODE(opened.st_mode)
-                if opened.st_uid not in {0, os.geteuid()} or mode & 0o022 or not mode & 0o111:
-                    # The mode and the owner travel with the refusal for the same
-                    # reason the directory's do: this is the last thing between an
-                    # operator and a registration, and a caller told only that the
-                    # file is untrusted has to go and stat it to learn why.
+                reason = untrusted_launcher_file(opened, trusted_uids=frozenset({0, os.geteuid()}))
+                if reason is not None:
+                    # The failing condition, the path it failed on, and the mode,
+                    # owner and group behind it all travel with the refusal for
+                    # the same reason the directory's do: this is the last thing
+                    # between an operator and a registration, and one sentence
+                    # covering four different faults sent people to stat the file
+                    # themselves to find out which one they had.
                     raise ConfigError(
                         "mcp_command_untrusted",
-                        "The MCP server executable must be trusted, executable, and not writable by other users.",
-                        {"path": str(candidate), "mode": f"{mode:04o}", "uid": opened.st_uid},
+                        f"The MCP server executable at {candidate} is {reason}. It must be trusted, executable, and writable by nobody but its owner.",
+                        {"path": str(candidate), "mode": f"{mode:04o}", "uid": opened.st_uid, "gid": opened.st_gid, "untrusted_because": reason},
                     )
         finally:
             for descriptor in reversed(target_descriptors):
@@ -3007,6 +3157,17 @@ def _skeleton_debugger() -> JsonObject:
     return entry
 
 
+def skeleton_debugger_scripts() -> tuple[str, str]:
+    """The interface and target scripts the shipped skeleton names, in that order.
+
+    Read off the skeleton rather than restated, so that bootstrap discovery
+    reaches a board through the same two scripts the entry it is about to write
+    will name. A second copy of the pair is the copy that goes on naming
+    `target/stm32f4x.cfg` after the skeleton has moved on."""
+    entry = _skeleton_debugger()
+    return str(entry.get("interface_cfg") or "interface/stlink.cfg"), str(entry.get("target_cfg") or "target/stm32f4x.cfg")
+
+
 def debugger_is_starter_entry(debugger: DebuggerConfig) -> bool:
     """Whether this is the shipped skeleton entry, untouched in every driving field.
 
@@ -3132,8 +3293,13 @@ def artifacts_config(raw: JsonObject) -> ArtifactsConfig:
 
 def com_port_config(name: str, value: Any) -> ComPortConfig:
     raw = mapping(value, f"com_ports.{name}")
+    # Absent or null is an entry that names a port and no device yet: the empty
+    # string is how that reaches the rest of the code, and `com_port_is_unbound`
+    # is how it is asked about. `str(None)` used to make it the literal "None",
+    # which is a device name nothing can open and nothing recognises as unset.
+    device = raw.get("device")
     return ComPortConfig(
-        device=str(raw["device"]),
+        device="" if device is None else str(device),
         baudrate=int(raw.get("baudrate", 115200)),
         timeout_s=float(raw.get("timeout_s", 0.1)),
         write_timeout_s=float(raw.get("write_timeout_s", 1.0)),
@@ -3499,7 +3665,12 @@ def validate_com_port_identity_declarations(com_ports: dict[str, ComPortConfig],
     under version 1 too."""
     for name, port in com_ports.items():
         declared = port.identity_source
-        if declared is None:
+        # An entry with no device yet has no identity to declare or contradict:
+        # what identifies a port is settled once it is bound, and until then a
+        # derived `device` would be a claim about a device name that is not
+        # there. The check runs in full the moment `adopt-hardware` or an
+        # operator names one.
+        if declared is None or com_port_is_unbound(port):
             continue
         derived = com_port_identity_source(port)
         if declared == derived:
@@ -3550,7 +3721,12 @@ def reject_unidentified_com_ports(com_ports: dict[str, ComPortConfig], config_pa
     if version < IDENTIFIED_COM_PORT_CONFIG_VERSION:
         return
     for name, port in com_ports.items():
-        if com_port_carries_hardware_identity(port) or port.identity_source is not None:
+        # An entry with no device yet is not identified by an enumeration order,
+        # because it is not identified by anything and cannot be opened at all.
+        # Version 3's rule is about a name that can come to reach another board;
+        # a port nothing can reach has no such name. It is asked the moment the
+        # device is filled in, which is the point at which the answer exists.
+        if com_port_carries_hardware_identity(port) or port.identity_source is not None or com_port_is_unbound(port):
             continue
         derived = com_port_identity_source(port)
         undeclared = (

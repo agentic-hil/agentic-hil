@@ -5,6 +5,7 @@ import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -523,29 +524,60 @@ class AgenticHILToolService:
             # recovery-class calls stay reachable through it, and whichever of
             # them ends the session brings the next call here with the hold gone.
             return result
+        recovered = False
+        # The one refusal this seam has to say out loud. Everything else it does
+        # not do is either invisible to the caller (nothing was owed) or already
+        # in the result; a recovery the selected entry's `allow_reset` withheld is
+        # neither, and an operator who is not told reads a board that was left
+        # unconfirmed for no stated reason.
+        withheld: JsonObject = {}
         if self.coordinator.blocked:
             try:
-                self._attempt_machine_recovery()
+                # A non-None report is a recovery that ran its action and cleared
+                # the incident; None is a reason no action could settle, left for
+                # the stand-down below or the operator.
+                #
+                # The entry and probe the just-finished call quarantined are carried
+                # in so the reset and probe re-read run against that exact board. An
+                # adoption bootstrap read selects a physical probe the startup
+                # backend is not necessarily bound to (its `probe_id` argument
+                # overrides the entry's configured id, and an unbound entry gives the
+                # startup backend no selector at all), and a multi-debugger file is
+                # loaded unbound entirely, so recovering through the startup binding
+                # would otherwise reset the wrong probe or refuse through the unbound
+                # backend and settle nothing. The `debugger_id` says which entry the
+                # `probe_id` belongs to.
+                selected_debugger, selected_probe = self._bootstrap_selection(result)
+                recovered = self._attempt_machine_recovery(selected_probe, selected_debugger) is not None
+                if not recovered and self._reset_grant_withheld(selected_probe, selected_debugger):
+                    withheld = {"reason_not_attempted": "allow_reset_missing"}
             except Exception as error:
                 # Same rule as everywhere else recovery runs: a fault inside it
                 # never fails open, and never replaces the call's own answer.
                 self._poison_quietly("machine_recovery_failed", error, audit_broken=isinstance(error, (ConfigError, OSError)))
         stood_down = self.coordinator.stand_down()
-        if stood_down is None:
-            return result
+        if stood_down is None and not recovered:
+            return {**result, **withheld} if withheld else result
         # Whatever the ended incident left registered goes back, because the call
-        # that took it is over and the bench is not held for it any more. A
-        # lease a live COM or CAN session owns is the exception and the only one:
-        # the session is still there, still usable, and still the thing that
-        # gives its device back. Without this the leases an incident used to keep
-        # would sit registered for the rest of the process, and every later call
-        # that asks whether this server holds anything would be told yes.
+        # that took it is over and the bench is not held for it any more. This
+        # runs after a recovery action too, not only after a stand-down: a
+        # `project_config_adopt_hardware` read whose target the recovery reset and
+        # re-read leaves its enumeration and probe leases registered and `active`,
+        # and a leftover active lease would tell the next config write this server
+        # is still holding the bench. A lease a live COM or CAN session owns is
+        # the exception and the only one: the session is still there, still
+        # usable, and still the thing that gives its device back.
         session_leases = {id(session.lease) for session in (*self.com_ports.sessions.values(), *self.can_buses.sessions.values())}
         for lease in list(self.coordinator.leases.values()):
             if lease.state == "active" and id(lease) not in session_leases:
                 lease.release()
         if self._quarantined_lease is not None and self._quarantined_lease.state != "active":
             self._quarantined_lease = None
+        if stood_down is None:
+            # The incident was settled by the recovery action, which wrote its own
+            # ledger line and unblocked the coordinator, so there was nothing left
+            # to stand down. The call's own result stands as it was returned.
+            return result
         # Attached while the flags still say quarantined, so the reasons keep the
         # remediation text they had; `call` re-attaching it is a no-op.
         result = attach_quarantine_guidance(result)
@@ -554,7 +586,7 @@ class AgenticHILToolService:
         # `cleanup_required` says something the stand-down did not change: this
         # call left work behind, a debug session to stop, a state nobody
         # confirmed, and a caller reading a failed result still has to know it.
-        return {**result, "incident_stood_down": stood_down, **({"quarantined": False} if result.get("quarantined") is True else {})}
+        return {**result, "incident_stood_down": stood_down, **withheld, **({"quarantined": False} if result.get("quarantined") is True else {})}
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
@@ -1230,7 +1262,110 @@ class AgenticHILToolService:
             return poison_error
         return None
 
-    def _attempt_machine_recovery(self) -> JsonObject | None:
+    @staticmethod
+    def _bootstrap_selection(result: JsonObject) -> tuple[str | None, str | None]:
+        """The entry and probe an adoption's bootstrap read selected, for recovery to bind to.
+
+        Only an adoption/create/init read carries a `hardware_discovery` block, and
+        only such a read selects a physical probe the startup backend may not be
+        bound to. Every other call's incident is raised on the configured probe the
+        startup backend already targets, so this returns ``(None, None)`` and
+        recovery keeps that backend.
+
+        The probe is the enumerated spelling, never the folded resource id: it is
+        what a toolchain's `adapter serial`/`sn=` selector is matched against, so a
+        case-folded copy could select nothing. The entry is the `debugger_id` the
+        read named: a configuration with several debuggers is loaded unbound, so the
+        probe alone cannot say which toolchain and grants to recover the board
+        under. The two travel together and both come off the adoption result."""
+        if not isinstance(result, dict):
+            return None, None
+        discovery = result.get("hardware_discovery")
+        if not isinstance(discovery, dict):
+            return None, None
+        probe_id = discovery.get("probe_id")
+        probe = probe_id if isinstance(probe_id, str) and probe_id else None
+        debugger_id = result.get("debugger_id")
+        debugger = debugger_id if isinstance(debugger_id, str) and debugger_id else None
+        return debugger, probe
+
+    def _recovery_config(self, selected_probe: str | None, selected_debugger: str | None) -> AgenticHILConfig | None:
+        """The config a recovery action drives, bound to the entry and probe that raised it.
+
+        Returns None to mean "keep the startup config and its backend": there is no
+        ``selected_probe``, or the startup config already targets exactly it. Any
+        other answer is a throwaway config bound to the probe the read left in an
+        unknown state, and it is both the permission the recovery is checked against
+        and the binding its backend is built from.
+
+        Two shapes need binding. When the startup config is bound to one entry, a
+        ``selected_probe`` that does not fold equal to that entry's configured id is
+        the read giving its `probe_id` argument precedence, or an unbound entry that
+        gave the startup backend no selector at all: the entry is kept and only its
+        probe is re-pointed. When the startup config is unbound -- a file with
+        several debuggers, deliberately loaded with `config.debugger is None` -- the
+        `probe_id` alone names no toolchain, so the entry adoption selected
+        (``selected_debugger``) is bound with `bind_debugger` and then pointed at the
+        probe. Recovering through the startup binding in either case would reset, and
+        clear the incident from, the wrong board or no particular board at all.
+
+        A configuration with no debugger to name (none configured, or the read
+        named none) has nothing to bind a probe onto, so the startup config stands."""
+        if selected_probe is None:
+            return None
+        debugger = self.config.debugger
+        if debugger is not None:
+            if debugger.probe_id is not None and fold_hardware_id(debugger.probe_id) == fold_hardware_id(selected_probe):
+                return None
+            return replace(self.config, debugger=replace(debugger, probe_id=selected_probe))
+        if selected_debugger is None or selected_debugger not in self.config.debuggers:
+            return None
+        bound = bind_debugger(self.config, selected_debugger)
+        return replace(bound, debugger=replace(bound.debugger, probe_id=selected_probe))
+
+    def _recovery_backend(self, recovery_config: AgenticHILConfig | None) -> tuple[DebuggerBackend, bool]:
+        """The backend a recovery action drives, and whether this call owns it.
+
+        The startup backend is kept when there is nothing to rebind
+        (``recovery_config`` is None; see `_recovery_config`), and when the backend
+        was injected: an injected one is the caller's, not ours to rebuild (see
+        `__init__`). Otherwise a backend is built for exactly the bound
+        ``recovery_config``. Building one spawns no process and opens no probe (its
+        work is in its calls), and the caller closes it."""
+        if recovery_config is None or not self._owns_backend:
+            return self.backend, False
+        return create_debugger_backend(recovery_config), True
+
+    def _reset_grant_withheld(self, selected_probe: str | None, selected_debugger: str | None) -> bool:
+        """Whether a missing `allow_reset` is what left this incident standing.
+
+        True in one shape only: the recovery had everything it needed except the
+        grant for the physical act. The bench's policy asks for reset_halt, the
+        open incident is a single reason that only a reset into halt settles (a
+        re-read would have run and settled it otherwise), and the entry this call
+        selected does not grant `allow_reset`.
+
+        The refusal then names it `allow_reset_missing`, the word the run
+        teardown's recovery block already uses for a reset its probe withholds,
+        because it is the same withholding read at a different seam: the operator
+        has the same single decision either way, to grant the reset on that entry
+        or to go to the board. The entry it applies to is the `debugger_id` the
+        refusal already carries.
+
+        Asked before the stand-down, which ends the incident this reads."""
+        config = self._recovery_config(selected_probe, selected_debugger) or self.config
+        debugger = config.debugger
+        if config.recovery.auto_recover != "reset_halt" or debugger is None or debugger.permissions.allow_reset:
+            return False
+        if not config.probe_allowed():
+            # A bench that may not read the probe either was not stopped by this
+            # grant alone, and naming one withholding as the reason would send an
+            # operator to grant a reset that still could not run.
+            return False
+        reason = self.coordinator.retryable_incident(RECOVERY_ACTION_REASONS)
+        return reason is not None and reason not in RETRYABLE_CLEANUP_REASONS
+
+    def _attempt_machine_recovery(self, selected_probe: str | None = None, selected_debugger: str | None = None) -> JsonObject | None:
         """Clear a recoverable incident without an operator, or refuse to.
 
         Two safe-state predicates, and the weakest one that can settle the open
@@ -1241,13 +1376,38 @@ class AgenticHILToolService:
         the state it is attesting to. `reset_halt` additionally drives the target
         into a defined halted state first, which is what settles an unconfirmed
         flash, reset, or session start: a physical act, gated on the bench's
-        recovery.auto_recover policy and on allow_reset.
+        recovery.auto_recover policy and on the allow_reset of the entry it will
+        be driven through.
+
+        ``selected_probe`` and ``selected_debugger`` are the physical probe and
+        the configured entry the just-finished call quarantined, when the call named
+        them -- an adoption bootstrap read does. The reset and probe run through a
+        backend bound to exactly that entry and probe, so the incident is both
+        settled and cleared from the board that raised it and no other; without them
+        the startup binding could reset, and clear the incident from, a different
+        probe, or (a multi-debugger file loaded unbound) refuse through the startup
+        `UnboundDebuggerBackend` and settle nothing at all. That same bound config
+        is every permission this recovery is checked against, in both directions:
+        an unbound service config neither withholds a read the selected entry in
+        fact grants, nor lends the reset predicate a grant that entry withholds,
+        because an unbound config carries neither. Every other incident is raised
+        on the configured probe the startup backend already targets, so both being
+        None keeps that backend and config.
 
         Returns the recovery report, or None when the incident is not machine
         recoverable or a predicate did not confirm the safe state."""
-        allowed = self.coordinator.recoverable_reasons()
+        # Resolved first, and once: it is the grant the recovery is authorized by,
+        # the grant the reasons it may settle are derived from, and the binding its
+        # backend is built from, so the three can never disagree about which board
+        # is being driven or about what may be done to it. Deriving the reason set
+        # from the unbound service config was exactly that disagreement: it admits
+        # the reset set on `debugger is None`, so a selected entry's `allow_reset:
+        # false` did not stop the reset the bound backend then performed.
+        recovery_config = self._recovery_config(selected_probe, selected_debugger)
+        authority = recovery_config or self.config
+        allowed = self.coordinator.recoverable_reasons(authority)
         reason = self.coordinator.retryable_incident(allowed) if allowed else None
-        if reason is None or not self.config.probe_allowed():
+        if reason is None or not authority.probe_allowed():
             return None
         if not self._machine_recovery_attempt_allowed():
             return None
@@ -1256,11 +1416,18 @@ class AgenticHILToolService:
         needs_reset = reason not in RETRYABLE_CLEANUP_REASONS
         if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
             return None
-        if needs_reset:
-            reset = self._invoke_dispatch(lambda: self.backend.reset_target("halt"))
-            if not overall_success(reset):
-                return None
-        verification = self._invoke_dispatch(self.backend.probe_target)
+        backend, owns_backend = self._recovery_backend(recovery_config)
+        try:
+            if needs_reset:
+                reset = self._invoke_dispatch(lambda: backend.reset_target("halt"))
+                if not overall_success(reset):
+                    return None
+            verification = self._invoke_dispatch(backend.probe_target)
+        finally:
+            # A backend built for this recovery holds no session and spawns its
+            # work in its calls, so closing it only drops the throwaway object.
+            if owns_backend:
+                backend.close()
         if not overall_success(verification) or verification.get("target_detected") is not True:
             return None
         policy = self.config.recovery
@@ -2536,7 +2703,11 @@ def _project_config_create(
         # is not the same as free, though: this enumerates probes and connects to
         # one, so on a configured server it goes in under that server's own
         # coordinator.
-        discovery, refusal, unaudited = discover_for_generation(current, coordinator, generation_bench=generation_bench)
+        # `GENERATED_PROJECT_PROFILE` is repository-controlled data and names no
+        # controller, so over MCP the target is still read off the board or left
+        # unnamed; a workspace profile does not decide it here, exactly as it
+        # decides no permission here.
+        discovery, refusal, unaudited = discover_for_generation(current, coordinator, generation_bench=generation_bench, profile=GENERATED_PROJECT_PROFILE)
         if refusal is not None:
             return refusal
         if not overall_success(discovery):
@@ -2720,6 +2891,7 @@ def discover_for_generation(
     reason_prefix: str = "config_create",
     frontend: str = "mcp",
     generation_bench: BenchMutex | None = None,
+    profile: JsonObject | None = None,
 ) -> tuple[JsonObject, JsonObject | None, str | None]:
     """Read what is attached, holding everything a probe read holds.
 
@@ -2795,7 +2967,7 @@ def discover_for_generation(
     if current is None:
         # No third answer here: the caller handed the None and already holds a
         # better reason than this function could invent for it.
-        return (*_discover_without_policy(tool=tool, frontend=frontend), None)
+        return (*_discover_without_policy(tool=tool, frontend=frontend, profile=profile), None)
     unusable = generation_audit_barrier(current)
     if unusable is not None:
         # The configuration loads and its `state_root` is the broken thing that a
@@ -2835,11 +3007,11 @@ def discover_for_generation(
         # in) the read still refuses a live holder; it just does not span the
         # write, which is the pre-existing behaviour.
         aliases = configured_device_resources(current)
-        return (*_discover_without_policy(tool=tool, frontend=frontend, resources=aliases, bench=generation_bench), unusable.error_type)
+        return (*_discover_without_policy(tool=tool, frontend=frontend, resources=aliases, bench=generation_bench, profile=profile), unusable.error_type)
     if coordinator is None:
         owned = HardwareCoordinator(current, frontend=frontend)
         try:
-            discovery, refusal = _discover_under_lease(current, owned, tool=tool, reason_prefix=reason_prefix)
+            discovery, refusal = _discover_under_lease(current, owned, tool=tool, reason_prefix=reason_prefix, profile=profile)
         finally:
             # Closing hands back the project lock and leaves any incident this
             # read raised persisted, so the next owner adopts it rather than
@@ -2851,7 +3023,7 @@ def discover_for_generation(
         if refusal is None and cleanup_error is not None:
             return {}, _lock_cleanup_refusal(cleanup_error, tool), None
         return discovery, refusal, None
-    return (*_discover_under_lease(current, coordinator, tool=tool, reason_prefix=reason_prefix), None)
+    return (*_discover_under_lease(current, coordinator, tool=tool, reason_prefix=reason_prefix, profile=profile), None)
 
 
 def generation_audit_barrier(current: AgenticHILConfig) -> ConfigError | None:
@@ -2911,7 +3083,7 @@ def _regeneration_moves_state_root(current: AgenticHILConfig) -> bool:
     return os.path.normcase(str(replacement)) != os.path.normcase(str(current.state_root))
 
 
-def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] | None = None, bench: BenchMutex | None = None) -> tuple[JsonObject, JsonObject | None]:
+def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] | None = None, bench: BenchMutex | None = None, profile: JsonObject | None = None) -> tuple[JsonObject, JsonObject | None]:
     """Bootstrap discovery with machine-wide physical exclusion but no lease.
 
     Two callers, and both read the board with no `state_root` to record a lease
@@ -2982,7 +3154,7 @@ def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] |
                 return refusal
             return None
 
-        discovery = discover_attached_hardware(before_connect=before_connect)
+        discovery = discover_attached_hardware(before_connect=before_connect, profile=profile)
         if refused:
             return {}, refused
         return discovery, None
@@ -3031,7 +3203,7 @@ def _lock_cleanup_refusal(error: Exception, tool: str) -> JsonObject:
     }
 
 
-def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator, *, tool: str, reason_prefix: str) -> tuple[JsonObject, JsonObject | None]:
+def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator, *, tool: str, reason_prefix: str, profile: JsonObject | None = None) -> tuple[JsonObject, JsonObject | None]:
     resources = [key for name in current.debuggers for key in configured_probe_resource(current, name)]
     return discover_under_hardware_lease(
         current,
@@ -3039,6 +3211,7 @@ def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordi
         tool=tool,
         reason_prefix=reason_prefix,
         resources=resources,
+        profile=profile,
     )
 
 

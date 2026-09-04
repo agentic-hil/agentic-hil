@@ -498,6 +498,34 @@ function Find-Python {
     return ''
 }
 
+# Can this interpreter run pip at all, asked before an install is attempted with
+# it rather than read out of the wreckage afterwards. It is rarer here than on
+# the POSIX side, where a distribution python3 with no pip module is the default
+# state of Debian and Ubuntu, but the structure is the same: an interpreter that
+# answers the version probe and then has no pip module fails with "No module
+# named pip", which carries none of the words the PEP 668 branch reads, so it
+# would stop step 2 with "pip could not install" on a machine where uv is one
+# fetch away. An embeddable or stripped Python, or one whose pip was removed, is
+# the shape that reaches this. A pip that answers here and then fails at the
+# install is a real pip failure and still fails: this decides only whether there
+# is a pip to try.
+function Test-PythonHasPip {
+    param([string]$PythonCommand)
+    $probe = Invoke-Captured -File $PythonCommand -Arguments @('-m', 'pip', '--version')
+    return ($probe.ExitCode -eq 0)
+}
+
+# The one uv takeover, for the two ways a discovered Python turns out not to be a
+# route to an installation: it has no pip module at all, and it has one the
+# distribution forbids pip to use (PEP 668). The caller records the manager, so
+# step 3 asks uv rather than the interpreter where the executable landed.
+function Install-UvInsteadOfPip {
+    if (-not (Test-Executable 'uv')) { Install-Uv }
+    Add-UserBinToPath
+    if (-not (Test-Executable 'uv')) { throw 'uv installed but does not resolve yet; open a new shell and run this again' }
+    Install-WithUv
+}
+
 # The one release of Astral's uv installer this script is allowed to run, and the
 # SHA-256 of exactly those bytes. They are one pair, and install.sh pins the same
 # uv release: bumping any one of the four alone breaks an install rather than
@@ -650,7 +678,11 @@ if (-not $needsPackage) {
     $packageManager = 'uv'
 } else {
     $pythonCommand = Find-Python
-    if ($pythonCommand) {
+    if ($pythonCommand -and -not (Test-PythonHasPip -PythonCommand $pythonCommand)) {
+        Write-Step 2 "package: $pythonCommand has no pip module, so pip cannot install with it; falling back to uv"
+        Install-UvInsteadOfPip
+        $packageManager = 'uv'
+    } elseif ($pythonCommand) {
         Write-Step 2 "package: installing $(Get-PackageSpec) user-local with $pythonCommand -m pip install --user"
         # pip leaves a package whose installed version already satisfies the
         # request untouched under --upgrade, so a refresh or a pin adds
@@ -668,10 +700,7 @@ if (-not $needsPackage) {
             # environment of uv's own, never --break-system-packages.
             if ($pip.Output -match 'externally.managed') {
                 Write-Say 'package: this Python is externally managed (PEP 668), so pip cannot own it; falling back to uv'
-                if (-not (Test-Executable 'uv')) { Install-Uv }
-                Add-UserBinToPath
-                if (-not (Test-Executable 'uv')) { throw 'uv installed but does not resolve yet; open a new shell and run this again' }
-                Install-WithUv
+                Install-UvInsteadOfPip
                 $packageManager = 'uv'
             } else {
                 throw "pip could not install $(Get-PackageSpec); TROUBLESHOOTING.md section 1 has the fallbacks"

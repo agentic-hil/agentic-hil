@@ -388,6 +388,26 @@ def com_port_identity_source(port: ComPortConfig) -> str:
     return usb_ids or "device"
 
 
+def com_port_is_unbound(port: ComPortConfig) -> bool:
+    """Whether this entry names a port without naming a device to open.
+
+    The one state a `com_ports` entry could not express. A project profile names
+    its ports (`dut_uart` at 115200, writable) before anybody knows which of the
+    host's thirty-odd serial devices that is, and until this existed the two
+    halves could not be written down apart: `agentic-hil init` with no bench
+    attached wrote `com_ports: {}`, so a plan that opens `dut_uart` was refused
+    with "references a COM port that is not in the authoritative config" for a
+    port the project had declared, and the operator was sent to look for a
+    mistake in their plan.
+
+    An unbound entry is declared and unusable, which is exactly what it is:
+    nothing opens it, every call that names it is refused by name, and
+    `adopt-hardware` or an operator fills the device in. `device` stays a
+    required field of any entry that is meant to be opened; what changed is that
+    absent or null now means "not bound yet" rather than the string "None"."""
+    return not port.device
+
+
 def com_port_carries_hardware_identity(port: ComPortConfig) -> bool:
     """Whether this entry names a *unit* without having to say so.
 

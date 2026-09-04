@@ -11,7 +11,8 @@ A key name cannot see a secret that a captured process stream prints inside its
 value, and package managers print exactly that: pip and uv echo the index they
 were configured with, and a private index URL routinely carries
 ``https://user:token@host/simple/``. Values under a captured stream key
-(``stdout``, ``stderr``, at any depth) therefore get a second, content pass that
+(``stdout``, ``stderr``, and ``backend_warnings``, which is a debugger backend's
+copy of some of those same lines, at any depth) therefore get a second, content pass that
 masks the credential shapes such output actually carries: URL userinfo, an
 ``Authorization: Bearer``/``Basic`` header line, and a secret-named assignment or
 query parameter. The pass is deliberately surgical, and deliberately confined to
@@ -39,8 +40,13 @@ _REDACTION_MARKER = "[redacted]"
 _SENSITIVE_KEY_PATTERN = re.compile(r"(?:^|_)(?:token|secret|password|passwd|apikey|api_key|authkey|auth_key)$", re.IGNORECASE)
 
 # The keys a captured process stream arrives under, matched at any depth (the
-# upgrade path nests them as `install.stdout`/`install.stderr`).
-_STREAM_KEYS = frozenset({"stdout", "stderr"})
+# upgrade path nests them as `install.stdout`/`install.stderr`). `backend_warnings`
+# is here because it is that same capture, filtered: the lines a debugger backend
+# lifts verbatim out of a run's own output to keep the evidence on a result the
+# marker settled as a success. The bytes are the tool's, so the pass that masks a
+# credentialed index URL under `stderr` has to mask it here too, or the same line
+# would be published in clear under the shorter field.
+_STREAM_KEYS = frozenset({"stdout", "stderr", "backend_warnings"})
 
 # `scheme://user:secret@host`: the user survives, because it names the account
 # the manager was configured with and is not the credential, and the span between
