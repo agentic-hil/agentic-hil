@@ -1579,6 +1579,102 @@ def test_a_timed_out_adopt_read_recovers_a_multi_debugger_file_under_the_selecte
     assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
 
 
+def _deny_reset(path: Path, name: str) -> None:
+    """Take `allow_reset` off one configured entry, leaving its other grants alone."""
+    document = document_of(path)
+    document["debuggers"][name]["permissions"]["allow_reset"] = False
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+
+def test_a_timed_out_adopt_read_does_not_reset_a_selected_entry_that_withholds_allow_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The permission half of the binding: `spare` denies `allow_reset`, so nothing is reset.
+
+    Binding the recovery to the selected entry decides which board is driven; it
+    does not decide whether that board may be driven. A multi-debugger file is
+    loaded unbound, so the reason set was computed off a service config with no
+    entry to read a grant from, and the wide reset set came back whatever the
+    selected entry said: a timed-out read against an entry configured
+    `allow_reset: false` was recovered with `reset_target("halt")` through the
+    newly bound backend, which is a physical state change nobody granted.
+
+    The grant now comes from the same bound entry the reset would run through, so
+    the stronger predicate degrades to the read-only set, no reset is attempted
+    (the target-state reason a re-read cannot settle is simply not admitted), and
+    the refusal names the withheld grant with `allow_reset_missing`, the same word
+    the run teardown's recovery block uses. The twin above, with the grant, still
+    resets: this refuses the act, not the routing."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _add_second_debugger(path, dut_probe=DECOY_PROBE, spare_probe=SPARE_PROBE)
+    _deny_reset(path, "spare")
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read(probe_serial=PROBE_SERIAL))
+    built = _record_backends(monkeypatch)
+
+    config = load_authoritative_config(workspace)
+    assert config.debugger is None, "a two-debugger file is loaded unbound"
+    assert config.debuggers["spare"].permissions.allow_reset is False
+    assert config.debuggers["dut"].permissions.allow_reset is True, "the entry that keeps the grant is not the selected one"
+    tools = AgenticHILToolService(config, frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"debugger_id": "spare", "probe_id": PROBE_SERIAL, "apply": True})
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined"
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        # No board was driven, and no recovery backend was even built: the reset
+        # the finding recorded (`['reset_target:halt', 'probe_target', 'close']`)
+        # does not happen against an entry that withholds the grant.
+        assert len(built) == 1, [backend.calls for backend in built]
+        assert built[0].calls == [], built[0].calls
+        # And the refusal says which withholding stopped it, beside the entry it
+        # applies to, so an operator reads the one decision they have: grant the
+        # reset on `spare`, or go to the board.
+        assert refused["reason_not_attempted"] == "allow_reset_missing"
+        assert refused["debugger_id"] == "spare"
+        # The incident owes no gate, so it is stood down exactly as it is when the
+        # bench's policy withholds the reset; what changed is that no reset ran.
+        assert refused["incident_stood_down"]["stood_down"] is True
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+    finally:
+        tools.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
+def test_a_timed_out_adopt_read_leaves_a_single_debugger_reset_grant_reading_as_it_did(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour: one configured entry without `allow_reset` was already refused.
+
+    A single-debugger file binds at load, so the reason set was always computed
+    off an entry with a grant on it and the read-only degrade already applied.
+    Nothing about that changes here, and this pins it: no reset is attempted, the
+    incident is stood down rather than machine-recovered, and the refusal names
+    the same withheld grant the multi-debugger case now names."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _deny_reset(path, "dut")
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
+
+    backend = _RecoveryBackend()
+    config = load_authoritative_config(workspace)
+    assert config.debugger is not None and config.debugger.permissions.allow_reset is False
+    tools = AgenticHILToolService(config, backend=backend, frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+
+        assert refused["ok"] is False, refused
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        assert backend.calls == [], backend.calls
+        assert refused["reason_not_attempted"] == "allow_reset_missing"
+        assert refused["incident_stood_down"]["stood_down"] is True
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+    finally:
+        tools.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
 def _probe_release_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only the probe lease fails to come back; the enumeration lease is clean.
 

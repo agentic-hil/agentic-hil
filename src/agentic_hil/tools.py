@@ -525,6 +525,12 @@ class AgenticHILToolService:
             # them ends the session brings the next call here with the hold gone.
             return result
         recovered = False
+        # The one refusal this seam has to say out loud. Everything else it does
+        # not do is either invisible to the caller (nothing was owed) or already
+        # in the result; a recovery the selected entry's `allow_reset` withheld is
+        # neither, and an operator who is not told reads a board that was left
+        # unconfirmed for no stated reason.
+        withheld: JsonObject = {}
         if self.coordinator.blocked:
             try:
                 # A non-None report is a recovery that ran its action and cleared
@@ -543,13 +549,15 @@ class AgenticHILToolService:
                 # `probe_id` belongs to.
                 selected_debugger, selected_probe = self._bootstrap_selection(result)
                 recovered = self._attempt_machine_recovery(selected_probe, selected_debugger) is not None
+                if not recovered and self._reset_grant_withheld(selected_probe, selected_debugger):
+                    withheld = {"reason_not_attempted": "allow_reset_missing"}
             except Exception as error:
                 # Same rule as everywhere else recovery runs: a fault inside it
                 # never fails open, and never replaces the call's own answer.
                 self._poison_quietly("machine_recovery_failed", error, audit_broken=isinstance(error, (ConfigError, OSError)))
         stood_down = self.coordinator.stand_down()
         if stood_down is None and not recovered:
-            return result
+            return {**result, **withheld} if withheld else result
         # Whatever the ended incident left registered goes back, because the call
         # that took it is over and the bench is not held for it any more. This
         # runs after a recovery action too, not only after a stand-down: a
@@ -578,7 +586,7 @@ class AgenticHILToolService:
         # `cleanup_required` says something the stand-down did not change: this
         # call left work behind, a debug session to stop, a state nobody
         # confirmed, and a caller reading a failed result still has to know it.
-        return {**result, "incident_stood_down": stood_down, **({"quarantined": False} if result.get("quarantined") is True else {})}
+        return {**result, "incident_stood_down": stood_down, **withheld, **({"quarantined": False} if result.get("quarantined") is True else {})}
 
     def _call_unlocked(self, name: str, arguments: JsonObject | None = None) -> JsonObject:
         if arguments is None:
@@ -1328,6 +1336,35 @@ class AgenticHILToolService:
             return self.backend, False
         return create_debugger_backend(recovery_config), True
 
+    def _reset_grant_withheld(self, selected_probe: str | None, selected_debugger: str | None) -> bool:
+        """Whether a missing `allow_reset` is what left this incident standing.
+
+        True in one shape only: the recovery had everything it needed except the
+        grant for the physical act. The bench's policy asks for reset_halt, the
+        open incident is a single reason that only a reset into halt settles (a
+        re-read would have run and settled it otherwise), and the entry this call
+        selected does not grant `allow_reset`.
+
+        The refusal then names it `allow_reset_missing`, the word the run
+        teardown's recovery block already uses for a reset its probe withholds,
+        because it is the same withholding read at a different seam: the operator
+        has the same single decision either way, to grant the reset on that entry
+        or to go to the board. The entry it applies to is the `debugger_id` the
+        refusal already carries.
+
+        Asked before the stand-down, which ends the incident this reads."""
+        config = self._recovery_config(selected_probe, selected_debugger) or self.config
+        debugger = config.debugger
+        if config.recovery.auto_recover != "reset_halt" or debugger is None or debugger.permissions.allow_reset:
+            return False
+        if not config.probe_allowed():
+            # A bench that may not read the probe either was not stopped by this
+            # grant alone, and naming one withholding as the reason would send an
+            # operator to grant a reset that still could not run.
+            return False
+        reason = self.coordinator.retryable_incident(RECOVERY_ACTION_REASONS)
+        return reason is not None and reason not in RETRYABLE_CLEANUP_REASONS
+
     def _attempt_machine_recovery(self, selected_probe: str | None = None, selected_debugger: str | None = None) -> JsonObject | None:
         """Clear a recoverable incident without an operator, or refuse to.
 
@@ -1339,7 +1376,8 @@ class AgenticHILToolService:
         the state it is attesting to. `reset_halt` additionally drives the target
         into a defined halted state first, which is what settles an unconfirmed
         flash, reset, or session start: a physical act, gated on the bench's
-        recovery.auto_recover policy and on allow_reset.
+        recovery.auto_recover policy and on the allow_reset of the entry it will
+        be driven through.
 
         ``selected_probe`` and ``selected_debugger`` are the physical probe and
         the configured entry the just-finished call quarantined, when the call named
@@ -1349,20 +1387,27 @@ class AgenticHILToolService:
         the startup binding could reset, and clear the incident from, a different
         probe, or (a multi-debugger file loaded unbound) refuse through the startup
         `UnboundDebuggerBackend` and settle nothing at all. That same bound config
-        is the permission this recovery is checked against, so an unbound service
-        config does not withhold a probe the selected entry in fact grants. Every
-        other incident is raised on the configured probe the startup backend already
-        targets, so both being None keeps that backend and config.
+        is every permission this recovery is checked against, in both directions:
+        an unbound service config neither withholds a read the selected entry in
+        fact grants, nor lends the reset predicate a grant that entry withholds,
+        because an unbound config carries neither. Every other incident is raised
+        on the configured probe the startup backend already targets, so both being
+        None keeps that backend and config.
 
         Returns the recovery report, or None when the incident is not machine
         recoverable or a predicate did not confirm the safe state."""
-        allowed = self.coordinator.recoverable_reasons()
-        reason = self.coordinator.retryable_incident(allowed) if allowed else None
-        # Resolved once: it is both the grant the recovery is authorized by and the
-        # binding its backend is built from, so the two can never disagree about
-        # which board is being driven.
+        # Resolved first, and once: it is the grant the recovery is authorized by,
+        # the grant the reasons it may settle are derived from, and the binding its
+        # backend is built from, so the three can never disagree about which board
+        # is being driven or about what may be done to it. Deriving the reason set
+        # from the unbound service config was exactly that disagreement: it admits
+        # the reset set on `debugger is None`, so a selected entry's `allow_reset:
+        # false` did not stop the reset the bound backend then performed.
         recovery_config = self._recovery_config(selected_probe, selected_debugger)
-        if reason is None or not (recovery_config or self.config).probe_allowed():
+        authority = recovery_config or self.config
+        allowed = self.coordinator.recoverable_reasons(authority)
+        reason = self.coordinator.retryable_incident(allowed) if allowed else None
+        if reason is None or not authority.probe_allowed():
             return None
         if not self._machine_recovery_attempt_allowed():
             return None
