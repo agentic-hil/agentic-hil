@@ -177,6 +177,77 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     assert "Claude Code" in result["restart_notice"]
 
 
+def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One ST-Link on this host, seen through the real discovery path.
+
+    Only the two ST-Link processes and the host's port inventory are replaced,
+    so enumeration, selection and the COM correlation all run for real. The
+    autouse fixture that hides this machine's own toolchain is what every other
+    test in this file leaves in place, which is why a setup here normally finds
+    nothing at all."""
+
+    def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        listing = "ST-LINK SN : STLINK123\n"
+        return CompletedCommand(listing if "-l" in command else f"{listing}Device name : STM32F446RE\n", "", 0, False, False)
+
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: FAKE_STLINK.as_posix())
+    monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
+    monkeypatch.setattr(
+        "agentic_hil.bootstrap.list_available_com_ports",
+        lambda tool: {"ok": True, "tool": tool, "ports": [{"device": "COM7", "serial_number": "STLINK123"}]},
+    )
+
+
+def test_setup_headline_says_when_the_configuration_it_wrote_is_the_placeholder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#416: a green `setup` that discovered nothing said nothing about it.
+
+    The `config` step has always been honest, and the headline is what a person
+    reads first: "Agentic HIL project set up." over a run that looked for a
+    board, found none and wrote placeholders, after a README that says setup
+    discovers your ST-LINK. One clause, decided by the same finding the step
+    reports, so the two agree."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["steps"]["config"]["hardware_discovery"]["ok"] is False
+    assert result["steps"]["config"]["summary"].startswith("No attached bench was found, so the placeholder")
+    # `startswith`, because a run that registered an MCP server appends the
+    # restart notice to this same field; what is pinned is the headline itself.
+    assert result["summary"].startswith(
+        "Agentic HIL project set up. No attached bench was found, so the project configuration written is the placeholder."
+    )
+
+
+def test_setup_headline_over_a_discovered_bench_is_the_plain_sentence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other side of the same clause: a run that found a board says nothing.
+
+    The clause is a finding, so it may not become standing text on exactly the
+    runs the README is describing."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+    _one_attached_stlink(monkeypatch)
+
+    result = setup_project(agent="claude-code")
+
+    assert result["steps"]["config"]["hardware_discovery"]["ok"] is True
+    assert result["steps"]["config"]["summary"].startswith("Attached hardware was discovered and configured")
+    assert result["summary"].startswith("Agentic HIL project set up.")
+    assert "placeholder" not in result["summary"]
+
+
 def test_setup_force_preserves_existing_authoritative_config_byte_for_byte(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -194,6 +265,11 @@ def test_setup_force_preserves_existing_authoritative_config_byte_for_byte(
     assert result["ok"] is True, result
     assert result["steps"]["config"]["skipped"] is True
     assert config_path.read_bytes() == before
+    # And the headline says nothing about placeholders. A kept file is not this
+    # run's to describe: it was never read for a bench, and calling it a
+    # placeholder would be a claim about somebody else's configuration.
+    assert result["summary"].startswith("Agentic HIL project set up.")
+    assert "placeholder" not in result["summary"]
 
 
 def test_setup_rolls_back_new_config_skill_registration_and_mcp_config_on_late_failure(

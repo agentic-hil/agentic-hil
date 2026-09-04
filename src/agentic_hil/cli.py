@@ -2106,6 +2106,24 @@ def _refused_project_scope(error: ConfigError) -> JsonObject:
     return scope
 
 
+def _wrote_a_placeholder_configuration(config_step: JsonObject) -> bool:
+    """Whether the config step wrote placeholders because it found no board.
+
+    Read off the discovery that step carries rather than off its sentence: that
+    `hardware_discovery` is the very thing `init_config` branched on when it
+    chose the skeleton over a filled-in template, so this is the same fact and
+    not a second reading of it.
+
+    A step that was skipped answers no whatever it carries. An existing
+    configuration is kept unread and untouched, and calling that file a
+    placeholder would be a claim about somebody else's bench.
+    """
+    if config_step.get("skipped") is True or not overall_success(config_step):
+        return False
+    discovery = config_step.get("hardware_discovery")
+    return isinstance(discovery, dict) and not overall_success(discovery)
+
+
 def setup_project(agent: str, force: bool = False) -> JsonObject:
     """First run in one command: the user-wide half, then the project half.
 
@@ -2134,7 +2152,15 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
     user_ok = overall_success(user_result)
     ok = user_ok and overall_success(project_result)
     if ok:
-        summary = "Agentic HIL project set up."
+        # The headline agrees with the `config` step it summarises. A green
+        # `setup` that looked for a board, found none and wrote the skeleton
+        # said only "project set up" to a reader whom the README had told this
+        # command discovers their ST-LINK (#416).
+        summary = "Agentic HIL project set up." + (
+            " No attached bench was found, so the project configuration written is the placeholder."
+            if _wrote_a_placeholder_configuration(project_result["steps"]["config"])
+            else ""
+        )
     elif user_ok:
         summary = "Agentic HIL is installed for this agent under this user account; the project half failed and only its own file changes were rolled back."
     else:

@@ -25,7 +25,7 @@ import shutil
 import textwrap
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
-from agentic_hil.knowledge import remediation_fields
+from agentic_hil.knowledge import command_line_remediation, remediation_fields
 from agentic_hil.report import overall_success
 from agentic_hil.types import JsonObject
 
@@ -104,7 +104,12 @@ def _render_lines(result: JsonObject, command: str | None) -> list[str]:
         # names it, the summary says what happened, and the catalogue says what
         # to do about it. A per-command renderer has nothing to add to that and
         # several would have quietly dropped the remediation list.
-        return render_refusal(result)
+        #
+        # The command is handed on all the same. It is not what the refusal is
+        # rendered *by*; it is the one fact this layer holds about who is
+        # reading, and for a refusal that has a route for each reader the
+        # catalogue puts theirs first.
+        return render_refusal(result, command)
     renderer = _RENDERERS.get(command or "")
     return renderer(result) if renderer is not None else render_generic(result)
 
@@ -403,29 +408,56 @@ def _tail(result: JsonObject) -> list[str]:
     return lines
 
 
-def _remediation(result: JsonObject) -> tuple[list[str], list[str]]:
+# The catalogue is scoped by whichever of these a refusal names, and which one
+# that is depends on who raised it: a config field, the backend that answered,
+# the adapter, the permission that is closed. Tried in turn, and an unscoped
+# entry answers when none of them has one, which is exactly what `lookup_remedy`
+# already does. One tuple, because the lookup and the command-line ordering have
+# to ask about the same entry or they answer out of two.
+_REMEDY_SCOPE_KEYS = ("field", "backend", "adapter", "permission", "tool")
+
+
+def _command_line_order(result: JsonObject, steps: Sequence[str]) -> list[str]:
+    """The catalogue's ordering for a person at a shell, where it has one.
+
+    Same scope chain the lookup below uses, and the unscoped entry last, because
+    `lookup_remedy` falls back to it and a scoped entry is the more specific
+    answer where one exists. The catalogue decides whether anything moves; this
+    only says which reader is holding the page.
+    """
+    error_type = _error_type(result) or None
+    scopes: list[str | None] = [value for key in _REMEDY_SCOPE_KEYS if isinstance(value := result.get(key), str)]
+    for scope in [*scopes, None]:
+        ordered = command_line_remediation(error_type, scope, list(steps))
+        if ordered is not None:
+            return ordered
+    return list(steps)
+
+
+def _remediation(result: JsonObject, *, command_line: bool = False) -> tuple[list[str], list[str]]:
     """What to do and what not to do, from the result or from the catalogue.
 
     A refusal built by `ConfigError.to_dict` already carries both, merged from
     the same catalogue the MCP reference serves. A refusal built by hand -- a
     `permission_denied` from a tool surface, say -- carries neither, and the
     catalogue still knows the answer, so it is looked up rather than left out.
+
+    `command_line` says a person typed a command to get here, which for a
+    refusal whose readers have different first moves decides which of the
+    catalogue's two orderings is printed. It changes no step and drops none:
+    `command_line_remediation` reorders the entry's own steps or declines.
     """
     steps = _strings(result.get("remediation"))
     avoid = _strings(result.get("do_not"))
     if steps or avoid:
-        return steps, avoid
+        return (_command_line_order(result, steps) if command_line else steps), avoid
     error_type = _error_type(result) or None
-    # The catalogue is scoped by whichever of these the refusal names, and which
-    # one that is depends on who raised it: a config field, the backend that
-    # answered, the adapter, the permission that is closed. Tried in turn, and an
-    # unscoped entry answers when none of them has one, which is exactly what
-    # `lookup_remedy` already does.
-    for key in ("field", "backend", "adapter", "permission", "tool"):
+    for key in _REMEDY_SCOPE_KEYS:
         scope = result.get(key)
         catalogue = remediation_fields(error_type, scope if isinstance(scope, str) else None)
         if catalogue:
-            return _strings(catalogue.get("remediation")), _strings(catalogue.get("do_not"))
+            found = _strings(catalogue.get("remediation"))
+            return (_command_line_order(result, found) if command_line else found), _strings(catalogue.get("do_not"))
     return [], []
 
 
@@ -433,7 +465,15 @@ def _remediation(result: JsonObject) -> tuple[list[str], list[str]]:
 # The refusal, and the generic fallback every command gets for free.
 
 
-def render_refusal(result: JsonObject) -> list[str]:
+def render_refusal(result: JsonObject, command: str | None = None) -> list[str]:
+    """A refusal, for whoever is reading it.
+
+    `command` is the subcommand a person typed, so its presence is what says a
+    person is reading rather than a caller parsing the document. It decides
+    nothing about the refusal itself; the only thing it reaches is which of the
+    catalogue's orderings the steps are printed in, for the refusals that carry
+    one for each reader.
+    """
     error_type = _error_type(result)
     lines = [f"Refused: {error_type}", ""]
     lines.extend(_wrap(_summary(result) or "The command was refused.", indent=_INDENT))
@@ -442,7 +482,7 @@ def render_refusal(result: JsonObject) -> list[str]:
         lines.append("")
         lines.extend(_wrap(meaning, indent=_INDENT))
     lines.extend(_section("Details", _refusal_details(result)))
-    steps, avoid = _remediation(result)
+    steps, avoid = _remediation(result, command_line=command is not None)
     lines.extend(_section("What to do", _numbered(steps)))
     lines.extend(_section("Do not", _bullets(avoid)))
     lines.extend(_tail(result))

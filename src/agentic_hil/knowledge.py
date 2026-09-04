@@ -278,11 +278,21 @@ class ErrorRemedy:
     that actually occurs. ``do_not`` names the wrong fix that looks right, and
     exists because a caller that is only told "no" reaches for the workaround
     the refusal was protecting against.
+
+    ``cli_remediation`` is the same steps in the order a person who typed a
+    command reads them, and is set only where the two readers of one refusal
+    have different first moves. It is a reordering and never a second text: the
+    steps are the same objects, so a step edited once is edited for both, and a
+    step added to one ordering and forgotten in the other is caught by the guard
+    over this catalogue rather than shipped as advice one reader never sees.
+    ``remediation`` stays the ordering an agent over MCP reads, which is who
+    most refusals on this surface reach.
     """
 
     meaning: str
     remediation: tuple[str, ...]
     do_not: tuple[str, ...] = ()
+    cli_remediation: tuple[str, ...] = ()
 
     def as_json(self) -> JsonObject:
         values = _substitutions()
@@ -344,6 +354,36 @@ INSTALL_THE_PROXY_CA = (
     "Install the proxy's own CA certificate into this machine's certificate store. Until that is done there is "
     "nothing this command can be pointed at that trusts what the proxy presents, and no switch that turns "
     "verification off is a fallback. TROUBLESHOOTING.md section 1 is the rest of it."
+)
+
+# The four steps out of a workspace with no configuration, named here because
+# two readers meet them in different orders. `config_file_not_found` is the one
+# refusal on this surface that reaches both: an agent whose first tool call hits
+# it, and a person whose first `agentic-hil doctor` hits it before anything has
+# been set up. Each has a route and neither has the other's, so the entry below
+# carries one ordering for each and these are the steps both orderings are made
+# of. Written so that either route reads correctly first or second: neither
+# opens by referring to the other.
+_CONFIG_MISSING_MCP_ROUTE = (
+    "Over MCP, call `project_config_create` once. It takes no arguments and writes this workspace's authoritative "
+    "configuration out of the hardware attached to this machine."
+)
+_CONFIG_MISSING_SHELL_ROUTE = (
+    "At a shell, run `agentic-hil init` from the project root; it writes that same file, and it is the operator's own "
+    "route rather than the agent's. When the agent on this machine is yours to register as well, `agentic-hil setup "
+    "--agent <claude-code|codex|opencode>` installs that agent's skill, registers the MCP server and runs this same "
+    "project half in one command."
+)
+_CONFIG_MISSING_WHAT_IT_WRITES = (
+    "Either route writes every permission true except `allow_raw_debugger_commands` and `allow_mass_erase`, which are "
+    "written false so that flashing works, so the bench is workable from the file that comes out without anyone "
+    "editing YAML."
+)
+_CONFIG_MISSING_REPORT_AND_ASK = (
+    "The permissions in it are the operator's to narrow, so an agent reports what it granted (flashing and resetting "
+    "among them) and asks the operator which of those this bench should not have. `project_config_set` writes `false` "
+    "into any of them and never `true`. Raw debugger commands and mass erase are already false and no tool here reads "
+    "either as permission to do anything, so neither is missing."
 )
 
 # Keys are "<error_type>" or "<error_type>:<scope>", where scope is the config
@@ -654,15 +694,22 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "directory for the call to use. It is the first wall a new project hits, not a fault."
         ),
         remediation=(
-            "Over MCP, call `project_config_create` once. It takes no arguments, generates the configuration out of "
-            "the hardware attached to this machine, and writes every permission true except "
-            "`allow_raw_debugger_commands` and `allow_mass_erase`, which it writes false so that flashing works, so "
-            "the bench is workable from the file it produces without anyone editing YAML.",
-            "On the command line a person runs `agentic-hil init` from the project root, which does the same thing.",
-            "Then report what it granted (flashing and resetting among them) and ask the operator which of those "
-            "this bench should not have. You can write `false` into any of them with `project_config_set`; you can "
-            "never write `true`. Raw debugger commands and mass erase are already false and no tool here reads "
-            "either as permission to do anything, so do not report them as missing.",
+            _CONFIG_MISSING_MCP_ROUTE,
+            _CONFIG_MISSING_SHELL_ROUTE,
+            _CONFIG_MISSING_WHAT_IT_WRITES,
+            _CONFIG_MISSING_REPORT_AND_ASK,
+        ),
+        # The same four, for the person who typed `agentic-hil doctor` and met
+        # this before any configuration existed. They were being told to call an
+        # MCP tool and then to "report what it granted and ask the operator",
+        # which is the agent's job description read out to the operator; the
+        # command they can run stood second and spoke about them in the third
+        # person.
+        cli_remediation=(
+            _CONFIG_MISSING_SHELL_ROUTE,
+            _CONFIG_MISSING_MCP_ROUTE,
+            _CONFIG_MISSING_WHAT_IT_WRITES,
+            _CONFIG_MISSING_REPORT_AND_ASK,
         ),
         do_not=(
             "Do not write the configuration by hand, and do not drive the hardware another way while the project has "
@@ -2054,6 +2101,29 @@ def remediation_fields(error_type: str | None, scope: str | None = None) -> Json
     if remedy.do_not:
         payload["do_not"] = [step.format(**values) for step in remedy.do_not]
     return payload
+
+
+def command_line_remediation(error_type: str | None, scope: str | None, steps: list[str]) -> list[str] | None:
+    """``steps`` reordered for a person at a shell, or None when nothing moves.
+
+    The catalogue decides this, not the renderer: which reader a step is for is
+    part of what the step says, and a rendering layer that reordered advice by
+    its own rule would be a second source of truth about it.
+
+    None means "print what the document carries", and it is the answer to three
+    different questions on purpose: this error has no separate ordering for a
+    person; there is no catalogue entry at all; or the steps in hand are not
+    this entry's, because a caller built its own list or added to one. The last
+    is what the multiset comparison is for. Reordering a list this entry does
+    not account for would drop or duplicate somebody's advice, and the one thing
+    a renderer may never do to a refusal is change what it says.
+    """
+    remedy = lookup_remedy(error_type, scope)
+    if remedy is None or not remedy.cli_remediation:
+        return None
+    values = _substitutions()
+    ordered = [step.format(**values) for step in remedy.cli_remediation]
+    return ordered if sorted(ordered) == sorted(steps) else None
 
 
 def lookup_remedy(error_type: str | None, scope: str | None = None) -> ErrorRemedy | None:
