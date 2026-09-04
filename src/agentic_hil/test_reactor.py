@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -21,7 +22,7 @@ from agentic_hil.config import (
     bind_debugger,
     is_path_within_frozen,
     reject_nonfinite_numbers,
-    safe_read_text,
+    safe_read_bytes,
 )
 from agentic_hil.contracts import validate_tool_arguments
 from agentic_hil.devices import (
@@ -597,6 +598,11 @@ class TestConfig:
     path: str
     name: str
     steps: list[TestStep]
+    # The SHA-256 of the exact bytes this plan was parsed from, captured at load
+    # so a run's provenance is the plan that ran and not whatever the file holds
+    # by the time evidence is collected (review round 0, finding 4). `None` only
+    # for a `TestConfig` built directly in a test that did not read a file.
+    sha256: str | None = None
 
 
 def load_test_config(test_config_path: str | None = None, work_dir: str | None = None) -> TestConfig:
@@ -611,7 +617,7 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
             {"path": str(path), "workspace_root": str(base)},
         )
     try:
-        loaded = yaml.load(safe_read_text(path, workspace=base), Loader=UniqueKeyLoader)
+        raw_bytes = safe_read_bytes(path, workspace=base)
     except FileNotFoundError as error:
         raise ConfigError("test_config_not_found", "Test reactor configuration file could not be found.", {"path": str(path)}) from error
     except OSError as error:
@@ -620,6 +626,12 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
             "Test reactor configuration file could not be read.",
             {"path": str(path), "backend_error": str(error)},
         ) from error
+    # The digest is of the bytes on disk, taken here and nowhere else: the same
+    # bytes are decoded and parsed below, so the digest, the name and the steps
+    # this returns are all one reading of one file.
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    try:
+        loaded = yaml.load(raw_bytes.decode("utf-8"), Loader=UniqueKeyLoader)
     except UnicodeDecodeError as error:
         raise ConfigError(
             "test_config_invalid",
@@ -644,7 +656,23 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
     reject_superseded_plan_version(raw, str(path))
     validate_test_config_schema(raw, str(path))
     reject_features_newer_than_plan_version(raw, str(path))
-    return TestConfig(path=str(path), name=str(raw.get("name") or path.stem), steps=[build_test_step(step) for step in raw["steps"]])
+    return TestConfig(path=str(path), name=str(raw.get("name") or path.stem), steps=[build_test_step(step) for step in raw["steps"]], sha256=digest)
+
+
+# The report field carrying the plan's load-time digest. `run-evidence` reads it
+# as the run's provenance and never re-hashes the file the report merely names.
+TEST_CONFIG_SHA256_KEY = "test_config_sha256"
+
+
+def plan_digest_field(test_config: TestConfig) -> JsonObject:
+    """The digest field for a report, or nothing when the plan carried no digest.
+
+    Absent rather than null so a report from a `TestConfig` built without reading
+    a file (the direct-construction path some tests take) reads the same as one
+    predating the field, and both fall back to the file the way they always did.
+    """
+    digest = getattr(test_config, "sha256", None)
+    return {TEST_CONFIG_SHA256_KEY: digest} if digest else {}
 
 
 def build_test_step(raw: JsonObject) -> TestStep:
@@ -2763,6 +2791,7 @@ class TestReactor:
                 "tool": "test_reactor",
                 "name": test_config.name,
                 "test_config_path": test_config.path,
+                **plan_digest_field(test_config),
                 "error_type": validation_error.get("error_type", "test_config_invalid"),
                 "validation_error": validation_error,
                 "steps": [],
@@ -2805,6 +2834,7 @@ class TestReactor:
             "tool": "test_reactor",
             "name": test_config.name,
             "test_config_path": test_config.path,
+            **plan_digest_field(test_config),
             "steps": completed,
             "cleanup": cleanup,
             "cleanup_ok": cleanup_ok,

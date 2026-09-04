@@ -13,6 +13,7 @@ pinned is every fact the design names and every value the design excludes.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -544,6 +545,58 @@ def test_a_plan_from_another_workspace_leaves_the_plan_path_and_digest_absent(tm
     # Only what the run recorded is left, and that is the executed routes.
     assert summary["bench"]["devices"] == {"debuggers": ["dut"], "com_ports": ["dut_uart"]}
     assert report["test_config_path"] not in outputs(tmp_path)
+
+
+def test_the_plan_digest_is_the_one_the_run_recorded_not_a_re_hash_of_the_file(tmp_path: Path) -> None:
+    """Review round 0, finding 4: the plan on disk can be edited between the run
+    reading it and this collection, so the summary carries the digest the run
+    recorded, never a re-hash of whatever the file holds now.
+
+    Pairing the old run's name and step results with a new file's digest and
+    device list would present a plan that never ran. Here the file is edited to a
+    different name and a different device after the run; the summary still reports
+    the recorded digest, flags that the file has diverged, keeps the executed
+    run's own name, and does not fold the edited file's device into the bench."""
+    write_logs(tmp_path)
+    plan = write_plan(tmp_path)
+    recorded = hashlib.sha256(plan.read_bytes()).hexdigest()
+    report = green_report(tmp_path)
+    report["test_config_sha256"] = recorded
+
+    # Edited after the run: a different name and a device the run never touched.
+    write_plan(tmp_path, "version: 3\nname: swapped-after-the-run\nsteps:\n  - {device: dut_can, action: can_open}\n")
+    on_disk = hashlib.sha256((tmp_path / "testconfig.yaml").read_bytes()).hexdigest()
+    assert on_disk != recorded
+
+    _result, summary, _document = evidence(tmp_path, report)
+
+    # The recorded digest is what is published, and it is not the file's own.
+    assert summary["plan"]["sha256"] == recorded
+    assert summary["plan"]["sha256"] != on_disk
+    # The divergence is reported rather than papered over.
+    assert summary["plan"]["sha256_mismatch"] is True
+    # The executed run's name stands; the edited file's does not replace it.
+    assert summary["plan"]["name"] == "nucleo-f446re-hello-world"
+    # And the edited file's `dut_can` is not folded in: only the executed routes.
+    assert summary["bench"]["devices"] == {"debuggers": ["dut"], "com_ports": ["dut_uart"]}
+
+
+def test_an_unchanged_plan_matches_its_recorded_digest_and_is_not_flagged(tmp_path: Path) -> None:
+    """The other half: when the file still is the bytes the run read, the recorded
+    digest and the file agree, nothing is flagged, and the plan the run never
+    finished (its unreached bus) is still filled in from the file that ran."""
+    write_logs(tmp_path)
+    plan = write_plan(tmp_path)
+    recorded = hashlib.sha256(plan.read_bytes()).hexdigest()
+    report = green_report(tmp_path)
+    report["test_config_sha256"] = recorded
+
+    _result, summary, _document = evidence(tmp_path, report)
+
+    assert summary["plan"]["sha256"] == recorded
+    assert "sha256_mismatch" not in summary["plan"]
+    # The unreached CAN bus is named because the file that ran is still there.
+    assert summary["bench"]["devices"] == {"debuggers": ["dut"], "com_ports": ["dut_uart"], "can_buses": ["dut_can"]}
 
 
 def test_a_log_named_by_an_absolute_path_from_another_workspace_is_counted_and_never_published(tmp_path: Path) -> None:

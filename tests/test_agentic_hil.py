@@ -1894,6 +1894,61 @@ def test_the_entry_points_moved_aside_are_only_this_distributions_own(
     assert (bin_directory / f"can_logger.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"not ours to sweep"
 
 
+def test_an_adjacent_prefix_match_survives_the_superseded_sweep(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review round 0, finding 2: an operator's own file whose name only shares
+    the `.superseded` prefix is not one this module wrote and must survive.
+
+    The sweep deletes the exact, finite set `_superseded_name` can produce --
+    `<launcher>.superseded` and `<launcher>.superseded.<index>` -- and nothing
+    else. A `<launcher>.exe.superseded-backup` an operator kept by hand matches
+    the old `<launcher>.exe.superseded*` glob but is not in that set, so under the
+    glob `unlink()` deleted it for good; here it stays where it was put."""
+    from agentic_hil.upgrade import _SUPERSEDED_SUFFIX, _remove_superseded_launchers
+
+    bin_directory = _uv_tool_bin(
+        monkeypatch,
+        tmp_path,
+        {
+            "agentic-hil.exe": b"current",
+            f"agentic-hil.exe{_SUPERSEDED_SUFFIX}": b"ours, one upgrade ago",
+            f"agentic-hil.exe{_SUPERSEDED_SUFFIX}.1": b"ours, two upgrades ago",
+            f"agentic-hil.exe{_SUPERSEDED_SUFFIX}-backup": b"an operator's own copy",
+            f"agentic-hil.exe{_SUPERSEDED_SUFFIX}.keep": b"an operator's own note",
+        },
+    )
+
+    _remove_superseded_launchers()
+
+    # The two names this module could have written are gone...
+    assert not (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}").exists()
+    assert not (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}.1").exists()
+    # ...and every adjacent name that only shares the prefix is left untouched.
+    assert (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}-backup").read_bytes() == b"an operator's own copy"
+    assert (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}.keep").read_bytes() == b"an operator's own note"
+    assert (bin_directory / "agentic-hil.exe").read_bytes() == b"current"
+
+
+def test_the_superseded_sweep_does_nothing_on_a_host_that_never_renames(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The mechanism only ever creates a superseded copy where a running file
+    cannot be replaced, so on every other host there is nothing of ours to sweep
+    and the pass leaves the directory exactly as it found it (review round 0,
+    finding 2). A same-named leftover on such a host was put there by something
+    else and is not this sweep's to remove."""
+    from agentic_hil.upgrade import _SUPERSEDED_SUFFIX, _remove_superseded_launchers
+
+    bin_directory = _uv_tool_bin(monkeypatch, tmp_path, {"agentic-hil.exe": b"current", f"agentic-hil.exe{_SUPERSEDED_SUFFIX}": b"not ours here"})
+    # A host that replaces running files never renamed anything aside itself.
+    monkeypatch.setattr("agentic_hil.upgrade._host_locks_running_files", lambda: False)
+
+    _remove_superseded_launchers()
+
+    assert (bin_directory / f"agentic-hil.exe{_SUPERSEDED_SUFFIX}").read_bytes() == b"not ours here"
+
+
 def test_rewriting_the_registration_block_survives_a_backslash_in_the_path() -> None:
     """The block names the skill's absolute path, which on Windows has backslashes.
 

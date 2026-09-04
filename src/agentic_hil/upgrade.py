@@ -711,11 +711,26 @@ def _installation_launchers() -> list[Path]:
 def _superseded_name(launcher: Path) -> Path | None:
     """A free sibling name for one launcher, or None when there is no room left."""
     for index in range(_SUPERSEDED_LIMIT):
-        candidate = launcher.with_name(f"{launcher.name}{_SUPERSEDED_SUFFIX}{f'.{index}' if index else ''}")
+        candidate = launcher.with_name(_superseded_sibling(launcher.name, index))
         with suppress(OSError):
             if not candidate.exists():
                 return candidate
     return None
+
+
+def _superseded_sibling(stem: str, index: int) -> str:
+    """The one sibling name index `index` maps to, the only spellings there are.
+
+    `.superseded` for the first and `.superseded.<index>` after it: this is the
+    single place the shape is written, so the generator above and the sweep below
+    agree on the exact, finite set of names and nothing has to infer it from a
+    glob."""
+    return f"{stem}{_SUPERSEDED_SUFFIX}{f'.{index}' if index else ''}"
+
+
+def _superseded_siblings(stem: str) -> tuple[str, ...]:
+    """Every sibling name a superseded copy of `stem` could ever have been given."""
+    return tuple(_superseded_sibling(stem, index) for index in range(_SUPERSEDED_LIMIT))
 
 
 def _remove_superseded_launchers() -> None:
@@ -727,18 +742,29 @@ def _remove_superseded_launchers() -> None:
     not on PATH under that name, it costs a few kilobytes, and the next upgrade
     asks again. Only names this module itself wrote are looked at, so a sweep
     can never reach a file somebody else put in a shared bin directory.
+
+    "Names this module itself wrote" is meant exactly: the finite set
+    `_superseded_name` can hand out, enumerated rather than matched by a glob. A
+    `<launcher>.superseded*` glob also matched an operator's own
+    `<launcher>.exe.superseded-backup`, which shares the prefix but is not a name
+    this generator produces, and `unlink()` deleted it for good (review round 0,
+    finding 2). And the sweep is confined to the hosts where the rename mechanism
+    runs at all -- the ones that cannot replace a running file -- because nowhere
+    else did this module ever create a superseded copy to clean up, so nowhere
+    else is there anything of ours to reach.
     """
+    if not _host_locks_running_files():
+        return
     directory = _manager_bin_directory()
     if directory is None:
         return
     for name in _entrypoint_names():
         for stem in (f"{name}.exe", name):
-            leftovers: list[Path] = []
-            with suppress(OSError):
-                leftovers = sorted(directory.glob(f"{stem}{_SUPERSEDED_SUFFIX}*"))
-            for leftover in leftovers:
+            for sibling in _superseded_siblings(stem):
+                leftover = directory / sibling
                 with suppress(OSError):
-                    leftover.unlink()
+                    if leftover.is_file():
+                        leftover.unlink()
 
 
 def _launchers_moved_aside() -> list[tuple[Path, Path]]:
