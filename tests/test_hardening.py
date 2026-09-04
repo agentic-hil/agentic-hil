@@ -61,6 +61,7 @@ from agentic_hil.report import (
     canonical_audit_evidence,
     canonical_audit_log_path,
     canonical_run_report_path,
+    classify_failure_report,
     ensure_audit_ready,
     logs_directory,
     overall_success,
@@ -3252,6 +3253,109 @@ def test_the_readback_is_never_green_when_promotion_and_its_corrective_state_wri
     assert readback.get("audit_ok") is False
     assert not (readback.get("ok") is True and readback.get("audit_ok") is not False)
     assert readback.get("canonical_write_pending") is True
+
+
+def test_a_promoted_success_leaves_the_previous_real_failure_in_last_failure(tmp_path: Path) -> None:
+    """A run that succeeded is not the last failure, and does not erase the one that was.
+
+    The trusted readback is staged non-green while a successful run waits for its
+    per-run copy to be promoted, and the failure record used to be decided from
+    that readback. Since the placeholder is non-green by construction, every
+    promoted success filed itself as the last failure: `classify_last_error`
+    answered `audit_failed` for a run that worked, and the real previous failure,
+    the one an operator or an agent looks up after a red run, was gone (#411).
+    A failure record advances on the run's own verdict; a marker that exists only
+    between two writes was never a verdict."""
+    config = load_test_config(tmp_path)
+
+    red = write_report(config, {"ok": False, "tool": "flash_firmware", "run": "run-red", "error_type": "flash_failed", "summary": "Flashing failed."})
+    assert red["audit_ok"] is True
+    assert read_last_failure(config)["error_type"] == "flash_failed"
+
+    green = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-green"})
+    assert green["audit_ok"] is True
+
+    # The red run is still the last failure, and the record is its own document,
+    # not the staging placeholder of the run that came after it.
+    recorded = read_last_failure(config)
+    assert recorded.get("run") == "run-red"
+    assert recorded.get("error_type") == "flash_failed"
+    assert "canonical_write_pending" not in recorded
+    # The tool an operator actually calls says the same thing.
+    classified = classify_failure_report(config, lambda _error_type: [])
+    assert classified["error_type"] == "flash_failed"
+
+    # ...while the readback the promotion story rests on is untouched: the
+    # successful run is the last report, green, with no pending marker left on it.
+    last = read_last_report(config)
+    assert last.get("run") == "run-green"
+    assert last.get("audit_ok") is True
+    assert "canonical_write_pending" not in last
+
+
+def test_a_failing_run_after_a_success_records_its_own_error_as_last_failure(tmp_path: Path) -> None:
+    """The mirror case: a success records no failure at all, and the next real
+    failure is what the record advances to.
+
+    Pinning only that a success leaves the record alone would also be satisfied by
+    a record that never moves, which is the same operator reading the wrong error,
+    so both halves are asserted here: nothing to classify after the green run, the
+    red run's own error type after it, and the staging marker in neither."""
+    config = load_test_config(tmp_path)
+
+    write_report(config, {"ok": True, "tool": "probe_target", "run": "run-green"})
+
+    assert read_last_failure(config).get("error_type") == "report_not_found"
+
+    write_report(config, {"ok": False, "tool": "reset_target", "run": "run-red", "error_type": "reset_failed", "summary": "Reset failed."})
+
+    recorded = read_last_failure(config)
+    assert recorded.get("run") == "run-red"
+    assert recorded.get("error_type") == "reset_failed"
+    assert "canonical_write_pending" not in recorded
+    assert classify_failure_report(config, lambda _error_type: [])["error_type"] == "reset_failed"
+
+
+def test_a_run_whose_audit_genuinely_failed_is_recorded_as_the_last_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reading the failure record off the run's verdict must still record a real
+    audit failure, including one that only happens after the readback was staged.
+
+    The promotion here fails before its rename, so a run that asked to be a
+    success is returned audit-failed. That verdict is a failure with nothing else
+    to name it, and it is what the record has to carry: this run's handle, the
+    write error that produced the verdict, and the audit-failed document rather
+    than the placeholder that stood in the same slot moments earlier."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-audit-failed")
+
+    original_atomic = report_module.atomic_write_text
+    canonical_writes = {"count": 0}
+
+    def flaky_atomic(path, text, **kwargs):
+        # The staged per-run copy lands; the promotion and any corrective rewrite
+        # raise before their replace, standing in for a disk that stopped taking
+        # writes mid-transaction.
+        if Path(path) == canonical:
+            canonical_writes["count"] += 1
+            if canonical_writes["count"] >= 2:
+                raise OSError("canonical write denied")
+        return original_atomic(path, text, **kwargs)
+
+    monkeypatch.setattr(report_module, "atomic_write_text", flaky_atomic)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-audit-failed"})
+
+    monkeypatch.setattr(report_module, "atomic_write_text", original_atomic)
+    assert result["audit_ok"] is False
+
+    recorded = read_last_failure(config)
+    assert recorded.get("run") == "run-audit-failed"
+    assert recorded.get("audit_ok") is False
+    assert recorded.get("audit_error", {}).get("backend_error") == "canonical write denied"
+    assert "canonical_write_pending" not in recorded
+    assert classify_failure_report(config, lambda _error_type: [])["error_type"] == "audit_failed"
 
 
 def test_path_lock_registry_does_not_keep_short_lived_paths(tmp_path: Path) -> None:

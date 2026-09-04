@@ -437,8 +437,15 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
             promoting = committed_canonical is not None and enriched.get("audit_ok") is not False
             readback = staged_report_snapshot(enriched) if promoting else enriched
             state["last_report"] = readback
-            if is_failure_report(readback):
-                state["last_failure"] = readback
+            # The failure record advances on the run's own verdict, never on the
+            # readback. The staging placeholder is non-green by construction, so
+            # reading the record off it filed every promoted success as the last
+            # failure and discarded the real one an operator looks up after a red
+            # run (#411). `enriched` is that verdict: a run that genuinely failed
+            # is recorded here with its own error type, and a success records
+            # nothing, leaving the previous failure standing.
+            if is_failure_report(enriched):
+                state["last_failure"] = enriched
             write_report_state(config, state)
             if promoting:
                 # `atomic_write_bytes` renames the finished document into place and
