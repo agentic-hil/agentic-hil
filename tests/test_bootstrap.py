@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import inspect
 import json
@@ -34,7 +34,7 @@ from agentic_hil.bootstrap import (
     select_probe_id,
     usb_stlink_probe_ids,
 )
-from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, adopt_hardware, init_config
+from agentic_hil.cli import DEFAULT_CONFIG_TEMPLATE, adopt_hardware, bootstrap_probe_listing, init_config
 from agentic_hil.config import (
     GDB_AUTODETECT_CANDIDATES,
     ConfigError,
@@ -169,8 +169,8 @@ def test_a_requested_probe_is_matched_by_hardware_identity_not_by_spelling(monke
     """`abcdef` selects the probe enumerated as `ABCDEF`.
 
     A probe serial is an opaque hardware id, and every device lock key in this
-    repository folds it for that reason: one ST-Link is `0669FF…` to
-    STM32CubeProgrammer and `0669ff…` to udev. Exact string membership answered
+    repository folds it for that reason: one ST-Link is `0669FFâ€¦` to
+    STM32CubeProgrammer and `0669ffâ€¦` to udev. Exact string membership answered
     `adapter_not_found` ("plug the board in") for a board that is plugged in.
     The enumerated spelling is what goes on to the toolchain and into the file."""
     commands: list[list[str]] = []
@@ -2330,3 +2330,27 @@ def test_the_reference_resource_states_which_enumeration_answers() -> None:
     # And the read that names the target without that CLI is stated as
     # read-only, because an agent has to know what an `init` costs the board.
     assert "Neither flashes, erases, resets nor halts." in rule["target_identity_without_the_cli"]
+
+
+def test_debugger_probes_lists_the_stlink_on_a_host_with_only_openocd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The third command that refused, and the one an operator runs first.
+
+    Before the first `setup` there is no configuration, so `agentic-hil
+    debugger-probes` answers through bootstrap discovery, which is exactly where
+    "is the board visible, is there one of it, which serial" is asked. On a host
+    with no STM32CubeProgrammer that was `debugger_not_found` while the serial
+    the caller wanted was in `agentic-hil com-ports`. It answers now, and it
+    names the backend that answered rather than the one this host cannot run."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch)
+
+    result = bootstrap_probe_listing()
+
+    assert result["ok"] is True, result
+    assert result["source"] == "bootstrap"
+    assert result["backend"] == "openocd"
+    assert result["discovered_by"] == DISCOVERED_BY_USB_INVENTORY
+    assert [entry["probe_id"] for entry in result["probes"]] == ["066AFF303435554157113106"]
+    assert result["stlink_ports"][0]["stable_device"] == NUCLEO_VCP["stable_device"]
