@@ -377,16 +377,19 @@ _CONFIG_MISSING_SHELL_ROUTE = (
 _CONFIG_MISSING_WHAT_IT_WRITES = (
     "Over MCP, `project_config_create` writes every permission true except `allow_raw_debugger_commands` and "
     "`allow_mass_erase`, which it writes false so that flashing works, so the bench is workable from the file it "
-    "produces without anyone editing YAML. `agentic-hil init` starts from the project's "
-    "`agentic-hil.config.example.yaml` and honours any permission that file sets false, so it can hand back a "
-    "deliberately narrower bench; read the `permissions` and `narrowed_permissions` it reports rather than assuming "
-    "the open defaults, though the two flash interlocks are false there too."
+    "produces without anyone editing YAML; over that route the two flash interlocks are false by construction. "
+    "`agentic-hil init` instead starts from the project's `agentic-hil.config.example.yaml` and honours whatever "
+    "permission that file names, so it can hand back a deliberately narrower bench, or a wider one where that file "
+    "opens a flash interlock: the interlocks come back false only when the example leaves them so. Read the "
+    "`permissions` and `narrowed_permissions` it reports rather than assuming the open defaults, and if either "
+    "`allow_raw_debugger_commands` or `allow_mass_erase` comes back true say so, `allow_mass_erase` above all."
 )
 _CONFIG_MISSING_REPORT_AND_ASK = (
     "The permissions in it are the operator's to narrow, so an agent reports what it granted (flashing and resetting "
     "among them) and asks the operator which of those this bench should not have. `project_config_set` writes `false` "
-    "into any of them and never `true`. Raw debugger commands and mass erase are already false and no tool here reads "
-    "either as permission to do anything, so neither is missing."
+    "into any of them and never `true`. No tool here reads raw debugger commands or mass erase as permission to do "
+    "anything, so wherever the generated file leaves them false they are a closed default rather than a grant gone "
+    "missing."
 )
 
 # Keys are "<error_type>" or "<error_type>:<scope>", where scope is the config

@@ -271,6 +271,37 @@ def test_discovery_applies_project_requirements() -> None:
     assert configured["com_ports"]["dut_uart"]["permissions"] == {"allow_write": False}
 
 
+def test_a_profile_can_open_a_flash_interlock() -> None:
+    """`agentic-hil init` honours a project's example configuration in both
+    directions, including the two flash interlocks it otherwise leaves false.
+
+    The default for `allow_raw_debugger_commands` and `allow_mass_erase` is
+    false, so an example that names them is the one place a profile *widens*
+    rather than narrows: the operator wrote them into a file they own and ran
+    `init` against, and this path writes what they wrote. That is why the
+    missing-configuration remediation must not promise both interlocks are
+    false for the shell route; this pins the behaviour it now describes so a
+    later change that silently clamps them false fails here and takes the
+    remediation with it."""
+    template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
+    profile = {
+        "target": {"name": "demo", "controller": "stm32f446ret6"},
+        "debuggers": {"dut": {"permissions": {flag: True for flag in EXCLUSIVE_FLASH_PERMISSIONS}}},
+    }
+    discovery = {
+        "executable": "C:/ST/STM32_Programmer_CLI.exe",
+        "probe_id": "STLINK123",
+        "target": {"controller": "STM32F446RE"},
+    }
+
+    configured = apply_discovery_to_template(template, profile, discovery)
+
+    permissions = configured["debuggers"]["dut"]["permissions"]
+    assert [flag for flag in EXCLUSIVE_FLASH_PERMISSIONS if not permissions[flag]] == [], (
+        "a profile that opens the flash interlocks is honoured, so the generated file carries both true"
+    )
+
+
 def _shipped_profiles() -> list[Path]:
     """Every `agentic-hil.config.example.yaml` this repository ships.
 
