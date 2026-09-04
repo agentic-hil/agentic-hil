@@ -20,6 +20,7 @@ nav:
       - CAN as a service: can-service-design.md
       - GitHub Action: github-action-design.md
   - Project:
+      - Support: support.md
       - Release strategy: release-strategy.md
       - Repository security: repository-security.md
 

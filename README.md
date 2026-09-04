@@ -132,6 +132,10 @@ The package is configured for PyPI publishing through GitHub trusted publishing 
 
 Policy bypasses are treated as vulnerabilities; see [SECURITY.md](SECURITY.md).
 
+## Support
+
+Linux, macOS and Windows are supported equally, what is supported is the debug probe with the backend behind it (ST-Link through OpenOCD or the STM32CubeProgrammer CLI, CMSIS-DAP probes through pyOCD) rather than any list of boards, and issues are answered within 24 hours on workdays, security reports within seven days: [docs/support.md](docs/support.md) is the whole promise, including what is not promised. Ask in [Discussions Q&A](https://github.com/agentic-hil/agentic-hil/discussions/categories/q-a), show a run in [Show and tell](https://github.com/agentic-hil/agentic-hil/discussions/categories/show-and-tell), and put a first run on your own bench, green or red, in [the first run report](https://github.com/agentic-hil/agentic-hil/issues/new?template=first-run.yml).
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

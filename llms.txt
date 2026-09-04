@@ -21,3 +21,4 @@ Every hardware action is validated against one authoritative configuration file 
 - [docs/testing.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/testing.md): the test reactor's declarative YAML plans and the pytest plugin that runs the same loop in CI.
 - [docs/safety-model.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/safety-model.md): locks, leases, incidents, quarantine and recovery.
 - [TROUBLESHOOTING.md](https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md): a failure diagnosed by the `error_type` the tool answered with.
+- [docs/support.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/support.md): which platforms and debugger backends are supported, how fast an answer comes, where to ask, and what is deliberately not promised.
