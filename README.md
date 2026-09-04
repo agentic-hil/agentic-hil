@@ -2,6 +2,10 @@
 
 <!-- mcp-name: io.github.agentic-hil/agentic-hil -->
 
+[![PyPI version](https://img.shields.io/pypi/v/agentic-hil)](https://pypi.org/project/agentic-hil/)
+[![CI](https://img.shields.io/github/actions/workflow/status/agentic-hil/agentic-hil/ci.yml?branch=master&label=CI)](https://github.com/agentic-hil/agentic-hil/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/agentic-hil/agentic-hil)](LICENSE)
+
 **Your AI agent writes the firmware, flashes it to the board on your desk, drives UART and CAN against it, reads back what the hardware actually did, and fixes what it got wrong; you review the pull request.**
 
 https://github.com/user-attachments/assets/d19b3b24-0250-4226-91c4-61bea65fa4b2
@@ -14,15 +18,21 @@ Nothing in that run is staged. One restart after the install line, in a freshly 
 
 ```bash
 curl -LsSf https://agentic-hil.github.io/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 **Windows**, in PowerShell:
 
 ```powershell
 irm https://agentic-hil.github.io/install.ps1 | iex
+[Environment]::SetEnvironmentVariable('Path', "$env:USERPROFILE\.local\bin;" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')
 ```
 
-One line installs the package user-local and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
+The second line is the notice the installer prints itself when the directory it installed into is not on your `PATH` already, with that exact directory in it; put the POSIX form in your shell profile and open a new shell, while the PowerShell form writes your user `Path` once. It is also the directory `uv` lands in when the script has to fetch it, so the one line puts both commands within reach.
+
+One line installs the package user-local and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository. Finding no `claude`, `codex` or `opencode` CLI there, it says so and writes nothing of any agent's: install the agent CLI, then run `agentic-hil agent-install --agent <claude-code|codex|opencode>` yourself, which is the line the installer prints for that case. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
+
+The line above and the checksummed route in [installation](docs/installation.md) install the same thing, the release from PyPI: the script resolves `agentic-hil[can]` against the package index and carries no branch or git reference at all, and `--version <x.y.z>` pins one exact release instead. What the checksummed route adds is the script itself, read before it runs: `install.sh` and its `install.sh.sha256` come from the same release, one is checked against the other, and the file that runs is the file you checked.
 
 [The STM32 starter](https://github.com/agentic-hil/stm32-starter) is the shortest way to watch that happen on hardware: three steps on a Nucleo-F446RE, with the firmware, the test plans and one planted defect already in place.
 
@@ -30,7 +40,9 @@ Claude Code can also take the skill from the plugin marketplace:
 `/plugin marketplace add agentic-hil/agentic-hil`, then `/plugin install agentic-hil@agentic-hil`.
 The plugin carries the skill and nothing else; the MCP server itself still comes from the install line above, which registers a verified absolute executable path outside your repository.
 
-[Installation](docs/installation.md) has every other path: the `cmd.exe` spelling, the repair run (the same line again, which reinstalls in place when `agentic-hil upgrade` itself fails), reading and checksumming the script from a release before running it, registering one agent instead of all of them, driving your own package manager, `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend. [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
+[Installation](docs/installation.md) has every other path: the `cmd.exe` spelling, the repair run (the same line again, which reinstalls in place when `agentic-hil upgrade` itself fails), that checksummed route in full, registering one agent instead of all of them, driving your own package manager, `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend. [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
+
+A first command that needs no board, in a clone of this repository: `agentic-hil check-plan examples/nucleo-f446re_demo/testconfig.yaml` answers `All 1 test plan(s) load through the reactor's loader.` and exits 0, having loaded no configuration and touched no hardware.
 
 Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, reports, and logs, all without giving an agent arbitrary host or debugger access. Each project has exactly one authoritative configuration stored outside the repository, out of reach of the agent's own file tools.
 
@@ -62,7 +74,7 @@ One YAML plan drives the whole bench: flash, reset, write, read with a comparato
 
 ## Security by construction
 
-Deny-by-default permissions per device, every hardware action validated, leased machine-wide, and written to a SHA-256 audit chain. The authoritative configuration lives outside the workspace, where the agent cannot edit it. Enforcement sits in the tool rather than in the agent host on purpose: a host's permission system judges shell strings and differs per host, while the bench's permissions judge the hardware action itself and travel with the bench, so the CLI, pytest, CI and the test reactor all walk the same gate. A failed run still gives the bench back: it aborts with its verdict, the recovery action resets and re-reads the target, and the standing quarantine is kept for the one state no later contact can rebuild, a broken audit trail. [The safety model](docs/safety-model.md) is the short version, [the security design](docs/security-design.md) the long one.
+A device is absent until the configuration declares it, so a bench with nothing attached carries `com_ports: {}` and `can_buses: {}` and a call naming a device the file does not declare is refused as `unknown_device`; on the devices it does declare, a generated configuration grants every permission that has a tool behind it (`allow_flash`, `allow_reset` and `allow_debug_execution` on a probe, `allow_write` on a serial port or CAN bus, and `allow_all_symbols` and `allow_upload` beside them) and holds the two flash interlocks `allow_raw_debugger_commands` and `allow_mass_erase` false, because either one true subtracts flashing and adds nothing. Take back what this bench should not have with `agentic-hil revoke <key>`, which moves one named permission and leaves every other setting in the file alone (`agentic-hil grant <key>` is the inverse); neither is reachable over MCP, where an agent can write `false` into a permission and never `true`. Every hardware action is validated, leased machine-wide, and written to a SHA-256 audit chain. The authoritative configuration lives outside the workspace, where the agent cannot edit it. Enforcement sits in the tool rather than in the agent host on purpose: a host's permission system judges shell strings and differs per host, while the bench's permissions judge the hardware action itself and travel with the bench, so the CLI, pytest, CI and the test reactor all walk the same gate. A failed run still gives the bench back: it aborts with its verdict, the recovery action resets and re-reads the target, and the standing quarantine is kept for the one state no later contact can rebuild, a broken audit trail. [The safety model](docs/safety-model.md) is the short version, [the security design](docs/security-design.md) the long one.
 
 ## Quickstart: one real run
 
