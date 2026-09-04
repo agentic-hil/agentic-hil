@@ -51,13 +51,16 @@ param(
     # carries a .devN version the release does not; pinning that development
     # version fails every otherwise-correct published install against a version
     # nobody can install yet. Left empty, the release is read from the newest
-    # vX.Y.Z tag in this clone. Name it here to pick a specific release instead
-    # of the newest, e.g. to measure an older one. A matching vX.Y.Z tag has to
-    # be present in this clone either way: published mode reads that tag to stage
-    # the trusted package the install's bytes and the agent skill are checked
-    # against, so it cannot stand in for a missing tag, only pick among the ones
-    # present, and a version with no tag here is refused before the matrix
-    # starts. Only -Guide reads it.
+    # vX.Y.Z tag in this clone. Naming it here asserts which release that is: it
+    # is accepted only when it matches the newest tag, so it confirms the current
+    # release and fails loudly on a stale clone rather than silently measuring the
+    # wrong one. The install is the guide's own unpinned "current release", so a
+    # release the newest tag has already superseded would be fetched as the
+    # current one and fail every exact-version check; that, and a version with no
+    # tag here, are refused before the matrix starts. A matching vX.Y.Z tag has to
+    # be present either way: published mode reads it to stage the trusted package
+    # the install's bytes and the agent skill are checked against. Only -Guide
+    # reads it.
     [string]$ExpectedVersion,
     [switch]$SkipBuild,
     [switch]$NoFileLogin,
@@ -261,16 +264,23 @@ function Get-PublishedReleaseVersion {
     # installed distribution to equal `target.expected_version`, so pinning the
     # development version there fails a wholly correct install of the release.
     #
-    # The release is the newest vX.Y.Z tag in this clone, or the one an
-    # -ExpectedVersion override names when a specific release is wanted. Either
-    # way a matching tag has to be present here, and not merely to name the
-    # release: published mode reads `src/agentic_hil` at that tag to stage the
-    # trusted package the installed bytes and the agent skill are compared
-    # against (see `released_package_digest` and `packaged_skill_reference`),
-    # so a release this clone carries no tag for cannot produce a passing
-    # published verdict at all. An override for a version with no tag is refused
-    # here, before the matrix starts, rather than after a run has spent model
-    # time and API budget on a verdict it could never reach.
+    # The release is the newest vX.Y.Z tag in this clone. Published mode hands
+    # the guide and nothing else, so the install is the guide's own unpinned
+    # "current release", and the newest tag is the only thing this clone can read
+    # offline as that current release. That tag also does real work, not merely
+    # naming the release: published mode reads `src/agentic_hil` at it to stage
+    # the trusted package the installed bytes and the agent skill are compared
+    # against (see `released_package_digest` and `packaged_skill_reference`), so
+    # a release this clone carries no tag for cannot produce a passing published
+    # verdict at all.
+    #
+    # -ExpectedVersion is an assertion, not a selector: it confirms which release
+    # this clone stands for and is accepted only when it names that newest tag. A
+    # value with no tag here, and a value that names a release the newest tag has
+    # already superseded, are both refused before the matrix starts rather than
+    # after a run has spent model time and API budget on a verdict it could never
+    # reach -- the unpinned install would fetch the current release, not the older
+    # one, and every exact-version check would then fail.
     param(
         [Parameter(Mandatory)][string]$RepositoryRoot,
         [string]$Override
@@ -281,6 +291,10 @@ function Get-PublishedReleaseVersion {
             Where-Object { $_ -match '^v[0-9]+\.[0-9]+\.[0-9]+$' } |
             ForEach-Object { $_.Substring(1) }
     )
+    $newest = $null
+    if ($tags.Count -gt 0) {
+        $newest = ($tags | Sort-Object { [version]$_ } | Select-Object -Last 1)
+    }
 
     if ($Override) {
         if ($Override -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
@@ -294,6 +308,15 @@ function Get-PublishedReleaseVersion {
                 "(git fetch --tags), or name a release this clone already has a tag for."
             )
         }
+        if ([version]$Override -lt [version]$newest) {
+            throw (
+                "-ExpectedVersion $Override names a release this clone has already superseded with v$newest. " +
+                "Published mode installs the current release the guide names, unpinned, and the verifier holds " +
+                "the install to exactly the version named here, so the current release (v$newest) would fail " +
+                "every run. Name v$newest to confirm the current release, or leave -ExpectedVersion off to take " +
+                "it automatically; an older release can only be measured in a mode that installs exactly it."
+            )
+        }
         return $Override
     }
 
@@ -305,7 +328,7 @@ function Get-PublishedReleaseVersion {
             "cannot stand in for a missing tag, only pick among the ones present."
         )
     }
-    return ($tags | Sort-Object { [version]$_ } | Select-Object -Last 1)
+    return $newest
 }
 
 $projectVersion = & $virtualEnvironmentPython -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"

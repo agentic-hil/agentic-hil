@@ -1363,6 +1363,75 @@ def test_a_published_run_stays_pinned_to_the_release(tmp_path: Path) -> None:
     assert installed_version(target, tmp_path) == "0.4.0"
 
 
+def _multi_release_repository(root: Path, versions: list[str], dev_version: str) -> None:
+    """A clone carrying several release tags, oldest to newest.
+
+    Everything the published-mode gates and `job_payload` read: a package, the
+    MCP tool contract, and a `pyproject.toml` at the between-release development
+    version a real checkout carries while the tags name the releases behind it.
+    """
+    import subprocess
+
+    package = root / "src" / "agentic_hil"
+    package.mkdir(parents=True)
+    contract = root / "evals" / "install" / "tools.list.expected"
+    contract.parent.mkdir(parents=True)
+    contract.write_text("one_tool\ntwo_tools\n", encoding="utf-8")
+    # The pin this repository carries, so an archive of a tag hashes the same as
+    # the working tree beside it regardless of core.autocrlf.
+    (root / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    assert subprocess.run(["git", "-C", str(root), "init"], capture_output=True).returncode == 0
+    for version in versions:
+        (package / "__init__.py").write_bytes(f"__version__ = {version!r}\n".encode())
+        for command in (
+            ["add", "-A"],
+            ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", f"release {version}"],
+            ["tag", f"v{version}"],
+        ):
+            assert subprocess.run(["git", "-C", str(root), *command], capture_output=True).returncode == 0
+    # The working tree has moved past the newest release, as it does between them.
+    _states_version(root, dev_version)
+
+
+def test_a_published_run_pinned_to_a_superseded_release_is_refused(tmp_path: Path) -> None:
+    """Review finding: the guide installs the current release, unpinned, so a
+    published run pinned to an older tag would fail every exact-version check
+    after spending model time and API budget on a verdict it could never reach.
+
+    Ordering is by version and not by string, so the newest of v0.9.2 and v0.9.10
+    is v0.9.10. A pin to the superseded v0.9.2 is refused at `source_gates`,
+    before the matrix starts; the current release flows through the generated job
+    contract unchanged, as the version the verifier holds both the installed
+    distribution and the running server to, beside a published target that names
+    no install source of its own -- the container installs the guide's current
+    release.
+    """
+    from evals.install.config import Target
+    from evals.install.runner import installed_version, job_payload, source_gates
+
+    _multi_release_repository(tmp_path, ["0.9.2", "0.9.10"], "0.9.11.dev0")
+    guide = "https://example.invalid/guide"
+
+    superseded = Target(mode="published", expected_version="0.9.2", guide_url=guide)
+    with pytest.raises(ValueError, match="already superseded with v0.9.10"):
+        source_gates(tmp_path, superseded)
+
+    current = Target(mode="published", expected_version="0.9.10", guide_url=guide)
+    assert source_gates(tmp_path, current) == "0.9.11.dev0"
+    assert installed_version(current, tmp_path) == "0.9.10"
+
+    matrix = replace(
+        load_matrix(REPOSITORY_ROOT / "evals" / "install" / "matrix.example.json"),
+        target=current,
+    )
+    payload = job_payload(matrix, matrix.cases[0], matrix.jobs[0], None, tmp_path)
+
+    assert payload["target"]["expected_version"] == "0.9.10"
+    # No install source of its own: the guide's own unpinned "current release" is
+    # what the container installs, which is why pinning an older one cannot pass.
+    assert payload["target"]["install_spec"] is None
+
+
 def test_a_tree_that_is_neither_the_release_nor_a_development_version_is_refused(tmp_path: Path) -> None:
     """The refusal that stays: a matrix this tree cannot answer for at all."""
     from evals.install.config import Target

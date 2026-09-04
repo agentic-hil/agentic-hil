@@ -374,17 +374,21 @@ def test_a_control_arm_runs_only_when_it_is_asked_for() -> None:
 def test_published_release_version_reads_the_newest_tag_or_a_validated_override() -> None:
     """The resolver, exercised against a `.dev0` clone's tag set.
 
-    Published mode installs the release, so the version it pins is the newest
-    `vX.Y.Z` tag and not the tree's development version. Ordering is by version
-    and not by string, so `v0.9.10` wins over `v0.9.2`; a pre-release tag and a
-    non-tag line are ignored; a `-ExpectedVersion` override wins when it names a
-    release this clone has a tag for, is refused when it carries a development
-    suffix, and is refused when it is well formed but names a release with no
-    tag here -- published mode reads that tag to stage the trusted package the
-    install's bytes and skill are checked against, so a version with no tag could
-    never pass and must not reach the matrix. The illustrative versions here are
-    deliberately not this project's own release, so the version-consistency sweep
-    does not have to carry this file as one that pins the release."""
+    Published mode installs the guide's own unpinned current release, so the
+    version it pins is the newest `vX.Y.Z` tag and not the tree's development
+    version. Ordering is by version and not by string, so `v0.9.10` wins over
+    `v0.9.2`; a pre-release tag and a non-tag line are ignored. A
+    `-ExpectedVersion` override is an assertion of the current release, not a
+    selector for an older one: it is accepted only when it names that newest tag,
+    is refused when it names a present but superseded tag (the unpinned install
+    fetches the current release, so an older pin would fail every exact-version
+    check), is refused when it carries a development suffix, and is refused when
+    it is well formed but names a release with no tag here -- published mode reads
+    that tag to stage the trusted package the install's bytes and skill are
+    checked against, so a version with no tag could never pass and must not reach
+    the matrix. The illustrative versions here are deliberately not this project's
+    own release, so the version-consistency sweep does not have to carry this file
+    as one that pins the release."""
     escaped_path = str(LOOP_SCRIPT).replace("'", "''")
     command = f"""
 $tokens = $null
@@ -414,8 +418,17 @@ function git {{
 $derived = Get-PublishedReleaseVersion -RepositoryRoot 'X'
 if ($derived -ne '0.9.10') {{ throw "Unexpected derived version: $derived" }}
 
-$override = Get-PublishedReleaseVersion -RepositoryRoot 'X' -Override '0.9.2'
-if ($override -ne '0.9.2') {{ throw "Unexpected override version: $override" }}
+# The override confirms the current release, so it is accepted only when it names
+# the newest tag, which the numeric ordering makes v0.9.10 and not v0.9.2.
+$override = Get-PublishedReleaseVersion -RepositoryRoot 'X' -Override '0.9.10'
+if ($override -ne '0.9.10') {{ throw "Unexpected override version: $override" }}
+
+# A present but superseded tag is refused: the unpinned install fetches v0.9.10,
+# so a run pinned to v0.9.2 would fail every exact-version check.
+$refusedSuperseded = $false
+try {{ Get-PublishedReleaseVersion -RepositoryRoot 'X' -Override '0.9.2' | Out-Null }}
+catch {{ $refusedSuperseded = $true }}
+if (-not $refusedSuperseded) {{ throw 'A superseded override was accepted.' }}
 
 $refused = $false
 try {{ Get-PublishedReleaseVersion -RepositoryRoot 'X' -Override '0.9.3.dev0' | Out-Null }}

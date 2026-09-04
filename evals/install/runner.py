@@ -44,6 +44,16 @@ TOOL_CONTRACT = Path("evals") / "install" / "tools.list.expected"
 # releases. `tools/check_version_consistency.py` owns the rule; here it is only
 # the shape that matters, because the question is what an install reports.
 DEVELOPMENT_VERSION = re.compile(r"^\d+\.\d+\.\d+\.dev\d+$")
+# A release, and the tag that names one. Published mode reads these to decide
+# which release this clone can stand for, so a pre-release or a `.devN` is
+# deliberately not a match.
+RELEASE_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+RELEASE_TAG = re.compile(r"^v\d+\.\d+\.\d+$")
+
+
+def _release_version_key(version: str) -> tuple[int, ...]:
+    """Order releases by number, so v0.9.10 follows v0.9.2 rather than preceding it."""
+    return tuple(int(part) for part in version.split("."))
 
 
 def utc_now() -> str:
@@ -261,18 +271,76 @@ def validate_source_matches_release(source_root: Path, expected_version: str) ->
         )
 
 
+def release_tag_versions(repository: Path) -> list[str]:
+    """Every `vX.Y.Z` release tag in this clone, oldest first, or [] when none.
+
+    Published mode installs whatever the package index serves as the current
+    release, and the runner cannot ask the index offline. The newest tag here is
+    the only thing it can read as "the current release", so it is what a published
+    `target.expected_version` is held against. A malformed or pre-release tag is
+    not a release and is dropped; an empty list means this clone names no release.
+    """
+    result = run_capture(["git", "-C", str(repository), "tag", "--list", "v[0-9]*"], 30)
+    if result.returncode != 0:
+        return []
+    versions = [
+        line.strip()[1:] for line in result.stdout.splitlines() if RELEASE_TAG.fullmatch(line.strip())
+    ]
+    return sorted(versions, key=_release_version_key)
+
+
+def validate_published_release_is_current(source_root: Path, expected_version: str) -> None:
+    """Refuse a published run pinned to a release this clone has already superseded.
+
+    Published mode hands the agent the guide and nothing else, so the install is
+    the guide's own unpinned "current release"; the verifier then requires the
+    installed distribution and the running server to report exactly
+    `target.expected_version`. That only holds when the pinned version is the
+    release the index actually serves as current. Offline, the newest `vX.Y.Z`
+    tag in this clone is what the runner reads as that release: a version older
+    than that tag names a release the index has moved past, so the current release
+    the guide installs would fail the exact-version checks in every run, after each
+    has spent model time and API budget. Refuse it here instead, before the matrix
+    starts.
+
+    A version newer than the newest tag is left to run: the clone's tags may
+    simply be behind the index, `released_package_digest` already reports the
+    missing tag as unverified rather than as a mismatch, and the version could
+    still be the one the index serves. A clone with no release tag at all names no
+    current release to compare against, so there is nothing here to refuse.
+    """
+    if RELEASE_VERSION.fullmatch(expected_version) is None:
+        return
+    versions = release_tag_versions(source_root)
+    if not versions:
+        return
+    newest = versions[-1]
+    if _release_version_key(expected_version) < _release_version_key(newest):
+        raise ValueError(
+            f"published target.expected_version {expected_version} names a release this clone has "
+            f"already superseded with v{newest}. Published mode installs the current release the guide "
+            f"names, unpinned, and the verifier holds the install to exactly {expected_version}, so the "
+            f"current release (v{newest} or newer) would fail every run. Pin the current release, or "
+            f"measure an older one only in a mode that installs exactly it."
+        )
+
+
 def source_gates(host_source_root: Path, target: Target) -> str:
     """Everything the source tree must satisfy before the first container starts.
 
-    One place, because these three refusals are one question asked of one tree,
-    and the answer to the first decides whether the second applies: a tree
-    carrying a development version reports itself rather than the release, which
-    is the entire defect `validate_source_matches_release` exists to refuse. Left
-    in, it would refuse the ordinary state of every commit between two releases.
+    One place, because these refusals are one question asked of one tree, and the
+    answer to the first decides whether the second applies: a tree carrying a
+    development version reports itself rather than the release, which is the
+    entire defect `validate_source_matches_release` exists to refuse. Left in, it
+    would refuse the ordinary state of every commit between two releases. Published
+    mode adds its own: the release pinned there has to be the one the guide's
+    unpinned install actually produces, which offline is the newest tag here.
     """
     version = validate_source_version(host_source_root, target.expected_version)
     if target.mode == "local" and version == target.expected_version:
         validate_source_matches_release(host_source_root, target.expected_version)
+    if target.mode == "published":
+        validate_published_release_is_current(host_source_root, target.expected_version)
     if target.mode == "remote":
         assert target.expected_commit is not None
         validate_remote_checkout(host_source_root, target.expected_commit)

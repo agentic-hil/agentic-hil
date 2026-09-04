@@ -668,16 +668,20 @@ Options:
   rather than from `pyproject.toml`, whose development version between releases
   the published release does not carry. Cannot be combined with `-FromBranch`,
   which names a different source;
-- `-ExpectedVersion`: the release `-Guide` pins, as `X.Y.Z`. Left empty, it is
-  read from the newest release tag; name it to pick a specific release instead
-  of the newest, such as an older one you want to measure. A matching `vX.Y.Z`
-  tag has to be present in this clone either way: published mode reads that tag
-  to stage the trusted package the install's bytes and the agent skill are
-  checked against, so a release with no tag here cannot yield a passing verdict
-  and is refused before the matrix starts. It cannot stand in for tags that were
-  never fetched (run `git fetch --tags` for that), only pick among the ones
-  present. It applies only with `-Guide`, and is refused with local or remote
-  mode, which install this tree and take its own version.
+- `-ExpectedVersion`: an assertion of the release `-Guide` pins, as `X.Y.Z`.
+  Left empty, the release is read from the newest release tag; naming it confirms
+  which release that is and is accepted only when it matches the newest tag, so a
+  stale clone fails loudly here instead of quietly measuring the wrong release.
+  Published mode installs the guide's own unpinned "current release", so a release
+  the newest tag has already superseded would be fetched as the current one and
+  fail every exact-version check; that release, and a version this clone has no
+  tag for, are both refused before the matrix starts. A matching `vX.Y.Z` tag has
+  to be present either way: published mode reads it to stage the trusted package
+  the install's bytes and the agent skill are checked against, and it cannot stand
+  in for tags that were never fetched (run `git fetch --tags` for that). Measuring
+  an older release needs a mode that installs exactly it, which the unpinned
+  published route is not. It applies only with `-Guide`, and is refused with local
+  or remote mode, which install this tree and take its own version.
 
 Without `-FromBranch` or `-Guide` the script builds a local-mode matrix against
 the working tree, which is why the one-command path needs one of those two to
