@@ -1004,11 +1004,20 @@ def test_a_real_doctor_at_a_terminal_reads_as_a_report(tmp_path: Path, monkeypat
 
     stream = FakeStdout(tty=True)
     monkeypatch.setattr("sys.stdout", stream)
-    assert cli.entrypoint(["doctor"]) == 0
+    # Nothing is attached on this host, so this bench is unbound and the exit
+    # code says so (#433). The report is what this test is about, and it is a
+    # report either way.
+    assert cli.entrypoint(["doctor"]) == 1
     out = stream.getvalue()
     assert '"ok"' not in out
     assert "Installation" in out and "MCP registration" in out and "Debuggers" in out
     assert str(cli.initialized_config_path(workspace)) in out
+    # The one section a newcomer needed and did not have: the bench, the reason,
+    # and the command that binds it, on screen and above the device sections.
+    assert "Bench binding" in out
+    assert "UNBOUND" in out
+    assert "adopt-hardware" in out
+    assert out.index("Bench binding") < out.index("Debuggers")
 
 
 def test_a_real_doctor_asked_for_as_a_document_is_one_json_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1019,9 +1028,14 @@ def test_a_real_doctor_asked_for_as_a_document_is_one_json_document(tmp_path: Pa
 
     stream = FakeStdout(tty=False)
     monkeypatch.setattr("sys.stdout", stream)
-    assert cli.entrypoint(["doctor", "--json"]) == 0
+    assert cli.entrypoint(["doctor", "--json"]) == 1
     document = json.loads(stream.getvalue())
     assert document["tool"] == "agentic_hil_doctor"
+    # The fields a script reads for the same fact the report puts on screen.
+    assert document["ok"] is False
+    assert document["unhealthy"] == ["bench_binding"]
+    assert document["bench_binding"]["ok"] is False
+    assert "adopt-hardware" in document["bench_binding"]["next_step"]
     assert document["config_path"] == str(cli.initialized_config_path(workspace))
 
 
@@ -1036,3 +1050,44 @@ def test_the_rendering_never_decides_anything_the_document_did_not(monkeypatch: 
     monkeypatch.setattr(cli, "render_result", record)
     _run(monkeypatch, ["init"], INIT_FORCED, tty=True)
     assert seen == [(INIT_FORCED, "init")]
+
+
+def test_a_probe_listing_says_which_enumeration_produced_the_ids() -> None:
+    """On an OpenOCD bench the backend and the enumeration are two facts (#432).
+
+    The ids come from the USB descriptors the probes published to this host, not
+    from anything OpenOCD ran, and a reader deciding whether a serial was read
+    off the probe or off its descriptor cannot get that from `backend: openocd`
+    alone. The document carries `discovered_by`; the rendering has to show it.
+    """
+    listing = {
+        "ok": True,
+        "tool": "debugger_probes_list",
+        "backend": "openocd",
+        "discovered_by": "usb_serial_inventory",
+        "probes": [{"probe_id": "066AFF303435554157113106"}],
+        "summary": "1 connected debugger probe(s) read from this host's USB serial inventory.",
+    }
+
+    out = _rendered(listing, "debugger-probes")
+
+    assert "discovered_by" in out
+    assert "usb_serial_inventory" in out
+    assert "066AFF303435554157113106" in out
+
+
+def test_a_probe_listing_refused_on_an_adapter_nothing_enumerates_says_which_script() -> None:
+    """The surviving `not_supported`, with the fact that decided it on screen."""
+    refusal = {
+        "ok": False,
+        "tool": "debugger_probes_list",
+        "backend": "openocd",
+        "error_type": "not_supported",
+        "interface_cfg": "interface/jlink.cfg",
+        "summary": "OpenOCD has no command that enumerates connected probe IDs, and this entry's adapter is not one this host can enumerate from its USB serial inventory either: `interface_cfg` is `interface/jlink.cfg`.",
+    }
+
+    out = _reflowed(_rendered(refusal, "debugger-probes"))
+
+    assert "not_supported" in out
+    assert "interface/jlink.cfg" in out

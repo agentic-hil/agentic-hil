@@ -2425,3 +2425,52 @@ def test_debugger_probes_lists_the_stlink_on_a_host_with_only_openocd(tmp_path: 
     assert result["discovered_by"] == DISCOVERED_BY_USB_INVENTORY
     assert [entry["probe_id"] for entry in result["probes"]] == ["066AFF303435554157113106"]
     assert result["stlink_ports"][0]["stable_device"] == NUCLEO_VCP["stable_device"]
+
+
+def test_troubleshooting_section_four_matches_what_the_two_commands_emit() -> None:
+    """The page and the commands are one answer, and they had drifted (#432).
+
+    Section 4 sent a reader with OpenOCD to `agentic-hil debugger-probes`, which
+    on a configured bench refused `not_supported` at them, and it claimed the
+    refusal carries `tools_searched` without saying which refusal: the
+    configured-entry one never had that field and never will, because it is
+    about the one executable that entry resolves to rather than about a host
+    search. Both claims are now stated as the code makes them, and this fails if
+    either side moves.
+    """
+    page = (REPOSITORY_ROOT / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+    section = page.split("## 4. `debugger_not_found`", 1)[1].split("\n## ", 1)[0]
+
+    # The bootstrap refusal really does carry both fields it is credited with.
+    refused = _discovery_failure_fields()
+    assert "tools_searched" in refused
+    assert "discovered_by" in refused
+    assert "`tools_searched`" in section
+    assert "`discovered_by`" in section
+    # And the page says which of the two refusals that is about, because the
+    # configured one carries neither.
+    assert "carries neither" in section
+
+    # The configured OpenOCD listing is described as it now behaves.
+    assert "usb_serial_inventory" in section
+    assert "not_supported" in section
+    assert "probe_discovery_failed" in section
+    # The claim that nothing is said to a board has to stay true of the code
+    # that answers: a USB descriptor reading spawns nothing.
+    assert "says a word to a board" in section
+
+
+def _discovery_failure_fields() -> JsonObject:
+    """The bootstrap `debugger_not_found` refusal, taken from the code itself.
+
+    Built rather than asserted against a literal, so the doc claim is checked
+    against what a host with neither toolchain would actually get back.
+    """
+    import agentic_hil.bootstrap as bootstrap_module
+
+    saved = bootstrap_module.find_openocd
+    try:
+        bootstrap_module.find_openocd = lambda: None  # type: ignore[assignment]
+        return bootstrap_module._usb_enumeration({"ok": True, "ports": []}, 1.0)
+    finally:
+        bootstrap_module.find_openocd = saved  # type: ignore[assignment]

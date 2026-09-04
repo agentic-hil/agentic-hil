@@ -1,8 +1,11 @@
-blank_issues_enabled: false
+blank_issues_enabled: true
 contact_links:
+  - name: Questions and first-run help
+    url: https://github.com/agentic-hil/agentic-hil/discussions/categories/q-a
+    about: Ask in Discussions Q&A when something is unclear or you are not yet sure whether what you saw is a defect.
   - name: Troubleshooting guide
     url: https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md
     about: Start here for debugger, target detection, artifact validation, and COM-port setup failures.
   - name: Security policy
     url: https://github.com/agentic-hil/agentic-hil/security/policy
-    about: Report security issues and hardware-safety concerns through the documented security process.
+    about: Report a vulnerability privately, the way SECURITY.md describes, and never as a public issue.

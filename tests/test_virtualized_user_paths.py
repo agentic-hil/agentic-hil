@@ -2080,7 +2080,10 @@ def test_doctor_reports_the_state_root_it_accepts(tmp_path: Path, monkeypatch: p
 
     report = doctor()
 
-    assert report["ok"] is True, report
+    # No board on this host, so the bench is unbound and that is the whole of
+    # what is red here. The state root is the check this test is about, and it
+    # answers for itself either way.
+    assert report["unhealthy"] == ["bench_binding"], report
     assert report["state_root"]["ok"] is True
     assert report["state_root"]["path"] == str(load_authoritative_config(workspace).state_root)
     assert "cannot record a hardware action" not in report["summary"]

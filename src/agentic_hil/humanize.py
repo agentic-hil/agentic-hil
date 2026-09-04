@@ -924,6 +924,24 @@ def render_doctor(result: JsonObject) -> list[str]:
             body.extend(_bullets([f"do not: {item}" for item in avoid], indent=_INDENT * 2))
         lines.extend(_section("State root", body))
 
+    # Immediately after it, and before the devices, because it answers the same
+    # class of question one level up: the state root says whether a hardware
+    # action can be recorded, and this says whether there is any hardware to
+    # record one about. A reader who gets to the device sections without having
+    # been told the bench is unbound reads a list of entries as a bench.
+    binding = _mapping(result.get("bench_binding"))
+    if binding:
+        verdict = "ok" if binding.get("ok") is True else "UNBOUND"
+        body = _fields([("verdict", verdict)])
+        body.extend(_wrap(_summary(binding), indent=_INDENT))
+        for entry in _entries(binding.get("unbound")):
+            body.extend(_fields([(str(entry.get("field", "field")), ", ".join(_strings(entry.get("entries"))) or "-")], indent=_INDENT))
+            body.extend(_wrap(_summary(entry), indent=_INDENT * 2))
+        next_step = binding.get("next_step")
+        if isinstance(next_step, str) and next_step:
+            body.extend(_numbered([next_step], indent=_INDENT))
+        lines.extend(_section("Bench binding", body))
+
     installation = _mapping(result.get("installation"))
     if installation:
         body = _fields([("version", installation.get("version")), ("package_path", installation.get("package_path")), ("editable", installation.get("editable"))])
@@ -1136,7 +1154,17 @@ def render_adopt_hardware(result: JsonObject) -> list[str]:
 
 def render_debugger_probes(result: JsonObject) -> list[str]:
     lines = _headline(result)
-    header = _fields([("source", result.get("source")), ("backend", result.get("backend")), ("quarantine_id", result.get("quarantine_id"))])
+    # `discovered_by` beside the backend, because on an OpenOCD bench the two are
+    # not the same fact: the backend is the toolchain the entry drives, and the
+    # enumeration that produced these ids is this host's USB serial inventory
+    # rather than anything OpenOCD ran. A reader deciding whether a serial was
+    # read off the probe or off the descriptor it published needs that on screen.
+    header = _fields([
+        ("source", result.get("source")),
+        ("backend", result.get("backend")),
+        ("discovered_by", result.get("discovered_by")),
+        ("quarantine_id", result.get("quarantine_id")),
+    ])
     if header:
         lines.append("")
         lines.extend(header)

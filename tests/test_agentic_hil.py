@@ -86,6 +86,22 @@ from agentic_hil.report import logs_directory
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 from agentic_hil.types import CURRENT_CONFIG_VERSION
 
+# One Nucleo's virtual COM port, exactly as pyserial reports it on a Linux host:
+# the ST-Link's own USB vendor and product ids, and the serial the probe
+# published, which is the string OpenOCD's `adapter serial` takes. The probe
+# listing on an OpenOCD bench is read out of a reading shaped like this one.
+NUCLEO_VCP_PORT: dict = {
+    "device": "/dev/ttyACM0",
+    "name": "ttyACM0",
+    "description": "STM32 STLink - ST-Link VCP Ctrl",
+    "manufacturer": "STMicroelectronics",
+    "product": "STM32 STLink",
+    "serial_number": "066AFF303435554157113106",
+    "vid": 0x0483,
+    "pid": 0x374B,
+    "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066AFF303435554157113106-if02",
+}
+
 
 def mcp_tool_call(service: AgenticHILToolService, name: str, arguments: dict | None = None) -> dict:
     response = handle_mcp_message(
@@ -165,7 +181,14 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     assert result["steps"]["config"]["ok"] is True
     assert result["steps"]["skill_install"]["ok"] is True
     assert result["steps"]["mcp_config"]["ok"] is True
-    assert result["steps"]["doctor"]["ok"] is True
+    # Nothing is attached on this host, so the file this command just wrote
+    # describes a bench with no hardware behind it. `doctor` says so rather than
+    # reporting green (#433), and `setup` keeps the file anyway: rolling back the
+    # documented outcome of the documented first command would be the worse of
+    # the two answers.
+    assert result["steps"]["doctor"]["ok"] is False
+    assert result["steps"]["doctor"]["unhealthy"] == ["bench_binding"]
+    assert result["steps"]["doctor"]["bench_binding"]["ok"] is False
     # MCP registration is USER-level, never written into the (untrusted) repo.
     assert not (workspace / ".mcp.json").exists()
     claude_json = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
@@ -2471,7 +2494,9 @@ def test_init_project_is_idempotent_and_keeps_the_config_it_finds(
 
     assert first["ok"] is True, first
     assert first["steps"]["config"]["ok"] is True
-    assert first["steps"]["doctor"]["ok"] is True
+    # No board on this host, so the bench is unbound and `doctor` is red about
+    # exactly that, while the run itself succeeds and keeps the file.
+    assert first["steps"]["doctor"]["unhealthy"] == ["bench_binding"]
     config_path = initialized_config_path(workspace)
     before = config_path.read_bytes()
 
@@ -2534,7 +2559,9 @@ def test_init_with_an_agent_hardens_a_config_an_earlier_plain_init_wrote(
     assert result["steps"]["config"]["ok"] is True
     assert result["steps"]["config"]["existing"] is True
     assert result["steps"]["config"]["skipped"] is True
-    assert result["steps"]["doctor"]["ok"] is True
+    # Unbound bench, red doctor, and the permission half still runs: the rules
+    # this command exists to add do not wait on a board being plugged in.
+    assert result["steps"]["doctor"]["unhealthy"] == ["bench_binding"]
     restriction = result["steps"]["agent_write_restriction"]
     assert restriction["ok"] is True
     assert restriction["added"] == _expected_deny_rules(config_path)
@@ -3035,7 +3062,7 @@ def test_both_halves_are_reachable_from_the_command_line(
     assert entrypoint(["init", "--agent", "claude-code", "--json"]) == 0
     project = json.loads(capsys.readouterr().out)
     assert project["scope"] == "project"
-    assert project["steps"]["doctor"]["ok"] is True
+    assert project["steps"]["doctor"]["unhealthy"] == ["bench_binding"]
     assert initialized_config_path(workspace).is_file()
 
 
@@ -3368,6 +3395,163 @@ def test_doctor_reports_every_named_debugger_and_its_permissions(tmp_path: Path,
     # Two probes, so nothing is bound and every grant is still denied.
     assert all(entry["bound"] is False for entry in result["debuggers"].values())
     assert result["debuggers"]["dut_a"]["permissions"]["allow_flash"] is False
+
+
+def test_doctor_says_a_bench_nobody_plugged_a_board_into_cannot_run_a_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The green report a newcomer acted on (#433).
+
+    `agentic-hil init` with nothing attached writes a workable file with
+    placeholders in it, which is the ordinary case: installing the tool and
+    connecting the board are two different moments. `doctor` reported that file
+    as loaded and exited 0, so the reader went and wrote the first plan, which
+    the same bench then refused. The verdict, the sentence and the exit code now
+    say what state this is, and name the command that ends it.
+    """
+    workspace = tmp_path / "firmware"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    assert init_config()["ok"] is True
+
+    report = doctor()
+
+    assert report["ok"] is False, report
+    # Named rather than left to be worked out from the sections.
+    assert report["unhealthy"] == ["bench_binding"]
+    binding = report["bench_binding"]
+    assert binding["ok"] is False
+    assert [entry["field"] for entry in binding["unbound"]] == ["debuggers"]
+    assert "no test plan can run" in binding["unbound"][0]["summary"]
+    # The command, on the result and in the headline a caller that keeps only
+    # `summary` is left with.
+    assert "adopt-hardware" in binding["next_step"]
+    assert "init --force" in binding["next_step"]
+    assert "not bound to hardware" in report["summary"]
+    assert "adopt-hardware" in report["summary"]
+    # And the placeholder in the description, reported beside it.
+    assert [entry["field"] for entry in binding["placeholders"]] == ["target.controller"]
+
+
+def test_doctor_names_a_declared_com_port_that_names_no_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second way a device is declared and unreachable.
+
+    A project profile names its ports before anybody knows which of the host's
+    thirty-odd serial devices they are, so `init` with no bench writes the entry
+    with no `device`. Every plan step and every COM call that opens it is refused
+    `com_port_not_bound`, and `doctor` is where that has to be visible before a
+    plan finds out.
+    """
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n")
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert report["ok"] is False, report
+    assert report["unhealthy"] == ["bench_binding"]
+    unbound = report["bench_binding"]["unbound"]
+    assert [entry["field"] for entry in unbound] == ["com_ports"]
+    assert unbound[0]["entries"] == ["dut_uart"]
+    assert "com_ports.dut_uart.device" in unbound[0]["summary"]
+    assert "com_port_not_bound" in unbound[0]["summary"]
+
+
+def test_doctor_stays_green_on_a_bench_whose_devices_all_name_hardware(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour that must not move: a bound bench is still healthy.
+
+    Everything this check adds has to be invisible on a configuration that names
+    its hardware, or `doctor` becomes a command nobody can get to green and the
+    verdict stops meaning anything.
+    """
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n    baudrate: 115200\n')
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert report["ok"] is True, report
+    assert report["unhealthy"] == []
+    assert report["bench_binding"]["ok"] is True
+    assert report["bench_binding"]["unbound"] == []
+    assert "not bound to hardware" not in report["summary"]
+    assert "adopt-hardware" not in report["summary"]
+
+
+def test_a_placeholder_controller_alone_is_reported_and_decides_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The description is not a device, and the verdict is about devices.
+
+    `target.controller` says what part this is; nothing routes through it, so a
+    board that flashes and runs plans with the key still at the skeleton value is
+    a working bench. It is reported, because it is the loudest sign the file was
+    written with nothing attached, and it does not make `doctor` red.
+    """
+    workspace = tmp_path / "workspace"
+    config_path = write_authoritative_config(workspace, monkeypatch)
+    document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    document["target"]["controller"] = "unknown-controller"
+    config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert report["ok"] is True, report
+    assert report["unhealthy"] == []
+    binding = report["bench_binding"]
+    assert binding["ok"] is True
+    assert binding["unbound"] == []
+    assert [entry["field"] for entry in binding["placeholders"]] == ["target.controller"]
+    # Still said out loud, with the command beside it.
+    assert "unknown-controller" in report["summary"]
+    assert "adopt-hardware" in report["summary"]
+
+
+def test_a_lone_debugger_without_a_probe_id_is_not_called_unbound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented Nucleo bench, which has no probe id and works.
+
+    Exactly one configured debugger is exempt from carrying a `probe_id`: it has
+    no second entry to be confused with, and OpenOCD has no listing of its own to
+    satisfy the demand from. Reading an unset `probe_id` as an unbound device
+    would call this project's own supported first path a broken bench.
+    """
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, probe_id=None, auto_probe_ids=False)
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert report["debuggers"]["dut"]["probe_id"] is None
+    assert report["bench_binding"]["ok"] is True, report["bench_binding"]
+    assert report["unhealthy"] == []
+
+
+def test_troubleshooting_describes_the_unbound_doctor_the_way_it_behaves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The section a reader with placeholders lands on, and the command's answer.
+
+    Section 5b is where somebody whose board was plugged in after `setup` ends
+    up, and it said `doctor` skips the debugger check and nothing else. It now
+    has to name the fields and the exit code, and the check has to still produce
+    them: a page describing a verdict the command stopped giving would be worse
+    than the silence it replaced.
+    """
+    workspace = tmp_path / "firmware"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    assert init_config()["ok"] is True
+    report = doctor()
+
+    page = (Path(__file__).resolve().parents[1] / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+    section = page.split("## 5b.", 1)[1].split("\n## ", 1)[0]
+
+    # Every field the page tells a reader to look at is on the result.
+    for field in ("bench_binding", "unhealthy"):
+        assert f"`{field}" in section
+        assert field in report
+    assert report["bench_binding"]["ok"] is False
+    assert "next_step" in report["bench_binding"]
+    assert "placeholders" in report["bench_binding"]
+    # And the two claims the page makes about the verdict.
+    assert "exits non-zero" in section
+    assert "no test plan can run" in section
+    assert report["ok"] is False
 
 
 def test_mcp_config_writes_project_mcp_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6306,14 +6490,118 @@ def test_openocd_passes_configured_probe_id(tmp_path: Path) -> None:
     assert "adapter serial STLINK123" in log_text
 
 
-def test_openocd_probe_listing_reports_not_supported(tmp_path: Path) -> None:
+def test_openocd_probe_listing_reads_the_hosts_usb_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal an OpenOCD bench got where TROUBLESHOOTING sends it (#432).
+
+    `Refused: not_supported, OpenOCD cannot enumerate all connected probe IDs`
+    was the whole answer on a configured `type: openocd` bench, and section 4
+    names this command as the way an OpenOCD reader finds a probe. It is also
+    the one thing this project already knew how to do: bootstrap discovery has
+    read ST-Link serials out of the host's USB descriptors since #423, and the
+    serial the caller wanted was in `agentic-hil com-ports` all along. The
+    configured backend now reads the same inventory and says which enumeration
+    answered.
+    """
+    monkeypatch.setattr(
+        "agentic_hil.backends.openocd.list_available_com_ports",
+        lambda tool: {"ok": True, "tool": tool, "ports": [NUCLEO_VCP_PORT, {"device": "/dev/ttyS0", "name": "ttyS0"}]},
+    )
     service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
     try:
         result = mcp_tool_call(service, "debugger_probes_list")
     finally:
         service.close()
+
+    assert result["ok"] is True, result
+    assert result["backend"] == "openocd"
+    assert result["discovered_by"] == "usb_serial_inventory"
+    assert result["probes"] == [{"probe_id": NUCLEO_VCP_PORT["serial_number"]}]
+    # The port the id was read out of, so an empty listing beside a visible
+    # ST-Link cannot be reported as "no probe attached".
+    assert result["stlink_ports"][0]["device"] == NUCLEO_VCP_PORT["device"]
+    # Nothing was said to a board to answer this.
+    assert result["target_contacted"] is False
+    assert result["hardware_state"] == "unchanged"
+
+
+def test_openocd_probe_listing_still_refuses_an_adapter_nothing_enumerates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`not_supported` survives exactly where it is still true.
+
+    OpenOCD drives adapters whose USB identity this host does not read, and an
+    ST-Link inventory is not their enumeration. Answering those with an empty
+    listing would say "no probe attached" about a bench nobody looked at, so the
+    entry whose `interface_cfg` names one is refused, and the refusal names the
+    script that decided it.
+    """
+    called: list[str] = []
+    monkeypatch.setattr(
+        "agentic_hil.backends.openocd.list_available_com_ports",
+        lambda tool: called.append(tool) or {"ok": True, "tool": tool, "ports": [NUCLEO_VCP_PORT]},
+    )
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, interface_cfg="interface/jlink.cfg"))))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+
     assert result["ok"] is False
     assert result["error_type"] == "not_supported"
+    assert "interface/jlink.cfg" in result["summary"]
+    assert result["interface_cfg"] == "interface/jlink.cfg"
+    assert result["target_contacted"] is False
+    # And the inventory is not even read for an adapter it cannot answer for.
+    assert called == []
+
+
+def test_openocd_probe_listing_says_so_when_the_inventory_cannot_be_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reading that failed is not a bench with no probes on it.
+
+    Without OpenOCD's own listing the host inventory *is* the enumeration, so an
+    inventory that could not be read is a discovery that could not run. Reporting
+    `ok: true` with an empty `probes` there would tell an operator their board is
+    missing on the evidence of a check that never happened.
+    """
+    monkeypatch.setattr(
+        "agentic_hil.backends.openocd.list_available_com_ports",
+        lambda tool: {"ok": False, "tool": tool, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported."},
+    )
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "probe_discovery_failed"
+    assert "pyserial is not installed" in result["summary"]
+    assert result["target_contacted"] is False
+
+
+@pytest.mark.parametrize(
+    ("interface_cfg", "enumerated"),
+    [
+        ("interface/stlink.cfg", True),
+        ("interface/stlink-dap.cfg", True),
+        ("interface/stlink-v2-1.cfg", True),
+        ("C:/openocd/share/openocd/scripts/interface/stlink.cfg", True),
+        (r"C:\openocd\scripts\interface\stlink.cfg", True),
+        ("interface/STLINK.CFG", True),
+        ("interface/jlink.cfg", False),
+        ("interface/cmsis-dap.cfg", False),
+        ("interface/ftdi/olimex-arm-usb-ocd.cfg", False),
+        ("", False),
+    ],
+)
+def test_the_interface_script_decides_whether_a_probe_can_be_enumerated(interface_cfg: str, enumerated: bool) -> None:
+    """The rule reads the script's own name, both separators, either case.
+
+    A Windows configuration writes forward slashes by convention and backslashes
+    by accident, and an operator may name an absolute path to a script of their
+    own; none of that may change which adapter the entry is understood to name.
+    """
+    from agentic_hil.backends.openocd import openocd_interface_enumerates_by_usb
+
+    assert openocd_interface_enumerates_by_usb(interface_cfg) is enumerated
 
 
 def test_stlink_lists_all_connected_probe_ids(tmp_path: Path) -> None:

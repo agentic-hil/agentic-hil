@@ -1,0 +1,71 @@
+name: First run report
+description: Say what happened the first time you drove your own bench with Agentic HIL, green or red.
+title: "first run: "
+labels:
+  - first-run
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A red run is as welcome here as a green one. This report is what fixes the path
+        for the next person who plugs a probe in, so write down what the run actually
+        did rather than what it was meant to do. Nothing here asks for a working board:
+        a run that stopped before it reached one is the most useful report there is.
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Which coding agent drove the run
+      options:
+        - Claude Code
+        - Codex
+        - opencode
+        - other
+    validations:
+      required: true
+  - type: input
+    id: probe
+    attributes:
+      label: Debug probe and the board behind it
+      description: The probe together with its backend is the unit this project supports, so name that first and the board after it.
+      placeholder: "ST-Link V2-1 through OpenOCD, with a Nucleo-F446RE behind it"
+    validations:
+      required: true
+  - type: input
+    id: host_os
+    attributes:
+      label: Operating system and version
+      placeholder: "Ubuntu 24.04, Windows 11 24H2, macOS 15"
+    validations:
+      required: true
+  - type: input
+    id: previous_flow
+    attributes:
+      label: How you flashed firmware before Agentic HIL
+      description: The tool, the button or the script that put an image on this board yesterday.
+      placeholder: "The IDE's run button, st-flash, a make flash target, a colleague's script"
+    validations:
+      required: true
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: |
+        Lead with the decisive line: the one that says the board did what the run claimed,
+        or the one that says why the run stopped. Then paste the output of
+        `agentic-hil doctor` from the same directory, which names the configuration the run
+        loaded and the devices it bound. Remove local user names and private paths first.
+      placeholder: |
+        The decisive line:
+
+        agentic-hil doctor:
+    validations:
+      required: true
+  - type: textarea
+    id: last_real_bug
+    attributes:
+      label: The last real firmware bug an agent should have caught here
+      description: |
+        Optional, and the most useful field on this form. The run on the hardware is the gate
+        that decides whether firmware work is done, so the defects that reach a real board are
+        what that gate has to be measured against. Name one you remember.
+      placeholder: "A UART framing error that only appeared after a cold reset, never on a warm one."

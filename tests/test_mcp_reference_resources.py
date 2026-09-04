@@ -598,6 +598,33 @@ def test_the_invalid_argument_entry_says_how_to_read_the_fields_the_refusal_name
     assert json.loads(read_text(service, ERROR_URI_PREFIX + "invalid_argument")) == entry
 
 
+def test_the_test_config_invalid_entry_names_the_three_answers_and_their_commands(service: AgenticHILToolService) -> None:
+    """The refusal every plan that does not run lands on, which had no entry (#431).
+
+    A reader who reaches this has written a plan, so they are past setup and have
+    the most to lose by guessing. The entry earns its place by separating the two
+    documents a plan refusal can be about, and by naming the command for each: the
+    plan is corrected against the `configured_*` list, or the configuration is
+    filled in with `adopt-hardware` or written again with `init --force`.
+    """
+    entry = catalogue_entry("test_config_invalid")
+    assert entry is not None
+    said = json.dumps(entry)
+
+    assert "`validation_error`" in said and "`next_step`" in said
+    assert "adopt-hardware" in said and "init --force" in said
+    # The plan reference has to be reachable rather than named, because a reader
+    # over MCP has no source tree to look the format up in.
+    assert TEST_PLAN_URI in said
+    assert read_text(service, TEST_PLAN_URI).strip()
+    # Widening the bench so a foreign plan loads is the wrong fix that looks
+    # right, and this entry is the only place it is named as one.
+    assert entry["do_not"]
+    # And the reference resource serves the same entry, over the connection a
+    # caller with no source tree has.
+    assert json.loads(read_text(service, ERROR_URI_PREFIX + "test_config_invalid")) == entry
+
+
 def test_a_schema_refusal_carries_the_catalogues_fix_in_the_result(service: AgenticHILToolService) -> None:
     """Every tool's schema refusal is built in one place, so it is fixed in one place.
 

@@ -1,6 +1,6 @@
 # Agentic HIL
 
-> Agentic HIL is a hardware-in-the-loop MCP server for AI coding agents. It gives an agent bounded tools to flash, reset and probe a real STM32 or other embedded target, to drive UART and CAN against it, and to read structured reports and logs back, so firmware work is finished on the board rather than at a green build. It runs on Linux, macOS and Windows with Python 3.10 or newer, and the same loop runs headless in CI through its pytest plugin.
+> Agentic HIL is a hardware-in-the-loop MCP server for AI coding agents. It lets an agent develop firmware on the real board: bounded tools to flash, reset and probe the target behind a debug probe, to drive UART and CAN against it, and to read structured reports and logs back, so the run on the hardware is the gate that decides whether the work is done, rather than a green build, and the report that run writes is the evidence a reviewer reads. What it supports is the probe with its backend rather than a board, ST-Link through OpenOCD or the STM32CubeProgrammer CLI and CMSIS-DAP probes through pyOCD, so any board behind such a probe runs the same software. It runs on Linux, macOS and Windows with Python 3.10 or newer, and the same gate runs headless in CI through its pytest plugin.
 
 Install it user-local, with no admin rights. On Linux and macOS, in any shell: `curl -LsSf https://agentic-hil.github.io/install.sh | sh`. On Windows, in PowerShell: `irm https://agentic-hil.github.io/install.ps1 | iex`. Then restart the agent once.
 
@@ -21,3 +21,4 @@ Every hardware action is validated against one authoritative configuration file 
 - [docs/testing.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/testing.md): the test reactor's declarative YAML plans and the pytest plugin that runs the same loop in CI.
 - [docs/safety-model.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/safety-model.md): locks, leases, incidents, quarantine and recovery.
 - [TROUBLESHOOTING.md](https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md): a failure diagnosed by the `error_type` the tool answered with.
+- [docs/support.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/support.md): which platforms and debugger backends are supported, how fast an answer comes, where to ask, and what is deliberately not promised.

@@ -19,6 +19,17 @@ set -eu
 # user on an old package and an old skill at once.
 RELEASE="0.21.2"
 
+# The PATH this run was handed, recorded before anything of ours has prepended to
+# it. Step 3's report is about the operator's own shell, and this script edits
+# PATH for its own use twice on the way there: `user_bin_on_path` puts the user
+# bin in front so a uv it has just fetched resolves for the rest of the run. Step
+# 3 then compared against that edited value, so on the commonest Linux of all,
+# where an externally managed python3 sends the run through uv, it told a reader
+# whose shell has no user bin on PATH that the directory was already on it, and
+# withheld the export line they needed (#430). The report reads this snapshot
+# instead, so it answers for the shell the reader is standing in.
+STARTUP_PATH="$PATH"
+
 AGENT=""
 WITH_AGENT_INSTALL=1
 PINNED=""
@@ -446,6 +457,10 @@ fetch_uv() {
 }
 
 user_bin_on_path() {
+    # For the rest of this run only: a uv just fetched into the user bin has to
+    # resolve for the steps that follow. Step 3 reports from STARTUP_PATH rather
+    # than from this edit, so the edit never becomes a claim about the reader's
+    # own shell.
     PATH="${XDG_BIN_HOME:-$HOME/.local/bin}:$HOME/.local/bin:$PATH"
     export PATH
 }
@@ -870,7 +885,10 @@ report_path() {
         # for the rest of the run: it, not an older agentic-hil earlier on PATH,
         # is what registers the skill and the MCP server.
         AGENTIC_HIL_CMD="$found_dir/agentic-hil"
-        case ":$PATH:" in
+        # STARTUP_PATH, never the live PATH: the live one may already carry this
+        # directory because this run put it there, and saying "already on your
+        # PATH" about our own edit is the claim #430 is about.
+        case ":$STARTUP_PATH:" in
             *":$found_dir:"*)
                 step 3 "PATH: agentic-hil is installed in $found_dir, already on your PATH"
                 ;;

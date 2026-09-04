@@ -105,7 +105,9 @@ Likely cause: OpenOCD (or pyOCD for `type: "pyocd"`, or STM32CubeProgrammer CLI 
 
 Fix: install the debugger tool (`pyocd` comes with the `agentic-hil[pyocd]` extra), then have the operator set `debuggers.<name>.executable` in the authoritative config to an existing host-owned executable outside the workspace. For pyOCD targets beyond the built-ins the CMSIS pack is a second, separate step; see 5a below.
 
-The same `error_type` out of `agentic-hil init`, `agentic-hil debugger-probes` or `agentic-hil adopt-hardware` is about bootstrap discovery rather than a configured entry, and it now means neither toolchain is on the host: discovery uses STM32CubeProgrammer's CLI where it is installed, and otherwise enumerates the ST-Link out of this host's USB serial inventory and drives it with the `openocd` on `PATH`. Installing OpenOCD alone is enough, and is the smaller of the two. The refusal carries `tools_searched`, which says which binaries were looked for and where each resolved.
+The same `error_type` out of `agentic-hil init`, `agentic-hil adopt-hardware`, or `agentic-hil debugger-probes` on a project that has no configuration yet, is about bootstrap discovery rather than a configured entry, and there it means neither toolchain is on the host: discovery uses STM32CubeProgrammer's CLI where it is installed, and otherwise enumerates the ST-Link out of this host's USB serial inventory and drives it with the `openocd` on `PATH`. Installing OpenOCD alone is enough, and is the smaller of the two. That refusal carries `tools_searched`, which says which binaries were looked for and where each resolved, and `discovered_by`, which says which of the two enumerations answered. A `debugger_not_found` from a configured entry is the paragraph above and carries neither: it is about the one executable that entry resolves to.
+
+Once the project has a configuration, `agentic-hil debugger-probes` answers through the configured backend, and on `type: openocd` it lists the attached ST-Link probes from the same USB serial inventory bootstrap reads, with `discovered_by: usb_serial_inventory` on the result. OpenOCD has no probe listing of its own and this one names an ST-Link and nothing else, so an entry whose `interface_cfg` names another adapter is refused `not_supported` and says so, rather than answered with an empty list that would read as no probe attached. An inventory that could not be read at all is `probe_discovery_failed` for the same reason. Nothing here says a word to a board: the ids come from the USB descriptors the probes published to the host, which is the same string OpenOCD's `adapter serial` takes.
 
 ## 5. `debugger_config_not_found`
 
@@ -137,7 +139,11 @@ Installed packs live in `cmsis-pack-manager`'s data directory (`%LOCALAPPDATA%\c
 
 ## 5b. The board was plugged in after `setup` ran
 
-Symptom: the configuration holds `probe_id: null`, `executable: null`, `target.controller: "unknown-controller"` and no `com_ports` entry, and `doctor` skips the debugger check.
+Symptom: the configuration holds `probe_id: null`, `executable: null`, `target.controller: "unknown-controller"` and no `com_ports` entry. `agentic-hil doctor` skips the debugger check, reports the bench as unbound under `Bench binding` and exits non-zero.
+
+That exit code is what it says it is: no test plan can run against this file yet, and a green `doctor` over it used to send a newcomer straight into a refusal from the first plan they wrote. The document carries the same fact in fields a script reads: `bench_binding.ok` is `false`, `bench_binding.unbound` names each device the file declares and does not identify (the `debuggers` section with no toolchain behind it, and each `com_ports` entry with no `device`), `bench_binding.next_step` carries the command, and `unhealthy` lists which checks decided the verdict. A `target.controller` still at the placeholder is reported under `bench_binding.placeholders` and decides nothing: nothing routes through that key, so it refuses no call.
+
+`agentic-hil setup` and `agentic-hil init` run this same check and keep the configuration anyway. Writing that file with nothing attached is what they are for, and rolling it back over the state it was asked to produce would be the worse of the two answers; they report the absent bench in their own headline instead. This is the one `doctor` finding they read and do not act on.
 
 Likely cause: `setup` discovers hardware once. It ran while nothing was attached, so `init` wrote the skeleton with placeholders. That is the ordinary case, because installing the tool and connecting the board are two separate moments. `init` now looks whatever else is in the workspace (it used to look only when the project shipped an `agentic-hil.config.example.yaml`, so on a fresh installation these placeholders could also mean nothing had been looked for), and its result names what discovery answered under `hardware_discovery`. Check that first, because a probe that was attached and refused reads differently from one that was not there.
 
@@ -421,6 +427,27 @@ Which reasons are machine-recoverable is the bench's `recovery.auto_recover` pol
 `reset_halt` drives the board. Set `recovery.auto_recover: "readonly"` if anything on the bench reacts to a target reset. The weakest predicate that can settle the open reason is the one that runs, so a toolchain fault never triggers a reset. Recovery halts the target and never runs it, so control is not handed back to a partially written image. `reset_halt` also degrades to `readonly` when the bound probe lacks `allow_reset`, and a config that never names `recovery.auto_recover` gets the default plus a one-time warning in the report the first time recovery resets the target.
 
 For the operator case, `lease-status` carries a `quarantine_guidance` entry per reason: `attempted` (what was being done when confirmation was lost), `confirmed` (what still holds), `unknown` (the gap that makes a machine answer impossible), and `physical_check` (what to verify on the physical board). Perform the named check, confirm the bench matches, then release it with `agentic-hil recover --confirm-safe-state --quarantine-id <id>` using the current `quarantine_id` (an old incident ID cannot release a newer quarantine). The signature attests exactly that check. An incident recorded by a different Agentic HIL version gets an explicit fallback entry pointing at its own records. If the authoritative config changed since the incident was recorded, recovery refuses with `config_changed` showing both hashes; after verifying the config delta, rerun with the explicit `--accept-config-change` override. The MCP tool takes the same override as `accept_config_change: true`, and both write `config_change_accepted` to the recovery ledger beside both digests.
+
+## 13a. `test_config_invalid`: The Plan Was Refused Before Any Step Ran
+
+Symptom: `agentic-hil test-reactor` or `test_reactor_run` answers `Refused: test_config_invalid` and names one step, for example `Test step references a COM port that is not in the authoritative config`. Nothing was locked, opened or driven.
+
+A plan is one document and the authoritative configuration is another, and this refusal is always the two disagreeing. Read `validation_error` first; it says which of them is wrong.
+
+| What `validation_error` carries | Which document is wrong | What to do |
+|---|---|---|
+| A `field` naming a plan key (`steps[2].action`, `version`), with `allowed_values` or a schema `validator` | The plan | Correct that key. `agentic-hil://reference/test-plan` is the format the plan was validated against, and it is generated out of the shipped schema rather than describing it |
+| A `field` naming a route key (`steps[2].port_id`, `steps[1].debugger`) and a `configured_com_ports`, `configured_can_buses` or `configured_debuggers` list with names in it | The plan | The step names a device this bench does not have. Correct `device:` on the step to one of the listed names |
+| The same, and that `configured_*` list is empty | The configuration | This project declares no such section at all. Attach the board and run `agentic-hil init --force` from the project root |
+| `error_type: com_port_not_bound` and an `unbound_key` | The configuration | The port is declared and its `device` is empty. Section 11 has this case |
+
+Every one of those carries `next_step`, which is the same answer written for the case in front of you, with the name of the key and the command in it. The result also carries the catalogue's `remediation` and `do_not`, the same text `agentic-hil://reference/errors/test_config_invalid` serves.
+
+`init --force` is a reset rather than a repair: it regenerates the whole file from the project profile and the attached hardware, and it takes every narrowed permission, baudrate, `resource_id` and artifact root with it. It names what it reopened in its own result. On a bench whose sections are already there and simply not filled in, `agentic-hil adopt-hardware --apply` is the smaller move and keeps everything else.
+
+Not this: adding a `com_ports`, `can_buses` or `debuggers` entry so that a plan loads. A plan naming a device this bench does not have was written for another bench, and an entry invented to satisfy it points a stimulus at whatever hardware answers to that name. Correct the plan, or bind the bench the plan is for.
+
+Not this either: raising the plan's `version:` to reach a step it refuses. The version says what the plan was written against, and a step that is too new for it is named here rather than failing on an older install with nothing said about why.
 
 ## 14. Upgrading, And Adding `[pyocd]` Or `[can]` Later
 

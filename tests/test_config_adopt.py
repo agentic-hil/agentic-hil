@@ -413,7 +413,14 @@ def test_the_untouched_skeleton_carries_the_board_with_nobody_editing_yaml(tmp_p
     assert document_of(path)["debuggers"]["dut"]["type"] == yaml.safe_load(before)["debuggers"]["dut"]["type"] == "openocd"
 
     checked = doctor()
-    assert checked["ok"] is True, checked
+    # Everything a probe hands over is here, and the one thing it does not is
+    # the debug stack: this entry says `openocd` and the attached toolchain is
+    # STM32CubeProgrammer, so `executable` is still unset and nothing on this
+    # bench can be driven yet. `doctor` reports that rather than green (#433),
+    # and names the section it is about.
+    assert checked["ok"] is False, checked
+    assert checked["unhealthy"] == ["bench_binding"]
+    assert [entry["field"] for entry in checked["bench_binding"]["unbound"]] == ["debuggers"]
     assert checked["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
     assert checked["target"]["controller"] == "stm32f446re"
     assert checked["com_ports"]["dut_uart"]["device"] == "COM9"
