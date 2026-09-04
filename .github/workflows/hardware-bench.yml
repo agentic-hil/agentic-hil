@@ -1,0 +1,163 @@
+# This project's own bench, on a schedule and on request, and never on a pull
+# request.
+#
+# There is deliberately no `pull_request` trigger, and adding one would open the
+# hole this file exists to keep shut. A self-hosted runner executes whatever the
+# checked-out branch says, on a machine with a board wired to it, so a workflow
+# that ran on a fork's pull request would hand a stranger's code that machine.
+# A change reaches this bench by being merged first, where a human has looked at
+# it, and then by the nightly schedule or by a maintainer starting the workflow
+# by hand. `push` is left out for the same reason it is left out of the starter's
+# hardware workflow: a bench is one board and a queue, not a per-commit gate.
+# .github/workflows/ci.yml is the gate; this is the nightly proof on real
+# hardware.
+#
+# The runner is addressed by its labels and by nothing else. No host name, no
+# user, no path and no network address belongs in this file: `self-hosted` says
+# the machine is not a hosted runner, `agentic-hil` says it is a bench, and
+# `nucleo-f446re` says which board it holds, so a plan written for that board
+# never lands on a bench beside it.
+#
+# What the operator sets up once, outside this repository, is docs/ci-examples.md
+# under "What the runner has to provide": the board and the operating-system
+# rights to open its probe and its serial port, the debugger and build
+# toolchains, and Agentic HIL on the runner's PATH. This job installs nothing,
+# upgrades nothing and writes no configuration. A workflow that could write the
+# file that says what the machine may do would be the hole the whole safety
+# model is built around.
+name: Hardware bench
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 03:17 UTC, nightly. An odd minute rather than the top of an hour, which is
+    # when every scheduled workflow on the service asks at once and the queue is
+    # longest.
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+# One bench, one run at a time. The group name is shared with the STM32
+# starter's hardware workflow on purpose: the two repositories drive the same
+# physical board, so their runs have to queue behind each other rather than meet
+# on it. The device locks are machine-wide, so a second run would be refused with
+# `device_busy` naming the holder; this group turns that refusal into a wait.
+# Never `cancel-in-progress: true`: cancelling a run in the middle of a plan is
+# how a board is left half flashed.
+concurrency:
+  group: nucleo-f446re-bench
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: Run the Nucleo-F446RE demo on the bench
+    # A fork inherits this file and its schedule. Without this, a fork's nightly
+    # run would queue forever against labels it has no runner for, and its owner
+    # would be reading a stuck job that was never theirs to run.
+    if: github.repository == 'agentic-hil/agentic-hil'
+    runs-on: [self-hosted, agentic-hil, nucleo-f446re]
+    timeout-minutes: 20
+
+    # Every `run:` step below is about the demo, so the demo directory is the
+    # working directory rather than a `cd` repeated in each step. This reaches
+    # `run:` steps only, which is why the upload paths at the end are spelled
+    # from the workspace root.
+    defaults:
+      run:
+        working-directory: examples/nucleo-f446re_demo
+
+    steps:
+      - name: Check out the commit this run is about
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The bench's own installation answers here, and this job neither installs
+      # it nor moves it: a bench may be deliberately offline, and an installation
+      # a workflow could replace is an installation nobody pinned. The number is
+      # printed so a report can be placed against the release that produced it.
+      - name: Say which Agentic HIL the bench is running
+        run: agentic-hil --version
+
+      # Doctor first, before a plan gets near the board: it resolves the
+      # authoritative configuration for this directory, names the probe and the
+      # port it bound, and spawns the debugger toolchain, so a missing toolchain
+      # or an unreadable bench fails here instead of half way through a plan.
+      #
+      # That configuration is created once, by hand, with `agentic-hil init` run
+      # in this directory in the runner's own checkout, and it lives outside the
+      # workspace. This job never creates it and never edits it: a configuration
+      # bound to another directory is refused rather than reused, and one stored
+      # inside the workspace is refused at load.
+      - name: Report the bench this job is about to drive
+        run: agentic-hil doctor
+
+      - name: Build the demo firmware for the board
+        id: build
+        run: |
+          cmake --preset Debug
+          cmake --build --preset Debug
+
+      # The declared plan, which is the demo's primary path and the one its
+      # README reaches for: flash, open the port with a clean buffer, reset, and
+      # read the boot banner. The reactor validates every device name, permission
+      # and session order before the first hardware action, and closes the UART
+      # session even when a step fails.
+      #
+      # The report is captured from `--json` into its own file, and that file is
+      # what the evidence step below reads. Never
+      # `.agentic-hil/reports/last-report.json`: a plan refused before its first
+      # step writes nothing there, so the shared file would still hold an earlier
+      # run's report and this job would publish it under this run's name.
+      # `--json` is written on every path, a refusal included, and names the plan
+      # it is about.
+      - name: Run the demo's test plan on the board
+        id: plan
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          mkdir -p artifacts/reports
+          agentic-hil test-reactor --test-config testconfig.yaml --json > artifacts/reports/testconfig.json
+
+      # The other way this demo reaches the board, and a different claim from the
+      # plan above: the same four tools driven by hand through the `agentic_hil`
+      # fixture, which the installed distribution registers as a pytest plugin.
+      # A suite green here is a suite a project can embed beside its own tests.
+      # pytest.ini anchors the rootdir to this directory, which is why the demo's
+      # README runs it from here and why this job does too.
+      - name: Run the same loop through the pytest plugin
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: pytest tests/
+
+      # What a reviewer with no access to this bench reads: the outcome, the plan
+      # and its digest, the tool versions, the bench identity by configuration
+      # digest, the failing step with its error type, the same run as prose, and
+      # a copy of the run's event logs. It is built from the report the step
+      # above captured, whatever that run did, because the red run is the one
+      # whose evidence matters most. The command appends its job summary to
+      # `$GITHUB_STEP_SUMMARY` itself, so the readable version of the run is on
+      # the job's own page and nothing here prints it a second time.
+      - name: Collect the evidence for the run
+        if: ${{ !cancelled() && steps.plan.outcome != 'skipped' }}
+        run: agentic-hil run-evidence --report artifacts/reports/testconfig.json --out artifacts/evidence
+
+      # `if: always()` because a cancelled run still leaves what it got as far
+      # as, and `warn` rather than `error` because a job that never reached a
+      # report has already failed for a reason worth reading, and a second
+      # failure from the upload step would sit on top of it.
+      #
+      # These are the workspace mirrors. The canonical, hash-chained copies stay
+      # under the configuration's `state_root` on the bench and are never
+      # uploaded: they are the ledger the mirrors are checked against, and
+      # shipping them to an artifact store would publish the thing they exist to
+      # verify.
+      - name: Upload the run evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nucleo-f446re-bench-evidence
+          path: |
+            examples/nucleo-f446re_demo/artifacts/
+            examples/nucleo-f446re_demo/.agentic-hil/reports/
+            examples/nucleo-f446re_demo/.agentic-hil/logs/
+          if-no-files-found: warn
+          retention-days: 14

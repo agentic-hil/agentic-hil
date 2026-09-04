@@ -210,6 +210,29 @@ looked at it.
   that turns a bench failure green, because a green job that did not test the
   board is the false green the whole product exists to avoid.
 
+## The bench this project runs itself
+
+The two files above are for your bench. This repository runs one of its own,
+`.github/workflows/hardware-bench.yml`, which puts the Nucleo-F446RE demo in
+`examples/nucleo-f446re_demo` on the project's own self-hosted bench every night
+and on manual dispatch, and on no other event: there is no `pull_request`
+trigger, because a self-hosted runner executes whatever the checked-out branch
+says and a fork's pull request must never become code running next to a board. A
+green run is a narrow claim, and it is worth exactly what it says: the demo
+firmware still builds from its committed CMake presets, `agentic-hil doctor`
+still resolves that runner's authoritative configuration and its probe and port,
+the declared plan in `testconfig.yaml` still flashes the image, resets the board
+and reads `Hello World` off the serial line inside its timeout, the same loop
+driven by hand through the pytest plugin still passes so the fixture and the
+reactor have not drifted apart, and `agentic-hil run-evidence` still turns that
+run's report into a bundle a reviewer without the bench can read, uploaded
+whatever the run did. It says nothing about any other board, and it is not a
+pull request gate: `.github/workflows/ci.yml` is the gate, and this is the
+nightly proof on real hardware. The runner is identified in that file by its
+labels alone, the same way the examples above identify yours, and the evidence
+it uploads carries the configuration digest and the logical device names rather
+than any hardware identity.
+
 ## Related
 
 - [The `agentic-hil/run` GitHub Action design](github-action-design.md): the
