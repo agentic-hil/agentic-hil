@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+from evals.install.adapters import REASONING_EFFORTS
 
 WINDOWS_ONLY = pytest.mark.skipif(
     os.name != "nt",
@@ -21,6 +24,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SETUP_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "setup-environment-windows.ps1"
 DOCKER_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "install-docker-windows.ps1"
 LOOP_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "run-install-eval-windows.ps1"
+README = REPOSITORY_ROOT / "evals" / "install" / "README.md"
+
+# `[switch]$DryRun` and `[int]$Repetitions = 2`: the type in front of the name is
+# what a declaration has and a mention in a comment has not.
+PARAMETER_DECLARATION = re.compile(r"\]\$([A-Za-z][A-Za-z0-9]*)")
+# A single leading hyphen, so a Python flag such as `--dry-run` in the same
+# sentence is not read as a PowerShell parameter.
+DOCUMENTED_OPTION = re.compile(r"`-(?!-)([A-Za-z][A-Za-z0-9]*)`")
 
 
 def _windows_powershell() -> Path:
@@ -60,6 +71,84 @@ def _run_script(
         check=False,
         timeout=timeout,
     )
+
+
+def _script_parameters(script: Path) -> set[str]:
+    """Every parameter the script declares, read out of its `param()` block.
+
+    Each declaration carries its type, so the closing bracket in front of the
+    name is what tells a parameter from a variable used in a comment.
+    """
+    source = script.read_text(encoding="utf-8")
+    start = source.index("param(")
+    end = source.index("\n)\n", start)
+    return set(PARAMETER_DECLARATION.findall(source[start:end]))
+
+
+def _documented_options(heading: str) -> set[str]:
+    """Every option the README names in the first list after that heading.
+
+    The list is the run of bullets between "Options:" and the next blank line,
+    so prose further down the section that mentions a flag does not count as
+    documenting it.
+    """
+    readme = README.read_text(encoding="utf-8")
+    marker = "\nOptions:\n"
+    section = readme[readme.index(heading) + len(heading) :]
+    listing = section[section.index(marker) + len(marker) :].strip("\n")
+    if "\n\n" in listing:
+        listing = listing[: listing.index("\n\n")]
+    assert listing.startswith("- `-"), f"{heading} has no option list: {listing[:60]!r}"
+    return set(DOCUMENTED_OPTION.findall(listing))
+
+
+@pytest.mark.parametrize(
+    ("script", "heading"),
+    [
+        (SETUP_SCRIPT, "### Windows prerequisite"),
+        (LOOP_SCRIPT, "## One command on Windows"),
+    ],
+    ids=["setup", "loop"],
+)
+def test_every_windows_script_parameter_is_documented(script: Path, heading: str) -> None:
+    """A parameter nobody can find is a parameter nobody uses.
+
+    Seven of them had accumulated on the evaluation loop script, `-Guide` and
+    `-FromBranch` among them, which are the two that select the target mode: the
+    one-command Windows path documented no way at all to reach the mode a release
+    is judged in. This reads text only, so it holds on every platform rather than
+    on the one where these scripts happen to run.
+    """
+    declared = _script_parameters(script)
+    documented = _documented_options(heading)
+
+    assert not declared - documented, (
+        f"{script.name} declares parameters the README does not document under "
+        f"{heading!r}: {sorted(declared - documented)}"
+    )
+    assert not documented - declared, (
+        f"the README documents options under {heading!r} that {script.name} does "
+        f"not declare: {sorted(documented - declared)}"
+    )
+
+
+def test_the_documented_reasoning_efforts_are_the_ones_the_matrix_accepts() -> None:
+    """One list of levels, stated in three places, that must not drift apart.
+
+    The loader validates against `REASONING_EFFORTS`, the Windows script refuses
+    anything outside its own `-Allowed` list before it writes a matrix, and the
+    README is where somebody reads which levels exist. A level added to the
+    first two and missing from the third is a level nobody asks for.
+    """
+    script = LOOP_SCRIPT.read_text(encoding="utf-8")
+    allowed_start = script.index('-Label "reasoning effort"')
+    allowed = re.findall(r'"([a-z]+)"', script[script.rindex("-Allowed @(", 0, allowed_start) : allowed_start])
+    readme = README.read_text(encoding="utf-8")
+    bullet = readme[readme.index("- `-ReasoningEfforts`") :]
+    documented = re.findall(r"`([a-z]+)`", bullet[: bullet.index(";")])
+
+    assert tuple(allowed) == REASONING_EFFORTS
+    assert tuple(documented) == REASONING_EFFORTS
 
 
 def _copy_setup_fixture(tmp_path: Path) -> tuple[Path, Path]:
