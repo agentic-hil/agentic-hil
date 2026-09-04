@@ -1,5 +1,5 @@
 site_name: Agentic HIL
-site_description: Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, from an AI agent over MCP, gated by one operator-owned policy file.
+site_description: "Develop firmware on the real board behind a debug probe: flash, reset, UART and CAN, from an AI agent over MCP, gated by one operator-owned policy file."
 site_url: https://agentic-hil.readthedocs.io/
 repo_url: https://github.com/agentic-hil/agentic-hil
 repo_name: agentic-hil/agentic-hil

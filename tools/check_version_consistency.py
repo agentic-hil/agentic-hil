@@ -763,7 +763,7 @@ def contract_problems(root: Path) -> list[str]:
         "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
         "name": "io.github.agentic-hil/agentic-hil",
         "title": "Agentic HIL",
-        "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
+        "description": "Develop firmware on the real board behind a debug probe: flash, reset, UART and CAN, policy-gated.",
         "version": version,
         "repository": {
             "url": "https://github.com/agentic-hil/agentic-hil",
@@ -796,7 +796,7 @@ def contract_problems(root: Path) -> list[str]:
         "name": "agentic-hil",
         "displayName": "Agentic Hardware-in-the-Loop",
         "version": version,
-        "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
+        "description": "Develop firmware on the real board behind a debug probe: flash, reset, UART and CAN, policy-gated.",
         "author": {"name": "Hannes Pauli"},
         "repository": "https://github.com/agentic-hil/agentic-hil",
         "license": "Apache-2.0",
@@ -813,7 +813,7 @@ def contract_problems(root: Path) -> list[str]:
             {
                 "name": "agentic-hil",
                 "displayName": "Agentic Hardware-in-the-Loop",
-                "description": "Probe, flash, reset and drive UART and CAN on a real STM32 or other embedded target, policy-gated.",
+                "description": "Develop firmware on the real board behind a debug probe: flash, reset, UART and CAN, policy-gated.",
                 "source": "./plugins/agentic-hil",
                 "version": version,
                 "license": "Apache-2.0",

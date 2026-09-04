@@ -6,7 +6,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/agentic-hil/agentic-hil/ci.yml?branch=master&label=CI)](https://github.com/agentic-hil/agentic-hil/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/agentic-hil/agentic-hil)](LICENSE)
 
-**Your AI agent writes the firmware, flashes it to the board on your desk, drives UART and CAN against it, reads back what the hardware actually did, and fixes what it got wrong; you review the pull request.**
+**Your AI agent writes the firmware, flashes it to the board on your desk, drives UART and CAN against it, reads back what the hardware actually did, and fixes what it got wrong; the run on the real board is what decides whether the work is done, and you review the pull request with that run's evidence in it.**
 
 https://github.com/user-attachments/assets/d19b3b24-0250-4226-91c4-61bea65fa4b2
 
@@ -44,11 +44,11 @@ The plugin carries the skill and nothing else; the MCP server itself still comes
 
 A first command that needs no board, in a clone of this repository: `agentic-hil check-plan examples/nucleo-f446re_demo/testconfig.yaml` answers `All 1 test plan(s) load through the reactor's loader.` and exits 0, having loaded no configuration and touched no hardware.
 
-Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, reports, and logs, all without giving an agent arbitrary host or debugger access. Each project has exactly one authoritative configuration stored outside the repository, out of reach of the agent's own file tools.
+Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that lets a coding agent develop firmware on the real board. It exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, reports, and logs, all without giving an agent arbitrary host or debugger access. The run on the board is the gate: the work is done when the hardware behaved, and the report that run writes is the evidence a reviewer reads. What it supports is the debug probe with its backend rather than a board, ST-Link through OpenOCD or the STM32CubeProgrammer CLI and CMSIS-DAP probes through pyOCD, so any board behind such a probe runs the same software. Each project has exactly one authoritative configuration stored outside the repository, out of reach of the agent's own file tools.
 
 ## Why
 
-A green build is not enough in embedded development: firmware has to behave correctly on the real board. Classic tools automate single steps (flash here, read a log there), but the moment real hardware has to respond, a human is back in the loop. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible.
+A green build is not enough in embedded development: firmware has to behave correctly on the real board, so the run on that board is the gate the work has to pass before it is done. Classic tools automate single steps (flash here, read a log there), but the moment real hardware has to respond, a human is back in the loop, which is what stops an agent from developing firmware through to that gate. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible, and leaves a reviewer nothing to read.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop-dark.svg">
@@ -62,15 +62,15 @@ Agentic HIL closes the gap with a small, auditable gate:
   <img alt="An AI agent or CI reaches Agentic HIL over MCP stdio only. The authoritative configuration, owned by the operator outside the workspace, gates every action. Agentic HIL drives debug probes (OpenOCD, pyOCD, STM32CubeProgrammer), serial ports, and CAN buses shared through the broker, and answers with structured results, reports, and a SHA-256 audit chain." src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/architecture.svg">
 </picture>
 
-Every hardware action is validated against the selected authoritative configuration, executed with timeouts, logged to `.agentic-hil/logs/`, and answered with a structured JSON result (`ok`, `error_type`, `summary`, `likely_causes`, `report_path`, `log_path`) that an agent can act on. What the agent may do at all is per device and per permission, and reaching for a debugger escape hatch is what takes flashing away.
+Every hardware action is validated against the selected authoritative configuration, executed with timeouts, logged to `.agentic-hil/logs/`, and answered with a structured JSON result (`ok`, `error_type`, `summary`, `likely_causes`, `report_path`, `log_path`) that an agent can act on and a reviewer can read afterwards. What the agent may do at all is per device and per permission, and reaching for a debugger escape hatch is what takes flashing away.
 
 ## What it drives
 
-Three debugger backends (OpenOCD, pyOCD, and the STM32CubeProgrammer CLI), plus serial ports and CAN (PCAN, SocketCAN, or a custom bridge; several runs can share one bus), on Linux, macOS, and Windows, Python 3.10 or newer, all CI-tested. The worked example in [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) runs the whole loop on an ST Nucleo-F446RE; [installation](docs/installation.md) has every backend and platform in detail.
+The unit it drives is the probe with its backend, not one board: three debugger backends (OpenOCD, pyOCD, and the STM32CubeProgrammer CLI), plus serial ports and CAN (PCAN, SocketCAN, or a custom bridge; several runs can share one bus), on Linux, macOS, and Windows, Python 3.10 or newer, all CI-tested. The worked example in [examples/nucleo-f446re_demo/](examples/nucleo-f446re_demo/) runs the whole loop on an ST Nucleo-F446RE, the board this repository proves the path on rather than the boundary of what runs; [installation](docs/installation.md) has every backend and platform in detail.
 
 ## The test reactor
 
-One YAML plan drives the whole bench: flash, reset, write, read with a comparator (exact text, a pattern, or a numeric range over a captured value), delays, and sessions that close themselves. Plans name logical devices; the bench configuration binds them to real hardware, so the same plan runs unchanged on every machine that has one. A failing step aborts the run, and the bench recovers itself: reap, reset into halt, probe, all attested in the run result. [How plans work.](docs/testing.md)
+A plan is how the gate is written down, and one YAML plan drives the whole bench: flash, reset, write, read with a comparator (exact text, a pattern, or a numeric range over a captured value), delays, and sessions that close themselves. Plans name logical devices; the bench configuration binds them to real hardware, so the same plan runs unchanged on every machine that has one. A failing step aborts the run, and the bench recovers itself: reap, reset into halt, probe, all attested in the run result. [How plans work.](docs/testing.md)
 
 ## Security by construction
 

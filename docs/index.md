@@ -1,12 +1,16 @@
 # Agentic HIL
 
-Agentic HIL is an MCP stdio server for safe embedded firmware development
-against local hardware-in-the-loop targets: narrow tools for probing,
+Agentic HIL is an MCP stdio server that lets a coding agent develop firmware
+safely on the real board behind a debug probe: narrow tools for probing,
 flashing, resetting, serial and CAN stimulus and feedback, and structured
-reports, all gated by one authoritative bench configuration.
+reports, all gated by one authoritative bench configuration. The run on the
+board is what decides whether the work is done, and the report it writes is
+what a reviewer reads. The supported unit is the probe with its backend rather
+than a board, so any board behind such a probe runs the same software.
 
 Start with [Installation](installation.md) (two commands and a first real run
-on a Nucleo-F446RE), then bind your bench in [Configuration](configuration.md).
+on a Nucleo-F446RE, the reference this path is proved on), then bind your bench
+in [Configuration](configuration.md).
 The repository's [README](https://github.com/agentic-hil/agentic-hil#readme) is the
 short tour; the pages here carry the depth:
 
