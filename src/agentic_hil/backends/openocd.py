@@ -242,6 +242,13 @@ class OpenOCDBackend:
         identity rules exist to refuse. The result says which enumeration
         answered under `discovered_by`, so a caller never has to infer it.
 
+        The inventory reaches an ST-Link only through the virtual COM port a V2-1
+        or a V3 publishes, so a standalone ST-LINK/V2 and any probe with no VCP
+        are outside what it can see. A reading that turns up no ST-Link at all is
+        therefore reported `complete: false` rather than as a finished empty
+        listing, because "nothing on the serial bus" is not "no probe attached"
+        for probes this enumeration cannot observe.
+
         Nothing is contacted either way: this reads a USB descriptor listing and
         says nothing to a board."""
         tool = "debugger_probes_list"
@@ -279,6 +286,39 @@ class OpenOCDBackend:
                 **NOT_CONTACTED,
             }
         probe_ids = usb_stlink_probe_ids(inventory)
+        stlink_ports = usb_stlink_ports(inventory)
+        if not probe_ids and not stlink_ports:
+            # No ST-Link is on the serial bus at all: not one that published a
+            # serial to name it, and not one that published a VCP without a
+            # serial. This enumeration reaches an ST-Link only through the virtual
+            # COM port a V2-1 or a V3 exposes, so a standalone ST-LINK/V2, and any
+            # probe OpenOCD drives that publishes no VCP, never enter it. An empty
+            # reading here is therefore not proof no probe is attached, and
+            # answering `probes: []` as a finished count would say "no probe"
+            # about hardware this method cannot observe -- the false negative that
+            # made this worse than the old `not_supported` (round 0, finding 2).
+            # The reading itself succeeded, so `ok` stays true, but `complete` is
+            # false and the summary names the blind spot so a caller never reads
+            # it as an empty bench.
+            return {
+                "ok": True,
+                "tool": tool,
+                "backend": self.backend_name,
+                "discovered_by": DISCOVERED_BY_USB_INVENTORY,
+                "probes": [],
+                "stlink_ports": [],
+                "complete": False,
+                "interface_cfg": interface_cfg,
+                "summary": (
+                    "No ST-Link with a virtual COM port is on this host's USB serial inventory, and that inventory is "
+                    "the only enumeration behind this listing. It reaches an ST-Link only through the VCP a V2-1 or a "
+                    "V3 publishes, so a standalone ST-LINK/V2 -- or any probe OpenOCD drives that exposes no virtual "
+                    "COM port -- would not appear here even if it is attached: this is not proof no probe is "
+                    "connected. Read the id off the probe or the adapter vendor's own tool, or check "
+                    "`agentic-hil com-ports`."
+                ),
+                **NOT_CONTACTED,
+            }
         return {
             "ok": True,
             "tool": tool,
@@ -289,12 +329,16 @@ class OpenOCDBackend:
             # that published no serial. An empty `probes` beside a listed port is
             # a probe that is there and cannot be named, which is a different
             # fact from no probe at all.
-            "stlink_ports": usb_stlink_ports(inventory),
+            "stlink_ports": stlink_ports,
+            # There is at least one ST-Link on the serial bus anchoring this
+            # answer, so it is not the blind empty reading above. It still sees an
+            # ST-Link only through the VCP it publishes, which the summary says.
+            "complete": True,
             "interface_cfg": interface_cfg,
             "summary": (
                 f"{len(probe_ids)} connected debugger probe(s) read from this host's USB serial inventory. OpenOCD has "
                 "no probe listing of its own, so the ids come from the USB descriptors the probes published and nothing "
-                "was said to a board."
+                "was said to a board. The inventory sees an ST-Link only through the virtual COM port it publishes."
             ),
             **NOT_CONTACTED,
         }

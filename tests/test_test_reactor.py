@@ -425,9 +425,15 @@ def test_a_step_naming_a_port_this_bench_declares_none_of_says_what_to_do(tmp_pa
     assert validation["configured_com_ports"] == []
     next_step = validation["next_step"]
     assert "`com_ports`" in next_step
+    # Emptiness is not read as proof the configuration is what is wrong: the more
+    # common reading, that the plan is for another bench, is offered first and
+    # regeneration only where the project profile is meant to carry the kind.
+    assert "another bench" in next_step
     assert "agentic-hil init --force" in next_step
-    # And it says what that command costs, because it replaces the file.
+    # And it says what that command costs, because it replaces the file: a reset,
+    # not a repair.
     assert "narrowed permission" in next_step
+    assert "reset rather than a repair" in next_step
     assert service.calls == []
 
 
@@ -1580,8 +1586,15 @@ def test_preflight_rejects_a_can_bus_the_config_does_not_declare(tmp_path: Path)
     result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
 
     assert result["ok"] is False
-    assert result["validation_error"]["field"] == "steps[0].bus_id"
-    assert result["validation_error"]["configured_can_buses"] == ["dut_can"]
+    validation = result["validation_error"]
+    assert validation["field"] == "steps[0].bus_id"
+    assert validation["configured_can_buses"] == ["dut_can"]
+    # Adoption has no CAN half, so a CAN refusal must not send the reader to
+    # `adopt-hardware` for a fill it cannot perform; the adapter and channel are
+    # written by hand instead (round 0, finding 1).
+    next_step = validation["next_step"]
+    assert "adopt-hardware" not in next_step
+    assert "adapter and channel" in next_step
     assert service.calls == []
 
 

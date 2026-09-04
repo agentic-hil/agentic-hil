@@ -1183,10 +1183,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "A step naming a device the configuration does not declare is corrected in the plan: `device:` has to be "
             "one of the names the refusal lists under the `configured_*` key for that kind.",
             "A bench that genuinely has no such entry is filled in rather than argued with. With the board attached, "
-            "`agentic-hil adopt-hardware --apply` fills a declared entry's hardware in; where the section is empty "
-            "because `agentic-hil init` ran with no bench attached, `agentic-hil init --force` from the project root "
-            "writes the file again from the project profile and the hardware it finds. `--force` replaces the whole "
-            "file, every narrowed permission included, so it is a reset rather than a repair.",
+            "`agentic-hil adopt-hardware --apply` fills a declared debugger or COM-port entry's hardware in; adoption "
+            "has no CAN half, so a `can_buses` entry's adapter and channel are written by hand. Where the section is "
+            "empty because `agentic-hil init` ran with no bench attached, `agentic-hil init --force` from the project "
+            "root writes the file again from the project profile and the hardware it finds. `--force` replaces the "
+            "whole file, every narrowed permission included, so it is a reset rather than a repair.",
             "A `field` naming a plan key rather than a device is a plan the schema rejects. "
             "`{test_plan_reference}` is what it was validated against; it reads the shipped schema rather than "
             "describing it, so the version that admits a step is in the same table as the step.",
@@ -1279,8 +1280,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "target_not_detected:openocd": ErrorRemedy(
         meaning="OpenOCD reached the debug adapter but no target answered on the selected transport.",
         remediation=(
-            "Confirm the probe enumerates at all: call debugger_probes_list. An empty list means the probe is missing, "
-            "not the target.",
+            "Confirm the probe enumerates at all: call debugger_probes_list. On OpenOCD it reads this host's USB "
+            "serial inventory, which sees an ST-Link only through the virtual COM port it publishes; a result carrying "
+            "`complete: false` found no such ST-Link, but a standalone ST-LINK/V2 with no VCP would not appear there, "
+            "so read the id off the probe before concluding it is missing.",
             "Check `debuggers.<name>.target_cfg` names the MCU family on the board. The default `target/stm32f4x.cfg` "
             "covers STM32F4 only.",
             "Check `debuggers.<name>.interface_cfg` matches the probe: `interface/stlink.cfg` for an on-board ST-Link.",

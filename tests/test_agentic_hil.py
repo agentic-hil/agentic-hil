@@ -3389,10 +3389,18 @@ def test_doctor_reports_every_named_debugger_and_its_permissions(tmp_path: Path,
 
     result = doctor()
 
-    assert result["ok"] is True
+    # `probe_b` names no toolchain, so it is a placeholder. A real `dut_a` beside
+    # it no longer hides it: the binding check reports each declared debugger, so
+    # the bench is not fully bound and `doctor` says so (round 0, finding 3).
+    assert result["ok"] is False
+    assert result["bench_binding"]["ok"] is False
+    assert [entry["field"] for entry in result["bench_binding"]["unbound"]] == ["debuggers"]
+    assert result["bench_binding"]["unbound"][0]["entries"] == ["probe_b"]
+    # The report still names every declared debugger and its permissions, which
+    # is what this test is about.
     assert sorted(result["debuggers"]) == ["dut_a", "probe_b"]
     assert result["debuggers"]["probe_b"]["probe_id"] is not None
-    # Two probes, so nothing is bound and every grant is still denied.
+    # Two probes, so nothing is session-bound and every grant is still denied.
     assert all(entry["bound"] is False for entry in result["debuggers"].values())
     assert result["debuggers"]["dut_a"]["permissions"]["allow_flash"] is False
 
@@ -3419,8 +3427,15 @@ def test_doctor_says_a_bench_nobody_plugged_a_board_into_cannot_run_a_plan(tmp_p
     assert report["unhealthy"] == ["bench_binding"]
     binding = report["bench_binding"]
     assert binding["ok"] is False
+    # The placeholder debugger `init` writes is the unbound device, reported per
+    # entry (round 0, finding 3) and naming the key that fills it.
     assert [entry["field"] for entry in binding["unbound"]] == ["debuggers"]
-    assert "no test plan can run" in binding["unbound"][0]["summary"]
+    assert binding["unbound"][0]["entries"] == ["dut"]
+    assert "flash, reset, probe or open a debug session" in binding["unbound"][0]["summary"]
+    assert "debuggers.dut.executable" in binding["unbound"][0]["summary"]
+    # "No plan can run" is the verdict's claim, and true here because nothing on
+    # this bench is bound -- not a property pinned on the debugger device.
+    assert "no test plan can run" in binding["summary"]
     # The command, on the result and in the headline a caller that keeps only
     # `summary` is left with.
     assert "adopt-hardware" in binding["next_step"]
@@ -3521,6 +3536,65 @@ def test_a_lone_debugger_without_a_probe_id_is_not_called_unbound(tmp_path: Path
     assert report["debuggers"]["dut"]["probe_id"] is None
     assert report["bench_binding"]["ok"] is True, report["bench_binding"]
     assert report["unhealthy"] == []
+
+
+def test_doctor_stays_green_on_a_debugger_free_uart_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty `debuggers` section is not an unbound device (round 0, finding 3).
+
+    A UART-only bench declares no debugger and runs a serial open/close plan with
+    none. The old section-level check called `debuggers: {}` unbound with "no test
+    plan can run", turning `doctor` red on a bench that works and that the schema
+    permits. An empty section declares no debugger device, so there is nothing
+    unbound to report.
+    """
+    workspace = tmp_path / "workspace"
+    config_path = write_authoritative_config(
+        workspace, monkeypatch, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n    baudrate: 115200\n'
+    )
+    document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    document["debuggers"] = {}
+    config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert report["ok"] is True, report
+    assert report["unhealthy"] == []
+    binding = report["bench_binding"]
+    assert binding["ok"] is True
+    assert binding["unbound"] == []
+    assert "not bound to hardware" not in report["summary"]
+    assert "no test plan can run" not in report["summary"]
+
+
+def test_doctor_names_a_placeholder_debugger_beside_a_bound_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A partly bound multi-debugger bench, per device (round 0, finding 3).
+
+    One probe has a real toolchain and a second is a placeholder. The old
+    section-level check saw one bound entry and reported "every device names the
+    hardware behind it", hiding the placeholder. Each entry is its own device, so
+    the placeholder is named though a real probe sits beside it, and the verdict
+    does not claim no plan can run because the bound probe still runs one.
+    """
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debuggers_yaml="debuggers:\n  spare:\n    type: openocd\n    executable: null\n    probe_id: null\n",
+    )
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert "bench_binding" in report["unhealthy"]
+    binding = report["bench_binding"]
+    assert binding["ok"] is False
+    assert [entry["field"] for entry in binding["unbound"]] == ["debuggers"]
+    # Named though the real `dut` sits beside it, and `dut` is not in the list.
+    assert binding["unbound"][0]["entries"] == ["spare"]
+    assert "debuggers.spare.executable" in binding["unbound"][0]["summary"]
+    # The bound probe still runs a plan, so the strong claim is not made.
+    assert "no test plan can run" not in binding["summary"]
 
 
 def test_troubleshooting_describes_the_unbound_doctor_the_way_it_behaves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6519,7 +6593,42 @@ def test_openocd_probe_listing_reads_the_hosts_usb_inventory(tmp_path: Path, mon
     # The port the id was read out of, so an empty listing beside a visible
     # ST-Link cannot be reported as "no probe attached".
     assert result["stlink_ports"][0]["device"] == NUCLEO_VCP_PORT["device"]
+    # A probe was seen on the serial bus, so this is an authoritative answer
+    # rather than the blind empty reading a VCP-less bus would give.
+    assert result["complete"] is True
     # Nothing was said to a board to answer this.
+    assert result["target_contacted"] is False
+    assert result["hardware_state"] == "unchanged"
+
+
+def test_openocd_probe_listing_does_not_read_a_vcp_less_bus_as_an_empty_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A serial inventory cannot see an ST-Link with no VCP (round 0, finding 2).
+
+    A standalone ST-LINK/V2, and any probe OpenOCD drives that publishes no
+    virtual COM port, never enters `serial.tools.list_ports.comports()`. So an
+    inventory that turns up no ST-Link at all is a blind spot, not an empty
+    bench, and answering `ok: true` with a finished `probes: []` would let a
+    caller conclude no probe is attached on the evidence of a reading that could
+    never have seen one. The listing is reported incomplete and names what it did
+    not look at instead.
+    """
+    monkeypatch.setattr(
+        "agentic_hil.backends.openocd.list_available_com_ports",
+        lambda tool: {"ok": True, "tool": tool, "ports": [{"device": "/dev/ttyS0", "name": "ttyS0"}]},
+    )
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+
+    # The reading succeeded, so it is not a discovery failure...
+    assert result["ok"] is True, result
+    assert result["probes"] == []
+    # ...but it is explicitly not authoritative about whether a probe is present.
+    assert result["complete"] is False
+    assert "not proof no probe is connected" in result["summary"]
+    assert "ST-LINK/V2" in result["summary"]
     assert result["target_contacted"] is False
     assert result["hardware_state"] == "unchanged"
 

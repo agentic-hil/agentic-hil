@@ -1036,6 +1036,12 @@ class StepDevice:
     # about a name can say which key to look at rather than leaving the reader to
     # map "COM port" onto `com_ports` themselves.
     config_section: ClassVar[str] = ""
+    # Whether `adopt-hardware` can fill a freshly declared entry of this kind. It
+    # reads a debugger's probe id and a COM port's device off the attached board
+    # and has no CAN half, so a `can_buses` entry's adapter and channel are the
+    # operator's to write and this kind's refusals never send a reader to
+    # adoption to have them filled in.
+    adoption_fills_entries: ClassVar[bool] = True
     # Every action this kind serves, collected from the `@step_action`
     # decorations on the methods that implement them. Derived, never written:
     # `step_actions` is the action → schema projection ACTION_SCHEMAS is built
@@ -1126,30 +1132,54 @@ class StepDevice:
         return cls.unbound_refusal(reactor, location, step, name)
 
     @classmethod
-    def unknown_name_next_step(cls, config: AgenticHILConfig, name: str) -> str:
-        """The one move that answers a step naming an entry nobody configured.
+    def entry_fill_step(cls, name: str) -> str:
+        """How a declared-but-empty entry of this kind gets the hardware behind
+        it, once the reader has decided this bench is meant to carry it.
 
-        The failure this replaces: the refusal said the plan referenced a device
-        that is not in the authoritative config and stopped there, so a reader who
-        had got as far as running a plan was left to work out for themselves which
-        of two entirely different things had happened. Either the plan is for
-        another bench, and the step is what gets corrected, or this bench really
-        has no such entry, and the configuration is what gets filled in. The list
-        of configured names decides which sentence is true here, so the refusal
-        says the true one rather than both."""
+        Only the kinds `adopt-hardware` reads off the board are sent to it; a CAN
+        bus has no adoption half, so its adapter and channel are written by hand
+        rather than the reader being told a command will fill them and finding it
+        cannot."""
+        if cls.adoption_fills_entries:
+            return f"With the board attached, `{ADOPT_HARDWARE_COMMAND}` then fills that entry's hardware in."
+        return (
+            f"Adoption has no CAN half, so fill `{cls.config_section}.{name}`'s adapter and channel in yourself; "
+            "no command reads them off the board for you."
+        )
+
+    @classmethod
+    def unknown_name_next_step(cls, config: AgenticHILConfig, name: str) -> str:
+        """The move that answers a step naming an entry nobody configured.
+
+        The failure this replaces said the plan referenced a device that is not in
+        the authoritative config and stopped there, so a reader who had got as far
+        as running a plan was left to work out which of two things had happened.
+        Either the plan is for another bench, and the step is what gets corrected,
+        or this bench is meant to carry the entry and it has not been filled in.
+
+        Emptiness does not decide which: a plan may name a `com_ports` entry a
+        bench does not have precisely because it was written for another bench,
+        and the catalogue's own `do_not` warns against declaring a device merely
+        to make such a plan load. So the reader is told to check the plan against
+        the bench first, and regeneration is offered only where the project's own
+        profile is meant to declare the kind. `--force` is a reset, not a repair,
+        so what it costs is said where it is named."""
         configured = sorted(cls.config_entries(config))
         if configured:
             return (
                 f"Correct the step to name one of the `{cls.config_section}` entries this project declares "
-                f"({', '.join(configured)}), or declare `{cls.config_section}.{name}` in the authoritative "
-                f"configuration yourself. With the board attached, `{ADOPT_HARDWARE_COMMAND}` then fills that "
-                "entry's hardware in."
+                f"({', '.join(configured)}), or, where this bench is meant to carry `{cls.config_section}.{name}`, "
+                f"declare it in the authoritative configuration yourself. {cls.entry_fill_step(name)}"
             )
         return (
             f"This project declares no `{cls.config_section}` at all, so there is no name to correct the step to. "
-            "Attach the board and run `agentic-hil init --force` from the project root, which writes the "
-            "configuration again from the project profile and the hardware it finds. It replaces the whole file, "
-            "every narrowed permission included, so read what it reports before running a plan against it."
+            f"A plan naming a `{cls.config_section}` entry a bench does not have is usually a plan written for "
+            "another bench: check it against the bench you mean to run it on, and point the step at the right one. "
+            f"Only where this project's own profile is meant to declare a `{cls.config_section}` is the "
+            "configuration what is missing; then attach the board and run `agentic-hil init --force` from the "
+            "project root, which writes the configuration again from the project profile and the hardware it finds. "
+            "It replaces the whole file, every narrowed permission included, so it is a reset rather than a repair: "
+            "read what it reports before running a plan against it."
         )
 
     @classmethod
@@ -1787,6 +1817,9 @@ class CanRunner(SessionDevice):
     configured_field: ClassVar[str] = "configured_can_buses"
     unknown_name_summary: ClassVar[str] = "Test step references a CAN bus that is not in the authoritative config."
     config_section: ClassVar[str] = "can_buses"
+    # `adopt-hardware` has no CAN half: a bus's adapter and channel are written by
+    # hand, so a refusal about a CAN name does not send the reader to adoption.
+    adoption_fills_entries: ClassVar[bool] = False
     session_noun: ClassVar[str] = "CAN bus"
     not_owned_error: ClassVar[str] = "can_session_not_owned"
     not_owned_summary: ClassVar[str] = "A test plan cannot close a CAN bus session it did not open."

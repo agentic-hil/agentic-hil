@@ -4627,17 +4627,28 @@ def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
     that had never been bound, with nothing in the green report to have warned
     them.
 
-    Two facts decide the verdict, each a device this file declares and does not
-    identify, and each refusing by itself:
+    The verdict is built per declared device, never per section (round 0,
+    finding 3). Each device this file declares and does not identify refuses by
+    itself:
 
-    * every configured debugger is a placeholder, so nothing here can flash,
-      reset, probe or open a debug session, and no plan runs at all;
-    * a `com_ports` entry names no device, so every step that opens it is
-      refused `com_port_not_bound`.
+    * each configured debugger that is a placeholder names no toolchain, so
+      nothing can flash, reset, probe or open a debug session on it;
+    * each `com_ports` entry that names no device is refused `com_port_not_bound`
+      by every step and every COM tool call that opens it.
 
-    Together they are unhealthy the way `state_root` is: a bench that cannot run
-    the thing this tool exists to run is not a healthy bench, and the exit code
-    is the one signal a provisioning script reads.
+    Section-level logic answered both wrong. It called an empty `debuggers`
+    section unbound though a UART-only or CAN-only plan runs with no debugger at
+    all, and it hid a placeholder debugger sitting beside a real one because the
+    section held at least one bound entry. An empty debugger section declares no
+    debugger device, so there is no unbound debugger to report; a placeholder
+    entry is an unbound device wherever it sits.
+
+    Together the unbound devices are unhealthy the way `state_root` is: a bench
+    with a device it cannot reach is not a healthy bench, and the exit code is the
+    one signal a provisioning script reads. Whether *no* plan at all can run is a
+    separate, stronger fact -- true only when nothing here is bound -- and the
+    headline says it only then, because a bench with one bound COM port runs a
+    UART plan past every placeholder debugger it declares.
 
     `target.controller` at the skeleton's own placeholder is reported beside
     them, under `placeholders`, and decides nothing. Nothing routes through it,
@@ -4648,24 +4659,23 @@ def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
     no probe id (see the `debugger-backends` reference): it has no second entry
     to be confused with, so demanding one would call the documented Nucleo bench
     broken. The state an unset `probe_id` actually arrives in is a placeholder
-    entry, which the first rule already catches."""
+    entry, which the debugger rule already catches through its executable."""
     unbound: list[JsonObject] = []
     # `debugger_is_placeholder`, not `debugger_drives_hardware`: the second
     # also reads the permissions, and a bench narrowed to nothing is a policy
     # decision rather than an unbound device. The question here is only
-    # whether this entry has a toolchain and an identity behind it.
-    bound = [name for name, entry in config.debuggers.items() if not debugger_is_placeholder(entry)]
-    if config.debuggers and not bound:
+    # whether this entry has a toolchain and an identity behind it. Asked of each
+    # entry, so a placeholder beside a real probe is still reported.
+    placeholder_debuggers = sorted(name for name, entry in config.debuggers.items() if debugger_is_placeholder(entry))
+    if placeholder_debuggers:
         unbound.append({
             "field": "debuggers",
-            "entries": sorted(config.debuggers),
+            "entries": placeholder_debuggers,
             "summary": (
-                "No configured debugger has a toolchain behind it, so nothing here can flash, reset, probe or open a "
-                "debug session, and no test plan can run."
+                f"{len(placeholder_debuggers)} declared debugger(s) name no toolchain, so nothing can flash, reset, "
+                "probe or open a debug session on them: " + ", ".join(f"debuggers.{name}.executable" for name in placeholder_debuggers)
             ),
         })
-    if not config.debuggers:
-        unbound.append({"field": "debuggers", "entries": [], "summary": "This configuration declares no debugger at all, so no test plan can run."})
     unbound_ports = sorted(port_id for port_id, port in config.com_ports.items() if com_port_is_unbound(port))
     if unbound_ports:
         unbound.append({
@@ -4691,7 +4701,24 @@ def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
         })
     if not unbound and not placeholders:
         return {"ok": True, "field": "bench_binding", "unbound": [], "placeholders": [], "summary": "Every device this configuration declares names the hardware behind it."}
+    # Whether any declared device is bound at all. "No test plan can run" is the
+    # strong claim the old section-level check made unconditionally and got wrong:
+    # a bench with one bound COM port runs a UART plan though every debugger it
+    # declares is a placeholder, and a CAN bus is written by hand so any declared
+    # one is bound. The sentence belongs only to the state where nothing here is
+    # bound -- the just-installed file #433 exists to catch.
+    can_run_a_plan = (
+        any(not debugger_is_placeholder(entry) for entry in config.debuggers.values())
+        or any(not com_port_is_unbound(port) for port in config.com_ports.values())
+        or bool(config.can_buses)
+    )
     stated = [*(str(entry["summary"]) for entry in unbound), *(str(entry["summary"]) for entry in placeholders)]
+    if not unbound:
+        lead = "This configuration still carries what `init` writes when nothing is attached: "
+    elif not can_run_a_plan:
+        lead = "This configuration describes a bench that is not bound to hardware, so no test plan can run against it yet: "
+    else:
+        lead = "This configuration describes a bench with a device that is not bound to hardware: "
     return {
         # The verdict is about devices, and only about devices: a placeholder in
         # the description is reported without deciding anything.
@@ -4699,15 +4726,13 @@ def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
         "field": "bench_binding",
         "unbound": unbound,
         "placeholders": placeholders,
-        "summary": (
-            ("This configuration describes a bench that is not bound to hardware: " if unbound else "This configuration still carries what `init` writes when nothing is attached: ")
-            + " ".join(stated)
-        ),
+        "summary": lead + " ".join(stated),
         "next_step": (
             f"Attach the board and run `{ADOPT_HARDWARE_COMMAND}`, which fills the identity keys that are still unset "
-            "from the attached hardware and leaves everything a person has set alone. Where the file was written before "
-            "the project had a profile at all, `agentic-hil init --force` writes it again from the project profile and "
-            "the hardware it finds; that one replaces the whole file, every narrowed permission included."
+            "in the declared entries from the attached hardware and leaves everything a person has set alone. Where the "
+            "file was written before the project had a profile at all, `agentic-hil init --force` writes it again from "
+            "the project profile and the hardware it finds; that one replaces the whole file, every narrowed permission "
+            "included."
         ),
     }
 
