@@ -2201,6 +2201,10 @@ def test_a_plan_naming_an_unbound_port_is_refused_by_the_port_not_by_the_plan(tm
         service.close()
 
     assert refused["ok"] is False
+    # The whole result, not only the finding nested in it: a caller branching on
+    # `error_type` reads the top level, and `test_config_invalid` there says the
+    # plan is the thing to correct.
+    assert refused["error_type"] == "com_port_not_bound"
     validation = refused["validation_error"]
     assert validation["error_type"] == "com_port_not_bound"
     assert validation["port_id"] == "dut_uart"
