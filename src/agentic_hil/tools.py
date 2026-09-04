@@ -2536,7 +2536,11 @@ def _project_config_create(
         # is not the same as free, though: this enumerates probes and connects to
         # one, so on a configured server it goes in under that server's own
         # coordinator.
-        discovery, refusal, unaudited = discover_for_generation(current, coordinator, generation_bench=generation_bench)
+        # `GENERATED_PROJECT_PROFILE` is repository-controlled data and names no
+        # controller, so over MCP the target is still read off the board or left
+        # unnamed; a workspace profile does not decide it here, exactly as it
+        # decides no permission here.
+        discovery, refusal, unaudited = discover_for_generation(current, coordinator, generation_bench=generation_bench, profile=GENERATED_PROJECT_PROFILE)
         if refusal is not None:
             return refusal
         if not overall_success(discovery):
@@ -2720,6 +2724,7 @@ def discover_for_generation(
     reason_prefix: str = "config_create",
     frontend: str = "mcp",
     generation_bench: BenchMutex | None = None,
+    profile: JsonObject | None = None,
 ) -> tuple[JsonObject, JsonObject | None, str | None]:
     """Read what is attached, holding everything a probe read holds.
 
@@ -2795,7 +2800,7 @@ def discover_for_generation(
     if current is None:
         # No third answer here: the caller handed the None and already holds a
         # better reason than this function could invent for it.
-        return (*_discover_without_policy(tool=tool, frontend=frontend), None)
+        return (*_discover_without_policy(tool=tool, frontend=frontend, profile=profile), None)
     unusable = generation_audit_barrier(current)
     if unusable is not None:
         # The configuration loads and its `state_root` is the broken thing that a
@@ -2835,11 +2840,11 @@ def discover_for_generation(
         # in) the read still refuses a live holder; it just does not span the
         # write, which is the pre-existing behaviour.
         aliases = configured_device_resources(current)
-        return (*_discover_without_policy(tool=tool, frontend=frontend, resources=aliases, bench=generation_bench), unusable.error_type)
+        return (*_discover_without_policy(tool=tool, frontend=frontend, resources=aliases, bench=generation_bench, profile=profile), unusable.error_type)
     if coordinator is None:
         owned = HardwareCoordinator(current, frontend=frontend)
         try:
-            discovery, refusal = _discover_under_lease(current, owned, tool=tool, reason_prefix=reason_prefix)
+            discovery, refusal = _discover_under_lease(current, owned, tool=tool, reason_prefix=reason_prefix, profile=profile)
         finally:
             # Closing hands back the project lock and leaves any incident this
             # read raised persisted, so the next owner adopts it rather than
@@ -2851,7 +2856,7 @@ def discover_for_generation(
         if refusal is None and cleanup_error is not None:
             return {}, _lock_cleanup_refusal(cleanup_error, tool), None
         return discovery, refusal, None
-    return (*_discover_under_lease(current, coordinator, tool=tool, reason_prefix=reason_prefix), None)
+    return (*_discover_under_lease(current, coordinator, tool=tool, reason_prefix=reason_prefix, profile=profile), None)
 
 
 def generation_audit_barrier(current: AgenticHILConfig) -> ConfigError | None:
@@ -2911,7 +2916,7 @@ def _regeneration_moves_state_root(current: AgenticHILConfig) -> bool:
     return os.path.normcase(str(replacement)) != os.path.normcase(str(current.state_root))
 
 
-def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] | None = None, bench: BenchMutex | None = None) -> tuple[JsonObject, JsonObject | None]:
+def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] | None = None, bench: BenchMutex | None = None, profile: JsonObject | None = None) -> tuple[JsonObject, JsonObject | None]:
     """Bootstrap discovery with machine-wide physical exclusion but no lease.
 
     Two callers, and both read the board with no `state_root` to record a lease
@@ -2982,7 +2987,7 @@ def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] |
                 return refusal
             return None
 
-        discovery = discover_attached_hardware(before_connect=before_connect)
+        discovery = discover_attached_hardware(before_connect=before_connect, profile=profile)
         if refused:
             return {}, refused
         return discovery, None
@@ -3031,7 +3036,7 @@ def _lock_cleanup_refusal(error: Exception, tool: str) -> JsonObject:
     }
 
 
-def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator, *, tool: str, reason_prefix: str) -> tuple[JsonObject, JsonObject | None]:
+def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator, *, tool: str, reason_prefix: str, profile: JsonObject | None = None) -> tuple[JsonObject, JsonObject | None]:
     resources = [key for name in current.debuggers for key in configured_probe_resource(current, name)]
     return discover_under_hardware_lease(
         current,
@@ -3039,6 +3044,7 @@ def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordi
         tool=tool,
         reason_prefix=reason_prefix,
         resources=resources,
+        profile=profile,
     )
 
 

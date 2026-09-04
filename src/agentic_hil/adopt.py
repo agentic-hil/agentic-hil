@@ -56,7 +56,7 @@ from typing import Any
 
 import yaml
 
-from agentic_hil.bootstrap import discover_attached_hardware, port_device_name
+from agentic_hil.bootstrap import discover_attached_hardware, load_project_profile, port_device_name
 from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, ConfigError
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
@@ -776,6 +776,11 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
         reason_prefix="adopt",
         resources=configured_resources,
         probe_id=requested_probe,
+        # The same profile `agentic-hil init` reads, from the same workspace.
+        # Adoption's whole job is to fill in what `init` could not, so a bench
+        # whose board is named by its project profile must not be a board this
+        # path cannot name either.
+        profile=load_project_profile(workspace),
     )
     if refusal is not None:
         return {**refusal, "path": str(target_path), "workspace_root": existing.workspace_root}
@@ -986,6 +991,7 @@ def discover_under_hardware_lease(
     reason_prefix: str,
     resources: list[str],
     probe_id: str | None = None,
+    profile: JsonObject | None = None,
 ) -> tuple[JsonObject, JsonObject | None]:
     """Read the attached probe holding what a probe read holds.
 
@@ -1010,6 +1016,11 @@ def discover_under_hardware_lease(
       locks are already back, so it raises the incident on the coordinator
       instead: same effect on the next caller, which is that there is no next
       hardware call until an operator resolves it.
+
+    ``profile`` is the workspace's own `agentic-hil.config.example.yaml`, passed
+    straight through: on a host with no STM32CubeProgrammer it is what names the
+    board, so a project that ships one is read without a word being said to the
+    target. It decides nothing else, and nothing at all where that CLI answers.
 
     ``tool`` names the caller in every result and record, and ``reason_prefix``
     names it in a quarantine reason: the callers are `project_config_adopt_hardware`,
@@ -1048,7 +1059,7 @@ def discover_under_hardware_lease(
         return None
 
     try:
-        discovery = discover_attached_hardware(probe_id=probe_id, before_connect=before_connect)
+        discovery = discover_attached_hardware(probe_id=probe_id, before_connect=before_connect, profile=profile)
     except BaseException as error:
         # Fail closed. What reached the board is unknown, so the locks stay taken
         # and an operator (or `agentic-hil recover`) owns the incident.

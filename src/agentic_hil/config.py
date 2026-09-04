@@ -3132,6 +3132,17 @@ def _skeleton_debugger() -> JsonObject:
     return entry
 
 
+def skeleton_debugger_scripts() -> tuple[str, str]:
+    """The interface and target scripts the shipped skeleton names, in that order.
+
+    Read off the skeleton rather than restated, so that bootstrap discovery
+    reaches a board through the same two scripts the entry it is about to write
+    will name. A second copy of the pair is the copy that goes on naming
+    `target/stm32f4x.cfg` after the skeleton has moved on."""
+    entry = _skeleton_debugger()
+    return str(entry.get("interface_cfg") or "interface/stlink.cfg"), str(entry.get("target_cfg") or "target/stm32f4x.cfg")
+
+
 def debugger_is_starter_entry(debugger: DebuggerConfig) -> bool:
     """Whether this is the shipped skeleton entry, untouched in every driving field.
 

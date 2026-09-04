@@ -275,8 +275,16 @@ def _no_host_stm32_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
     installed on the machine running the suite and connect to whatever is plugged
     into it: passing on a bare CI container and doing real hardware I/O on a
     developer's bench. A test that wants a toolchain patches this name itself, and
-    that patch runs after this one."""
+    that patch runs after this one.
+
+    Both toolchains, because discovery has two ways in. With no
+    STM32CubeProgrammer it enumerates ST-Link probes out of the host's USB serial
+    inventory and drives them with OpenOCD, so a suite that hid only ST's CLI
+    would take the fallback path on any machine with `openocd` on PATH and the
+    skeleton path everywhere else: the same assertions answering differently per
+    developer, which is what this fixture exists to prevent."""
     monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: None)
+    monkeypatch.setattr("agentic_hil.bootstrap.find_openocd", lambda: None)
 
 
 @pytest.fixture(autouse=True)

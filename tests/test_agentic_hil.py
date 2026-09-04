@@ -244,9 +244,9 @@ def test_setup_headline_names_a_discovery_failure_that_is_not_an_absent_bench(
 ) -> None:
     """#416, refined: not every placeholder means the bench is absent.
 
-    The default run here has no STM32CubeProgrammer -- the autouse fixture hides
-    it -- so discovery fails with `debugger_not_found`, a missing tool and not a
-    missing board. The headline used to answer every such failure with "No
+    The default run here has neither STM32CubeProgrammer nor OpenOCD -- the
+    autouse fixture hides both -- so discovery fails with `debugger_not_found`,
+    a missing tool and not a missing board. The headline used to answer every such failure with "No
     attached bench was found", telling an operator to plug in a board that may
     already be there. It now names what discovery reported, so a green run's most
     prominent line agrees with the reason its `config` step carries."""
@@ -260,20 +260,21 @@ def test_setup_headline_names_a_discovery_failure_that_is_not_an_absent_bench(
     assert result["ok"] is True, result
     assert result["steps"]["config"]["hardware_discovery"]["error_type"] == "debugger_not_found"
     assert result["steps"]["config"]["summary"].startswith(
-        "Hardware discovery did not configure a bench (STM32CubeProgrammer CLI was not found), so the placeholder"
+        "Hardware discovery did not configure a bench (Neither STM32CubeProgrammer's CLI (STM32_Programmer_CLI) nor "
+        "OpenOCD (openocd) was found on this host"
     )
     # `startswith`, because a run that registered an MCP server appends the
     # restart notice to this same field; what is pinned is the headline itself.
     assert result["summary"].startswith(
         "Agentic HIL project set up. Hardware discovery did not configure a bench "
-        "(STM32CubeProgrammer CLI was not found), so the project configuration written is the placeholder."
+        "(Neither STM32CubeProgrammer's CLI (STM32_Programmer_CLI) nor OpenOCD (openocd) was found on this host"
     )
     # And it does not tell an operator their attached toolchain's board is gone.
     assert "No attached bench was found" not in result["summary"]
     # The nested config step's first next step is matched to the reason too:
     # install the toolchain, not attach a board.
     first_step = result["steps"]["config"]["next_steps"][0]
-    assert "Install STM32CubeProgrammer" in first_step
+    assert "OpenOCD is the smaller of the two" in first_step
     assert "Attach the bench" not in first_step
 
 

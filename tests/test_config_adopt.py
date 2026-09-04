@@ -82,7 +82,7 @@ def attached(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict:
     discovery.update(overrides)
     seen: dict[str, Any] = {}
 
-    def discover(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None) -> dict:
+    def discover(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
         seen["probe_id"] = probe_id
         if discovery.get("ok") is not True:
             return discovery
@@ -850,7 +850,7 @@ def test_nothing_is_read_or_written_while_this_server_holds_hardware(tmp_path: P
     before = path.read_text(encoding="utf-8")
     reached: dict[str, bool] = {}
 
-    def discover(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None) -> dict:  # pragma: no cover - must not run
+    def discover(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:  # pragma: no cover - must not run
         reached["discovery"] = True
         return {"ok": True}
 
@@ -1013,7 +1013,7 @@ def test_a_read_that_raises_quarantines_the_probe_and_shuts_the_path(tmp_path: P
     workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     before = path.read_text(encoding="utf-8")
 
-    def exploding(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None) -> dict:
+    def exploding(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
         if before_connect is not None:
             before_connect(PROBE_SERIAL)
         raise RuntimeError("STM32_Programmer_CLI died mid-connect")
@@ -1225,7 +1225,7 @@ def test_a_key_filled_while_the_probe_was_being_read_is_not_overwritten(tmp_path
     discovery = attached(monkeypatch)
     real = project_config_adopt_hardware.__globals__["discover_attached_hardware"]
 
-    def slow(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None) -> dict:
+    def slow(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
         # Somebody else writes this file while the board is being read.
         meanwhile = document_of(path)
         meanwhile["target"]["controller"] = "stm32f411re"
@@ -1268,7 +1268,7 @@ def test_an_entry_named_like_a_reserved_key_is_still_covered_by_the_document_che
     attached(monkeypatch)
     real = project_config_adopt_hardware.__globals__["discover_attached_hardware"]
 
-    def slow(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None) -> dict:
+    def slow(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
         # The entry is switched to another backend while this board is being
         # read. `type` is not a key adoption carries, so no per-key expectation
         # covers it, and the whole-document comparison is the only thing that can.
