@@ -28,6 +28,14 @@ REPOSITORY_REFERENCE = re.compile(
 )
 INSTALLS_FROM_SOURCE = re.compile(r"git\+https://github\.com/agentic-hil/agentic-hil|--from\s+git\+")
 
+# llms.txt is read on its own, by a fetcher that has no repository around it, so
+# a relative link there resolves to nothing and an absolute one that names a path
+# this repository no longer holds resolves to a 404. The previous llms.txt died
+# of both: bare filenames, and a tool list that had drifted from the code. This
+# gate is what makes the second copy different from the first.
+INDEX_LINK = re.compile(r"\[[^\]]+\]\((?P<url>[^)\s]+)\)")
+REPOSITORY_BLOB = "https://github.com/agentic-hil/agentic-hil/blob/master/"
+
 
 def package_version(root: Path) -> str:
     """The release a pin must name, which is not the version this tree builds.
@@ -54,6 +62,7 @@ def shipped_documents(root: Path) -> list[Path]:
         root / "AGENTS.md",
         root / "SECURITY.md",
         root / "server.json",
+        root / "llms.txt",
     ]
     globbed = [
         *sorted((root / "docs").rglob("*.md")),
@@ -83,12 +92,40 @@ def violations(document: Path, text: str, version: str) -> list[str]:
     return found
 
 
+def index_problems(root: Path) -> list[str]:
+    """Links in llms.txt an external fetcher could not follow.
+
+    Two failures, one gate: a link that is not absolute, which resolves only for
+    a reader who already has the repository open, and an absolute link into this
+    repository naming a path that is no longer here. Links to anywhere else are
+    somebody else's to keep, so they are read for their form and not followed.
+    """
+    index = root / "llms.txt"
+    if not index.is_file():
+        return []
+    found = []
+    for match in INDEX_LINK.finditer(index.read_text(encoding="utf-8")):
+        url = match.group("url")
+        if not url.startswith(("https://", "http://")):
+            found.append(f"llms.txt links {url}, which resolves only inside a checkout")
+            continue
+        if not url.startswith(REPOSITORY_BLOB):
+            continue
+        relative = url[len(REPOSITORY_BLOB) :]
+        if not relative or ".." in relative.split("/") or relative.startswith("/"):
+            found.append(f"llms.txt links {url}, which is not a path in this repository")
+        elif not (root / relative).is_file():
+            found.append(f"llms.txt links {url}, and {relative} is not in this repository")
+    return found
+
+
 def main(argv: list[str] | None = None) -> int:
     root = Path(argv[0]) if argv else Path(__file__).resolve().parents[1]
     version = package_version(root)
     found = []
     for document in shipped_documents(root):
         found.extend(violations(document, document.read_text(encoding="utf-8"), version))
+    found.extend(index_problems(root))
     for problem in found:
         print(problem, file=sys.stderr)
     return 1 if found else 0

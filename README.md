@@ -2,14 +2,11 @@
 
 <!-- mcp-name: io.github.agentic-hil/agentic-hil -->
 
-**Your AI agent can develop firmware on its own, because Agentic HIL closes the loop with real hardware.**
+**Your AI agent writes the firmware, flashes it to the board on your desk, drives UART and CAN against it, reads back what the hardware actually did, and fixes what it got wrong; you review the pull request.**
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop-dark.svg">
-  <img alt="The Agentic HIL loop: build, flash, stimulate, observe, then diagnose and fix, closing back onto build. Flash and stimulate write to the real board on your bench; observe reads back from it. Your agent runs the loop unattended; you review the pull request." src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop.svg">
-</picture>
+https://github.com/user-attachments/assets/d19b3b24-0250-4226-91c4-61bea65fa4b2
 
-Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, reports, and logs, all without giving an agent arbitrary host or debugger access. Each project has exactly one authoritative configuration stored outside the repository, out of reach of the agent's own file tools.
+Nothing in that run is staged. One restart after the install line, in a freshly created firmware project, the first sentence makes the agent set the bench up itself and the second makes the board say Hello World and prove it said it: the configuration is created over MCP with the permissions reported out loud, the firmware is written on the spot, `flash_firmware` and `com_read` go through the gate, the twelve bytes come back off the wire, and the plan it pins is run once green and once against a wrong expectation, because a test that cannot fail proves nothing. What remains in the project afterwards is the plan as a reviewable file and the run's own report: lease released, safe state confirmed, nothing quarantined.
 
 ## Install
 
@@ -25,52 +22,28 @@ curl -LsSf https://agentic-hil.github.io/install.sh | sh
 irm https://agentic-hil.github.io/install.ps1 | iex
 ```
 
-**Windows**, from `cmd.exe` or the Run box:
+One line installs the package user-local and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
 
-```cmd
-powershell -c "irm https://agentic-hil.github.io/install.ps1|iex"
-```
+[The STM32 starter](https://github.com/agentic-hil/stm32-starter) is the shortest way to watch that happen on hardware: three steps on a Nucleo-F446RE, with the firmware, the test plans and one planted defect already in place.
 
-One line installs the package user-local (through `uv` where it exists, `pip --user` otherwise) and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository: no project configuration is written, no shell profile is edited. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
+Claude Code can also take the skill from the plugin marketplace:
+`/plugin marketplace add agentic-hil/agentic-hil`, then `/plugin install agentic-hil@agentic-hil`.
+The plugin carries the skill and nothing else; the MCP server itself still comes from the install line above, which registers a verified absolute executable path outside your repository.
 
-The same line is also the repair line: run it again on a machine that already has Agentic HIL and it reinstalls in place, which is the way back when `agentic-hil upgrade` itself fails.
+[Installation](docs/installation.md) has every other path: the `cmd.exe` spelling, the repair run (the same line again, which reinstalls in place when `agentic-hil upgrade` itself fails), reading and checksumming the script from a release before running it, registering one agent instead of all of them, driving your own package manager, `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend. [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
 
-Prefer to read before you run? Take the script and its SHA-256 from the same release, check one against the other, and run the file you checked:
-
-```bash
-curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh
-curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh.sha256
-sha256sum -c install.sh.sha256 && sh install.sh
-```
-
-```powershell
-iwr -OutFile install.ps1 https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1
-iwr -OutFile install.ps1.sha256 https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1.sha256
-if ((Get-FileHash install.ps1).Hash -eq (-split (Get-Content install.ps1.sha256))[0]) { .\install.ps1 }
-```
-
-The one-line form above installs from the default branch, which is where a fix lands first; this form installs the release, which is the pair a checksum can speak for.
-
-Pass `--agent claude-code` (or `codex`, `opencode`) to register one agent instead of all of them, `--help` for the rest; piped, that reads `| sh -s -- --agent claude-code`. If you would rather drive your own package manager, the same two halves by hand:
-
-```bash
-uv tool install "agentic-hil[can]"               # or: pip install --user "agentic-hil[can]"
-agentic-hil agent-install --agent claude-code    # or: codex / opencode
-```
-
-[Installation](docs/installation.md) has `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend; [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
-
-### It proves itself on the board
-
-One restart after the install line, in a freshly created firmware project: the first sentence makes the agent set the bench up itself, the second makes the board say Hello World and prove it said it.
-
-https://github.com/user-attachments/assets/d19b3b24-0250-4226-91c4-61bea65fa4b2
-
-Nothing in that run is staged: the configuration is created over MCP with the permissions reported out loud, the firmware is written on the spot, `flash_firmware` and `com_read` go through the gate, the twelve bytes come back off the wire, and the plan it pins is run once green and once against a wrong expectation, because a test that cannot fail proves nothing. What remains in the project afterwards is the plan as a reviewable file and the run's own report: lease released, safe state confirmed, nothing quarantined.
+Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, reports, and logs, all without giving an agent arbitrary host or debugger access. Each project has exactly one authoritative configuration stored outside the repository, out of reach of the agent's own file tools.
 
 ## Why
 
-A green build is not enough in embedded development: firmware has to behave correctly on the real board. Classic tools automate single steps (flash here, read a log there), but the moment real hardware has to respond, a human is back in the loop. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible. Agentic HIL closes the gap with a small, auditable gate:
+A green build is not enough in embedded development: firmware has to behave correctly on the real board. Classic tools automate single steps (flash here, read a log there), but the moment real hardware has to respond, a human is back in the loop. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop-dark.svg">
+  <img alt="The Agentic HIL loop: build, flash, stimulate, observe, then diagnose and fix, closing back onto build. Flash and stimulate write to the real board on your bench; observe reads back from it. Your agent runs the loop unattended; you review the pull request." src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop.svg">
+</picture>
+
+Agentic HIL closes the gap with a small, auditable gate:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/architecture-dark.svg">

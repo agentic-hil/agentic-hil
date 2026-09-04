@@ -1,0 +1,23 @@
+# Agentic HIL
+
+> Agentic HIL is a hardware-in-the-loop MCP server for AI coding agents. It gives an agent bounded tools to flash, reset and probe a real STM32 or other embedded target, to drive UART and CAN against it, and to read structured reports and logs back, so firmware work is finished on the board rather than at a green build. It runs on Linux, macOS and Windows with Python 3.10 or newer, and the same loop runs headless in CI through its pytest plugin.
+
+Install it user-local, with no admin rights. On Linux and macOS, in any shell: `curl -LsSf https://agentic-hil.github.io/install.sh | sh`. On Windows, in PowerShell: `irm https://agentic-hil.github.io/install.ps1 | iex`. Then restart the agent once.
+
+Every hardware action is validated against one authoritative configuration file that lives outside the repository, out of reach of the agent's own file tools. That file is the operator's: it names the bench's devices and grants each permission per device, and an action it does not grant is refused rather than performed.
+
+## Start here
+
+- [AI_AGENT_QUICKSTART.md](https://github.com/agentic-hil/agentic-hil/blob/master/AI_AGENT_QUICKSTART.md): the install and first-run path written for an agent, with the complete fallback chain.
+- [STM32 starter](https://github.com/agentic-hil/stm32-starter): a Nucleo-F446RE project with firmware, three test plans and one planted defect, so the whole loop runs in three steps.
+- [README.md](https://github.com/agentic-hil/agentic-hil/blob/master/README.md): what the product is, the install line, and the short tour of what it drives.
+
+## Reference
+
+- [docs/installation.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/installation.md): every install path, the optional extras, upgrading, and the platform and debugger backends.
+- [docs/configuration.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/configuration.md): what the authoritative configuration declares, who may change it, and how a permission is granted or narrowed.
+- [docs/mcp-tools.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/mcp-tools.md): the complete MCP tool surface and how one run is composed from it.
+- [docs/mcp-hosts.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/mcp-hosts.md): registering the stdio server in Claude Code, Codex, opencode, VS Code and JetBrains.
+- [docs/testing.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/testing.md): the test reactor's declarative YAML plans and the pytest plugin that runs the same loop in CI.
+- [docs/safety-model.md](https://github.com/agentic-hil/agentic-hil/blob/master/docs/safety-model.md): locks, leases, incidents, quarantine and recovery.
+- [TROUBLESHOOTING.md](https://github.com/agentic-hil/agentic-hil/blob/master/TROUBLESHOOTING.md): a failure diagnosed by the `error_type` the tool answered with.
