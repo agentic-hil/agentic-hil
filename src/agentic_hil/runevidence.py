@@ -24,12 +24,40 @@ every string that does reach an output is swept for the values the report itself
 says are identities. A busy device is named by the logical name its plan gave
 it, never by the `probe:<serial>` the mutex took.
 
+**A credential is withheld the same way, and by the same code as everywhere
+else.** `print_json` and `emit_result` are the two ways a result leaves this
+process, and both pass it through `redact_sensitive` first. This is a third sink
+for the same documents, and the one whose files a CI system publishes, so the
+report takes that same function before anything is mapped off it, and the same
+fail-closed rule with it: a redaction that hands back something other than a
+document is the one case that step exists for, so the bundle becomes a refusal
+built from this command's name and no field of the report rather than the report
+nothing vouched for.
+
+That pass masks by key name (`token`, `password`, `api_key`) and content-scans
+the captured streams a report carries, and it deliberately does not scan prose,
+because in an operator's terminal a false positive eats the diagnosis instead of
+a credential. But prose is exactly what reaches these two documents: what a
+reviewer reads of a failed step is the sentence the backend wrote, and a backend
+writes the URL it fetched from and the header it sent. So every string on its way
+into either document takes the content pass too, the same `redact_stream_text`
+those streams take, and the trade-off is decided the other way here for a
+reason: this sink is not a terminal, only the credential span is replaced so the
+decisive sentence still reads, and the unmasked words are still in the collected
+log for whoever is allowed to read those. The identity sweep then runs on top of
+both, because it covers what neither of them can: a path, a serial and a lock key
+are not secret-named and are not credential-shaped, and no key name or pattern
+would find them.
+
 The logs are the exception and the reason is the same rule read the other way.
 They are copied, not derived, and copied byte for byte: a backend writes its own
 command line into its own log, and a mirror this command had edited could never
 be checked against the hash-chained copy under `state_root`, which is the only
-thing that makes the mirror worth uploading. So the summaries carry no identity
-and the collected evidence is what the run recorded.
+thing that makes the mirror worth uploading. A secret a backend printed into its
+own log therefore stays there, and that is the log's problem to fix where it is
+written rather than this command's to paper over; it is also why the two
+summaries are the half of the bundle written to be read by anyone. So the
+summaries carry no identity and the collected evidence is what the run recorded.
 
 **Nothing is invented.** A field the environment did not supply is absent rather
 than empty or guessed: a run outside CI has no `firmware` block at all, and a
@@ -56,6 +84,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from agentic_hil import __version__
 from agentic_hil.config import ConfigError, to_posix
 from agentic_hil.junit import run_refusal
+from agentic_hil.knowledge import REDACTION_UNAVAILABLE_ERROR
+from agentic_hil.redact import redact_sensitive, redact_stream_text
 from agentic_hil.report import overall_success
 from agentic_hil.test_reactor import (
     flatten_steps,
@@ -68,6 +98,13 @@ from agentic_hil.types import JsonObject
 
 RUN_EVIDENCE_TOOL = "run_evidence"
 
+# The command as an operator types it. The redaction refusal is built from this
+# and from nothing else, so it is spelled here rather than taken off a caller:
+# a GitLab job and an operator at a shell reach this code through the same
+# command, and a refusal that named whoever called it would be naming a caller
+# instead of the sink that withheld the bundle.
+RUN_EVIDENCE_COMMAND = "run-evidence"
+
 # The three files, named once. A workflow uploads the directory, so the names
 # are part of the contract with whoever reads the bundle afterwards.
 RUN_SUMMARY_FILENAME = "run-summary.json"
@@ -77,6 +114,15 @@ LOGS_DIRECTORY_NAME = "logs"
 # Where a GitHub job's summary is appended. Set by the runner, so its presence
 # is what says the job summary has a second destination beside the file.
 STEP_SUMMARY_ENV = "GITHUB_STEP_SUMMARY"
+
+# What both documents say when the redaction did not hand back a document. One
+# sentence, used verbatim in the JSON and in the Markdown, so a reviewer reading
+# the job page and a consumer parsing the summary are told the same thing.
+REDACTION_UNAVAILABLE_SUMMARY = (
+    "This evidence was not written from the run report. Redacting the report did not produce a document, so nothing "
+    "can say its secret-named values were replaced, and the unredacted report is not what gets published instead. "
+    "No field of the report is in this bundle and no event log was collected."
+)
 
 # What replaces an identity that reached a string on its way out. Redacted, not
 # removed: a reader has to be able to see that something was withheld exactly
@@ -122,11 +168,22 @@ def write_run_evidence(report_path: str, out_dir: str, *, workspace: str | Path 
     The verdict is about the evidence, not about the run: a job whose plan
     failed still wrote its evidence correctly, and a step that went red because
     the run did would make `if: always()` impossible to reason about. The run's
-    own verdict is `outcome`, on this result and in both documents.
+    own verdict is `outcome`, on this result and in both documents. A redaction
+    that cannot vouch for the report is the one thing that does turn this
+    verdict red, and it is not an exception to that rule but the same rule: the
+    evidence is what failed, so the bundle says so and the step says so.
     """
     root = Path(workspace).resolve() if workspace is not None else Path.cwd().resolve()
     environment = dict(environ) if environ is not None else dict(_os_environ())
-    report = _read_report(report_path)
+    # Redacted first, and everything below reads the redacted document: the
+    # summaries are mapped from it, the identity sweep is read off it, and the
+    # logs are collected by the `log_path` fields it carries. Redaction touches
+    # none of those three (no path field is secret-named), so the mapping is
+    # unchanged and only the secret-shaped values differ.
+    redacted = redact_sensitive(_read_report(report_path))
+    if not isinstance(redacted, dict):
+        return _redaction_refusal(Path(out_dir).expanduser(), environment)
+    report = redacted
     excluded = excluded_values(report, root)
     plan = _plan_of(report, root)
     summary = run_summary(report, root, environment, plan=plan, excluded=excluded)
@@ -176,6 +233,57 @@ def _evidence_summary(outcome: str, logs: JsonObject, step_summary: str | None) 
             "another workspace; those paths are identities this command does not publish, and the files were not collected."
         )
     return sentence
+
+
+def _redaction_refusal(out: Path, environment: Mapping[str, str]) -> JsonObject:
+    """The bundle a report the redaction could not vouch for leaves behind.
+
+    Written rather than raised, because these files are what a workflow's
+    `if: always()` upload step collects and a bundle that is simply missing
+    reads as a step that never ran; the reviewer gets the statement instead, in
+    both documents and on the job page where the summary is appended.
+
+    Every byte of it comes from this command's own name. Carrying over one field
+    of the report, even one that reads as harmless, would be the fail-open
+    branch again in a smaller shape: what is not known here is precisely which
+    of that report's values the redaction would have replaced. `outcome` is
+    deliberately absent from `run-summary.json` for the same reason, and it is
+    also what stops a consumer reading a refusal as a run that ended somehow.
+
+    No log is collected either, and that is not a second rule: the report is the
+    index that names them, and the index is the document nothing vouched for.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    refusal: JsonObject = {
+        "ok": False,
+        "tool": RUN_EVIDENCE_TOOL,
+        "error_type": REDACTION_UNAVAILABLE_ERROR,
+        "command": RUN_EVIDENCE_COMMAND,
+        "summary": REDACTION_UNAVAILABLE_SUMMARY,
+    }
+    summary_path = out / RUN_SUMMARY_FILENAME
+    summary_path.write_text(json.dumps(refusal, indent=2) + "\n", encoding="utf-8")
+    document = (
+        f"## Agentic HIL: {RUN_EVIDENCE_COMMAND}\n\n"
+        f"**Outcome:** {REDACTION_UNAVAILABLE_ERROR}\n\n"
+        f"{REDACTION_UNAVAILABLE_SUMMARY}\n"
+    )
+    job_summary_path = out / JOB_SUMMARY_FILENAME
+    job_summary_path.write_text(document, encoding="utf-8")
+    logs_path = out / LOGS_DIRECTORY_NAME
+    logs_path.mkdir(parents=True, exist_ok=True)
+    step_summary = _append_step_summary(document, environment)
+    result: JsonObject = {
+        **refusal,
+        "out": str(out),
+        "run_summary_path": str(summary_path),
+        "job_summary_path": str(job_summary_path),
+        "logs_path": str(logs_path),
+        "logs_copied": [],
+    }
+    if step_summary is not None:
+        result["step_summary_path"] = step_summary
+    return result
 
 
 def _os_environ() -> Mapping[str, str]:
@@ -693,12 +801,24 @@ def _scrubbed(value: object, excluded: frozenset[str], workspace: Path) -> objec
 
 
 def _scrub(text: str, excluded: frozenset[str], workspace: Path) -> str:
-    """One string with every identity taken out of it, wherever it sat.
+    """One string with every credential and every identity taken out of it.
 
-    Longest first, so a value that contains another does not leave the shorter
-    one's tail behind. The path sweep runs afterwards and catches the shape
-    rather than the value: an absolute path a backend printed inside a sentence
-    was never a field, so nothing could have collected it by name."""
+    The credential pass first, over the string as the backend wrote it, because
+    `redact_stream_text` matches shapes rather than names -- a URL with userinfo,
+    an `Authorization: Bearer` line, a `token=` assignment -- and it has to see
+    the original bytes to find them. `redact_sensitive` on the report cannot
+    reach these: the strings that arrive in either document arrive under
+    `summary`, `route` and `action`, and it never content-scans a prose key.
+    This is the one place in the project that decides that trade-off the other
+    way, and it is decided by the sink: the file goes to an artifact store, only
+    the credential span is replaced so the failing step's own sentence still
+    reads, and the unmasked words remain in the collected log.
+
+    Then the identities, longest first, so a value that contains another does not
+    leave the shorter one's tail behind. The path sweep runs last and catches the
+    shape rather than the value: an absolute path a backend printed inside a
+    sentence was never a field, so nothing could have collected it by name."""
+    text = redact_stream_text(text)
     for value in sorted(excluded, key=len, reverse=True):
         if value and value in text:
             text = text.replace(value, WITHHELD)

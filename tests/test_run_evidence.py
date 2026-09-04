@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from conftest import FAKE_OPENOCD, write_authoritative_config
 
+from agentic_hil import runevidence
 from agentic_hil.cli import entrypoint
 from agentic_hil.config import ConfigError
 from agentic_hil.runevidence import WITHHELD, write_run_evidence
@@ -31,6 +32,15 @@ OPENOCD_EXECUTABLE = "C:\\tools\\openocd-0.12.0\\bin\\openocd.exe"
 CONFIG_PATH = "C:\\Users\\operator\\AppData\\Roaming\\agentic-hil\\config.yaml"
 FOREIGN_LOG = "/home/runner/other-workspace/.agentic-hil/logs/com-20260901-090000-dut_uart.jsonl"
 LOCK_KEYS = [f"probe:{PROBE_SERIAL}", "com:COM7", "can:pcan:PCAN_USBBUS1"]
+
+# The credentials, which are not identities: nothing in the report says these
+# are secret, so only the redaction the other two sinks apply finds them. One of
+# each shape it knows, spelled the way a tool prints them.
+INDEX_PASSWORD = "s3cr3t-index-password"
+INDEX_URL = f"https://ci-bot:{INDEX_PASSWORD}@packages.example.com/simple/"
+BEARER_TOKEN = "gh0_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+BEARER_HEADER = f"Authorization: Bearer {BEARER_TOKEN}"
+STEP_TOKEN = "gh0_Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2"
 
 PLAN_TEXT = (
     "version: 3\n"
@@ -334,6 +344,46 @@ def test_every_excluded_value_planted_in_a_report_is_absent_from_all_three_outpu
     document = (tmp_path / "evidence" / "job-summary.md").read_text(encoding="utf-8")
     assert "The board sent nothing within 5000 ms" in document
     assert WITHHELD in document
+
+
+def test_a_credential_planted_in_a_report_is_masked_in_both_documents(tmp_path: Path) -> None:
+    """The three credential shapes, in the places a report really carries them.
+
+    An identity is a value the report names as one; a credential is not, and no
+    field list would find it, which is why it takes the redaction the other two
+    sinks apply rather than the sweep above. The masking is what a reviewer can
+    check: the account, the host and the header's scheme word survive, and the
+    sentence they sit in is still the sentence the backend wrote.
+
+    `run-summary.json` is a copy-by-name mapping and carries no prose at all, so
+    its assertion here is an absence: the credential has no field to arrive
+    under, and this pins that adding one would not change that.
+    """
+    write_logs(tmp_path)
+    report = failed_report(tmp_path)
+    report["steps"][2]["result"]["token"] = STEP_TOKEN
+    report["steps"][2]["result"]["summary"] = (
+        f"The board sent nothing within 5000 ms; the image was fetched from {INDEX_URL} with {BEARER_HEADER}, token={STEP_TOKEN}"
+    )
+    report["recovery"]["summary"] = f"The board was reset after re-fetching from {INDEX_URL}"
+
+    _result, summary, document = evidence(tmp_path, report)
+
+    published = outputs(tmp_path)
+    assert INDEX_PASSWORD not in published
+    assert BEARER_TOKEN not in published
+    assert STEP_TOKEN not in published
+    assert INDEX_PASSWORD not in json.dumps(summary)
+    assert BEARER_TOKEN not in json.dumps(summary)
+    assert STEP_TOKEN not in json.dumps(summary)
+    # Only the credential span goes. What is left is what the sentence was for.
+    assert "The board sent nothing within 5000 ms" in document
+    assert "ci-bot:[redacted]@packages.example.com" in document
+    assert "Authorization: Bearer [redacted]" in document
+    assert "token=[redacted]" in document
+    # Every free-text field of the two documents, not just the failing step's.
+    assert "The board was reset after re-fetching from" in document
+    assert document.count("ci-bot:[redacted]@packages.example.com") == 2
 
 
 def test_a_busy_device_is_named_by_its_logical_name_and_never_by_its_lock_key(tmp_path: Path) -> None:
@@ -717,6 +767,86 @@ def test_the_evidence_step_stays_green_when_the_run_it_reports_was_red(
 
     assert exit_code == 0
     assert json.loads(capsys.readouterr().out)["outcome"] == "refused"
+
+
+@pytest.mark.parametrize("answer", [None, ["ok", "token", "hunter2"]])
+def test_a_redaction_that_answers_with_no_document_withholds_the_whole_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: object,
+) -> None:
+    """The case the guard exists for, and the case that must publish nothing.
+
+    Forced rather than provoked, exactly as the two other sinks pin it:
+    `redact_sensitive` answers a document with a document, so no report's own
+    contents can reach this branch, and it is precisely the branch in which the
+    report must not be written out. The three files are still written, because
+    they are what a workflow's `if: always()` step uploads and a missing bundle
+    reads as a step that never ran, but every byte of them comes from the
+    command's own name.
+    """
+    write_logs(tmp_path)
+    report = failed_report(tmp_path)
+    report["steps"][2]["result"]["token"] = STEP_TOKEN
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    monkeypatch.setattr(runevidence, "redact_sensitive", lambda value: answer)
+
+    result = write_run_evidence(str(report_path), str(tmp_path / "evidence"), workspace=tmp_path, environ={})
+
+    out = tmp_path / "evidence"
+    summary = json.loads((out / "run-summary.json").read_text(encoding="utf-8"))
+    document = (out / "job-summary.md").read_text(encoding="utf-8")
+    # The command's own verdict, so the step that wrote a refusal is red.
+    assert result["ok"] is False
+    assert result["error_type"] == "redaction_unavailable"
+    assert result["command"] == "run-evidence"
+    # The same refusal in both documents, and no run outcome in either: a
+    # consumer must not be able to read this as a run that ended somehow.
+    assert summary["ok"] is False
+    assert summary["error_type"] == "redaction_unavailable"
+    assert summary["command"] == "run-evidence"
+    assert "outcome" not in summary
+    assert "redaction_unavailable" in document
+    assert "was not written from the run report" in document
+    # Not one field of the report, in either of them or in the result.
+    published = "\n".join([json.dumps(summary), document, json.dumps(result)])
+    for value in (STEP_TOKEN, PROBE_SERIAL, OPENOCD_EXECUTABLE, CONFIG_PATH, "nucleo-f446re-hello-world", "uart_expect_timeout", "dut_uart", "The board sent nothing"):
+        assert value not in published
+    # The logs are named by the report, and the report is what nothing vouched
+    # for, so the directory is there and empty.
+    assert result["logs_copied"] == []
+    assert list((out / "logs").iterdir()) == []
+
+
+def test_a_withheld_bundle_fails_the_command_closed_and_is_still_on_the_job_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """End to end: the exit code, and the second destination the summary has.
+
+    The evidence step's verdict is about the evidence, and here the evidence is
+    what failed, so this is the one thing that turns it red. A reviewer looking
+    at the job page has to find the statement there rather than an empty space
+    where the run's table usually is.
+    """
+    write_logs(tmp_path)
+    step_summary = tmp_path / "runner" / "step-summary.md"
+    step_summary.parent.mkdir(parents=True)
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(failed_report(tmp_path), indent=2), encoding="utf-8")
+    monkeypatch.setattr(runevidence, "redact_sensitive", lambda value: None)
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(step_summary))
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = entrypoint(["run-evidence", "--report", str(report_path), "--out", "evidence", "--json"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["error_type"] == "redaction_unavailable"
+    assert "redaction_unavailable" in step_summary.read_text(encoding="utf-8")
+    assert "The board sent nothing" not in step_summary.read_text(encoding="utf-8")
 
 
 def test_a_real_reactor_run_maps_to_the_evidence_a_reviewer_reads(
