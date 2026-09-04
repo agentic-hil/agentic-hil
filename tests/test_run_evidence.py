@@ -243,6 +243,60 @@ def test_a_refused_report_produces_the_same_three_outputs_with_outcome_refused(t
     assert summary["bench"]["devices"] == {"debuggers": ["dut"], "com_ports": ["dut_uart"], "can_buses": ["dut_can"]}
 
 
+def test_a_refused_plan_after_a_green_one_gets_its_own_evidence(tmp_path: Path) -> None:
+    """The CI loop's central promise, as a regression on the report each plan feeds.
+
+    A plan refused before its first step, or refused for having no configuration
+    at all, writes nothing to the shared `.agentic-hil/reports/last-report.json`,
+    so a loop that fed that file to `run-evidence` after the refusal published
+    the *previous* plan's report under the refused plan's name. Both examples now
+    capture each run's `--json` report into its own file and build the evidence
+    from that, so the two bundles are modelled here as two separate report files:
+    a green nominal run, then a diagnostic plan refused at preflight, the refusal
+    document `test-reactor --json` emits and which now names the plan it was
+    about. The refused plan's bundle must be its own refusal, and nothing of the
+    green run may reach it.
+    """
+    write_logs(tmp_path)
+
+    nominal = tmp_path / "nominal.testconfig.yaml"
+    nominal.write_text(PLAN_TEXT.replace("nucleo-f446re-hello-world", "nucleo-f446re-nominal"), encoding="utf-8")
+    green = green_report(tmp_path)
+    green["name"] = "nucleo-f446re-nominal"
+    green["test_config_path"] = str(nominal)
+
+    diagnostic = tmp_path / "diagnostic.testconfig.yaml"
+    diagnostic.write_text(PLAN_TEXT.replace("nucleo-f446re-hello-world", "nucleo-f446re-diagnostic"), encoding="utf-8")
+    # The document a bench with no configuration answers with, captured verbatim:
+    # no report was ever written to disk, but `--json` carries it and names the
+    # plan, which is what lets the bundle be the diagnostic plan's own.
+    refusal = {
+        "ok": False,
+        "tool": "test_reactor",
+        "error_type": "config_file_not_found",
+        "summary": "No Agentic HIL configuration was found for this workspace.",
+        "test_config_path": "diagnostic.testconfig.yaml",
+    }
+
+    _green_result, green_summary, _green_doc = evidence(tmp_path, green, out="evidence/nominal")
+    refused_result, refused_summary, refused_doc = evidence(tmp_path, refusal, out="evidence/diagnostic")
+
+    # The nominal plan's bundle is the green run's.
+    assert green_summary["outcome"] == "success"
+    assert green_summary["plan"]["name"] == "nucleo-f446re-nominal"
+
+    # The refused plan's bundle is its own refusal and names its own plan.
+    assert refused_result["ok"] is True
+    assert refused_summary["outcome"] == "refused"
+    assert refused_summary["plan"]["path"] == "diagnostic.testconfig.yaml"
+    assert refused_summary["plan"]["name"] == "nucleo-f446re-diagnostic"
+    assert "config_file_not_found" in refused_doc
+    # Nothing of the green run leaked into it: not its outcome, not its name.
+    assert refused_summary["plan"]["name"] != green_summary["plan"]["name"]
+    assert "nucleo-f446re-nominal" not in refused_doc
+    assert "success" not in refused_summary["outcome"]
+
+
 def test_a_stopped_run_is_a_failure_and_not_a_refusal(tmp_path: Path) -> None:
     # A stop reached the bench and closed it cleanly, so it must not be read as
     # a run that never started; the JUnit mapping draws the same line.

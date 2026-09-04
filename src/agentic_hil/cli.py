@@ -93,7 +93,7 @@ from agentic_hil.report import overall_success
 from agentic_hil.runevidence import write_run_evidence
 from agentic_hil.runlifecycle import request_run_stop, run_status
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH
+from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, flatten_steps, load_test_config
 from agentic_hil.tools import (
     AgenticHILToolService,
     UnprovisionedToolService,
@@ -260,7 +260,14 @@ def entrypoint(argv: list[str] | None = None) -> int:
     if isinstance(result, int):
         return result
     if result is not None:
-        emit_result(result, command, human=human)
+        # A result whose secret-named values redaction could not vouch for is a
+        # result neither sink published, so it fails the command closed however
+        # the original result would have scored: an exit 0 over a rendering
+        # refusal would tell a caller the command succeeded and left them a
+        # document, when what it left is the statement that there is no document.
+        withheld = emit_result(result, command, human=human)
+        if withheld:
+            return 1
         return 0 if result_succeeded(result) else 1
     return 0
 
@@ -282,26 +289,34 @@ def human_readable_output(command: str, *, json_requested: bool) -> bool:
     return command not in PROTOCOL_COMMANDS and not json_requested
 
 
-def emit_result(result: JsonObject, command: str | None, *, human: bool) -> None:
+def emit_result(result: JsonObject, command: str | None, *, human: bool) -> bool:
     """Print one result document, as the machine document or as prose.
 
-    The machine half goes through `print_json` untouched, which is what keeps it
-    byte-identical. The human half redacts through the same function first, so a
-    rendering can never publish a secret-named value the document would have
-    replaced.
+    Returns whether the result was withheld: `True` when redaction could not
+    vouch for it and a `redaction_unavailable` refusal was emitted in its place,
+    so the caller can fail the command closed rather than exit successfully over
+    a result nobody printed.
 
-    A redaction that hands back something other than a document is the one case
-    that second step exists for, and it is exactly the case in which the
-    original must not be printed: rendering it would publish the values nothing
-    has vouched for. So the fallback fails closed and the rendering gets the
-    refusal below instead, never the result.
+    Both sinks redact through `redact_sensitive`, and both fail closed on the
+    same condition, because redaction is the last step before a result leaves
+    this process by either of them. A redaction that hands back something other
+    than a document is the one case that step exists for, and it is exactly the
+    case in which the original must not be printed: rendering it, or dumping it,
+    would publish the values nothing has vouched for. The machine half used to be
+    the exception -- it dumped whatever redaction returned, `null` or a list
+    included -- so a caller told to retry with `--json` met the same failure in a
+    shape it could not read. Now the human half renders the refusal and the
+    machine half dumps it, the two stay byte-identical on the path that works,
+    and neither publishes the result the redaction could not clear.
     """
     if not human:
-        print_json(result)
-        return
+        return print_json(result, command)
     redacted = redact_sensitive(result)
-    document = redacted if isinstance(redacted, dict) else redaction_unavailable(command)
-    write_rendered(sys.stdout, render_result(document, command))
+    if not isinstance(redacted, dict):
+        write_rendered(sys.stdout, render_result(redaction_unavailable(command), command))
+        return True
+    write_rendered(sys.stdout, render_result(redacted, command))
+    return False
 
 
 def redaction_unavailable(command: str | None) -> JsonObject:
@@ -461,6 +476,12 @@ def build_parser() -> argparse.ArgumentParser:
     test_schema_parser.add_argument("--output", default=None)
     test_schema_parser.add_argument("--force", action="store_true")
 
+    check_plan_parser = subparsers.add_parser(
+        "check-plan",
+        help="load each named test plan through the reactor's own loader and say whether it holds, without a configuration and without touching hardware: the same duplicate-key rejection, non-finite-number rejection and plan-version feature gates the bench would apply, so a plan this accepts is one the reactor can load. Exit is nonzero if any plan is refused. This is the loadability check a hosted simulator job runs; a schema-only reader passes plans the reactor then refuses",
+    )
+    check_plan_parser.add_argument("plans", nargs="+", metavar="PLAN", help="one or more test plan paths inside this workspace")
+
     mcp_config_parser = subparsers.add_parser("mcp-config", help="print or write project .mcp.json for MCP client discovery")
     mcp_config_parser.add_argument("--output", default=None)
     mcp_config_parser.add_argument("--force", action="store_true")
@@ -566,6 +587,8 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return schema(args.output, args.force)
     if args.command == "test-schema":
         return test_schema(args.output, args.force)
+    if args.command == "check-plan":
+        return check_plan(args.plans)
     if args.command == "mcp-config":
         return mcp_config(args.output, args.force)
     if args.command == "skill-install":
@@ -2901,6 +2924,12 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
     try:
         config = load_authoritative_config(Path.cwd())
     except ConfigError as error:
+        # Name the plan the operator asked to run, so the refusal document a CI
+        # job captures for a bench with no configuration says which plan it is
+        # about. The evidence bundle reads `test_config_path`, and this refusal
+        # comes before any configuration exists, so it is the only place that
+        # value can be attached to it.
+        error.details.setdefault("test_config_path", test_config_path or DEFAULT_TEST_CONFIG_PATH)
         write_refusal_junit_xml(junit_xml, {"tool": "test_reactor", **error.to_dict()})
         raise
     return run_plan(config, test_config_path, wait_s=wait_s, run_handle=run_handle, junit_xml=junit_xml)
@@ -2994,6 +3023,48 @@ def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
 
 
 test_schema.__test__ = False  # type: ignore[attr-defined] - keep pytest from collecting the CLI helper
+
+
+def check_plan(plans: list[str]) -> JsonObject:
+    """Load each plan through the reactor's own loader and report whether it holds.
+
+    The hosted simulator job's one job is to establish that every plan in the
+    repository is one the reactor can load, and a schema-only reader cannot: it
+    ignores `x-since-version`, so a plan using a key from a later plan version
+    passes it and is then refused on the bench; and `yaml.safe_load` silently
+    collapses the duplicate keys `UniqueKeyLoader` refuses. So this calls
+    `load_test_config`, the same function the reactor loads a plan with, which is
+    the whole of that guarantee: the duplicate-key rejection, the non-finite
+    number rejection, the plan-version supersession and the feature gates, in one
+    place rather than reimplemented in a workflow. It loads no configuration and
+    touches no hardware; the workspace is this working directory, which is the
+    checkout the simulator runs in and the root a plan must stay inside.
+
+    A red plan does not stop the ones after it: every plan is reported, so one
+    run names all of them rather than the first to fail, and `ok` is false when
+    any was refused so the command exits nonzero.
+    """
+    work_dir = str(Path.cwd())
+    checked: list[JsonObject] = []
+    for plan in plans:
+        try:
+            loaded = load_test_config(plan, work_dir)
+        except ConfigError as error:
+            detail = error.to_dict()
+            checked.append({"plan": plan, "ok": False, "error_type": detail.get("error_type"), "summary": detail.get("summary")})
+        else:
+            checked.append({"plan": plan, "ok": True, "name": loaded.name, "steps": sum(1 for _ in flatten_steps(loaded.steps))})
+    refused = [entry["plan"] for entry in checked if not entry["ok"]]
+    ok = not refused
+    summary = (
+        f"All {len(checked)} test plan(s) load through the reactor's loader."
+        if ok
+        else f"{len(refused)} of {len(checked)} test plan(s) would be refused by the reactor: {', '.join(str(name) for name in refused)}."
+    )
+    return {"ok": ok, "tool": "check_plan", "summary": summary, "plans": checked}
+
+
+check_plan.__test__ = False  # type: ignore[attr-defined] - keep pytest from collecting the CLI helper
 
 
 def _mcp_cache_roots() -> list[Path]:
@@ -4777,5 +4848,20 @@ def upsert_marked_block(file_path: Path, block: str) -> JsonObject:
     return {"updated": False}
 
 
-def print_json(value: JsonObject) -> None:
-    sys.stdout.write(json.dumps(redact_sensitive(value), indent=2) + "\n")
+def print_json(value: JsonObject, command: str | None = None) -> bool:
+    """The machine sink: redact, then dump. Returns whether the value was withheld.
+
+    Byte-for-byte what it always was on the path that works -- a document in,
+    the redacted document out. It now fails closed on the same condition the
+    rendered sink does: a redaction that hands back something other than a
+    document cannot be dumped, `null` and a bare list included, so a
+    `redaction_unavailable` refusal is dumped in its place and `True` is
+    returned. Both sinks share `redact_sensitive`, so neither can be the safe one
+    to retry when it fails, and this is what makes that true rather than
+    advertised."""
+    redacted = redact_sensitive(value)
+    if not isinstance(redacted, dict):
+        sys.stdout.write(json.dumps(redaction_unavailable(command), indent=2) + "\n")
+        return True
+    sys.stdout.write(json.dumps(redacted, indent=2) + "\n")
+    return False

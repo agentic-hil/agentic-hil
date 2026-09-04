@@ -56,7 +56,13 @@ by the workflow, and none of it can be.
   runner already selects for `shell: bash`.
 
 The hosted simulator job needs none of this. It installs the pinned release
-from the package index and reads plan files, and that is the whole of it.
+from the package index and loads each plan through the reactor's own loader with
+`agentic-hil check-plan`, and that is the whole of it. That command is the
+loadability check the job exists for: it calls the same `load_test_config` the
+bench would, so a plan it accepts is one the reactor can load, where a
+schema-only reader would pass a plan using a key from a later plan version, or
+one with the duplicate keys the real loader refuses, and let the failure reach
+the bench.
 
 ## The version pin
 
@@ -123,12 +129,19 @@ world-readable on a public repository: the configuration digest and the logical
 device names are what identify a bench there, never a probe serial or a device
 path.
 
-### Collect the evidence before the next plan runs
+### Give every plan its own report
 
-Each run overwrites `.agentic-hil/reports/last-report.json`. Both examples
-therefore run `run-evidence` inside the same step as the plan it belongs to,
-into a directory named after that plan, rather than once at the end. A job that
-collects evidence after three plans has the evidence of the third.
+Both examples capture each run's report from `--json` into its own file, named
+after the plan under `artifacts/reports/`, and feed that file to `run-evidence`
+in the same step as the plan it belongs to, rather than reading the shared
+`.agentic-hil/reports/last-report.json`. A plan refused before its first step,
+or refused for having no configuration at all, writes nothing to that shared
+file, so a job that read it would build the refused plan's evidence out of the
+previous plan's report, and a first plan refused would leave the bundle empty.
+`--json` is written on every path, a refusal included, and names the plan it is
+about, so the capture is always this plan's own. Collecting the evidence in the
+same step, into a directory named after the plan, is also what keeps a job that
+runs three plans from ending with the evidence of only one.
 
 ## Which of the trust rule's conditions a workflow can state
 

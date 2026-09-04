@@ -1131,16 +1131,16 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     REDACTION_UNAVAILABLE_ERROR: ErrorRemedy(
         meaning=(
             "Nothing on the bench failed and nothing was refused. The command produced its result, and the step that "
-            "replaces secret-named values before a result is rendered for a person did not hand back a document, so "
-            "the rendering had nothing it could vouch for and printed this in place of the result. The result itself "
-            "is intact and is still what `--json` prints; what was withheld is the prose."
+            "replaces secret-named values before a result leaves this process did not hand back a document. Both "
+            "sinks depend on that step -- the prose a person reads and the `--json` document alike -- so neither can "
+            "publish this result, and this was emitted in place of it by whichever one you asked for. The command "
+            "exits nonzero because a result nothing could vouch for is a result that was not delivered."
         ),
         remediation=(
-            "Repeat the command with `--json`. That half is the document itself, redacted at its own sink and "
-            "unaffected by this, so it is how to read the result the rendering withheld.",
-            "Then report it, with the command that produced it and `agentic-hil --version`. Redaction answers a "
-            "document with a document for every document it is given, so no result's own contents can reach this: "
-            "what it names is an installation whose `agentic_hil.redact` is not the one this server ships.",
+            "Report it, with the command that produced it and `agentic-hil --version`. Redaction answers a document "
+            "with a document for every document it is given, so no result's own contents can reach this: what it "
+            "names is an installation whose `agentic_hil.redact` is not the one this server ships. `--json` is not a "
+            "way around it, because that sink redacts through the same function and fails closed the same way.",
             "Check for a second copy of the package while collecting that: `python -c \"import agentic_hil; "
             "print(agentic_hil.__file__)\"` names the one actually imported, and a user-site install shadowing the "
             "intended one is the way two versions end up in a single process.",
@@ -1148,8 +1148,8 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not read this as a hardware, permission or configuration failure. It says nothing about what the "
             "command did or left behind; it says only that the result was not rendered.",
-            "Do not reach for another way to print the result. The one thing known about it here is that nothing has "
-            "vouched for its secret-named values, which is what the rendering declined to publish.",
+            "Do not reach for another way to print the result, `--json` included. The one thing known about it here "
+            "is that nothing has vouched for its secret-named values, which is what both sinks declined to publish.",
         ),
     ),
     "target_not_detected:openocd": ErrorRemedy(

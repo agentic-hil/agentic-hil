@@ -868,19 +868,52 @@ def test_a_redaction_that_answers_with_no_document_withholds_the_result(monkeypa
     result's own contents, and it is precisely the branch that must not print
     the unredacted document. It used to, and a guard that falls back to the
     thing it guards against says the opposite of what it guards.
+
+    An originally successful command that could not be rendered has still not
+    been delivered, so the exit status is the refusal's, not the result's: a
+    green exit here would tell a caller the command left it a document when what
+    it left is the statement that there is none.
     """
     document = {"ok": True, "summary": "Bridge opened.", "auth_token": "hunter2", "nested": {"api_key": "hunter2"}}
     monkeypatch.setattr(cli, "redact_sensitive", lambda value: answer)
 
-    _, out = _run(monkeypatch, ["lease-status"], document, tty=True)
+    code, out = _run(monkeypatch, ["lease-status"], document, tty=True)
 
+    # An originally successful result still exits nonzero when it could not be rendered.
+    assert code == 1
     # Not the secret, and not one field of the document that carried it.
     assert "hunter2" not in out
     assert "Bridge opened." not in out
     # What is there instead names the refusal, the command, and what to do.
     assert "redaction_unavailable" in out
     assert "lease-status" in out
-    assert "What to do" in out and "--json" in out
+    assert "What to do" in out
+    # The remediation no longer sends the operator to `--json`: that sink shares
+    # `redact_sensitive` and fails the same way, so it names it as no way around.
+    assert "agentic-hil --version" in out
+
+
+@pytest.mark.parametrize("answer", [None, ["ok", "auth_token", "hunter2"]])
+def test_the_machine_sink_also_fails_closed_when_redaction_yields_no_document(monkeypatch: pytest.MonkeyPatch, answer: object) -> None:
+    """`--json` is the sink the old remediation sent the operator to, so it is
+    the one that most had to stop printing `null` or a bare list in place of the
+    result. It shares `redact_sensitive` with the rendering, so under the exact
+    condition the fallback exists for it dumps the same refusal document and
+    exits nonzero rather than a value nothing vouched for.
+    """
+    document = {"ok": True, "summary": "Bridge opened.", "auth_token": "hunter2", "nested": {"api_key": "hunter2"}}
+    monkeypatch.setattr(cli, "redact_sensitive", lambda value: answer)
+
+    code, out = _run(monkeypatch, ["lease-status", "--json"], document, tty=False)
+
+    assert code == 1
+    # The machine sink is JSON, and it is the refusal rather than `null`/a list.
+    refusal = json.loads(out)
+    assert refusal["error_type"] == "redaction_unavailable"
+    assert refusal["command"] == "lease-status"
+    # Neither the secret nor the field that carried it reaches the document.
+    assert "hunter2" not in out
+    assert "Bridge opened." not in out
 
 
 def test_a_stream_that_cannot_spell_the_text_still_gets_the_answer() -> None:

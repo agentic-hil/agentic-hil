@@ -269,22 +269,52 @@ def test_doctor_runs_before_any_plan_gets_near_the_board() -> None:
         assert doctor < plan, commands
 
 
-def test_every_plan_is_run_with_the_junit_path_and_its_evidence_collected_beside_it() -> None:
-    """One command each, and both in the same block.
+def test_every_plan_captures_its_own_report_and_never_the_shared_one() -> None:
+    """One command each, in the same block, and never `last-report.json`.
 
-    The evidence has to be collected before the next plan overwrites
-    `last-report.json`, so a job that ran `run-evidence` once at the end would
-    keep the evidence of the last plan and lose the rest. Being in the same
-    block is what makes that impossible to get wrong by adding a plan.
+    A plan refused before its first step, or refused for having no configuration
+    at all, writes no `.agentic-hil/reports/last-report.json`, so a job that fed
+    that shared file to `run-evidence` would publish the previous plan's report
+    under the refused plan's name, and a first plan refused would leave the whole
+    bundle empty. Each run's report is captured from `--json` into its own file,
+    and that file, never the shared one, is what the evidence is built from;
+    `--json` is written on every path a refusal included, so the capture is never
+    empty. Being in the same block is what keeps the two commands from drifting
+    when a plan is added.
     """
     for commands in (github_commands(GITHUB, "hardware"), gitlab_commands(GITLAB, "hardware")):
         running = [command for command in commands if "agentic-hil test-reactor" in command]
         assert len(running) == 1, running
-        assert "--test-config" in running[0]
-        assert "--junit-xml" in running[0]
-        assert "agentic-hil run-evidence --report " in running[0]
-        assert " --out " in running[0]
-        assert "last-report.json" in running[0]
+        block = running[0]
+        assert "--test-config" in block
+        assert "--junit-xml" in block
+        # The report is captured from --json into a per-plan file...
+        assert "--json" in block
+        assert 'report="artifacts/reports/' in block
+        assert '> "$report"' in block
+        # ...and that captured file, never the shared last-report.json, is the
+        # evidence's input.
+        assert 'agentic-hil run-evidence --report "$report"' in block
+        assert " --out " in block
+        assert "last-report.json" not in block
+
+
+def test_github_does_not_append_the_job_summary_a_second_time() -> None:
+    """`run-evidence` appends `job-summary.md` to `$GITHUB_STEP_SUMMARY` itself.
+
+    A `cat` of the same file into the same variable in the workflow would put
+    every plan's table and verdict on the job page twice, so the GitHub job does
+    not touch `GITHUB_STEP_SUMMARY` at all. GitLab has no such variable, so
+    `run-evidence` appends nowhere there and that example prints the summary into
+    the log with `cat` on purpose: the same document, one destination each.
+    """
+    github = " ".join(github_commands(GITHUB, "hardware"))
+    assert "GITHUB_STEP_SUMMARY" not in github
+    assert "job-summary.md" not in github
+
+    gitlab = " ".join(gitlab_commands(GITLAB, "hardware"))
+    assert "cat " in gitlab
+    assert "job-summary.md" in gitlab
 
 
 def test_the_evidence_is_uploaded_whatever_the_run_did() -> None:
@@ -301,15 +331,22 @@ def test_the_evidence_is_uploaded_whatever_the_run_did() -> None:
 
 
 def test_the_simulator_job_is_the_hosted_path_and_touches_no_bench() -> None:
-    """The other half of the file: no board, so any runner, and a real check."""
+    """The other half of the file: no board, so any runner, and a real check.
+
+    The check is `check-plan`, which loads each plan through the reactor's own
+    loader, not a schema-only reader that would pass a plan the reactor then
+    refuses. And it is never `test-reactor`, which drives the board.
+    """
     simulator = GITHUB["jobs"]["simulator"]
 
     assert "self-hosted" not in simulator["runs-on"]
     assert "concurrency" not in simulator
     installed = " ".join(github_commands(GITHUB, "simulator"))
-    assert "agentic-hil test-schema" in installed
+    assert "agentic-hil check-plan" in installed
     assert "agentic-hil test-reactor" not in installed
-    assert "agentic-hil test-reactor" not in " ".join(gitlab_commands(GITLAB, "simulator"))
+    gitlab_simulator = " ".join(gitlab_commands(GITLAB, "simulator"))
+    assert "agentic-hil check-plan" in gitlab_simulator
+    assert "agentic-hil test-reactor" not in gitlab_simulator
 
 
 def test_no_step_in_either_example_downloads_something_unpinned() -> None:

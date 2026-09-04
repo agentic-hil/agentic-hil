@@ -121,26 +121,34 @@ jobs:
 
       # Each plan runs, and a red one does not stop the ones after it: a job
       # that stopped at the first failure could not show whether the rest of
-      # the bench still works. This is one step rather than one step per plan
-      # because the evidence for each run has to be collected before the next
-      # plan overwrites `.agentic-hil/reports/last-report.json`.
+      # the bench still works.
+      #
+      # Each run's report is captured from `--json` into its own file under
+      # `artifacts/reports/`, and that file is what `run-evidence` reads. Not
+      # `.agentic-hil/reports/last-report.json`: a plan refused before its first
+      # step, or refused for having no configuration at all, writes no report
+      # there, so the shared file would still hold the previous plan's report and
+      # this job would publish it under the refused plan's name. `--json` is
+      # written on every path, refusals included, and names the plan it is about,
+      # so the bundle is always this plan's own.
       #
       # `run-evidence` turns that report into the bundle a reviewer without
       # access to this bench can read: `run-summary.json`, `job-summary.md` and
-      # a `logs/` copy, beside the JUnit file `--junit-xml` wrote.
+      # a `logs/` copy, beside the JUnit file `--junit-xml` wrote. It appends the
+      # job summary to `$GITHUB_STEP_SUMMARY` itself, so there is no `cat` here;
+      # a second one would put every plan's table on the job page twice.
       - name: Run the test plans on the board
         shell: bash
         run: |
           set -uo pipefail
           status=0
+          mkdir -p artifacts/reports
           for plan in tests/hil/nominal.testconfig.yaml tests/hil/diagnostic.testconfig.yaml; do
             name="$(basename "$plan" .testconfig.yaml)"
             echo "::group::$name"
-            agentic-hil test-reactor --test-config "$plan" --junit-xml "artifacts/junit-$name.xml" || status=1
-            agentic-hil run-evidence --report .agentic-hil/reports/last-report.json --out "artifacts/evidence/$name" || status=1
-            if [ -f "artifacts/evidence/$name/job-summary.md" ]; then
-              cat "artifacts/evidence/$name/job-summary.md" >> "$GITHUB_STEP_SUMMARY"
-            fi
+            report="artifacts/reports/$name.json"
+            agentic-hil test-reactor --test-config "$plan" --json --junit-xml "artifacts/junit-$name.xml" > "$report" || status=1
+            agentic-hil run-evidence --report "$report" --out "artifacts/evidence/$name" || status=1
             echo "::endgroup::"
           done
           exit "$status"
@@ -186,31 +194,15 @@ jobs:
       - name: Install the pinned Agentic HIL
         run: python -m pip install "agentic-hil==${AGENTIC_HIL_VERSION}"
 
-      # The plan schema comes out of the installation that would run the plans,
-      # so the two cannot disagree about what a plan may say. `jsonschema` and
-      # `PyYAML` are Agentic HIL's own dependencies and are already here.
-      - name: Check the test plans against the plan schema
-        run: |
-          agentic-hil test-schema --output "$RUNNER_TEMP/testconfig.schema.json" --force
-          python - "$RUNNER_TEMP/testconfig.schema.json" tests/hil/*.testconfig.yaml <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          import jsonschema
-          import yaml
-
-          schema = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          validator = jsonschema.validators.validator_for(schema)(schema)
-          refused = False
-          for plan in sys.argv[2:]:
-              document = yaml.safe_load(Path(plan).read_text(encoding="utf-8"))
-              errors = sorted(validator.iter_errors(document), key=str)
-              for error in errors:
-                  where = "/".join(str(part) for part in error.path) or "the document"
-                  print(f"{plan}: {where}: {error.message}")
-              refused = refused or bool(errors)
-              if not errors:
-                  print(f"{plan}: valid against the plan schema")
-          sys.exit(1 if refused else 0)
-          PY
+      # Every plan is loaded through the reactor's own loader, the same one the
+      # hardware job would use. This is the guarantee the job exists for, and a
+      # schema-only check cannot make it: `jsonschema` ignores the
+      # `x-since-version` gates, so a plan using a key from a later plan version
+      # passes it and is then refused on the bench, and `yaml.safe_load` silently
+      # collapses the duplicate keys the real loader refuses. `check-plan` calls
+      # `load_test_config`, so a plan it accepts is one the reactor can load: the
+      # same duplicate-key rejection, non-finite-number rejection, plan-version
+      # supersession and feature gates. It reads plan files, loads no
+      # configuration and touches no hardware.
+      - name: Check the test plans are loadable
+        run: agentic-hil check-plan tests/hil/*.testconfig.yaml

@@ -660,6 +660,66 @@ def test_cli_returns_failure_for_audit_failed_result(monkeypatch: pytest.MonkeyP
     assert json.loads(capsys.readouterr().out)["audit_ok"] is False
 
 
+def test_check_plan_accepts_a_loadable_plan(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    """The hosted simulator's happy path: a plan the reactor can load passes,
+    with no configuration and no hardware."""
+    monkeypatch.chdir(tmp_path)
+    plan = tmp_path / "nominal.testconfig.yaml"
+    plan.write_text("version: 3\nname: nominal\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert result["ok"] is True
+    assert result["plans"][0]["name"] == "nominal"
+    assert result["plans"][0]["steps"] == 1
+
+
+def test_check_plan_refuses_what_a_schema_only_reader_would_pass(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    """The two failures the schema-only reader the examples used to run would miss.
+
+    `yaml.safe_load` silently collapses duplicate keys the reactor's
+    `UniqueKeyLoader` refuses, and `jsonschema` ignores the `x-since-version`
+    gates, so a plan using a key from a later plan version passes it and is then
+    refused on the bench. `check-plan` loads through `load_test_config`, so both
+    are caught here, one run names every red plan rather than the first, and the
+    command exits nonzero.
+    """
+    monkeypatch.chdir(tmp_path)
+    good = tmp_path / "good.testconfig.yaml"
+    good.write_text("version: 3\nname: good\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+    duplicate_key = tmp_path / "dupe.testconfig.yaml"
+    duplicate_key.write_text("version: 3\nname: one\nname: two\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+    too_new_for_its_version = tmp_path / "too_new.testconfig.yaml"
+    too_new_for_its_version.write_text("version: 2\nname: too-new\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(good), str(duplicate_key), str(too_new_for_its_version), "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    verdicts = {Path(entry["plan"]).name: entry for entry in result["plans"]}
+    assert verdicts["good.testconfig.yaml"]["ok"] is True
+    assert verdicts["dupe.testconfig.yaml"]["ok"] is False
+    assert verdicts["too_new.testconfig.yaml"]["ok"] is False
+    # The feature gate jsonschema ignores is what catches the version mismatch.
+    assert verdicts["too_new.testconfig.yaml"]["error_type"] == "test_config_invalid"
+
+
+def test_check_plan_renders_a_refusal_for_a_person(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    """Without `--json` the operator reading the CI log gets prose, and it names
+    which plan would be refused rather than a machine document."""
+    monkeypatch.chdir(tmp_path)
+    plan = tmp_path / "v1.testconfig.yaml"
+    plan.write_text("version: 1\nname: old\nsteps:\n  - {debugger: dut, action: reset}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan)])
+
+    assert exit_code == 1
+    printed = capsys.readouterr().out
+    assert "v1.testconfig.yaml" in printed
+
+
 def test_a_run_names_the_per_run_report_copy_the_next_run_will_not_overwrite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
