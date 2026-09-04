@@ -83,6 +83,7 @@ from agentic_hil.knowledge import (
     CONFIG_GRANT_COMMAND,
     CONFIG_REOPEN_COMMAND,
     CONFIG_REVOKE_COMMAND,
+    EXCLUSIVE_FLASH_PERMISSIONS,
     REDACTION_UNAVAILABLE_ERROR,
     RUNNING_SERVER_COMPARISON,
     remediation_fields,
@@ -2708,17 +2709,25 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # profile or no profile, and are stated once here instead.
     written_document = yaml.safe_load(text) or {}
     narrowed = narrowed_permissions(written_document)
-    granted_clause = (
-        "with every permission granted except the two that are false so that flashing works"
-        if not narrowed
-        else f"with every permission granted except the two that are false so that flashing works, and {len(narrowed)} the project profile set to false"
-    )
+    # The two flash interlocks default false on every generated bench and are
+    # stated once as "the two that are false so that flashing works" -- but only
+    # while they are actually false. A project profile is the one input `init`
+    # honours that can write one true (its default is false, so naming it is a
+    # widening, not a narrowing), and either one true refuses `flash_firmware` on
+    # that probe. The fixed clause then told an operator whose profile opened one
+    # the opposite of both the file it just wrote and the bench it describes
+    # (review round 2, finding 1), so the clause is read off the surface actually
+    # written. `narrowed` is the false-beyond-default set and an opened interlock
+    # is true, so the two are disjoint and are reported apart.
+    opened = opened_flash_interlocks(written)
+    granted_clause = _init_granted_clause(sorted(narrowed), opened)
     discarded, unreadable_previous = _discarded_narrowings(existing, written_document)
     unreadable_previous = unreadable_existing or unreadable_previous
     next_steps = init_next_steps(
         available_com_ports,
         target_path,
         narrowed=sorted(narrowed),
+        opened_interlocks=opened,
         drives_hardware=any(debugger_drives_hardware(written, entry) for entry in written.debuggers.values()),
     )
     if not discovered:
@@ -3039,18 +3048,83 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
     return run_plan(config, test_config_path, wait_s=wait_s, run_handle=run_handle, junit_xml=junit_xml)
 
 
-def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
-    granted_step = (
-        "Every permission in this file is true, including probing, flashing, resetting, resuming a halted debug "
-        "session, and serial and CAN writes, except allow_raw_debugger_commands and allow_mass_erase, which are "
-        "false so that flashing works. Read the permissions blocks and decide which of the rest this bench should "
-        "not have."
-        if not narrowed
-        else "Every permission in this file is true, including probing, flashing, resetting, resuming a halted "
-        "debug session, and serial and CAN writes, except allow_raw_debugger_commands and allow_mass_erase, which "
-        "are false so that flashing works, and the ones your project profile set to false (" + ", ".join(narrowed) + "). "
-        "Read the permissions blocks and decide which of the rest this bench should not have."
+def opened_flash_interlocks(config: AgenticHILConfig) -> list[str]:
+    """The flash interlocks a loaded configuration leaves *true*, by dotted path.
+
+    `allow_raw_debugger_commands` and `allow_mass_erase` default false on every
+    generated bench, and either one true refuses `flash_firmware` on that probe:
+    validated flashing and unrestricted debugger access are mutually exclusive.
+    A project profile is the one input `agentic-hil init` honours that can write
+    one true, so `init`'s own summary and next step read this off the file it
+    wrote rather than repeating "the two that are false so that flashing works"
+    on a bench where the profile opened one and flashing is therefore disabled
+    (review round 2, finding 1)."""
+    return sorted(
+        f"debuggers.{name}.permissions.{flag}"
+        for name, entry in config.debuggers.items()
+        for flag in EXCLUSIVE_FLASH_PERMISSIONS
+        if getattr(entry.permissions, flag)
     )
+
+
+def _init_granted_clause(narrowed: list[str], opened_interlocks: list[str]) -> str:
+    """The permission sentence `init`'s summary carries, told off the written file.
+
+    Three shapes, because three things can be true of the file this command just
+    wrote. Both interlocks false is the ordinary bench and reads as it always
+    has. A profile that opened one is named explicitly, `allow_mass_erase` above
+    all, together with the fact that flashing is disabled on that probe while it
+    stands -- the one thing the fixed sentence got backwards. A narrowing the
+    profile made is appended to whichever of those two the interlocks produced,
+    since a profile can both open an interlock and close something else."""
+    if opened_interlocks:
+        # "probe" counts distinct debuggers, "interlock" counts flags: both
+        # interlocks can be open on one probe, so the two do not pluralise
+        # together. A dotted path here is always `debuggers.<name>.permissions.<flag>`.
+        probes = "those probes" if len({path.split(".")[1] for path in opened_interlocks}) > 1 else "that probe"
+        interlocks = "flash interlocks" if len(opened_interlocks) > 1 else "flash interlock"
+        base = (
+            f"with every other permission granted, but the project profile left the {interlocks} "
+            f"{', '.join(opened_interlocks)} true, so flashing is disabled on {probes}"
+        )
+    else:
+        base = "with every permission granted except the two that are false so that flashing works"
+    if not narrowed:
+        return base
+    return f"{base}, and {len(narrowed)} {'permission' if len(narrowed) == 1 else 'permissions'} the project profile set to false"
+
+
+def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narrowed: list[str] | None = None, opened_interlocks: list[str] | None = None, drives_hardware: bool = True) -> list[str]:
+    narrowed = narrowed or []
+    opened_interlocks = opened_interlocks or []
+    granted_prefix = (
+        "Every permission in this file is true, including probing, flashing, resetting, resuming a halted debug "
+        "session, and serial and CAN writes"
+    )
+    if opened_interlocks:
+        # A profile opened an interlock, so the fixed "which are false so that
+        # flashing works" is wrong twice over: the named flag is true, and
+        # flashing is off, not on. Say so and name the flags, `allow_mass_erase`
+        # first, rather than let the operator read the standing default.
+        probes = "those probes" if len({path.split(".")[1] for path in opened_interlocks}) > 1 else "that probe"
+        they_are = "they are" if len(opened_interlocks) > 1 else "it is"
+        narrowed_note = f", and the ones your project profile also set to false ({', '.join(narrowed)})" if narrowed else ""
+        granted_step = (
+            f"{granted_prefix}, but your project profile left {', '.join(opened_interlocks)} true, so flash_firmware "
+            f"is refused on {probes} until {they_are} set false again{narrowed_note}. Read the permissions blocks and "
+            "decide which of the rest this bench should not have."
+        )
+    elif narrowed:
+        granted_step = (
+            f"{granted_prefix}, except allow_raw_debugger_commands and allow_mass_erase, which are false so that "
+            f"flashing works, and the ones your project profile set to false ({', '.join(narrowed)}). Read the "
+            "permissions blocks and decide which of the rest this bench should not have."
+        )
+    else:
+        granted_step = (
+            f"{granted_prefix}, except allow_raw_debugger_commands and allow_mass_erase, which are false so that "
+            "flashing works. Read the permissions blocks and decide which of the rest this bench should not have."
+        )
     next_steps = [
         f"Review the config at {config_path}. Set {CONFIG_ENV} only when an explicit absolute-path override is needed.",
         "Edit target.name and target.controller for your board.",

@@ -616,6 +616,63 @@ def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_pat
     assert not any(step.startswith("Every permission in this file is true:") for step in result["next_steps"])
 
 
+def test_init_tells_the_operator_when_a_profile_opened_a_flash_interlock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A profile that opens a flash interlock disables flashing, and `init` must say so.
+
+    `allow_mass_erase` and `allow_raw_debugger_commands` default false so that
+    `flash_firmware` works, and a project profile is the one input `init`
+    honours that can write one true. When it does, flashing is refused on that
+    probe -- so the summary and the permission next step must not repeat the
+    standing "the two that are false so that flashing works". That told an
+    operator whose profile opened `allow_mass_erase` the opposite of both the
+    file it wrote and the bench it describes (review round 2, finding 1). The
+    full true/false surface in `permissions` already carried the real value; this
+    pins the user-facing prose to it, `allow_mass_erase` above all because it
+    cannot be taken back once it has run."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    (workspace / "agentic-hil.config.example.yaml").write_text(
+        "target:\n  name: demo\n  controller: stm32f446ret6\n"
+        "debuggers:\n  dut:\n    permissions:\n      allow_mass_erase: true\n",
+        encoding="utf-8",
+    )
+    executable = Path(__file__).resolve()
+    monkeypatch.setattr(
+        "agentic_hil.tools.discover_attached_hardware",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "executable": str(executable),
+            "probe_id": "STLINK123",
+            "target": {"controller": "STM32F446RE"},
+            "com_port": {"device": "COM3"},
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+        },
+    )
+
+    result = init_config()
+    written = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
+    interlock = "debuggers.dut.permissions.allow_mass_erase"
+
+    assert result["ok"] is True, result
+    # The file honoured the profile, so the interlock really is open, and it is
+    # a widening rather than a narrowing, so it is deliberately absent from
+    # `narrowed_permissions`; `permissions` below carries its true value.
+    assert written["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is True
+    assert result["permissions"]["debuggers"]["dut"]["allow_mass_erase"] is True
+    assert interlock not in result["narrowed_permissions"]
+    # Neither user-facing field may claim the interlocks are false or that
+    # flashing works: both must name the open interlock and say flashing is off.
+    assert "the two that are false so that flashing works" not in result["summary"]
+    assert interlock in result["summary"]
+    assert "flashing is disabled" in result["summary"]
+    granted_step = next(step for step in result["next_steps"] if step.startswith("Every permission in this file is true"))
+    assert "which are false so that flashing works" not in granted_step
+    assert interlock in granted_step
+    assert "flash_firmware is refused" in granted_step
+
+
 def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The skeleton path, which is the one the issue is about.
 
