@@ -700,7 +700,11 @@ def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(
     This is the other half of the report. An operator handed `probe_id: null` and
     a placeholder target, with no sentence anywhere about the board they can see
     plugged in, concludes that detection is broken. The result now names what
-    discovery answered and the one command that fills the file in afterwards."""
+    discovery answered and the one command that fills the file in afterwards.
+
+    Discovery here fails with `debugger_not_found`, a missing STM32CubeProgrammer
+    and not a missing board, so the summary names that reason rather than
+    reporting an absent bench: the toolchain, not the board, is what to install."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
@@ -713,10 +717,32 @@ def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(
     # outcomes this key could not tell apart, and only one of them exists now.
     assert result["hardware_discovery"]["ok"] is False
     assert result["hardware_discovery"]["error_type"] == "debugger_not_found"
-    assert result["summary"].startswith("No attached bench was found")
+    assert result["summary"].startswith(
+        "Hardware discovery did not configure a bench (STM32CubeProgrammer CLI was not found), so the placeholder"
+    )
     assert result["summary"].endswith("with every permission granted except the two that are false so that flashing works.")
+    assert "No attached bench was found" not in result["summary"]
     assert "STM32CubeProgrammer CLI was not found." in result["next_steps"][0]
     assert "agentic-hil adopt-hardware" in result["next_steps"][0]
+
+
+def test_init_reserves_absent_bench_wording_for_the_empty_probe_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`adapter_not_found` is the one placeholder that means "attach a board".
+
+    A programmer that ran and enumerated no ST-Link is the empty-bench result,
+    and there "No attached bench was found" is exactly the instruction. The
+    wording stays reserved for it so it does not appear over a missing tool or a
+    board that answered ambiguously."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _fixed_stlink(monkeypatch, "No ST-LINK detected\n")
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    assert result["hardware_discovery"]["error_type"] == "adapter_not_found"
+    assert result["summary"].startswith("No attached bench was found, so the placeholder")
 
 
 def test_init_and_the_server_describe_one_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

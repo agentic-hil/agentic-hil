@@ -663,8 +663,16 @@ Options:
   `HEAD` and install from that commit, so what is measured is what anyone else
   pulling this branch gets. The commit has to be pushed;
 - `-Guide`: published mode. Hand the agents this guide URL verbatim and let its
-  own published path install the current release. Cannot be combined with
-  `-FromBranch`, which names a different source.
+  own published path install the current release. The version every artifact is
+  held to is that release, read from the newest `vX.Y.Z` tag in this clone
+  rather than from `pyproject.toml`, whose development version between releases
+  the published release does not carry. Cannot be combined with `-FromBranch`,
+  which names a different source;
+- `-ExpectedVersion`: the release `-Guide` pins, as `X.Y.Z`. Left empty, it is
+  read from the newest release tag, which published mode already needs present
+  to check the install's digest; name it for a clone whose tags are not fetched.
+  It applies only with `-Guide`, and is refused with local or remote mode, which
+  install this tree and take its own version.
 
 Without `-FromBranch` or `-Guide` the script builds a local-mode matrix against
 the working tree, which is why the one-command path needs one of those two to

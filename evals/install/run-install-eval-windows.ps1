@@ -46,6 +46,15 @@ param(
     # measures the release the way an engineer hands it over. Whatever that
     # guide's published path installs is what gets verified.
     [string]$Guide,
+    # The release published mode is held to. Published mode installs the current
+    # release from the index, not this working tree, which between releases
+    # carries a .devN version the release does not; pinning that development
+    # version fails every otherwise-correct published install against a version
+    # nobody can install yet. Left empty, the release is read from the newest
+    # vX.Y.Z tag in this clone, which published mode already requires be present
+    # to check the install's digest. Name it here to override that, for a clone
+    # whose tags are not fetched. Only -Guide reads it.
+    [string]$ExpectedVersion,
     [switch]$SkipBuild,
     [switch]$NoFileLogin,
     [switch]$RefreshLogin,
@@ -241,6 +250,45 @@ function Write-JsonFile {
     [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding $false))
 }
 
+function Get-PublishedReleaseVersion {
+    # The release a published-mode run is held to, which is never this tree's
+    # own version: between releases the working tree carries a development
+    # version the published release does not, and the verifier requires the
+    # installed distribution to equal `target.expected_version`, so pinning the
+    # development version there fails a wholly correct install of the release.
+    #
+    # An override wins when given and is validated first, so a typo is refused
+    # rather than pinned. Otherwise the release is the newest vX.Y.Z tag in the
+    # clone: published mode already needs that tag present to check the install's
+    # digest, and the version gate keeps the newest one equal to the release the
+    # index serves, so it is read from the same place rather than guessed from
+    # the tree.
+    param(
+        [Parameter(Mandatory)][string]$RepositoryRoot,
+        [string]$Override
+    )
+
+    if ($Override) {
+        if ($Override -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "-ExpectedVersion must name a released version as X.Y.Z, not '$Override'."
+        }
+        return $Override
+    }
+
+    $tags = @(
+        git -C $RepositoryRoot tag --list 'v[0-9]*' 2>$null |
+            Where-Object { $_ -match '^v[0-9]+\.[0-9]+\.[0-9]+$' } |
+            ForEach-Object { $_.Substring(1) }
+    )
+    if ($tags.Count -eq 0) {
+        throw (
+            "Published mode names the current release, which this clone cannot state: it carries no vX.Y.Z " +
+            "release tag. Fetch the tags (git fetch --tags), or pass -ExpectedVersion X.Y.Z to name the release."
+        )
+    }
+    return ($tags | Sort-Object { [version]$_ } | Select-Object -Last 1)
+}
+
 $projectVersion = & $virtualEnvironmentPython -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
 if ($LASTEXITCODE -ne 0 -or -not $projectVersion) {
     throw "The project version could not be read from pyproject.toml."
@@ -361,6 +409,14 @@ foreach ($case in $Cases) {
 # Point the models at the branch, not at a copy of it: the guide they read is
 # the one on the remote at this commit, so a change measured here is a change
 # anyone else pulling this branch gets. Requires the commit to be pushed.
+#
+# Local and remote install this working tree, so the version every artifact is
+# held to is the tree's own, development suffix and all; -ExpectedVersion names
+# the published release and has nothing to override on either, so it is refused
+# here rather than silently ignored.
+if ($ExpectedVersion -and -not $Guide) {
+    throw "-ExpectedVersion names the published release and only applies with -Guide; local and remote install this tree and take its own version."
+}
 $target = @{ mode = "local"; expected_version = $projectVersion.Trim() }
 if ($FromBranch) {
     $head = (git rev-parse HEAD).Trim()
@@ -376,8 +432,13 @@ if ($FromBranch) {
 }
 if ($Guide) {
     if ($FromBranch) { throw "-Guide and -FromBranch name different sources; pick one." }
-    $target = @{ mode = "published"; expected_version = $projectVersion.Trim(); guide_url = $Guide }
+    # The release the guide's own path installs, never this tree's development
+    # version: published mode preserves expected_version through to the verifier,
+    # which fails an install that does not report exactly it.
+    $publishedVersion = Get-PublishedReleaseVersion -RepositoryRoot $repositoryRoot -Override $ExpectedVersion
+    $target = @{ mode = "published"; expected_version = $publishedVersion; guide_url = $Guide }
     Write-Host "Guide:      $Guide"
+    Write-Host "Release:    $publishedVersion (the guide installs the published release; this tree is $($projectVersion.Trim()))"
 }
 
 $matrixPath = Join-Path ([IO.Path]::GetTempPath()) ("agentic-hil-eval-matrix-" + [Guid]::NewGuid().ToString("N") + ".json")

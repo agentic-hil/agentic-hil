@@ -2106,22 +2106,42 @@ def _refused_project_scope(error: ConfigError) -> JsonObject:
     return scope
 
 
-def _wrote_a_placeholder_configuration(config_step: JsonObject) -> bool:
-    """Whether the config step wrote placeholders because it found no board.
+def _placeholder_discovery(config_step: JsonObject) -> JsonObject | None:
+    """The failed discovery a placeholder configuration was written from, or None.
 
     Read off the discovery that step carries rather than off its sentence: that
     `hardware_discovery` is the very thing `init_config` branched on when it
     chose the skeleton over a filled-in template, so this is the same fact and
     not a second reading of it.
 
-    A step that was skipped answers no whatever it carries. An existing
+    A step that was skipped answers None whatever it carries. An existing
     configuration is kept unread and untouched, and calling that file a
     placeholder would be a claim about somebody else's bench.
     """
     if config_step.get("skipped") is True or not overall_success(config_step):
-        return False
+        return None
     discovery = config_step.get("hardware_discovery")
-    return isinstance(discovery, dict) and not overall_success(discovery)
+    if isinstance(discovery, dict) and not overall_success(discovery):
+        return discovery
+    return None
+
+
+def _placeholder_reason(discovery: JsonObject) -> str:
+    """Why the placeholder was written, named from discovery's own answer.
+
+    `adapter_not_found` is the single result "No attached bench was found"
+    describes truthfully: enumeration ran and listed no probe. A missing or
+    broken STM32CubeProgrammer, more than one probe attached, an ST-Link that
+    named no target, or a timeout each failed with a bench that may be plugged
+    in the whole time, so calling any of those "no attached bench" would send an
+    operator to reseat a board that is already there. Those name what discovery
+    reported instead, so the headline agrees with the reason its `config` step
+    carries rather than overwriting every failure with the one it is not.
+    """
+    if discovery.get("error_type") == "adapter_not_found":
+        return "No attached bench was found"
+    reason = str(discovery.get("summary") or "hardware discovery identified no bench").rstrip(".")
+    return f"Hardware discovery did not configure a bench ({reason})"
 
 
 def setup_project(agent: str, force: bool = False) -> JsonObject:
@@ -2155,10 +2175,15 @@ def setup_project(agent: str, force: bool = False) -> JsonObject:
         # The headline agrees with the `config` step it summarises. A green
         # `setup` that looked for a board, found none and wrote the skeleton
         # said only "project set up" to a reader whom the README had told this
-        # command discovers their ST-LINK (#416).
+        # command discovers their ST-LINK (#416). The reason is read off the same
+        # discovery the step reports, so a run that failed for a reason other
+        # than an empty bench -- a missing toolchain, two probes, a target that
+        # did not answer -- names that reason here instead of telling an operator
+        # their attached board is absent.
+        placeholder_discovery = _placeholder_discovery(project_result["steps"]["config"])
         summary = "Agentic HIL project set up." + (
-            " No attached bench was found, so the project configuration written is the placeholder."
-            if _wrote_a_placeholder_configuration(project_result["steps"]["config"])
+            f" {_placeholder_reason(placeholder_discovery)}, so the project configuration written is the placeholder."
+            if placeholder_discovery is not None
             else ""
         )
     elif user_ok:
@@ -2647,7 +2672,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         # "detection is broken", which is exactly how this was reported.
         next_steps.insert(
             0,
-            "This file describes no board yet, because hardware discovery ran and found none: "
+            "This file describes no board yet, because hardware discovery ran without configuring one: "
             f"{discovery.get('summary') or 'no attached bench was identified'} "
             "(the whole result is under `hardware_discovery`). Attach the bench and run "
             "`agentic-hil adopt-hardware`, which fills in the probe id, the toolchain executable, the detected "
@@ -2681,7 +2706,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
             (
                 f"Attached hardware was discovered and configured, {granted_clause}."
                 if discovered
-                else f"No attached bench was found, so the placeholder Agentic HIL project configuration was written, {granted_clause}."
+                else f"{_placeholder_reason(discovery)}, so the placeholder Agentic HIL project configuration was written, {granted_clause}."
             )
             + (
                 f" The file it replaced had {len(discarded)} {'permission' if len(discarded) == 1 else 'permissions'} "

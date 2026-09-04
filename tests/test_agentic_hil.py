@@ -198,17 +198,56 @@ def _one_attached_stlink(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_setup_headline_says_when_the_configuration_it_wrote_is_the_placeholder(
+def _no_attached_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """STM32CubeProgrammer is on this host and enumerates no ST-Link.
+
+    This is the one discovery result "No attached bench was found" describes: the
+    programmer ran, listed zero probes and said so, which discovery reports as
+    `adapter_not_found`. The autouse fixture hides the toolchain by default, so a
+    test that wants the empty-bench result rather than a missing-tool one has to
+    hand discovery a programmer that answers."""
+
+    def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand("No ST-LINK detected\n", "", 0, False, False)
+
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: FAKE_STLINK.as_posix())
+    monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
+    monkeypatch.setattr(
+        "agentic_hil.bootstrap.list_available_com_ports",
+        lambda tool: {"ok": True, "tool": tool, "ports": []},
+    )
+
+
+def _two_attached_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two ST-Links on this host, which discovery refuses to choose between.
+
+    A bench that is attached -- two of it -- so the placeholder written here is
+    not one an operator should be told to plug a board in for; discovery reports
+    it as `ambiguous_hardware`."""
+
+    def fake_spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand("ST-LINK SN : STLINK111\nST-LINK SN : STLINK222\n", "", 0, False, False)
+
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: FAKE_STLINK.as_posix())
+    monkeypatch.setattr("agentic_hil.bootstrap.spawn_command", fake_spawn)
+    monkeypatch.setattr(
+        "agentic_hil.bootstrap.list_available_com_ports",
+        lambda tool: {"ok": True, "tool": tool, "ports": []},
+    )
+
+
+def test_setup_headline_names_a_discovery_failure_that_is_not_an_absent_bench(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#416: a green `setup` that discovered nothing said nothing about it.
+    """#416, refined: not every placeholder means the bench is absent.
 
-    The `config` step has always been honest, and the headline is what a person
-    reads first: "Agentic HIL project set up." over a run that looked for a
-    board, found none and wrote placeholders, after a README that says setup
-    discovers your ST-LINK. One clause, decided by the same finding the step
-    reports, so the two agree."""
+    The default run here has no STM32CubeProgrammer -- the autouse fixture hides
+    it -- so discovery fails with `debugger_not_found`, a missing tool and not a
+    missing board. The headline used to answer every such failure with "No
+    attached bench was found", telling an operator to plug in a board that may
+    already be there. It now names what discovery reported, so a green run's most
+    prominent line agrees with the reason its `config` step carries."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
@@ -217,13 +256,69 @@ def test_setup_headline_says_when_the_configuration_it_wrote_is_the_placeholder(
     result = setup_project(agent="claude-code")
 
     assert result["ok"] is True, result
-    assert result["steps"]["config"]["hardware_discovery"]["ok"] is False
-    assert result["steps"]["config"]["summary"].startswith("No attached bench was found, so the placeholder")
+    assert result["steps"]["config"]["hardware_discovery"]["error_type"] == "debugger_not_found"
+    assert result["steps"]["config"]["summary"].startswith(
+        "Hardware discovery did not configure a bench (STM32CubeProgrammer CLI was not found), so the placeholder"
+    )
     # `startswith`, because a run that registered an MCP server appends the
     # restart notice to this same field; what is pinned is the headline itself.
     assert result["summary"].startswith(
+        "Agentic HIL project set up. Hardware discovery did not configure a bench "
+        "(STM32CubeProgrammer CLI was not found), so the project configuration written is the placeholder."
+    )
+    # And it does not tell an operator their attached toolchain's board is gone.
+    assert "No attached bench was found" not in result["summary"]
+
+
+def test_setup_headline_reserves_absent_bench_for_the_empty_probe_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one failure "No attached bench was found" is allowed to describe.
+
+    A programmer that ran and listed no probe is `adapter_not_found`, and there
+    the friendly wording is exactly right: attach the board. It stays reserved
+    for that result so it means something when it appears."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+    _no_attached_probe(monkeypatch)
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["steps"]["config"]["hardware_discovery"]["error_type"] == "adapter_not_found"
+    assert result["summary"].startswith(
         "Agentic HIL project set up. No attached bench was found, so the project configuration written is the placeholder."
     )
+
+
+def test_setup_headline_over_two_probes_does_not_report_an_absent_bench(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two attached probes are the sharpest case: the bench is doubly present.
+
+    `ambiguous_hardware` writes a placeholder because discovery will not choose a
+    board, not because none is there, so the headline names that reason rather
+    than sending the operator to plug in what is plugged in twice."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _trusted_test_mcp_command(monkeypatch)
+    _two_attached_probes(monkeypatch)
+
+    result = setup_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    assert result["steps"]["config"]["hardware_discovery"]["error_type"] == "ambiguous_hardware"
+    assert result["summary"].startswith(
+        "Agentic HIL project set up. Hardware discovery did not configure a bench "
+        "(More than one ST-Link probe is attached; discovery will not choose a board), "
+        "so the project configuration written is the placeholder."
+    )
+    assert "No attached bench was found" not in result["summary"]
 
 
 def test_setup_headline_over_a_discovered_bench_is_the_plain_sentence(
