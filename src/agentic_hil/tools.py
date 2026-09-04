@@ -523,29 +523,40 @@ class AgenticHILToolService:
             # recovery-class calls stay reachable through it, and whichever of
             # them ends the session brings the next call here with the hold gone.
             return result
+        recovered = False
         if self.coordinator.blocked:
             try:
-                self._attempt_machine_recovery()
+                # A non-None report is a recovery that ran its action and cleared
+                # the incident; None is a reason no action could settle, left for
+                # the stand-down below or the operator.
+                recovered = self._attempt_machine_recovery() is not None
             except Exception as error:
                 # Same rule as everywhere else recovery runs: a fault inside it
                 # never fails open, and never replaces the call's own answer.
                 self._poison_quietly("machine_recovery_failed", error, audit_broken=isinstance(error, (ConfigError, OSError)))
         stood_down = self.coordinator.stand_down()
-        if stood_down is None:
+        if stood_down is None and not recovered:
             return result
         # Whatever the ended incident left registered goes back, because the call
-        # that took it is over and the bench is not held for it any more. A
-        # lease a live COM or CAN session owns is the exception and the only one:
-        # the session is still there, still usable, and still the thing that
-        # gives its device back. Without this the leases an incident used to keep
-        # would sit registered for the rest of the process, and every later call
-        # that asks whether this server holds anything would be told yes.
+        # that took it is over and the bench is not held for it any more. This
+        # runs after a recovery action too, not only after a stand-down: a
+        # `project_config_adopt_hardware` read whose target the recovery reset and
+        # re-read leaves its enumeration and probe leases registered and `active`,
+        # and a leftover active lease would tell the next config write this server
+        # is still holding the bench. A lease a live COM or CAN session owns is
+        # the exception and the only one: the session is still there, still
+        # usable, and still the thing that gives its device back.
         session_leases = {id(session.lease) for session in (*self.com_ports.sessions.values(), *self.can_buses.sessions.values())}
         for lease in list(self.coordinator.leases.values()):
             if lease.state == "active" and id(lease) not in session_leases:
                 lease.release()
         if self._quarantined_lease is not None and self._quarantined_lease.state != "active":
             self._quarantined_lease = None
+        if stood_down is None:
+            # The incident was settled by the recovery action, which wrote its own
+            # ledger line and unblocked the coordinator, so there was nothing left
+            # to stand down. The call's own result stands as it was returned.
+            return result
         # Attached while the flags still say quarantined, so the reasons keep the
         # remediation text they had; `call` re-attaching it is a no-op.
         result = attach_quarantine_guidance(result)

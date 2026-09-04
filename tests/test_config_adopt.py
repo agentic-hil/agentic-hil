@@ -28,6 +28,7 @@ the failure mode that would make this path worse than the retyping.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 from pathlib import Path
@@ -35,7 +36,7 @@ from typing import Any
 
 import pytest
 import yaml
-from conftest import FAKE_GDB, FAKE_STLINK, write_authoritative_config
+from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_GDB, FAKE_STLINK, write_authoritative_config
 
 from agentic_hil.adopt import (
     PROJECT_CONFIG_ADOPT,
@@ -61,7 +62,12 @@ from agentic_hil.config import (
 )
 from agentic_hil.configstate import STATE_UNREADABLE
 from agentic_hil.configwrite import ACTOR_HUMAN, PROJECT_CONFIG_SET
-from agentic_hil.coordination import HardwareCoordinator, HardwareLease
+from agentic_hil.coordination import (
+    DEBUGGER_READONLY_TARGET_STATE_REASON,
+    RECOVERY_ACTION_VIA,
+    HardwareCoordinator,
+    HardwareLease,
+)
 from agentic_hil.knowledge import CONFIG_DESCRIPTION_RIGHT, CONFIG_PERMISSIONS_RIGHT, CONFIG_WRITE_RIGHT
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import fold_hardware_id
@@ -1109,10 +1115,12 @@ def test_a_timed_out_openocd_read_quarantines_the_probe_and_writes_nothing(tmp_p
     `hardware_state: unknown`, so `overall_success` refuses it and no probe or
     controller is carried into the file. And because the read may have left the
     target halted with nothing to resume it, the lease is not handed back as a
-    clean release: it declines to confirm a safe state it never reached, which
-    quarantines the probe `safe_state_unconfirmed` and refuses
-    `resource_quarantined`. The audit record says the same, and the file is
-    untouched.
+    clean release: it is quarantined `debugger_readonly_target_state_unconfirmed`,
+    the reason a read-only probe raises for a target state it could not confirm,
+    so the service's configured reset-into-halt/probe recovery can recognise and
+    settle it rather than the generic `safe_state_unconfirmed` incident nothing
+    but an operator could clear. The refusal is `resource_quarantined`, the audit
+    record says the same, and the file is untouched.
     """
     workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
     before = path.read_text(encoding="utf-8")
@@ -1148,7 +1156,10 @@ def test_a_timed_out_openocd_read_quarantines_the_probe_and_writes_nothing(tmp_p
         # being reported as an untouched bench.
         assert refused["hardware_state"] == "unknown"
         assert refused["side_effect_status"] == "unknown"
-        assert "safe_state_unconfirmed" in refused["cleanup_reasons"]
+        assert "debugger_readonly_target_state_unconfirmed" in refused["cleanup_reasons"]
+        # And not the generic release failure that RECOVERY_ACTION_REASONS does
+        # not cover: manufacturing that was the whole finding.
+        assert "safe_state_unconfirmed" not in refused["cleanup_reasons"]
         # The lease was quarantined, not handed back: a clean release would have
         # cleared `blocked`, and it is still held. (It is not an `audit_incident`,
         # so it does not `stand` forever -- the target's state is what the next
@@ -1160,6 +1171,151 @@ def test_a_timed_out_openocd_read_quarantines_the_probe_and_writes_nothing(tmp_p
         # locks could not all come back; either way the file must be untouched.
         with contextlib.suppress(Exception):
             coordinator.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
+class _RecoveryBackend:
+    """A probe double that records what the end-of-call recovery drove.
+
+    The adopt read is monkeypatched at `discover_attached_hardware`, so this
+    backend is touched only by the recovery action `AgenticHILToolService`
+    attempts after the call: `reset_target("halt")` then `probe_target`. The
+    order the tests assert is read straight off `calls`."""
+
+    def __init__(self, *, reset_ok: bool = True, probe_ok: bool = True, target_detected: bool = True) -> None:
+        self.calls: list[str] = []
+        self.reset_ok = reset_ok
+        self.probe_ok = probe_ok
+        self.target_detected = target_detected
+
+    def probe_target(self) -> dict:
+        self.calls.append("probe_target")
+        return {"ok": self.probe_ok, "tool": "probe_target", "target_detected": self.target_detected if self.probe_ok else False}
+
+    def reset_target(self, mode: str = "run") -> dict:
+        self.calls.append(f"reset_target:{mode}")
+        return {"ok": self.reset_ok, "tool": "reset_target", "mode": mode}
+
+    def close(self) -> None:
+        return None
+
+    def sessionless_debug_tools(self) -> frozenset[str]:
+        return frozenset()
+
+
+def _timed_out_read(discovery: dict | None = None):
+    """A bootstrap discovery reaped mid-attach: the lock is taken, the state unknown."""
+    result = {
+        "ok": False,
+        "tool": "bootstrap_hardware_discovery",
+        "error_type": "timeout",
+        "probe_id": PROBE_SERIAL,
+        "target": None,
+        "side_effect_committed": False,
+        "side_effect_status": "unknown",
+        "hardware_state": "unknown",
+        "cleanup_required": False,
+        "summary": "OpenOCD did not finish its read before it was reaped.",
+        **(discovery or {}),
+    }
+
+    def timed_out(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
+        if before_connect is not None:
+            before_connect(PROBE_SERIAL)
+        return result
+
+    return timed_out
+
+
+def _set_auto_recover(path: Path, policy: str) -> None:
+    """Name this bench's recovery policy in the authoritative file."""
+    document = document_of(path)
+    document["recovery"] = {"auto_recover": policy}
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+
+def test_a_timed_out_adopt_read_lets_the_service_run_its_configured_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """agentic-hil/agentic-hil#: the timeout reason a reset can actually settle.
+
+    Through `AgenticHILToolService.call`, not the bare function: the service is
+    the only place the configured reset-into-halt/probe recovery runs, and the
+    bare function stops at the quarantine. A read reaped mid-attach may have left
+    the core halted, so the probe is quarantined with
+    `debugger_readonly_target_state_unconfirmed`, a reason `RECOVERY_ACTION_REASONS`
+    covers, and the service's end-of-call handler drives the bench back into a
+    defined state (`reset_target("halt")`, then `probe_target`) before it hands
+    the locks back. It used to manufacture `safe_state_unconfirmed`, which no
+    recovery action recognises, so the incident was stood down with the core left
+    wherever the reaped `init` put it. Nothing is written to the configuration
+    either way: the read failed."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
+
+    backend = _RecoveryBackend()
+    tools = AgenticHILToolService(load_authoritative_config(workspace), backend=backend, frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined"
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        # The recovery action ran, and ran the reset before the probe: the whole
+        # point of the fix is that a physical settle happens rather than a stand
+        # down with the core left as the reaped read found it.
+        assert backend.calls == ["reset_target:halt", "probe_target"], backend.calls
+        # And it settled the incident: the coordinator is unblocked and the leases
+        # the read took (enumeration and probe) are back, so the next config write
+        # is not told this server is still holding the bench.
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+        ledger_path = Path(tools.coordinator.root) / "recovery.jsonl"
+        lines = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert any(
+            line.get("via") == RECOVERY_ACTION_VIA
+            and line.get("recovery") == "incident_resolved"
+            and line.get("reason") == DEBUGGER_READONLY_TARGET_STATE_REASON
+            for line in lines
+        ), lines
+    finally:
+        tools.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
+
+
+def test_a_timed_out_adopt_read_takes_no_target_action_when_the_policy_withholds_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The withheld half: `recovery.auto_recover: off` runs no reset.
+
+    The reason a reset could settle does not oblige one where the bench forbids
+    it. With recovery off, the service drives nothing: it stands the incident
+    down instead, because the reason does not name a damaged audit chain, and the
+    target's state is what the next reset and probe say it is. The board is left
+    for the next contact rather than held, and the reset the fix enables for a
+    permitting bench never touches this one."""
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, permissions=DEFAULT_TEST_PERMISSIONS, **{CONFIG_DESCRIPTION_RIGHT: True})
+    _set_auto_recover(path, "off")
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", _timed_out_read())
+
+    backend = _RecoveryBackend()
+    tools = AgenticHILToolService(load_authoritative_config(workspace), backend=backend, frontend="mcp")
+    try:
+        refused = tools.call(PROJECT_CONFIG_ADOPT, {"apply": True})
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined"
+        assert DEBUGGER_READONLY_TARGET_STATE_REASON in refused["cleanup_reasons"]
+        # No physical action: the policy withheld the reset and there is no
+        # weaker predicate that settles a target-state reason.
+        assert backend.calls == [], backend.calls
+        # The incident does not stand (its audit chain is intact), so it is stood
+        # down and the locks come back rather than waiting for an operator.
+        assert refused["incident_stood_down"]["stood_down"] is True
+        assert tools.coordinator.blocked is False
+        assert tools.open_hardware_holds() is None
+    finally:
+        tools.close()
 
     assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
 

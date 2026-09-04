@@ -69,6 +69,7 @@ from agentic_hil.configwrite import (
 )
 from agentic_hil.coordination import (
     DEBUGGER_DISCOVERY_RESOURCE,
+    DEBUGGER_READONLY_TARGET_STATE_REASON,
     CoordinationError,
     HardwareCoordinator,
     HardwareLease,
@@ -1099,22 +1100,31 @@ def discover_under_hardware_lease(
     # board in -- an OpenOCD `init` reaped mid-attach reports `hardware_state:
     # unknown` -- is not a lease this process may hand back as a clean release.
     # `overall_success` already fails such a discovery so no file is written from
-    # it, but the board itself is quarantined only if the release declines to
-    # confirm a safe state the read never reached; that turns the lease into the
-    # same `safe_state_unconfirmed` incident an operator resolves as any other
-    # release that could not vouch for the bench.
+    # it, but the SWD attach may have left the core halted, so the board itself is
+    # quarantined with `debugger_readonly_target_state_unconfirmed`: the same
+    # reason `probe_target` raises for a read whose target state it could not
+    # confirm, and one a reset into halt and a probe re-read settle. Releasing
+    # with `safe_state_confirmed=False` instead manufactured the generic
+    # `safe_state_unconfirmed` incident, which `RECOVERY_ACTION_REASONS` does not
+    # cover, so the service's end-of-call handler stood the incident down with no
+    # target action over a core the timed-out `init` may have left halted, and
+    # only an operator at the bench could settle what the configured reset can.
     safe_state = discovery.get("hardware_state") != "unknown"
     released = True
     for lease in reversed(held):
-        if lease.state == "active":
-            # `release` returns False for a durable-record or lock-release
-            # failure and leaves the lease registered, blocking and quarantined.
-            # Discarding that answer reported a clean read of a board this
-            # process is still holding, and let the configuration write go ahead
-            # under it: the one place where "the hardware is fine now" has to be
-            # a checked claim rather than an assumption. It also returns False
-            # when this read declines to confirm the board is safe, above.
-            released = lease.release(safe_state_confirmed=safe_state) and released
+        if lease.state != "active":
+            continue
+        if not safe_state:
+            lease.quarantine(DEBUGGER_READONLY_TARGET_STATE_REASON)
+            released = False
+            continue
+        # `release` returns False for a durable-record or lock-release failure
+        # and leaves the lease registered, blocking and quarantined. Discarding
+        # that answer reported a clean read of a board this process is still
+        # holding, and let the configuration write go ahead under it: the one
+        # place where "the hardware is fine now" has to be a checked claim rather
+        # than an assumption.
+        released = lease.release() and released
     status = _combined_status(held)
     if not released or status["cleanup_required"] or status["quarantined"]:
         return {}, _refuse_after_failed_release(existing, record, discovery, status, tool)
