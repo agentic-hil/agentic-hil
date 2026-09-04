@@ -83,8 +83,8 @@ VOLATILE_SERIAL_DEVICE_WARNING = (
 UNBOUND_SERIAL_DEVICE_WARNING = (
     "This COM port names no device yet, so nothing can be opened on it. The entry exists because the project "
     "declared this port by name, baudrate and permissions before any bench was attached; run `agentic-hil "
-    "adopt-hardware --apply` with the board plugged in to fill the device in from the hardware, or name it "
-    "yourself with `agentic-hil grant`-style edits to `com_ports.<name>.device`."
+    "adopt-hardware --apply` with the board plugged in to fill the device in from the hardware, or set "
+    "`com_ports.<name>.device` yourself. `agentic-hil com-ports` lists what this host has."
 )
 
 TYPE_ONLY_SERIAL_DEVICE_WARNING = (
@@ -443,7 +443,16 @@ class UartDevice(Device):
         Computed in `types.com_port_identity_source`, because a version 3
         configuration declares this answer in the file and that declaration is
         checked against it at load. One function, so what the file has to say and
-        what this reports cannot come apart."""
+        what this reports cannot come apart.
+
+        The exception is an entry with no device, where there is nothing for the
+        file to say: both version 3 checks skip it, so `unbound` is reported
+        here without becoming a value anybody may declare. Falling through to
+        the shared function reported `identity_source: device` beside `device:
+        ""`, which names a key that is empty as the thing that identifies the
+        port."""
+        if com_port_is_unbound(self.port):
+            return "unbound"
         return com_port_identity_source(self.port)
 
     @property

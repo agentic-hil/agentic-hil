@@ -2276,6 +2276,9 @@ def test_an_unbound_port_locks_under_its_own_name_and_says_what_it_is(tmp_path: 
     device = uart_device(config, "dut_uart")
     assert device.lock_key == "com:unbound:dut_uart"
     assert "names no device yet" in str(device.identity_warning)
+    # And it does not name an empty key as the thing that identifies the port,
+    # which is what falling through to the shared rule reported.
+    assert device.identity_source == "unbound"
 
 
 def test_version_3_does_not_demand_an_identity_from_a_port_with_no_device(tmp_path: Path) -> None:
