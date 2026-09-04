@@ -54,12 +54,20 @@ def call(workspace: Path, name: str, arguments: dict) -> dict:
 
 
 def _comparable(result: dict) -> dict:
-    """One run's result, less the two things two runs may honestly differ in.
+    """One run's result, less the three things two runs may honestly differ in.
 
-    The handle, because two runs are two runs; and the moment the configuration
-    was last compared against the file, because a clock moves between them. The
-    digests that check says the same thing about stay in."""
-    trimmed = {key: value for key, value in result.items() if key != "run"}
+    The handle, because two runs are two runs; the path of the per-run report
+    copy, which is that handle under a directory; and the moment the
+    configuration was last compared against the file, because a clock moves
+    between them. The digests that check says the same thing about stay in, and
+    so does the summary sentence naming that copy: the handle is substituted out
+    of the sentence rather than the sentence dropped, so the two routes are still
+    held to saying the same thing about where their report went."""
+    handle = str(result.get("run") or "")
+    trimmed = {key: value for key, value in result.items() if key not in {"run", "canonical_report_path"}}
+    summary = trimmed.get("summary")
+    if handle and isinstance(summary, str):
+        trimmed["summary"] = summary.replace(handle, "<run>")
     in_force = trimmed.get("config_in_force")
     if isinstance(in_force, dict):
         trimmed["config_in_force"] = {key: value for key, value in in_force.items() if key != "checked_at"}

@@ -24,7 +24,12 @@ the shell, with the operator.
 process is running, so a result that reports the new number as this server's
 would be a lie a host cannot check. The vocabulary is the one the staleness block
 already uses: `upgraded_on_disk`, `previous_version`, `version`,
-`running_version`, `restart_required`.
+`running_version`, `restart_required`. The same sentence is what every *other*
+server running out of this installation gets: it keeps the files it has mapped,
+answers with the previous release until its host restarts, and is named under
+`restart_required_by` rather than being made a reason to refuse. An upgrade the
+operator started at their own shell is never blocked because their bench is
+working.
 
 Two rules are the whole of what both front ends owe an installation, and both
 were learned from one report on a pip `--user` machine that was already at the
@@ -80,9 +85,9 @@ from agentic_hil.types import AgenticHILConfig, JsonObject
 CLI_UPGRADE_TOOL = "agentic_hil_upgrade"
 SERVER_UPGRADE = "server_upgrade"
 
-# How far up the process tree the upgrade guard follows launchers before it
-# stops looking, and how many holding processes a refusal names before the
-# count carries the rest.
+# How far up the process tree the upgrade follows launchers before it stops
+# looking, and how many still-running servers a result names before the count
+# carries the rest.
 _ANCESTOR_WALK_LIMIT = 16
 _REPORTED_HOLDER_LIMIT = 10
 
@@ -117,6 +122,35 @@ def _dedicated_environment_root() -> Path | None:
     return None
 
 
+def _declared_extras() -> dict[str, list[str]]:
+    """Every extra this distribution declares, and the distributions each one pulls in.
+
+    Read to answer which extras are installed (every requirement of the extra is
+    present), so the reinstall line an upgrade prints carries exactly the extras
+    the machine already has. It is deliberately not used to claim ownership of
+    those distributions' console scripts: an isolated manager does not expose a
+    dependency's launchers by default, so a same-named file in the shared bin is
+    not this installation's to move (review round 0, finding 3, and
+    `_entrypoint_names`).
+    """
+    from importlib.metadata import distribution
+
+    try:
+        metadata = distribution("agentic-hil").metadata
+    except Exception:
+        return {}
+    declared = [name.strip() for name in metadata.get_all("Provides-Extra") or [] if isinstance(name, str) and name.strip()]
+    requirements = [item for item in metadata.get_all("Requires-Dist") or [] if isinstance(item, str)]
+    extras: dict[str, list[str]] = {}
+    for extra in declared:
+        marker = re.compile(rf"""extra\s*==\s*['"]{re.escape(extra)}['"]""")
+        required = [_requirement_name(item) for item in requirements if ";" in item and marker.search(item.split(";", 1)[1])]
+        names = [name for name in required if name]
+        if names:
+            extras[extra] = names
+    return extras
+
+
 def _installed_extras() -> tuple[str, ...]:
     """Declared extras whose every requirement is installed alongside this package.
 
@@ -126,21 +160,10 @@ def _installed_extras() -> tuple[str, ...]:
     one that names the bare distribution re-resolves without the extras and
     leaves whatever they installed pinned at whatever version it already had.
     """
-    from importlib.metadata import PackageNotFoundError, distribution, version
+    from importlib.metadata import PackageNotFoundError, version
 
-    try:
-        metadata = distribution("agentic-hil").metadata
-    except Exception:
-        return ()
-    declared = [name.strip() for name in metadata.get_all("Provides-Extra") or [] if isinstance(name, str) and name.strip()]
-    requirements = [item for item in metadata.get_all("Requires-Dist") or [] if isinstance(item, str)]
     installed: list[str] = []
-    for extra in declared:
-        marker = re.compile(rf"""extra\s*==\s*['"]{re.escape(extra)}['"]""")
-        required = [_requirement_name(item) for item in requirements if ";" in item and marker.search(item.split(";", 1)[1])]
-        names = [name for name in required if name]
-        if not names:
-            continue
+    for extra, names in _declared_extras().items():
         for name in names:
             try:
                 version(name)
@@ -548,12 +571,16 @@ def _upgrading_process_and_its_launchers(by_pid: dict[int, ProcessImage], owned_
 def _processes_holding_installation() -> list[JsonObject]:
     """Processes running out of the installation an upgrade is about to replace.
 
+    Read before the manager runs and reported afterwards, because those are the
+    processes the swap does not reach: a running server keeps the files it has
+    mapped and goes on answering with the previous version until the host that
+    started it restarts. Naming them is the whole of what `restart_required`
+    owes an operator, and it is not a reason to refuse an upgrade the operator
+    typed.
+
     Empty on every platform but Windows, and deliberately so. Elsewhere a
     package manager unlinks the old files while the processes using them keep
-    reading their own copies, so the upgrade completes and nothing is lost.
-    Windows refuses to delete a file that is mapped as a running image, and a
-    manager that removes the environment before it rebuilds it then leaves
-    neither the old installation nor the new one.
+    reading their own copies, and the snapshot this reads has no answer there.
     """
     snapshot = snapshot_process_images()
     if snapshot is None:
@@ -568,6 +595,255 @@ def _processes_holding_installation() -> list[JsonObject]:
         if entry.pid not in excluded and _belongs_to_installation(entry.image, owned_prefix, scripts)
     ]
     return sorted(holders, key=lambda holder: holder["pid"])
+
+
+# ---------------------------------------------------------------------------
+# The launcher on PATH, moved out of the manager's way.
+#
+# A `uv tool` installation is two places: the environment, and one small
+# trampoline per console script in uv's bin directory, copied out of that
+# environment. Upgrading replaces both, and on Windows the copy of the
+# trampoline is the step that fails, because every live MCP server was started
+# through it and a file mapped as a running image cannot be overwritten:
+#
+#     Caused by: Failed to install entrypoint
+#     Caused by: failed to copy file from ...\uv\tools\agentic-hil\Scripts\agentic-hil.exe
+#     to ...\.local\bin\agentic-hil.exe: Der Prozess kann nicht auf die Datei
+#     zugreifen, da sie von einem anderen Prozess verwendet wird. (os error 32)
+#
+# Windows does not refuse to *rename* that file. A rename moves the directory
+# entry and the mapping follows the file, so the running launcher keeps the
+# image it has and the manager's copy lands on a name nothing holds any more.
+# That is the whole of the fix: rename before the manager runs, put back
+# whatever the manager did not replace after all, and delete the leftovers on a
+# later run once nothing maps them.
+
+# What a superseded launcher is renamed to. It has to be a sibling (a rename
+# across volumes is a copy, which is the operation that just failed), it has to
+# be a name no shell resolves, and it has to be recognisable to the sweep below
+# without matching anything this installation did not write.
+_SUPERSEDED_SUFFIX = ".superseded"
+# How many superseded copies of one launcher may pile up before this stops
+# making more. Reached only on a bench where nothing has restarted through
+# several upgrades, and stopping there loses the rename rather than the upgrade.
+_SUPERSEDED_LIMIT = 32
+
+
+def _manager_bin_directory() -> Path | None:
+    """Where the manager keeps the launchers it copies out of this environment.
+
+    Only the two managers with an environment of their own have such a
+    directory: `uv tool` and `pipx` install the package away from PATH and put
+    a trampoline where PATH can see it. The pip and `uv pip` routes write their
+    console scripts into the scheme's own scripts directory, which is inside
+    the installation and is not a separate copy to keep in step.
+
+    Read out of the environment rather than out of the manager, because asking
+    the manager means running it, and the one question this needs answered is
+    where a file is. The order is uv's own documented one, and `pipx` reads a
+    single variable of its own; where neither says anything, both land on the
+    same `~/.local/bin`.
+    """
+    manager = owning_manager()
+    variables = {"uv-tool": ("UV_TOOL_BIN_DIR", "XDG_BIN_HOME"), "pipx": ("PIPX_BIN_DIR",)}.get(manager)
+    if variables is None:
+        return None
+    for variable in variables:
+        configured = os.environ.get(variable, "").strip()
+        if configured:
+            return Path(configured)
+    if manager == "uv-tool":
+        data_home = os.environ.get("XDG_DATA_HOME", "").strip()
+        if data_home:
+            return Path(data_home).parent / "bin"
+    with suppress(RuntimeError, OSError):
+        return Path.home() / ".local" / "bin"
+    return None
+
+
+def _entrypoint_names() -> tuple[str, ...]:
+    """Every console script this installation's own distribution declares.
+
+    Only `agentic-hil`'s own entry points, and deliberately not the ones the
+    installed extras' distributions declare. The launchers this touches live in
+    the shared bin of an isolated manager -- `_manager_bin_directory` names one
+    only for `uv-tool` and `pipx` -- and neither exposes a dependency's
+    executables there by default: `uv tool` installs only the requested
+    package's scripts, and `pipx` exposes a dependency's only when it was
+    installed with `--include-deps`. So an ordinary `agentic-hil[can]`
+    installation does not own `can_logger`; a same-named file in the shared bin
+    belongs to whatever put it there, and renaming or sweeping it would move an
+    unrelated tool's launcher out of PATH (review round 0, finding 3). Deriving
+    the extras' scripts and assuming this installation owns them was exactly that
+    false inference.
+
+    `agentic-hil` is seeded rather than looked up so that unreadable metadata
+    still costs nothing but any further console scripts this package itself
+    declares, never the one name this module is about.
+    """
+    from importlib.metadata import distribution
+
+    names = {"agentic-hil"}
+    with suppress(Exception):
+        names.update(entry.name for entry in distribution("agentic-hil").entry_points if entry.group == "console_scripts")
+    return tuple(sorted(names))
+
+
+def _installation_launchers() -> list[Path]:
+    """The launcher files that exist right now, for those names, in that directory.
+
+    Both spellings are tried and only what is there is returned: a name is a
+    file on Windows with `.exe` on it and without on POSIX, and a candidate that
+    does not exist is a console script this manager never installed.
+    """
+    directory = _manager_bin_directory()
+    if directory is None:
+        return []
+    found: list[Path] = []
+    for name in _entrypoint_names():
+        for candidate in (directory / f"{name}.exe", directory / name):
+            with suppress(OSError):
+                if candidate.is_file():
+                    found.append(candidate)
+    return found
+
+
+def _superseded_name(launcher: Path) -> Path | None:
+    """A free sibling name for one launcher, or None when there is no room left."""
+    for index in range(_SUPERSEDED_LIMIT):
+        candidate = launcher.with_name(f"{launcher.name}{_SUPERSEDED_SUFFIX}{f'.{index}' if index else ''}")
+        with suppress(OSError):
+            if not candidate.exists():
+                return candidate
+    return None
+
+
+def _remove_superseded_launchers() -> None:
+    """Delete what an earlier upgrade renamed aside, once nothing maps it.
+
+    A delete that fails because a launcher of the previous release is still
+    running is the ordinary state of a bench whose sessions have not restarted
+    yet, so the file is left exactly where it is and nothing is reported: it is
+    not on PATH under that name, it costs a few kilobytes, and the next upgrade
+    asks again. Only names this module itself wrote are looked at, so a sweep
+    can never reach a file somebody else put in a shared bin directory.
+    """
+    directory = _manager_bin_directory()
+    if directory is None:
+        return
+    for name in _entrypoint_names():
+        for stem in (f"{name}.exe", name):
+            leftovers: list[Path] = []
+            with suppress(OSError):
+                leftovers = sorted(directory.glob(f"{stem}{_SUPERSEDED_SUFFIX}*"))
+            for leftover in leftovers:
+                with suppress(OSError):
+                    leftover.unlink()
+
+
+def _launchers_moved_aside() -> list[tuple[Path, Path]]:
+    """Rename the launchers the manager is about to replace out of its way.
+
+    Empty on a host that lets a running executable be replaced, which is every
+    platform but Windows: there the manager unlinks the old file, the process
+    running it keeps reading its own copy, and a rename would only leave a
+    second file behind for nothing.
+
+    A rename that fails is not a failure of the upgrade. It means the manager
+    meets the file the way it always did, which is the behaviour this replaces,
+    so the run goes on and reports whatever the manager makes of it.
+    """
+    if not _host_locks_running_files():
+        return []
+    moved: list[tuple[Path, Path]] = []
+    for launcher in _installation_launchers():
+        aside = _superseded_name(launcher)
+        if aside is None:
+            continue
+        with suppress(OSError):
+            launcher.rename(aside)
+            moved.append((launcher, aside))
+    return moved
+
+
+class _RestoredLaunchers(NamedTuple):
+    """What restoring the moved-aside launchers left standing.
+
+    `superseded` are the sibling names kept because the manager did write the
+    launcher, so the old image sits under a name nothing on PATH resolves.
+    `unrecovered` are the launchers the manager did not write and the rename-back
+    could not put back either: PATH has no launcher under that name and only the
+    `.superseded` sibling beside it, so the CLI is off PATH until that sibling is
+    moved back by hand. Each is named as a `(launcher, sibling)` pair so a
+    result can tell an operator exactly which file to restore."""
+
+    superseded: list[str] = []
+    unrecovered: list[tuple[str, str]] = []
+
+
+def _restore_unreplaced_launchers(moved: list[tuple[Path, Path]]) -> _RestoredLaunchers:
+    """Put back every launcher the manager did not write after all.
+
+    The rename is only safe because of this: a manager that failed before it
+    reached the entrypoints, or one that had nothing to install, would otherwise
+    leave the installation with no launcher on PATH at all. So each name is
+    asked once more after the manager stops, and one that is still missing gets
+    its old image back under the name that was there before.
+
+    A rename-back that itself fails used to be swallowed, which left the CLI off
+    PATH with only its `.superseded` sibling to show for it and a result that
+    still called the installation intact (review round 0, finding 4). So the
+    launchers that stay missing are reported, for the caller to surface as
+    cleanup-required rather than to bury.
+    """
+    superseded: list[str] = []
+    unrecovered: list[tuple[str, str]] = []
+    for launcher, aside in moved:
+        replaced = False
+        with suppress(OSError):
+            replaced = launcher.exists()
+        if replaced:
+            superseded.append(str(aside))
+            continue
+        try:
+            aside.rename(launcher)
+        except OSError:
+            still_missing = True
+            with suppress(OSError):
+                still_missing = not launcher.exists()
+            if still_missing:
+                unrecovered.append((str(launcher), str(aside)))
+    return _RestoredLaunchers(superseded, unrecovered)
+
+
+def _with_unrecovered_launchers(outcome: JsonObject, restore: _RestoredLaunchers) -> JsonObject:
+    """Fail an outcome that left the CLI launcher off PATH, naming the sibling.
+
+    A launcher the manager did not write and the rename-back could not restore is
+    a broken installation whatever the version probe answered: the module still
+    imports, but the console script an operator types is gone and only its
+    `.superseded` sibling remains. So this outcome is failed and cleanup-required
+    even over an otherwise clean upgrade, and it names each file to move back
+    (review round 0, finding 4). A no-op when every launcher was restored, which
+    is every ordinary run."""
+    if not restore.unrecovered:
+        return outcome
+    off_path = ", ".join(launcher for launcher, _ in restore.unrecovered)
+    summary = str(outcome.get("summary") or "").rstrip()
+    note = (
+        f"The CLI launcher could not be put back after the upgrade: {off_path} is off PATH and only its "
+        "`.superseded` sibling remains, so the console script will not run. Rename each `recover_from` file back to "
+        "its `launcher` name before calling the CLI again."
+    )
+    return {
+        **outcome,
+        "ok": False,
+        "installation_intact": False,
+        "cleanup_required": True,
+        "restart_required": False,
+        "unrecovered_launchers": [{"launcher": launcher, "recover_from": sibling} for launcher, sibling in restore.unrecovered],
+        "summary": f"{summary} {note}" if summary else note,
+    }
 
 
 def _run_upgrade_process(command: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -1283,6 +1559,34 @@ def _upgrade_changed_nothing(
     }
 
 
+def _still_running_the_previous_version(holders: list[JsonObject], previous_version: str) -> JsonObject:
+    """The servers the swap did not reach, and the one thing left to do about them.
+
+    Nothing here is a refusal. A process that was started out of this
+    installation keeps the files it has mapped, goes on executing the release it
+    imported, and stops doing so when the host that started it restarts, which
+    is exactly what `restart_required` already means. So the operator is told
+    which hosts to restart and nothing else: pid and image, the same rendering
+    the old refusal used, plus the sentence that says why they still answer with
+    the old number.
+
+    Empty on the platform that has no such list, so a result gains these fields
+    only where they say something.
+    """
+    if not holders:
+        return {}
+    named = "1 process" if len(holders) == 1 else f"{len(holders)} processes"
+    return {
+        "restart_required_by": holders[:_REPORTED_HOLDER_LIMIT],
+        "restart_required_by_count": len(holders),
+        "restart_notice": (
+            f"{named} started out of this installation before the swap and still runs {previous_version}; "
+            f"`restart_required_by` names each one by pid and image. Each goes on answering with {previous_version} "
+            f"until the host that started it restarts, and that restart is the whole of what is left to do."
+        ),
+    }
+
+
 def replace_installation(*, tool: str) -> JsonObject:
     """Hand this installation to its own package manager and report what moved.
 
@@ -1292,21 +1596,22 @@ def replace_installation(*, tool: str) -> JsonObject:
     that is the one condition where there is no manager to have an outcome from.
     The command line prints it as a refusal like any other, and the MCP tool
     turns it into a result.
+
+    A server running out of this installation is read here and reported, never
+    refused. An upgrade the operator typed at their own shell goes through: the
+    running server keeps its mapped files and its old behaviour, the new release
+    lands on disk, and the result names the hosts whose restart adopts it. The
+    refusal this replaces asked an operator to go and close sessions they could
+    not always see, and the half of it that was a real failure -- the launcher
+    on PATH that a running process has mapped -- is answered by moving that
+    launcher aside rather than by not upgrading.
     """
-    holders = _processes_holding_installation()
-    if holders:
-        return {
-            "ok": False,
-            "tool": tool,
-            "error_type": "installation_in_use",
-            "summary": "Another process is running out of this installation, so upgrading it now would leave no working installation at all. Nothing was changed.",
-            "python": sys.executable,
-            "installation_root": str(Path(sys.prefix)),
-            "held_by": holders[:_REPORTED_HOLDER_LIMIT],
-            "held_by_count": len(holders),
-            "installed_version": __version__,
-            **remediation_fields("installation_in_use"),
-        }
+    still_running = _processes_holding_installation()
+    # First, because it is the one step that undoes work an earlier run left
+    # behind, and it must happen even on a run that turns out to have nothing to
+    # install: a bench that is already current is exactly where the leftovers of
+    # the upgrade before it are sitting.
+    _remove_superseded_launchers()
 
     manager, command = _upgrade_command()
     previous_version = __version__
@@ -1328,22 +1633,16 @@ def replace_installation(*, tool: str) -> JsonObject:
         # accounts of one proxy on a single result.
         return _with_certificate_note(_nothing_to_install(tool, manager, command, previous_version, resolution), resolution_certificates)
 
+    # The launchers on PATH go out of the manager's way here and nowhere
+    # earlier: an already-current run would have renamed the installation's own
+    # entry points aside and given nothing back, because the manager it never
+    # reached is what writes the replacements.
+    moved_aside = _launchers_moved_aside()
     try:
         installed, install_result, certificates = _manager_run(manager, command)
     except (OSError, subprocess.TimeoutExpired) as error:
-        return _failed_upgrade(
-            tool,
-            manager,
-            command,
-            previous_version,
-            installed_extras,
-            reinstall_command,
-            summary="Agentic HIL package upgrade could not run.",
-            exception_type=type(error).__name__,
-            detail=str(error),
-        )
-    if installed.returncode != 0:
-        return _with_certificate_note(
+        restore = _restore_unreplaced_launchers(moved_aside)
+        return _with_unrecovered_launchers(
             _failed_upgrade(
                 tool,
                 manager,
@@ -1351,10 +1650,68 @@ def replace_installation(*, tool: str) -> JsonObject:
                 previous_version,
                 installed_extras,
                 reinstall_command,
-                summary="Agentic HIL package manager reported an upgrade failure.",
-                install=install_result,
+                summary="Agentic HIL package upgrade could not run.",
+                exception_type=type(error).__name__,
+                detail=str(error),
             ),
-            certificates,
+            restore,
+        )
+    except BaseException as error:
+        # A KeyboardInterrupt, a SystemExit, or any unexpected error from the
+        # manager run would otherwise skip restoration entirely and leave the
+        # launchers renamed aside -- the CLI off PATH with only a `.superseded`
+        # sibling. Put them back before the exception propagates, so an
+        # interrupted upgrade never disarms the very command used to repair it
+        # (review round 0, finding 4).
+        restore = _restore_unreplaced_launchers(moved_aside)
+        if restore.unrecovered:
+            # Restoration itself failed while the run was being interrupted, so
+            # re-raising would carry the interruption away and leave the CLI off
+            # PATH with no cleanup-required result and no recovery path -- the
+            # exact case round 0, finding 4 required to be surfaced rather than
+            # buried, now closed on the exceptional path too (review round 1,
+            # finding 3). Return the structured cleanup failure naming each
+            # launcher and its `recover_from` sibling, recording the interruption
+            # that caused it instead of dropping it. The original exception is not
+            # re-raised here on purpose: the operator must be told how to put the
+            # launcher back, and an interruption that propagated silently would be
+            # the disarmed-repair-command bug all over again.
+            return _with_unrecovered_launchers(
+                _failed_upgrade(
+                    tool,
+                    manager,
+                    command,
+                    previous_version,
+                    installed_extras,
+                    reinstall_command,
+                    summary="Agentic HIL package upgrade was interrupted before it finished.",
+                    exception_type=type(error).__name__,
+                    detail=str(error),
+                ),
+                restore,
+            )
+        # Every launcher went back, so nothing is left off PATH: the interruption
+        # has cost the run nothing a result would need to carry, and it propagates
+        # exactly as it would have (review round 0, finding 4).
+        raise
+    restore = _restore_unreplaced_launchers(moved_aside)
+    superseded = restore.superseded
+    if installed.returncode != 0:
+        return _with_unrecovered_launchers(
+            _with_certificate_note(
+                _failed_upgrade(
+                    tool,
+                    manager,
+                    command,
+                    previous_version,
+                    installed_extras,
+                    reinstall_command,
+                    summary="Agentic HIL package manager reported an upgrade failure.",
+                    install=install_result,
+                ),
+                certificates,
+            ),
+            restore,
         )
 
     verification, current_version = _loaded_version()
@@ -1364,35 +1721,43 @@ def replace_installation(*, tool: str) -> JsonObject:
         # here named the verification step and stopped, which told an operator
         # that something could not be loaded without telling them their
         # installation was gone or what single command brings it back.
-        return _with_certificate_note(
-            _installation_broken(
-                {"ok": False, "tool": tool, "manager": manager, "command": command, "python": sys.executable, "previous_version": previous_version, "install": install_result},
-                installed_extras,
-                reinstall_command,
-                verification,
-                "Agentic HIL package manager completed, but the installation it left cannot be loaded.",
+        return _with_unrecovered_launchers(
+            _with_certificate_note(
+                _installation_broken(
+                    {"ok": False, "tool": tool, "manager": manager, "command": command, "python": sys.executable, "previous_version": previous_version, "install": install_result},
+                    installed_extras,
+                    reinstall_command,
+                    verification,
+                    "Agentic HIL package manager completed, but the installation it left cannot be loaded.",
+                ),
+                certificates,
             ),
-            certificates,
+            restore,
         )
 
     if current_version == previous_version:
-        return _with_certificate_note(_upgrade_changed_nothing(tool, manager, command, previous_version, current_version, install_result), certificates)
+        return _with_unrecovered_launchers(_with_certificate_note(_upgrade_changed_nothing(tool, manager, command, previous_version, current_version, install_result), certificates), restore)
 
-    return _with_certificate_note(
-        {
-            "ok": True,
-            "tool": tool,
-            "upgraded_on_disk": True,
-            "summary": f"Agentic HIL upgraded from {previous_version} to {current_version} on disk.",
-            "manager": manager,
-            "command": command,
-            "python": sys.executable,
-            "previous_version": previous_version,
-            "version": current_version,
-            "install": install_result,
-            "restart_required": True,
-        },
-        certificates,
+    return _with_unrecovered_launchers(
+        _with_certificate_note(
+            {
+                "ok": True,
+                "tool": tool,
+                "upgraded_on_disk": True,
+                "summary": f"Agentic HIL upgraded from {previous_version} to {current_version} on disk.",
+                "manager": manager,
+                "command": command,
+                "python": sys.executable,
+                "previous_version": previous_version,
+                "version": current_version,
+                "install": install_result,
+                "restart_required": True,
+                **({"superseded_entrypoints": superseded} if superseded else {}),
+                **_still_running_the_previous_version(still_running, previous_version),
+            },
+            certificates,
+        ),
+        restore,
     )
 
 
@@ -1444,16 +1809,25 @@ def _host_locks_running_files() -> bool:
 def _upgrade_cli_only_on_host() -> JsonObject:
     """Windows: a running image cannot be replaced, so the tool says so instead.
 
-    The issue allowed two answers here (a detached helper that swaps once this
-    server has exited, or a named refusal) and forbade the third, a swap that
-    half happens. The refusal is the one that can be told the truth about. A
-    helper outlives the result that announced it: whatever it does afterwards
-    happens with nobody left to report it, so the tool would have to promise an
-    outcome it cannot observe, and a helper that failed would leave exactly the
+    The one guard that survives the operator's rule, because it is not about
+    other people's servers but about this one. The interpreter executing this
+    call is inside the environment the manager has to remove, and Windows
+    refuses to delete a file mapped as a running image: a manager that removes
+    the environment before it rebuilds it fails on that delete and stops in
+    between. What the command line does about the launcher on PATH does not
+    reach this, and could not: renaming a file inside a directory does not let
+    that directory be removed, and the one image in the way here is the
+    interpreter running the code that would do the renaming.
+
+    The issue allowed two answers (a detached helper that swaps once this server
+    has exited, or a named refusal) and forbade the third, a swap that half
+    happens. The refusal is the one that can be told the truth about. A helper
+    outlives the result that announced it: whatever it does afterwards happens
+    with nobody left to report it, so the tool would have to promise an outcome
+    it cannot observe, and a helper that failed would leave exactly the
     half-replaced environment the promise was made to avoid. `agentic-hil
     upgrade` at a shell is a process that is not the server, so it can watch its
-    own manager finish and report what actually happened, and it already has the
-    `installation_in_use` guard that names the running server as the holder.
+    own manager finish and report what actually happened.
     """
     return {
         "ok": False,
@@ -1464,8 +1838,9 @@ def _upgrade_cli_only_on_host() -> JsonObject:
             "running out of the installation the upgrade would replace. A package manager that removes the environment "
             "before it rebuilds it fails on that delete and stops in between, leaving neither the old installation nor "
             "the new one, so nothing was attempted. On this host the upgrade is the command line's: `agentic-hil "
-            "upgrade` runs as a separate process, refuses while this server still holds the installation, and keeps "
-            "the extras this installation was created with."
+            "upgrade` runs as a separate process, so the environment it replaces is not the one it is running out of. "
+            "It keeps the extras this installation was created with, it is not refused because this server is running, "
+            "and it names this server among the processes that answer with the old release until the host restarts."
         ),
         "platform": sys.platform,
         "running_version": __version__,

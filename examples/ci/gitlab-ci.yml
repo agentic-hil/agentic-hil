@@ -1,0 +1,194 @@
+# A worked GitLab CI configuration for a project whose tests run on a real
+# bench. Copy it to `.gitlab-ci.yml` in your own repository and change four
+# things: the runner tags, the plan paths, the build command, and the pinned
+# version. Everything else is the shape, and the shape is the point.
+#
+# Two jobs, because there are two paths and a reader has to see both in one
+# file. `hardware` runs the plans on a runner that has the board attached.
+# `simulator` needs no bench, establishes nothing electrical, and checks that
+# the plans themselves are loadable: the cheapest place to find a broken plan
+# is here, and the most expensive is the bench.
+#
+# What the runner has to provide before this pipeline can run at all is in
+# docs/ci-examples.md. Nothing here installs Agentic HIL on the bench, writes a
+# configuration, or grants a permission. The authoritative configuration is the
+# bench operator's, it lives outside the workspace, and a pipeline that could
+# write it would be the hole the whole safety model is built around.
+
+# One pipeline per change, not two. A job that opts into `merge_request_event`
+# while the branch also has a pipeline gets GitLab's duplicate pipelines, and on
+# a bench that means the same plans queued twice for the same commit, holding
+# the board for twice as long. These are GitLab's own rules for it: a merge
+# request pipeline where there is a merge request, a branch pipeline where there
+# is not.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+stages:
+  - simulate
+  - hardware
+
+variables:
+  # The exact release this pipeline is written against. The hardware job holds
+  # the bench's own installation to it and stops when they disagree; the
+  # simulator job installs exactly it. No range, no `latest`, no git reference:
+  # a version a resolver picked is a version nobody reviewed, and the two jobs
+  # would stop being about the same code.
+  AGENTIC_HIL_VERSION: "0.21.2"
+
+simulator:
+  stage: simulate
+  # No `image:` here on purpose. A runner with the docker executor has a
+  # default image configured and a shell runner has none to give; either way
+  # the image belongs to whoever runs the runner. If you do set one, pin it by
+  # digest (`python@sha256:...`), because a floating tag is exactly the
+  # unversioned download the rest of this file avoids.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  script:
+    # The exact release from the index, so this job and the bench are checking
+    # the same code.
+    - python -m pip install "agentic-hil==$AGENTIC_HIL_VERSION"
+    # Every plan is loaded through the reactor's own loader, the same one the
+    # hardware job would use. This is the guarantee the job exists for, and a
+    # schema-only check cannot make it: `jsonschema` ignores the
+    # `x-since-version` gates, so a plan using a key from a later plan version
+    # passes it and is then refused on the bench, and `yaml.safe_load` silently
+    # collapses the duplicate keys the real loader refuses. `check-plan` calls
+    # `load_test_config`, so a plan it accepts is one the reactor can load: the
+    # same duplicate-key rejection, non-finite-number rejection, plan-version
+    # supersession and feature gates. It reads plan files, loads no
+    # configuration and touches no hardware.
+    - agentic-hil check-plan tests/hil/*.testconfig.yaml
+
+hardware:
+  stage: hardware
+
+  # Trust rule, first and third conditions together: GitLab has no
+  # `RUNNER_ENVIRONMENT`, so the tags are the whole of how a job finds the one
+  # machine that has a bench. Register that runner with `agentic-hil` and the
+  # board label among its tags, and give it no others that a job could reach by
+  # accident. A shared runner carries neither tag; if one ever does, it has no
+  # probe, no serial port and no configuration, and `agentic-hil doctor` below
+  # is what says so before a plan gets near anything.
+  tags:
+    - agentic-hil
+    - nucleo-f446re
+
+  # One bench, one run at a time. The device locks are machine-wide, so a
+  # second run would be refused with `device_busy` naming the holder rather
+  # than interleaved; this group turns that refusal into a queue.
+  resource_group: bench-nucleo-f446re
+
+  # Never cancellable by a newer pipeline. Cancelling a run in the middle of a
+  # plan is how a board is left half flashed, and auto-cancel of redundant
+  # pipelines is on by default.
+  interruptible: false
+
+  timeout: 20 minutes
+
+  # Trust rule, fourth condition, as far as a pipeline can state it.
+  #
+  # A merge request from a fork never reaches the bench: on a fork's merge
+  # request the source project is not this project, and that is the whole test.
+  # An external pull request event and a pipeline triggered from another
+  # project are refused by name rather than inspected, because both hand this
+  # project's trust to code that arrived from somewhere else, which is the
+  # exact shape this rule exists to stop. A fork's change reaches the bench by
+  # being pushed to a branch in this project first, where a human looked at it.
+  #
+  # What the rules cannot state is who may run a pipeline here at all. That is
+  # the project's own settings, not this file. See docs/ci-examples.md.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "external_pull_request_event"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "pipeline"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: on_success
+    - if: $CI_COMMIT_BRANCH
+      when: on_success
+    - when: never
+
+  before_script:
+    # The bench's own installation answers here. This downloads nothing and
+    # installs nothing: a bench may be deliberately offline, and an
+    # installation the operator pinned is not a pipeline's to move. What the
+    # pipeline does own is the number, so a bench that has drifted off it fails
+    # here rather than producing evidence nobody can place.
+    - |
+      set -euo pipefail
+      installed="$(agentic-hil --version)"
+      if [ "$installed" != "$AGENTIC_HIL_VERSION" ]; then
+        echo "This pipeline is pinned to Agentic HIL $AGENTIC_HIL_VERSION and this bench has $installed." >&2
+        echo "Update the bench, or update AGENTIC_HIL_VERSION in this file after reading the changelog." >&2
+        exit 1
+      fi
+
+  script:
+    # Doctor first, before a plan gets near the board: it resolves the
+    # authoritative configuration, names the probe and the port it bound, and
+    # spawns the debugger toolchain. A missing toolchain or an unreadable bench
+    # is a clearer failure here than half way through a plan.
+    - agentic-hil doctor
+
+    # The one project-specific step. Yours will differ; what matters is that
+    # the image exists before a plan is asked to flash it.
+    - cmake --preset Debug
+    - cmake --build --preset Debug
+
+    # Each plan runs, and a red one does not stop the ones after it: a job that
+    # stopped at the first failure could not show whether the rest of the bench
+    # still works.
+    #
+    # Each run's report is captured from `--json` into its own file under
+    # `artifacts/reports/`, and that file is what `run-evidence` reads. Not
+    # `.agentic-hil/reports/last-report.json`: a plan refused before its first
+    # step, or refused for having no configuration at all, writes no report
+    # there, so the shared file would still hold the previous plan's report and
+    # this job would publish it under the refused plan's name. `--json` is
+    # written on every path, refusals included, and names the plan it is about,
+    # so the bundle is always this plan's own.
+    #
+    # `run-evidence` turns that report into the bundle a reviewer without
+    # access to this bench can read: `run-summary.json`, `job-summary.md` and a
+    # `logs/` copy, beside the JUnit file `--junit-xml` wrote. GitLab has no
+    # job summary of its own, so the summary is printed into the log with `cat`
+    # as well as kept as an artifact.
+    - |
+      set -uo pipefail
+      status=0
+      mkdir -p artifacts/reports
+      for plan in tests/hil/nominal.testconfig.yaml tests/hil/diagnostic.testconfig.yaml; do
+        name="$(basename "$plan" .testconfig.yaml)"
+        report="artifacts/reports/$name.json"
+        agentic-hil test-reactor --test-config "$plan" --json --junit-xml "artifacts/junit-$name.xml" > "$report" || status=1
+        agentic-hil run-evidence --report "$report" --out "artifacts/evidence/$name" || status=1
+        if [ -f "artifacts/evidence/$name/job-summary.md" ]; then
+          cat "artifacts/evidence/$name/job-summary.md"
+        fi
+      done
+      exit "$status"
+
+  # `when: always` because the red run is the one whose evidence matters most,
+  # and a cancelled one still leaves what it got as far as.
+  #
+  # The canonical, hash-chained copies of these logs stay under the bench's
+  # `state_root` and are not uploaded: they are the ledger the uploaded mirrors
+  # are checked against, and shipping them to an artifact store would publish
+  # the thing they exist to verify.
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - artifacts/
+      - .agentic-hil/reports/
+    reports:
+      junit: artifacts/junit-*.xml

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import errno
 import math
 import os
@@ -570,11 +571,47 @@ class ComPortSession:
         self.reader_error: JsonObject | None = None
         self.lock = threading.Lock()
         self.io_lock = threading.Lock()
+        # The one writer for this session's log. Re-entrant, because the write
+        # path holds it across the line as well as across its own append: see
+        # `append_audit` for what that buys and `ComPortService.write_bytes`
+        # for why the append alone was not enough.
+        self.audit_lock = threading.RLock()
         self.reader: threading.Thread | None = None
         self.audit_broken = False
         self.lease = lease or DetachedHardwareLease()
         if start_reader:
             self.start_reader()
+
+    def append_audit(self, event: JsonObject, config: AgenticHILConfig | None = None) -> Exception | None:
+        """Append one entry to this session's log, in the order it happened.
+
+        Every appender goes through here: the reader thread recording what
+        arrived, and the write path recording what was sent. They used to
+        append on their own, so the file's line order was the order two threads
+        reached it rather than the order of the events, and a `tx` entry could
+        land behind the `rx` entry of the answer it caused. `safe_append_text`
+        already keeps each line whole; what was missing is which line goes
+        first, which is what a reader of the log actually follows.
+
+        The timestamp is taken inside this same section, by `append_jsonl`, so
+        the line order and the timestamps are one order rather than two, and a
+        log read top to bottom says what a log sorted by its own `time` field
+        says.
+
+        Returns exactly what `append_jsonl` returns and raises exactly what it
+        raises: the lock decides when a line is written, never whether, so the
+        audit-failure handling at every call site (quarantine, and the
+        `mark_audit_failure` the caller puts on its result) is untouched.
+
+        ``config`` marks an agent-initiated hardware effect, whose line is
+        mirrored into the trusted canonical ledger as well as the workspace
+        log. The reader's own feedback lines pass none and stay in the
+        workspace log, as they always have.
+        """
+        with self.audit_lock:
+            if config is None:
+                return append_jsonl(self.log_path, event)
+            return append_jsonl_audited(config, self.log_path, event)
 
     def start_reader(self) -> None:
         if self.reader is not None:
@@ -606,7 +643,7 @@ class ComPortSession:
                 if not data:
                     time.sleep(0.01)
                     continue
-                audit_error = append_jsonl(self.log_path, {"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
+                audit_error = self.append_audit({"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
                 if audit_error is not None:
                     self.reader_error = {"error_type": "audit_write_failed", "summary": "COM port feedback could not be audited.", "backend_error": str(audit_error)}
                     self.audit_broken = True
@@ -621,7 +658,7 @@ class ComPortSession:
                         "backend_error": str(error),
                         "likely_causes": likely_causes("serial_read_failed"),
                     }
-                    append_jsonl(self.log_path, {"event": "error", **self.reader_error})
+                    self.append_audit({"event": "error", **self.reader_error})
                 break
 
 
@@ -786,7 +823,7 @@ class ComPortService:
             return self._write_unattached_lease_report(opened, lease, release_if_safe=True)
         session = opened["session"]
         self.sessions[port_id] = session
-        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "start", "port_id": port_id, "device": session.port_config.device})
+        audit_error = session.append_audit({"event": "start", "port_id": port_id, "device": session.port_config.device}, self.config)
         if audit_error is not None:
             session.audit_broken = True
             with suppress(BaseException):
@@ -878,25 +915,39 @@ class ComPortService:
         session = session_result["session"]
         if len(data) > session.port_config.max_write_bytes:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "summary": "COM port write exceeds configured max_write_bytes.", "bytes_requested": len(data), "max_write_bytes": session.port_config.max_write_bytes}
-        try:
-            sent = _write_with_bounded_retry(session.serial_handle, data)
-            flush = getattr(session.serial_handle, "flush", None)
-            if callable(flush):
-                flush()
-        except BaseException as error:
-            result = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "serial_write_failed", "summary": "COM port write failed.", "backend_error": str(error), "likely_causes": likely_causes("serial_write_failed"), "log_path": display_path(self.config, session.log_path)}
-            session.lease.quarantine("com_write_effect_unconfirmed", error)
-            result.update({"side_effect_status": "unknown", "retry_safe": False, "cleanup_required": True, "quarantined": True})
-            audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", **result})
-            if audit_error is not None:
-                session.audit_broken = True
-                session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
-                return mark_audit_failure(result, audit_error)
-            if not isinstance(error, Exception):
-                raise
-            return result
-        sent_data = data[:sent]
-        audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "tx", "bytes": len(sent_data), "hex": sent_data.hex(), "text": decode_bytes(sent_data, session.port_config.encoding)})
+        # The bytes on the line and the entry that records them are one section,
+        # not two. A target can answer while the write is still in flight, and
+        # the reader appends what it received the moment it has it, so with only
+        # the appends serialised the answer still reaches the file first and the
+        # log reads as a board replying before it was asked. Held from before
+        # the write, the entry for a stimulus is in the file ahead of the entry
+        # for anything that stimulus provoked.
+        #
+        # What waits here is the reader's next line, for the length of one
+        # write, which `write_timeout_s` already bounds. Not the feedback
+        # itself: the reader puts received bytes in the session buffer before it
+        # reaches its append, so a `com_read` during that window hands out
+        # everything that arrived.
+        with session.audit_lock:
+            try:
+                sent = _write_with_bounded_retry(session.serial_handle, data)
+                flush = getattr(session.serial_handle, "flush", None)
+                if callable(flush):
+                    flush()
+            except BaseException as error:
+                result = {"ok": False, "tool": tool, "port_id": port_id, "error_type": "serial_write_failed", "summary": "COM port write failed.", "backend_error": str(error), "likely_causes": likely_causes("serial_write_failed"), "log_path": display_path(self.config, session.log_path)}
+                session.lease.quarantine("com_write_effect_unconfirmed", error)
+                result.update({"side_effect_status": "unknown", "retry_safe": False, "cleanup_required": True, "quarantined": True})
+                audit_error = session.append_audit({"event": "error", **result}, self.config)
+                if audit_error is not None:
+                    session.audit_broken = True
+                    session.lease.quarantine("com_write_audit_broken", audit_error, audit_broken=True)
+                    return mark_audit_failure(result, audit_error)
+                if not isinstance(error, Exception):
+                    raise
+                return result
+            sent_data = data[:sent]
+            audit_error = session.append_audit({"direction": "tx", "bytes": len(sent_data), "hex": sent_data.hex(), "text": decode_bytes(sent_data, session.port_config.encoding)}, self.config)
         if sent < len(data):
             # Confirmed short, not unknown: every attempt returned normally,
             # nothing raised, and pyserial's own return values, read this
@@ -1258,7 +1309,9 @@ class ComPortService:
                 errors.append(("reader", error))
                 if interrupt is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                     interrupt = error
-        audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "stop", "reason": reason})
+        # After the reader has been joined above, so the stop entry is the last
+        # line rather than one racing whatever the reader had left to write.
+        audit_error = session.append_audit({"event": "stop", "reason": reason}, self.config)
         if audit_error is not None or session.audit_broken:
             session.audit_broken = True
             session.lease.quarantine("com_audit_broken", audit_error, audit_broken=True)
@@ -1369,6 +1422,113 @@ def decode_bytes(data: bytes, encoding: str) -> str:
         return data.decode(encoding, errors="replace")
     except LookupError:
         return data.decode("utf-8", errors="replace")
+
+
+def matched_span_bytes(received: bytes, encoding: str, span: tuple[int, int]) -> bytes | None:
+    """The raw wire bytes a ``[start, end)`` character span was decoded from.
+
+    ``decode_bytes`` decodes with ``errors="replace"``, which is not reversible:
+    an invalid ``ff`` becomes ``�`` and a stateful codec can add a BOM, so
+    re-encoding a matched string invents bytes the port never sent. A green
+    report that documents ``matched_text`` in the same ``{hex, text, encoding}``
+    shape as the raw tail must not attest to fabricated wire bytes, so the byte
+    field is sliced out of ``received`` itself instead.
+
+    The map from character index to byte offset is built by feeding ``received``
+    to an incremental decoder one byte at a time, which pins each produced
+    character to the byte run it consumed even across a ``replace``. The whole
+    decode is checked against ``decode_bytes`` so the span indices align with the
+    string the match was made against; ``None`` when they do not (an encoding
+    whose incremental and one-shot decodes disagree), which the caller reads as
+    "omit the byte field" rather than as a reason to re-encode.
+
+    One decoder call can emit several characters at once -- a stateful codec such
+    as UTF-7 buffers a run and yields it only when the closing byte arrives -- and
+    the interior byte boundaries of such a run are not recoverable. A span that
+    begins or ends on one of those interior boundaries also returns ``None`` (a
+    match on ``本`` alone inside a UTF-7 ``日本語`` run, for one), so the byte field
+    is omitted rather than reported as an empty or misaligned slice (review round
+    1, finding 4).
+
+    A single character can also depend on decoder state carried from earlier
+    bytes even when it is emitted on its own. In an ISO-2022-JP stream the escape
+    that switches into two-byte mode arrives before the run, so the interior
+    ``本`` maps to the bytes ``4b 5c`` -- which read as the two ASCII characters
+    ``K`` and a backslash when decoded from the initial state, not as ``本``.
+    Every candidate slice is therefore checked to decode, on its own, back to
+    exactly the matched substring; a slice that does not is state-dependent, so
+    ``None`` is returned and the caller keeps the honest text-only match (review
+    round 2, finding 2)."""
+    start, end = span
+    if start < 0 or end < start:
+        return None
+    try:
+        make_decoder = codecs.getincrementaldecoder(encoding)
+    except LookupError:
+        make_decoder = codecs.getincrementaldecoder("utf-8")
+    decoder = make_decoder(errors="replace")
+    char_byte_starts: list[int] = []
+    produced: list[str] = []
+    # The boundaries that fall inside a run of characters one decoder call emitted
+    # at once. A stateful codec (UTF-7, an ISO-2022 escape run, any codec that
+    # buffers until a terminator) yields several characters only when the byte
+    # closing the run arrives, and which byte within the run each of them actually
+    # began at is not recoverable. The run's outer edges are sound -- it began
+    # where the codec resumed consuming and ended at the closing byte -- so only
+    # the interior starts are ambiguous, and a span that begins or ends on one
+    # cannot be sliced honestly (review round 1, finding 4).
+    ambiguous: set[int] = set()
+    pending = 0
+    for index in range(len(received)):
+        out = decoder.decode(received[index : index + 1])
+        for offset, character in enumerate(out):
+            if offset > 0:
+                ambiguous.add(len(char_byte_starts))
+            char_byte_starts.append(pending if offset == 0 else index)
+            produced.append(character)
+        if out:
+            pending = index + 1
+    for offset, character in enumerate(decoder.decode(b"", final=True)):
+        if offset > 0:
+            ambiguous.add(len(char_byte_starts))
+        char_byte_starts.append(pending)
+        produced.append(character)
+    # A sentinel so an end index at the very end of the string maps to len().
+    char_byte_starts.append(len(received))
+    if end >= len(char_byte_starts) or "".join(produced) != decode_bytes(received, encoding):
+        return None
+    if start in ambiguous or end in ambiguous:
+        # The span begins or ends inside a multi-character emission, where the
+        # byte boundary is a guess. Report no byte evidence rather than invent a
+        # span -- an empty or misaligned slice -- and let the caller fall back to
+        # the honest text-only match (review round 1, finding 4).
+        return None
+    candidate = received[char_byte_starts[start] : char_byte_starts[end]]
+    if decode_bytes(candidate, encoding) != "".join(produced[start:end]):
+        # The slice reads as the matched substring only in the decoder state the
+        # bytes before it established. A stateful codec that carries shift state
+        # -- an ISO-2022-JP run switched in by an earlier escape, whose interior
+        # ``本`` is the two ASCII-looking bytes ``4b 5c`` -- decodes that same
+        # slice to something else from the initial state (here ``K`` and a
+        # backslash), so on its own it is false wire evidence, not a
+        # multi-character emission the ``ambiguous`` set already caught. Omit the
+        # byte field and let the caller fall back to the honest text-only match
+        # (review round 2, finding 2).
+        return None
+    return candidate
+
+
+def encode_text(text: str, encoding: str) -> bytes:
+    """``decode_bytes`` the other way round, for text this port already spoke.
+
+    The port's own encoding, with the same fallback and the same refusal to
+    raise: a caller here is describing bytes that already arrived, so an
+    unconfigurable codec or a character the codec cannot write must produce a
+    poorer answer, never an exception in place of an answer."""
+    try:
+        return text.encode(encoding, errors="replace")
+    except LookupError:
+        return text.encode("utf-8", errors="replace")
 
 
 def serial_by_id_links(directory: str = SERIAL_BY_ID_DIRECTORY) -> dict[str, str]:

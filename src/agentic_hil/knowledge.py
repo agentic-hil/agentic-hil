@@ -97,6 +97,12 @@ CONFIG_REVOKE_COMMAND = "agentic-hil revoke"
 # `bench_run_stop`; this is a command line refusing because *another* process
 # holds the bench, and what an operator does about that is find out whose it is.
 PERMISSION_CHANGE_IN_OPEN_RUN = "permission_change_in_open_run"
+# The rendering refusing to publish a result it cannot vouch for. Every result
+# rendered as prose is redacted first, and a redaction that hands back something
+# other than a document leaves nothing standing behind that claim, so the
+# command line prints this in place of the result. Nothing on the bench failed,
+# which is why it is its own error_type rather than one of the failures above.
+REDACTION_UNAVAILABLE_ERROR = "redaction_unavailable"
 
 # Both of these act on flash outside the path this server validates (a raw
 # debugger command writes whatever it is given, a mass erase clears whatever a
@@ -423,28 +429,6 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not treat an unreadable file as an unchanged one and carry on as if the answers were current.",
         ),
     ),
-    "installation_in_use": ErrorRemedy(
-        meaning=(
-            "A process is running out of the installation this upgrade would replace, and on Windows a file mapped as "
-            "a running image cannot be deleted. A package manager that removes the environment before it rebuilds it "
-            "fails on that delete and stops in between, leaving neither the old installation nor the new one. The "
-            "refusal comes before anything is removed, so the installation is untouched and still works."
-        ),
-        remediation=(
-            "Close the agent host. It starts the Agentic HIL MCP server itself, so that server runs for as long as "
-            "the host does, which is why a working setup is exactly the state this fails in.",
-            "Run `agentic-hil upgrade` again, then start the host, which picks up the new server.",
-            "If no host is open, the refusal names each holding process by pid and image path. End those processes, "
-            "then run the upgrade again.",
-        ),
-        do_not=(
-            "Do not reach for `uv tool install --upgrade` or `uv tool install --force` to get past this. Those are "
-            "the commands the refusal protects you from: they remove the environment first, and that removal is what "
-            "fails while the server holds it.",
-            "Do not delete the environment by hand to unblock the upgrade. The running server is what holds it, and "
-            "an installation destroyed around a live process is the outcome being refused.",
-        ),
-    ),
     "installation_broken": ErrorRemedy(
         meaning=(
             "An upgrade stopped part way and this installation did not survive it. The check that produced this ran "
@@ -564,8 +548,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
         remediation=(
             "Close the agent host first. The command below reinstalls the environment, which on Windows means deleting "
-            "it, and that delete fails while the MCP server the host started is still running out of it: the failure "
-            "`installation_in_use` exists to prevent, and this command has no such check of its own.",
+            "it, and that delete fails while the MCP server the host started is still running out of it. `agentic-hil "
+            "upgrade` moves the launcher on PATH out of the manager's way before it runs; a reinstall typed by hand "
+            "has nothing of the kind, and the delete it starts with is the step that fails.",
             "Run the command in `reinstall_command` on this result. It is the one that clears the pin *and* keeps this "
             "installation's extras: `installed_extras` says which ones were found, and reinstalling without them "
             "removes what they installed. On a bench with `can`, that silently takes CAN support away. The hint `uv` "
@@ -598,8 +583,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Report the refusal, name `permissions.allow_upgrade`, and say which file carries it. The operator opens "
             "it by editing that file; you cannot, and `project_config_set` writes only `false` into a permission.",
             "The command line does the same job for a person and needs no permission at all: `agentic-hil upgrade` "
-            "from any directory. It preserves the extras the installation was created with, and it refuses while this "
-            "server is still running out of the installation, so it is run with the agent host closed.",
+            "from any directory. It preserves the extras the installation was created with, and it is not refused "
+            "because this server is running: it names this server under `restart_required_by` and the host restart "
+            "is what adopts the new release.",
             "`agentic-hil --version` beside this result's `running_version` is how an operator checks whether a newer "
             "release is even the difference they are chasing.",
         ),
@@ -647,12 +633,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "refusal exists to prevent."
         ),
         remediation=(
-            "Ask the operator to run `agentic-hil upgrade` at a shell with the agent host closed. It runs as a "
-            "separate process, so it can replace this installation; it upgrades through the manager that owns the "
-            "installation and keeps the extras it was created with; and if a server is still running out of it, it "
-            "refuses with `installation_in_use` and names the holding process rather than breaking the environment.",
-            "Then the host is started again, which loads the new server. Report `running_version` from this result as "
-            "the version still in force until that has happened.",
+            "Ask the operator to run `agentic-hil upgrade` at a shell. It runs as a separate process, so the "
+            "environment it replaces is not the one it is running out of; it upgrades through the manager that owns "
+            "the installation and keeps the extras it was created with; and it moves the launcher on PATH aside first, "
+            "so the copy that used to fail against a mapped image lands.",
+            "That command is not refused because this server is running. It names this server under "
+            "`restart_required_by`, which says what is left to do: restart the host, which is what loads the new "
+            "release. Report `running_version` from this result as the version still in force until that has happened.",
         ),
         do_not=(
             "Do not retry this tool after closing a run or a session. The refusal is about the platform, not about "
@@ -982,10 +969,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "default cannot be used. `agentic-hil init` and `project_config_create` fall back to it on their own for "
             "both the configuration and the state_root, so re-running either is usually the whole fix.",
             "This refusal is about a path, so it is deterministic: the same command with nothing changed is refused "
-            "again, with a new run id and the same two spellings. Repair the setting instead. When `field` is "
-            "`state_root`, the configuration names a root this profile will not accept and `agentic-hil init --force` "
-            "(or `project_config_create`) rewrites the file with one it will; anything else here is a path an operator "
-            "set, and it is changed in the file before the command is run again.",
+            "again, with a new run id and the same two spellings. Repair the setting instead. Which setting is read "
+            "off `path`, against the two roots `agentic-hil doctor` prints as `config_path` and under `State root`: a "
+            "`path` under the configured `state_root` (every report, log, lease and audit record is written there) "
+            "means the configuration names a root this profile will not accept, and `agentic-hil init --force` (or "
+            "`project_config_create`) rewrites the file with one it will. Any other `path` is one an operator set, and "
+            "it is changed in the file before the command is run again.",
             "Where each file may live: MCP resource " + PLATFORM_PATHS_URI + ".",
         ),
         do_not=(
@@ -1133,6 +1122,34 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "instead: the same request failing one layer later for a reason that is not the real one.",
             "Do not read this as a hardware or a permission problem. Nothing was contacted, so there is no state to "
             "recover and no permission to ask the operator for.",
+        ),
+    ),
+    # The only entry here that is about this server's own output rather than
+    # about a bench, a policy or a payload. It is what a reader gets in place of
+    # a result the rendering could not vouch for, so it has to say that the
+    # command itself is not what went wrong.
+    REDACTION_UNAVAILABLE_ERROR: ErrorRemedy(
+        meaning=(
+            "Nothing on the bench failed and nothing was refused. The command produced its result, and the step that "
+            "replaces secret-named values before a result leaves this process did not hand back a document. Both "
+            "sinks depend on that step -- the prose a person reads and the `--json` document alike -- so neither can "
+            "publish this result, and this was emitted in place of it by whichever one you asked for. The command "
+            "exits nonzero because a result nothing could vouch for is a result that was not delivered."
+        ),
+        remediation=(
+            "Report it, with the command that produced it and `agentic-hil --version`. Redaction answers a document "
+            "with a document for every document it is given, so no result's own contents can reach this: what it "
+            "names is an installation whose `agentic_hil.redact` is not the one this server ships. `--json` is not a "
+            "way around it, because that sink redacts through the same function and fails closed the same way.",
+            "Check for a second copy of the package while collecting that: `python -c \"import agentic_hil; "
+            "print(agentic_hil.__file__)\"` names the one actually imported, and a user-site install shadowing the "
+            "intended one is the way two versions end up in a single process.",
+        ),
+        do_not=(
+            "Do not read this as a hardware, permission or configuration failure. It says nothing about what the "
+            "command did or left behind; it says only that the result was not rendered.",
+            "Do not reach for another way to print the result, `--json` included. The one thing known about it here "
+            "is that nothing has vouched for its secret-named values, which is what both sinks declined to publish.",
         ),
     ),
     "target_not_detected:openocd": ErrorRemedy(

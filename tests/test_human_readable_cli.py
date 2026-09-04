@@ -431,23 +431,23 @@ def test_a_refusal_renders_captured_output_however_deep_the_document_nests_it() 
 def test_a_refusal_whose_diagnosis_is_a_list_of_objects_renders_the_entries() -> None:
     """The other half of the shape, and the catalogue already points at it.
 
-    `installation_in_use` names each holding process in `held_by` and
-    `device_busy` says "Read `holder`" in its own remediation, so the advice this
-    same rendering prints was sending people to fields it did not print.
+    `upgrade_in_open_run` says "`held_devices` and `device_holds` in this refusal
+    name what is held" in its own remediation, so the advice this same rendering
+    prints was sending people to fields it did not print.
     """
     document = {
         "ok": False,
-        "error_type": "installation_in_use",
-        "summary": "The installation is in use and nothing was removed.",
-        "held_by": [
-            {"pid": 4412, "image": "C:/Users/op/AppData/Local/Programs/claude/claude.exe"},
-            {"pid": 7781, "image": "C:/Users/op/.local/bin/agentic-hil.exe"},
+        "error_type": "upgrade_in_open_run",
+        "summary": "Something is holding this bench right now, so nothing was changed.",
+        "device_holds": [
+            {"resource": "debugger:dut", "holder_pid": 4412},
+            {"resource": "com:dut_uart", "holder_pid": 7781},
         ],
     }
     out = _rendered(document, "upgrade")
-    assert "\n  held_by\n" in out
+    assert "\n  device_holds\n" in out
     assert "4412" in out and "7781" in out
-    assert "claude.exe" in out and "agentic-hil.exe" in out
+    assert "debugger:dut" in out and "com:dut_uart" in out
     assert "{" not in out and "[" not in out
 
 
@@ -653,6 +653,50 @@ def test_a_secret_named_value_inside_a_refusals_nested_object_is_redacted(monkey
     assert "error: 401 Unauthorized" in out
 
 
+def test_an_upgrade_that_left_servers_running_prints_which_hosts_to_restart() -> None:
+    """The list the old refusal printed, moved to where it is no longer a wall.
+
+    An operator who typed `agentic-hil upgrade` while their agent host was open
+    used to be refused and handed pids to go and kill. They now get the upgrade
+    and the same pids, under Restart, as the one thing still to do. The sentence
+    comes first because it is what makes the list mean something, and the
+    processes are rendered the way every other list of named things is.
+    """
+    document = {
+        "ok": True,
+        "tool": "agentic_hil_upgrade",
+        "summary": "Agentic HIL upgraded from 0.19.0 to 9.9.9; restart agent hosts to load the new MCP server.",
+        "previous_version": "0.19.0",
+        "version": "9.9.9",
+        "manager": "uv",
+        "upgraded_on_disk": True,
+        "restart_required": True,
+        "restart_required_by": [
+            {"pid": 732, "image": "C:/Users/op/AppData/Roaming/uv/tools/agentic-hil/Scripts/python.exe"},
+            {"pid": 5140, "image": "C:/Users/op/AppData/Roaming/uv/tools/agentic-hil/Scripts/python.exe"},
+        ],
+        "restart_required_by_count": 2,
+        "restart_notice": (
+            "2 processes started out of this installation before the swap and still run 0.19.0; `restart_required_by` "
+            "names each one by pid and image. Each goes on answering with 0.19.0 until the host that started it "
+            "restarts, and that restart is the whole of what is left to do."
+        ),
+        "superseded_entrypoints": ["C:/Users/op/.local/bin/agentic-hil.exe.superseded"],
+    }
+    out = _rendered(document, "upgrade")
+
+    assert "\nRestart\n" in out
+    assert "until the host that started it restarts" in _reflowed(out)
+    assert "\n  - 732\n" in out and "\n  - 5140\n" in out
+    assert out.count("image  C:/Users/op/AppData/Roaming/uv/tools/agentic-hil/Scripts/python.exe") == 2
+    # The renamed launcher is named rather than left as a mystery file beside the
+    # one on PATH, and it is stated as nothing to act on.
+    assert "\nSuperseded launchers\n" in out
+    assert "agentic-hil.exe.superseded" in out
+    assert "nothing needs doing about them here" in _reflowed(out)
+    assert "{" not in out and "[" not in out
+
+
 def test_doctor_renders_its_findings_section_by_section() -> None:
     out = _rendered(DOCTOR, "doctor")
     for section in ("Installation", "MCP registration", "Target", "Debuggers", "COM ports", "CAN buses", "Warnings"):
@@ -813,6 +857,63 @@ def test_a_secret_named_value_is_redacted_before_it_is_rendered(monkeypatch: pyt
     _, out = _run(monkeypatch, ["lease-status"], document, tty=True)
     assert "hunter2" not in out
     assert "[redacted]" in out
+
+
+@pytest.mark.parametrize("answer", [None, ["ok", "auth_token", "hunter2"]])
+def test_a_redaction_that_answers_with_no_document_withholds_the_result(monkeypatch: pytest.MonkeyPatch, answer: object) -> None:
+    """The fallback is the one case the guard exists for, so it fails closed.
+
+    `redact_sensitive` answers a document with a document, which is why this has
+    to be forced rather than provoked: the branch cannot be reached from a
+    result's own contents, and it is precisely the branch that must not print
+    the unredacted document. It used to, and a guard that falls back to the
+    thing it guards against says the opposite of what it guards.
+
+    An originally successful command that could not be rendered has still not
+    been delivered, so the exit status is the refusal's, not the result's: a
+    green exit here would tell a caller the command left it a document when what
+    it left is the statement that there is none.
+    """
+    document = {"ok": True, "summary": "Bridge opened.", "auth_token": "hunter2", "nested": {"api_key": "hunter2"}}
+    monkeypatch.setattr(cli, "redact_sensitive", lambda value: answer)
+
+    code, out = _run(monkeypatch, ["lease-status"], document, tty=True)
+
+    # An originally successful result still exits nonzero when it could not be rendered.
+    assert code == 1
+    # Not the secret, and not one field of the document that carried it.
+    assert "hunter2" not in out
+    assert "Bridge opened." not in out
+    # What is there instead names the refusal, the command, and what to do.
+    assert "redaction_unavailable" in out
+    assert "lease-status" in out
+    assert "What to do" in out
+    # The remediation no longer sends the operator to `--json`: that sink shares
+    # `redact_sensitive` and fails the same way, so it names it as no way around.
+    assert "agentic-hil --version" in out
+
+
+@pytest.mark.parametrize("answer", [None, ["ok", "auth_token", "hunter2"]])
+def test_the_machine_sink_also_fails_closed_when_redaction_yields_no_document(monkeypatch: pytest.MonkeyPatch, answer: object) -> None:
+    """`--json` is the sink the old remediation sent the operator to, so it is
+    the one that most had to stop printing `null` or a bare list in place of the
+    result. It shares `redact_sensitive` with the rendering, so under the exact
+    condition the fallback exists for it dumps the same refusal document and
+    exits nonzero rather than a value nothing vouched for.
+    """
+    document = {"ok": True, "summary": "Bridge opened.", "auth_token": "hunter2", "nested": {"api_key": "hunter2"}}
+    monkeypatch.setattr(cli, "redact_sensitive", lambda value: answer)
+
+    code, out = _run(monkeypatch, ["lease-status", "--json"], document, tty=False)
+
+    assert code == 1
+    # The machine sink is JSON, and it is the refusal rather than `null`/a list.
+    refusal = json.loads(out)
+    assert refusal["error_type"] == "redaction_unavailable"
+    assert refusal["command"] == "lease-status"
+    # Neither the secret nor the field that carried it reaches the document.
+    assert "hunter2" not in out
+    assert "Bridge opened." not in out
 
 
 def test_a_stream_that_cannot_spell_the_text_still_gets_the_answer() -> None:

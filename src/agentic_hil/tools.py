@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import os
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +13,7 @@ import yaml
 from agentic_hil import __version__
 from agentic_hil.adopt import (
     PROJECT_CONFIG_ADOPT,
+    configured_device_resources,
     configured_probe_resource,
     discover_under_hardware_lease,
     project_config_adopt_hardware,
@@ -2511,7 +2514,12 @@ def _project_config_create(
     if existing is not None and open_holds:
         return _create_in_open_run_refusal(existing, open_holds)
     target_path = authoritative_config_target(workspace)
-    with secure_user_file_lock(target_path):
+    # `generation_locks` beside the file lock: the repair path takes its device
+    # locks into this bench during discovery and keeps them held through the write
+    # below, so a foreign UART- or CAN-only run cannot start between the read and
+    # the replacement (review round 1, finding 2). Empty and a no-op on every
+    # other path.
+    with secure_user_file_lock(target_path), generation_locks(frontend="mcp") as generation_bench:
         # The gate is the configuration and nothing else. A server bound to one
         # is gated by the permissions it loaded, even if the file has since been
         # removed underneath it: that server has a policy and may not replace it
@@ -2528,7 +2536,7 @@ def _project_config_create(
         # is not the same as free, though: this enumerates probes and connects to
         # one, so on a configured server it goes in under that server's own
         # coordinator.
-        discovery, refusal, unaudited = discover_for_generation(current, coordinator)
+        discovery, refusal, unaudited = discover_for_generation(current, coordinator, generation_bench=generation_bench)
         if refusal is not None:
             return refusal
         if not overall_success(discovery):
@@ -2684,6 +2692,26 @@ def _create_in_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObje
     }
 
 
+@contextmanager
+def generation_locks(*, frontend: str = "mcp") -> Iterator[BenchMutex]:
+    """The bench a repair generation holds its device locks in, from the read to the write.
+
+    Passed to ``discover_for_generation`` as ``generation_bench``. On the
+    broken-`state_root` repair path -- the one generation path with no open-run
+    check behind it -- discovery takes every configured device lock into this
+    bench and leaves them held; every other path leaves it empty and the release
+    here is a no-op. Releasing only on the way out, once the document has been
+    generated, written and validated (and any rollback done), is what closes the
+    window a foreign UART- or CAN-only run could otherwise start in between the
+    read and the replacement and have its configuration rewritten beneath it
+    (review round 1, finding 2)."""
+    bench = BenchMutex(frontend=frontend)
+    try:
+        yield bench
+    finally:
+        bench.release_all()
+
+
 def discover_for_generation(
     current: AgenticHILConfig | None,
     coordinator: HardwareCoordinator | None,
@@ -2691,6 +2719,7 @@ def discover_for_generation(
     tool: str = PROJECT_CONFIG_CREATE,
     reason_prefix: str = "config_create",
     frontend: str = "mcp",
+    generation_bench: BenchMutex | None = None,
 ) -> tuple[JsonObject, JsonObject | None, str | None]:
     """Read what is attached, holding everything a probe read holds.
 
@@ -2701,6 +2730,14 @@ def discover_for_generation(
     is filed under, and which frontend an owned coordinator announces itself as.
     What is read, what is locked and what happens when any of it fails are not
     a caller's to vary: that was the defect.
+
+    ``generation_bench`` is the one thing a caller must vary on the repair path,
+    and it is a lifetime rather than a policy. The broken-`state_root` path takes
+    its device locks into this bench and leaves them held so the caller can keep
+    them across the authoritative write; passing `generation_locks()` and
+    releasing it once the write commits is what closes the window between this
+    read and the replacement (review round 1, finding 2). Every other path leaves
+    it untouched.
 
     Not a partial copy of the adoption path any more but the same function:
     `discover_under_hardware_lease` proves the audit trail writable before the
@@ -2774,18 +2811,31 @@ def discover_for_generation(
         # does not repair reaches the leased path below and its `audit_unavailable`
         # refusal, rather than being read around here (review round 0, finding 1).
         #
-        # So this takes the route the first `init` takes, with one lock the first
+        # So this takes the route the first `init` takes, with locks the first
         # `init` has no way to hold: a first init has no configuration and so no
-        # aliases, but this bench does, and a board another owner holds through a
-        # configured `resource_id` must not be read out from under it just because
-        # the `state_root` that would record the read is broken. The same
-        # configured device locks the leased path acquires are taken here beside
-        # the host-wide enumeration lock and `probe:<serial>`, and a foreign holder
-        # on any of them comes back `device_busy` with nothing said to the board
-        # (review round 0, finding 2). The caller is told the read went unaudited
-        # rather than being left to infer it.
-        aliases = [key for name in current.debuggers for key in configured_probe_resource(current, name)]
-        return (*_discover_without_policy(tool=tool, frontend=frontend, resources=aliases), unusable.error_type)
+        # aliases, but this bench does, and a device another owner holds under a
+        # configured name must not have its policy rewritten out from under it
+        # just because the `state_root` that would record a lease is broken.
+        # Every machine-wide device lock this configuration names -- probe, UART
+        # and CAN, not the probes alone -- is taken here beside the host-wide
+        # enumeration lock and `probe:<serial>`. A UART- or CAN-only run in
+        # another workspace holds no probe alias, so a probes-only acquisition
+        # missed exactly the case the skipped open-run check existed to catch;
+        # now a foreign holder on any of them comes back `device_busy` with
+        # nothing said to the board (review round 0, finding 2). The caller is
+        # told the read went unaudited rather than being left to infer it.
+        #
+        # Those locks are taken into the caller's `generation_bench` and left held
+        # when it hands one in: releasing them the moment discovery returned would
+        # reopen the very window the open-run check cannot cover, letting a foreign
+        # UART- or CAN-only run start between this read and the authoritative write
+        # and have its configuration replaced beneath it. The caller holds them
+        # across the whole generation and releases once the write is done (review
+        # round 1, finding 2). Without a bench (a direct caller that does not opt
+        # in) the read still refuses a live holder; it just does not span the
+        # write, which is the pre-existing behaviour.
+        aliases = configured_device_resources(current)
+        return (*_discover_without_policy(tool=tool, frontend=frontend, resources=aliases, bench=generation_bench), unusable.error_type)
     if coordinator is None:
         owned = HardwareCoordinator(current, frontend=frontend)
         try:
@@ -2861,7 +2911,7 @@ def _regeneration_moves_state_root(current: AgenticHILConfig) -> bool:
     return os.path.normcase(str(replacement)) != os.path.normcase(str(current.state_root))
 
 
-def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] | None = None) -> tuple[JsonObject, JsonObject | None]:
+def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] | None = None, bench: BenchMutex | None = None) -> tuple[JsonObject, JsonObject | None]:
     """Bootstrap discovery with machine-wide physical exclusion but no lease.
 
     Two callers, and both read the board with no `state_root` to record a lease
@@ -2883,10 +2933,25 @@ def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] |
     `init`. A first init knows no alias, but a configured bench does, and a run
     another owner holds through a debugger's `resource_id` locks
     ``physical:<resource_id>``, a key no enumeration derives, so the
-    `probe:<serial>` locks alone would read the board out from under it. Acquired
-    up front beside the enumeration lock and released with everything else, so the
-    regeneration honours the same aliases the leased path does even though it has
-    no `state_root` under which to record a lease (review round 0, finding 2).
+    `probe:<serial>` locks alone would read the board out from under it. On the
+    broken-`state_root` repair path the caller passes every machine-wide device
+    lock the configuration names -- UART and CAN as well as the probes -- because
+    the open-run check that would otherwise have caught a foreign UART- or
+    CAN-only run was skipped, and those runs hold no probe alias
+    (`configured_device_resources`). Acquired up front beside the enumeration
+    lock, so the regeneration honours the same device exclusion a leased run would
+    even though it has no `state_root` under which to record a lease (review round
+    0, finding 2).
+
+    ``bench`` is who releases those locks. Without one this function owns a bench
+    for the length of the read and releases everything on the way out, which is
+    the first-`init` case with no configuration to hold the read past. A
+    regeneration hands its own bench in and does *not* have it released here: the
+    file it is about to rewrite is one a foreign UART- or CAN-only run could
+    otherwise take between this read and the authoritative write, so the caller
+    keeps every configured device lock held across discovery, document generation
+    and the replacement, and releases only once that is done (review round 1,
+    finding 2).
 
     Returns the discovery and, when a lock refused, the refusal that is the whole
     answer. A refusal from `before_connect` is surfaced as that refusal rather
@@ -2894,7 +2959,9 @@ def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] |
     hand it back as an unsuccessful read, which the caller would write a
     placeholder file from instead of refusing.
     """
-    bench = BenchMutex(frontend=frontend)
+    caller_owns_bench = bench is not None
+    if bench is None:
+        bench = BenchMutex(frontend=frontend)
     try:
         try:
             bench.acquire_named(DEBUGGER_DISCOVERY_RESOURCE)
@@ -2920,7 +2987,11 @@ def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] |
             return {}, refused
         return discovery, None
     finally:
-        bench.release_all()
+        # A caller-supplied bench keeps its locks past this read on purpose; the
+        # caller releases it once the whole generation has committed. A bench this
+        # function owns has no reader past the read and is released here.
+        if not caller_owns_bench:
+            bench.release_all()
 
 
 def _bootstrap_device_busy(busy: JsonObject, tool: str) -> JsonObject:

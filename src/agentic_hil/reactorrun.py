@@ -80,6 +80,14 @@ def run_plan(
         # case where no report file is written at all either. The steps go in
         # when the plan did load, so the document still says what the run would
         # have done.
+        #
+        # Name the plan that was asked for, so the refusal document a CI job
+        # captures says which plan it is about. A run that failed to load names
+        # the file only as the absolute `path` the loader rejected; the evidence
+        # bundle reads `test_config_path`, and a refusal that never named it
+        # would produce a bundle that could not say which plan the outcome
+        # belongs to.
+        error.details.setdefault("test_config_path", test_config_path or DEFAULT_TEST_CONFIG_PATH)
         write_refusal_junit_xml(junit_xml, {"tool": "test_reactor", **error.to_dict()}, plan_steps=() if test_config is None else test_config.steps)
         raise
     with registration:

@@ -72,6 +72,64 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
+  # The shipped CI examples pin AGENTIC_HIL_VERSION to the release this tree
+  # builds toward -- the release that first exposes the check-plan and
+  # run-evidence commands they invoke. tests/test_ci_examples.py proves against
+  # this checkout's parser that the examples invoke only commands the code
+  # defines, but it has no network and, between releases, that pin names a
+  # release the index does not carry yet. This is the one moment the pin is a
+  # real distribution: after PyPI has the release. So here the exact pinned
+  # artifact is downloaded and its CLI is asked to answer for itself, closing the
+  # gap the review kept naming -- that nothing reached the published distribution
+  # to confirm it exposes the commands a copied example runs. It runs after the
+  # PyPI upload, which is the point of no return, so it is an alarm and not a
+  # gate: you cannot inspect a published artifact before it is published.
+  verify-published-examples:
+    name: Verify the CI example pin resolves
+    needs:
+      - validate_release
+      - publish
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+
+      # The one string a reader copies, read out of the examples themselves and
+      # confirmed to be the release this tree builds toward before anything is
+      # installed. This is what turns "a version" into "the exact pinned
+      # artifact" the rest of the job downloads.
+      - name: Read the pinned example version
+        run: echo "EXAMPLE_PIN=$(python tools/verify_published_examples.py --print-pin)" >> "$GITHUB_ENV"
+
+      # Isolated, so this is the distribution PyPI serves and never the checkout,
+      # and retried because index metadata lags a fresh upload by up to minutes.
+      - name: Install the pinned distribution from PyPI
+        run: |
+          set -euo pipefail
+          python -m venv verify-env
+          for attempt in 1 2 3 4 5 6; do
+            if verify-env/bin/pip install --no-cache-dir "agentic-hil==${EXAMPLE_PIN}"; then
+              exit 0
+            fi
+            if [ "$attempt" = 6 ]; then
+              echo "agentic-hil==${EXAMPLE_PIN} is not installable from PyPI" >&2
+              exit 1
+            fi
+            sleep "$((attempt * 15))"
+          done
+
+      # The published artifact answers for itself: its --version is the pin, and
+      # every command the examples invoke answers --help.
+      - name: Verify the published CLI exposes every command the examples invoke
+        run: python tools/verify_published_examples.py --agentic-hil verify-env/bin/agentic-hil
+
   publish-mcp-registry:
     name: Publish to MCP Registry
     needs:

@@ -73,7 +73,7 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     HardwareLease,
 )
-from agentic_hil.devices import DebuggerDevice
+from agentic_hil.devices import CanDevice, DebuggerDevice, UartDevice
 from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
     CONFIG_NAMED_SECTIONS,
@@ -948,6 +948,34 @@ def configured_probe_resource(existing: AgenticHILConfig, debugger_id: str) -> l
         return []
     device = DebuggerDevice(config_id=debugger_id, debugger=entry)
     return list(device.lock_keys) if device.identity_source in {"resource_id", "probe_id"} else []
+
+
+def configured_device_resources(existing: AgenticHILConfig) -> list[str]:
+    """Every machine-wide device lock the loaded configuration's entries name.
+
+    The debugger half is ``configured_probe_resource``, unit-filtered for the
+    reason stated there: a toolchain-only debugger derives a shared
+    ``probe:<type>`` key every unfilled skeleton on the host would derive too, so
+    locking it serializes unrelated benches while protecting neither.
+
+    The COM and CAN halves lock every configured entry, because neither has such
+    a placeholder: a serial device folds to its ``resource_id``, its adapter
+    serial or its host device name, and a CAN bus to its adapter and channel,
+    each a concrete port on this machine, so holding the lock serializes only
+    against a run on the same physical device. That exclusion is the whole point
+    on the path that calls this. A regeneration whose ``state_root`` cannot be
+    read has no open-run check to fall back on, and a UART- or CAN-only run in
+    another workspace holds exactly these locks and none a probe alias would
+    catch, so acquiring them is what keeps the configuration from being rewritten
+    under a live measurement (review round 0, finding 2)."""
+    resources: list[str] = []
+    for name in existing.debuggers:
+        resources.extend(configured_probe_resource(existing, name))
+    for name, port in existing.com_ports.items():
+        resources.extend(UartDevice(config_id=name, port=port).lock_keys)
+    for name, bus in existing.can_buses.items():
+        resources.extend(CanDevice(config_id=name, bus=bus).lock_keys)
+    return resources
 
 
 def discover_under_hardware_lease(

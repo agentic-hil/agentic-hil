@@ -22,6 +22,7 @@ profile exactly, on either platform, with nothing timing-dependent in it.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -36,8 +37,11 @@ from agentic_hil.cli import (
     _claude_code_deny_patterns,
     _configuration_the_projects_walk_finds,
     _external_project_record_path,
+    _kept_configuration_findings,
     _recorded_external_configurations,
     _visible_project_configurations,
+    build_parser,
+    doctor,
     init_config,
     init_project,
     restrict_agent_write_access,
@@ -70,8 +74,10 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.configwrite import config_document_snapshot, load_config_document
+from agentic_hil.coordination import CoordinationError, HardwareCoordinator
+from agentic_hil.humanize import render_result
 from agentic_hil.knowledge import remediation_fields
-from agentic_hil.report import report_state_path
+from agentic_hil.report import overall_success, report_state_path
 from agentic_hil.tools import (
     PROJECT_CONFIG_CREATE,
     AgenticHILToolService,
@@ -1895,3 +1901,534 @@ def test_the_deterministic_refusal_names_the_repair_instead_of_a_retry() -> None
     assert "deterministic" in joined
     assert "`agentic-hil init --force`" in joined
     assert "`project_config_create`" in joined
+
+
+# ---------------------------------------------------------------------------
+# #399: the same profile, one release later, on a file that was already written.
+# `init --force` repaired it in one line and a plain `init` said nothing at all,
+# `doctor` never read `state_root` and called the bench healthy, and the
+# remediation that names the repair keyed on a `field` the refusal a reader
+# actually meets does not carry.
+
+
+def reflowed(text: str) -> str:
+    """A rendering with the wrapper's line breaks taken back out.
+
+    What the rendering says and where it wraps are two different assertions, and
+    only the second is about the terminal.
+    """
+    return " ".join(text.split())
+
+
+def generated_then_redirected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, serial: str) -> tuple[Path, Path]:
+    """A configuration this host wrote and this host has stopped accepting.
+
+    The profile of the report: a file an earlier release generated names
+    `state_root` under the platform default, and the packaged host reading it now
+    virtualizes that root. Written before the redirect and met after it, which is
+    the order every command in this section is handed it in, and the reason none
+    of them may assume a file they generated themselves.
+
+    Only the state root is redirected here, so the configuration stays where it
+    always was and exactly one of the two roots is unusable.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_state(tmp_path, monkeypatch)
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), serial)
+    created = init_config()
+    assert created["ok"] is True, created
+    assert written_state_root(created) == virtual / "agentic-hil", "the file has to name the root that is about to be redirected"
+    virtualize(monkeypatch, virtual, tmp_path / "package-local-cache")
+    return workspace, virtual / "agentic-hil"
+
+
+def test_a_plain_init_names_the_state_root_it_keeps_and_will_not_accept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The silence, stated as the command that ran over the broken file.
+
+    `init` reported `config skipped  Existing authoritative config, unchanged`
+    and exited 0 over a file naming a state root every plan is refused under, so
+    the one command that repairs it, `--force`, was the one the report never
+    mentioned. The file is still kept, byte for byte: what changes is that the
+    run says which root it is keeping and what to type.
+    """
+    workspace, redirected = generated_then_redirected(tmp_path, monkeypatch, "STLINK39901")
+    target = project_config_path(workspace)
+    before = target.read_bytes()
+
+    result = init_project()
+
+    assert target.read_bytes() == before, "a plain init still keeps the file byte for byte"
+    config_step = result["steps"]["config"]
+    assert (config_step["ok"], config_step["skipped"], config_step["existing"]) == (True, True, True)
+    # Exactly one root, and the one that is actually redirected: the
+    # configuration's own directory is untouched on this profile and must not be
+    # reported as a finding.
+    findings = config_step["unusable_roots"]
+    assert [item["field"] for item in findings] == ["state_root"]
+    assert findings[0]["error_type"] == "unsafe_configured_path"
+    assert findings[0]["path"] == str(redirected)
+    assert findings[0]["resolved_parent"] == str(tmp_path / "package-local-cache" / "agentic-hil")
+    # Both spellings and the repair, in the sentence a person reads. One
+    # sentence, too: a plain `init` never reaches the open-run pre-flight, so the
+    # note #402 added to a regeneration may not appear over a file being kept.
+    assert len(result["warnings"]) == 1, result["warnings"]
+    assert "open_run_check" not in config_step
+    warning = " ".join(result["warnings"])
+    assert str(redirected) in warning
+    assert str(tmp_path / "package-local-cache" / "agentic-hil") in warning
+    assert "agentic-hil init --force" in warning
+
+
+def test_the_kept_configuration_finding_is_not_what_fails_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Which step owns the verdict, pinned so the two do not merge.
+
+    Keeping the file is what was asked, so the config step stays `ok` and
+    `skipped` and the finding rides on it as a warning. The bench being unusable
+    is `doctor`'s answer about the same root, and that is what the run and the
+    exit code are taken from. A finding that failed its own step would say the
+    command failed at the thing it was told to do.
+    """
+    generated_then_redirected(tmp_path, monkeypatch, "STLINK39902")
+
+    result = init_project()
+
+    assert result["steps"]["config"]["ok"] is True
+    assert result["steps"]["doctor"]["ok"] is False, result["steps"]["doctor"]
+    assert result["ok"] is False
+    assert overall_success(result) is False
+
+
+def test_a_healthy_configuration_is_kept_in_silence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbouring case, and the one every other bench is.
+
+    Nothing is redirected, both roots pass the rule a write is held to, and the
+    second `init` says exactly what it said before: the file is unchanged, there
+    is no warning and no finding, and the run is green.
+    """
+    bench(tmp_path, monkeypatch)
+    assert init_project()["ok"] is True
+
+    result = init_project()
+
+    assert result["ok"] is True, result
+    assert "warnings" not in result
+    config_step = result["steps"]["config"]
+    assert config_step["summary"] == "Existing authoritative config, unchanged: not a byte of it was written, and this never replaces operator policy."
+    assert "unusable_roots" not in config_step
+
+
+def test_a_kept_configuration_is_also_measured_where_the_file_itself_sits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other root a kept file commits the bench to.
+
+    Every lock and every rewrite of the configuration goes through its own
+    directory, so a file sitting under a redirected configuration root is the
+    same finding about the other half of the pair, and the check has to ask about
+    both rather than about `state_root` alone.
+    """
+    bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_config(tmp_path, monkeypatch)
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK39903")
+    created = init_config()
+    assert created["ok"] is True, created
+    target = Path(created["path"])
+    assert target.parent.parent == project_config_directory(), "the file has to sit under the root that is about to be redirected"
+    virtualize(monkeypatch, virtual, tmp_path / "package-roaming-cache")
+
+    findings = _kept_configuration_findings(target)
+
+    assert [item["field"] for item in findings] == ["config_path"]
+    assert findings[0]["path"] == str(target.parent)
+    assert findings[0]["resolved_parent"].startswith(str(tmp_path / "package-roaming-cache"))
+
+
+def test_doctor_reads_the_state_root_and_calls_the_bench_unhealthy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check `doctor` never made, on the configuration it called healthy.
+
+    Nothing in the rendering or in `--json` mentioned `state_root`, so the bench
+    that refused every plan at its first hardware action was signed off by the
+    command a newcomer runs to find out whether it works. The verdict is the
+    whole point: a state root the enforcer refuses refuses the bench, not one
+    device on it.
+    """
+    _, redirected = generated_then_redirected(tmp_path, monkeypatch, "STLINK39904")
+
+    report = doctor()
+
+    assert report["ok"] is False, report
+    check = report["state_root"]
+    assert check["ok"] is False
+    assert check["field"] == "state_root"
+    assert check["path"] == str(redirected)
+    assert check["resolved_parent"] == str(tmp_path / "package-local-cache" / "agentic-hil")
+    assert check["error_type"] == "unsafe_configured_path"
+    assert "audit_unavailable" in check["summary"]
+    assert "agentic-hil init --force" in check["summary"]
+    # The headline says it too: a verdict a reader has to open a nested object to
+    # find is the verdict that was missed.
+    assert "cannot record a hardware action" in report["summary"]
+
+
+def test_doctor_reports_the_state_root_it_accepts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same field on a bench that is fine: reported, and not a warning.
+
+    The path and the verdict are what `doctor` owes a reader either way; a check
+    that only ever appeared on a broken bench would leave the healthy one
+    unable to show that it was made.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    assert init_project()["ok"] is True
+
+    report = doctor()
+
+    assert report["ok"] is True, report
+    assert report["state_root"]["ok"] is True
+    assert report["state_root"]["path"] == str(load_authoritative_config(workspace).state_root)
+    assert "cannot record a hardware action" not in report["summary"]
+
+
+def test_the_state_root_verdict_reaches_the_person_reading_doctor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both halves of #399's second gap: the rendering and `--json`.
+
+    The report is read at a terminal far more often than it is parsed, so the
+    path, the spelling it resolves to and the repair have to survive the
+    rendering, under a heading beside the configuration rather than buried among
+    the devices.
+    """
+    _, redirected = generated_then_redirected(tmp_path, monkeypatch, "STLINK39905")
+
+    rendered = reflowed(render_result(doctor(), "doctor"))
+
+    assert "State root" in rendered
+    assert f"path {redirected}" in rendered
+    assert "verdict FAILED" in rendered
+    assert f"resolved_parent {tmp_path / 'package-local-cache' / 'agentic-hil'}" in rendered
+    assert "error_type unsafe_configured_path" in rendered
+    assert "agentic-hil init --force" in rendered
+
+
+def test_the_one_line_a_regeneration_changes_is_the_one_both_findings_clear_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the two findings are worth: the command they name is the repair.
+
+    On the bench, `init --force` changed exactly one line, `state_root`, and the
+    plans ran. So the root a regeneration would pick is written into the file
+    that is there, and the same two questions are asked again: the state root the
+    file now names is one this profile accepts, `doctor` calls the bench healthy,
+    and the kept-file check has nothing left to report. The line is written
+    directly rather than by running the regeneration, so what is measured is the
+    verdict following the value and nothing else about the command.
+    """
+    workspace, redirected = generated_then_redirected(tmp_path, monkeypatch, "STLINK39906")
+    assert doctor()["ok"] is False
+    assert init_project()["steps"]["config"]["unusable_roots"], "the finding has to be standing before the repair"
+    target = project_config_path(workspace)
+    document = yaml.safe_load(target.read_text(encoding="utf-8"))
+    replacement = provisionable_state_root(workspace, target)
+    assert replacement == fallback_state_root()
+    assert replacement != redirected
+    document["state_root"] = str(replacement)
+    target.write_text(yaml.safe_dump(document, sort_keys=False, allow_unicode=False), encoding="utf-8")
+
+    repaired = init_project()
+
+    assert repaired["ok"] is True, repaired
+    assert "warnings" not in repaired
+    assert "unusable_roots" not in repaired["steps"]["config"]
+    assert repaired["steps"]["doctor"]["state_root"]["ok"] is True
+    assert Path(load_authoritative_config(workspace).state_root) == replacement
+
+
+def test_the_remediation_names_the_path_rather_than_a_field_no_refusal_carries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Item 3, held to the refusal a reader actually meets.
+
+    The guidance said "When `field` is `state_root`", and the refusal that
+    reaches an operator is raised by `refuse_redirected_parent`, the enforcer
+    every read and write in this package passes through with a path and nothing
+    else. It cannot name a configured field: the path it is handed is usually one
+    derived from a root rather than the value of any setting, which is exactly
+    the report-state file below. So the sentence keys on `path`, which every one
+    of these refusals carries.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    virtual = virtualized_user_state(tmp_path, monkeypatch)
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK39907")
+    assert init_config()["ok"] is True
+    virtualize(monkeypatch, virtual, tmp_path / "package-local-cache")
+    config = load_authoritative_config(workspace)
+
+    with pytest.raises(ConfigError) as refusal:
+        safe_file_path(report_state_path(config))
+
+    met = refusal.value.to_dict()
+    assert met["error_type"] == "unsafe_configured_path"
+    assert "field" not in met, "the enforcer is handed a path and no configured field"
+    assert met["path"].startswith(str(virtual / "agentic-hil"))
+    guidance = " ".join(met["remediation"])
+    assert "When `field` is" not in guidance
+    assert "`path`" in guidance
+    assert "`state_root`" in guidance
+    assert "`agentic-hil init --force`" in guidance
+
+
+# ---------------------------------------------------------------------------
+# #402: the repair every one of those messages names, run on the profile they
+# name it for. Before generating anything `init --force` asks whether a bench run
+# is open, and that question is read out of the lease record under the very
+# `state_root` the command is about to replace. On this profile that read is
+# refused, the coordinator turns the refusal into `coordination_state_invalid`,
+# and the command died on state under the state root it exists to rewrite.
+
+
+def test_force_regenerates_when_the_open_run_check_cannot_read_the_old_state_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The defect, stated as the command that was supposed to be the way out.
+
+    Nothing had been written when it died, so the file naming the unusable root
+    was still there afterwards and the repair the refusals name was unreachable
+    from this profile. What the pre-flight protects is a run in progress, and a
+    run records itself under the same root nothing can be read from, so there is
+    none to protect: the question is reported as unasked and the regeneration
+    goes on to write the root this profile does accept.
+    """
+    workspace, redirected = generated_then_redirected(tmp_path, monkeypatch, "STLINK40201")
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    assert written_state_root(result) == fallback_state_root()
+    assert Path(load_authoritative_config(workspace).state_root) == fallback_state_root()
+    note = result["open_run_check"]
+    assert note["checked"] is False
+    assert note["field"] == "state_root"
+    # Both spellings, for the reason the kept-root finding carries both: the
+    # resolved one is where the read would actually have landed.
+    assert note["path"] == str(redirected)
+    assert note["resolved_parent"] == str(tmp_path / "package-local-cache" / "agentic-hil")
+    assert note["error_type"] == "unsafe_configured_path"
+    assert "could not be checked" in note["summary"]
+    assert "lease-status" in note["summary"], "a check that did not happen has to name what can still answer it"
+
+
+def test_the_unchecked_open_run_reaches_the_person_reading_the_regeneration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check that silently did not happen is the shape of finding that is missed.
+
+    `agentic-hil init --force` is read at a terminal, so the note rides the run
+    as a warning and survives the rendering: the root, the spelling it resolves
+    to and the fact that nobody looked. The run itself is green, because the
+    regeneration is what was asked for and it happened.
+    """
+    _, redirected = generated_then_redirected(tmp_path, monkeypatch, "STLINK40202")
+
+    result = init_project(force=True)
+
+    assert result["ok"] is True, result
+    assert result["steps"]["config"]["open_run_check"]["checked"] is False
+    rendered = reflowed(render_result(result, "init"))
+    assert "Warnings" in rendered
+    assert "Whether a bench run is open could not be checked" in rendered
+    assert str(redirected) in rendered
+    assert str(tmp_path / "package-local-cache" / "agentic-hil") in rendered
+
+
+def test_an_open_run_on_a_root_that_can_be_read_still_refuses_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal the repair may not take with it.
+
+    Nothing about this profile is a licence to write over somebody's run. Where
+    the record can be read and names a bench that is held, `--force` answers
+    `config_write_in_open_run` exactly as it did, nothing is written, and no note
+    claims the question went unasked.
+    """
+    bench(tmp_path, monkeypatch)
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK40203")
+    created = init_config()
+    assert created["ok"] is True, created
+    target = Path(created["path"])
+    before = target.read_bytes()
+
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire([f"probe:{fold_hardware_id('STLINK40203')}"])
+    try:
+        refused = init_config(force=True)
+    finally:
+        stranger.release_all()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "config_write_in_open_run"
+    assert "open_run_check" not in refused
+    assert target.read_bytes() == before
+
+
+def _redirected_bench_naming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, serial: str, section: str, entry: dict) -> tuple[Path, Path]:
+    """A `generated_then_redirected` bench whose kept file also names one device.
+
+    `init` writes no `com_ports` or `can_buses`, so the entry the open-run check
+    has to catch is added to the file the operator would already have on a bench
+    that uses a UART or a CAN bus. The state root stays the redirected, unreadable
+    one, so the regeneration takes the repair path with no open-run check to fall
+    back on."""
+    workspace, redirected = generated_then_redirected(tmp_path, monkeypatch, serial)
+    target = project_config_path(workspace)
+    document = yaml.safe_load(target.read_text(encoding="utf-8"))
+    document[section] = entry
+    target.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return workspace, target
+
+
+def test_force_over_an_unreadable_state_root_is_refused_by_a_uart_only_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The repair path's own version of the UART-only open run.
+
+    The open-run check reads the lease record under the `state_root`, which on
+    this profile it cannot, so it is skipped and the regeneration falls back to
+    the device locks it takes for the read. A run in another workspace holding
+    only this bench's UART lock -- no probe, no CAN -- is what a probes-only
+    fallback walked straight past, replacing baud rates and permissions under a
+    live measurement. Every configured device lock is taken now, so it comes back
+    `device_busy` with nothing written."""
+    from agentic_hil.devices import config_devices
+
+    workspace, target = _redirected_bench_naming(
+        tmp_path, monkeypatch, "STLINK40210", "com_ports", {"dut_uart": {"device": "COM_FINDING2_UART", "identity_source": "device"}}
+    )
+    before = target.read_bytes()
+    uart = next(key for key in config_devices(load_authoritative_config(workspace)).lock_keys if key.startswith("com:"))
+
+    stranger = BenchMutex(frontend="stranger", label="uart-only-run")
+    stranger.acquire([uart])
+    try:
+        refused = init_config(force=True)
+    finally:
+        stranger.release_all()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "device_busy"
+    assert refused["resource"] == uart
+    # Nothing was rewritten: the file the run was taken under is byte-for-byte
+    # what it was, so no baud rate or permission moved beneath the held port.
+    assert target.read_bytes() == before
+
+
+def test_force_over_an_unreadable_state_root_is_refused_by_a_can_only_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """And the CAN bus, which shares no lock with the probe at all.
+
+    A UART on this bench at least sits on the same adapter as the probe; a CAN
+    bus does not, so a probes-only fallback protected it not at all. The same
+    repair path now holds this bus's machine-wide lock through the read and
+    refuses `device_busy` when another workspace is on it."""
+    from agentic_hil.devices import config_devices
+
+    workspace, target = _redirected_bench_naming(
+        tmp_path, monkeypatch, "STLINK40211", "can_buses", {"dut_can": {"adapter": "peak", "channel": "PCAN_USBBUS1", "bitrate": 250000}}
+    )
+    before = target.read_bytes()
+    bus = next(key for key in config_devices(load_authoritative_config(workspace)).lock_keys if key.startswith("can:"))
+
+    stranger = BenchMutex(frontend="stranger", label="can-only-run")
+    stranger.acquire([bus])
+    try:
+        refused = init_config(force=True)
+    finally:
+        stranger.release_all()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "device_busy"
+    assert refused["resource"] == bus
+    assert target.read_bytes() == before
+
+
+def test_repair_holds_the_device_lock_across_the_write_not_only_the_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-1 finding 2: the repair keeps its device locks from the read through the write.
+
+    The earlier pair proves a holder that predates the read is refused. This
+    proves the other seam the reviewer named: a foreign UART-only run that tries
+    to start *after* discovery but *before* the file is replaced is refused too,
+    because the repair holds the bench across document generation and the
+    authoritative write rather than releasing it the moment discovery returned.
+    Only once the replacement has landed can such a run take the lock."""
+    from agentic_hil.bench import DeviceBusyError
+    from agentic_hil.cli import secure_atomic_write_text as real_secure_atomic_write_text
+    from agentic_hil.devices import config_devices
+
+    workspace, target = _redirected_bench_naming(
+        tmp_path, monkeypatch, "STLINK40212", "com_ports", {"dut_uart": {"device": "COM_FINDING2_LATE", "identity_source": "device"}}
+    )
+    before = target.read_bytes()
+    uart = next(key for key in config_devices(load_authoritative_config(workspace)).lock_keys if key.startswith("com:"))
+
+    observed: dict[str, bool] = {}
+
+    def interpose(path: Path | str, text: str, **kwargs: object) -> None:
+        # Fires from the final-write seam, after the board has been read and the
+        # replacement document built. A UART-only run in another workspace trying
+        # to start here holds none of what discovery locked and everything the
+        # skipped open-run check would have caught, so it is exactly the case the
+        # repair must refuse while its write is in flight.
+        if Path(path) == target and "refused_during_write" not in observed:
+            latecomer = BenchMutex(frontend="late-uart-run")
+            try:
+                with pytest.raises(DeviceBusyError):
+                    latecomer.acquire([uart])
+            finally:
+                latecomer.release_all()
+            observed["refused_during_write"] = True
+        return real_secure_atomic_write_text(path, text, **kwargs)
+
+    monkeypatch.setattr("agentic_hil.cli.secure_atomic_write_text", interpose)
+
+    result = init_config(force=True)
+
+    assert result["ok"] is True, result
+    # The refusal happened at the write seam, not merely before the read.
+    assert observed.get("refused_during_write") is True
+    # The replacement really landed, and the lock is given back with it: a run
+    # that starts once the write is done takes the bench that was held throughout.
+    assert target.read_bytes() != before
+    after = BenchMutex(frontend="after-replacement")
+    try:
+        assert after.acquire([uart]) == [uart]
+    finally:
+        after.release_all()
+
+
+def test_a_corrupt_lease_record_on_a_healthy_root_still_stops_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of the licence: only a refused root buys the note.
+
+    A root this profile accepts can be read under, so a record that will not
+    parse there is a real fault in the coordination state and not a question that
+    could not be asked. `coordination_state_invalid` still comes out, and the
+    configuration is still standing untouched behind it. Swallowing every
+    `CoordinationError` here would regenerate over a bench whose state nobody
+    understands.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK40204")
+    created = init_config()
+    assert created["ok"] is True, created
+    target = Path(created["path"])
+    before = target.read_bytes()
+    coordinator = HardwareCoordinator(load_authoritative_config(workspace), "operator-cli")
+    try:
+        coordinator._record_path(coordinator.project_key).write_text('{"version": 999}\n', encoding="utf-8")
+    finally:
+        coordinator.close()
+
+    with pytest.raises(CoordinationError) as raised:
+        init_config(force=True)
+
+    assert raised.value.result["error_type"] == "coordination_state_invalid"
+    assert target.read_bytes() == before
+
+
+def test_every_flag_init_offers_is_explained_in_its_own_help() -> None:
+    """The smaller finding of the same walk.
+
+    `--force` is the repair the two findings above name, and it was the one flag
+    `init --help` documented with no help text at all.
+    """
+    parser = build_parser()
+    subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    init_parser = subparsers.choices["init"]
+
+    assert [action.option_strings for action in init_parser._actions if action.option_strings and not action.help] == []
+
+    help_text = reflowed(init_parser.format_help())
+    assert "--force" in help_text
+    assert "state_root" in help_text
+    assert "agentic-hil grant" in help_text

@@ -21,11 +21,13 @@ exclude tests/test_loop_in_container.py
 # missed until a from-sdist collection was actually tried.
 exclude tests/test_shipped_references.py
 exclude tests/test_version_consistency.py
+exclude tests/test_ci_examples.py
+exclude tests/test_verify_published_examples.py
 exclude tests/test_ci_linux.py
 # The one-line installers sit at the repository root and are fetched from there
 # rather than from the distribution, so the pins on them have nothing to read in
 # a source distribution.
 exclude tests/test_install_scripts.py
-recursive-include examples *.py *.md *.yaml
+recursive-include examples *.py *.md *.yaml *.yml
 # The firmware demo is repository content, not package content.
 prune examples/nucleo-f446re_demo

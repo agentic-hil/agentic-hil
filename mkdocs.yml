@@ -13,6 +13,7 @@ nav:
   - MCP tools: mcp-tools.md
   - Testing: testing.md
   - Test plan contract: test-plan-contract.md
+  - CI examples: ci-examples.md
   - Safety model: safety-model.md
   - Security design: security-design.md
   - Designs:

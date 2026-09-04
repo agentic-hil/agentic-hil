@@ -62,6 +62,7 @@ from agentic_hil.config import (
     tool_owned_user_roots,
     trusted_persistent_executable,
     user_file_lock_path,
+    writable_stable_directory,
 )
 from agentic_hil.configreload import NOT_RELOADED_SECTIONS, PROJECT_CONFIG_RELOAD, RELOADED_SECTIONS, reload_description
 from agentic_hil.configstate import config_status, with_config_status
@@ -82,19 +83,22 @@ from agentic_hil.knowledge import (
     CONFIG_GRANT_COMMAND,
     CONFIG_REOPEN_COMMAND,
     CONFIG_REVOKE_COMMAND,
+    REDACTION_UNAVAILABLE_ERROR,
     RUNNING_SERVER_COMPARISON,
     remediation_fields,
 )
 from agentic_hil.reactorrun import run_plan, start_plan_detached
 from agentic_hil.redact import redact_sensitive
 from agentic_hil.report import overall_success
+from agentic_hil.runevidence import write_run_evidence
 from agentic_hil.runlifecycle import request_run_stop, run_status
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH
+from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, flatten_steps, load_test_config
 from agentic_hil.tools import (
     AgenticHILToolService,
     UnprovisionedToolService,
     discover_for_generation,
+    generation_locks,
     narrowed_permissions,
     unbound_debugger_error,
 )
@@ -256,7 +260,14 @@ def entrypoint(argv: list[str] | None = None) -> int:
     if isinstance(result, int):
         return result
     if result is not None:
-        emit_result(result, command, human=human)
+        # A result whose secret-named values redaction could not vouch for is a
+        # result neither sink published, so it fails the command closed however
+        # the original result would have scored: an exit 0 over a rendering
+        # refusal would tell a caller the command succeeded and left them a
+        # document, when what it left is the statement that there is no document.
+        withheld = emit_result(result, command, human=human)
+        if withheld:
+            return 1
         return 0 if result_succeeded(result) else 1
     return 0
 
@@ -278,19 +289,60 @@ def human_readable_output(command: str, *, json_requested: bool) -> bool:
     return command not in PROTOCOL_COMMANDS and not json_requested
 
 
-def emit_result(result: JsonObject, command: str | None, *, human: bool) -> None:
+def emit_result(result: JsonObject, command: str | None, *, human: bool) -> bool:
     """Print one result document, as the machine document or as prose.
 
-    The machine half goes through `print_json` untouched, which is what keeps it
-    byte-identical. The human half redacts through the same function first, so a
-    rendering can never publish a secret-named value the document would have
-    replaced.
+    Returns whether the result was withheld: `True` when redaction could not
+    vouch for it and a `redaction_unavailable` refusal was emitted in its place,
+    so the caller can fail the command closed rather than exit successfully over
+    a result nobody printed.
+
+    Both sinks redact through `redact_sensitive`, and both fail closed on the
+    same condition, because redaction is the last step before a result leaves
+    this process by either of them. A redaction that hands back something other
+    than a document is the one case that step exists for, and it is exactly the
+    case in which the original must not be printed: rendering it, or dumping it,
+    would publish the values nothing has vouched for. The machine half used to be
+    the exception -- it dumped whatever redaction returned, `null` or a list
+    included -- so a caller told to retry with `--json` met the same failure in a
+    shape it could not read. Now the human half renders the refusal and the
+    machine half dumps it, the two stay byte-identical on the path that works,
+    and neither publishes the result the redaction could not clear.
     """
     if not human:
-        print_json(result)
-        return
+        return print_json(result, command)
     redacted = redact_sensitive(result)
-    write_rendered(sys.stdout, render_result(redacted if isinstance(redacted, dict) else result, command))
+    if not isinstance(redacted, dict):
+        write_rendered(sys.stdout, render_result(redaction_unavailable(command), command))
+        return True
+    write_rendered(sys.stdout, render_result(redacted, command))
+    return False
+
+
+def redaction_unavailable(command: str | None) -> JsonObject:
+    """What is rendered when redacting a result did not hand back a document.
+
+    Built from the command name and nothing else. Carrying over a field of the
+    result, even one that reads as harmless, would be the fail-open branch again
+    in a smaller shape: what is not known here is precisely which of that
+    document's values the redaction would have replaced.
+
+    It carries no `remediation` of its own because it is rendered and never
+    returned: `render_refusal` looks the error_type up in the same catalogue
+    that would have been merged in here, so a copy would only be a second one to
+    keep in step.
+    """
+    refusal: JsonObject = {
+        "ok": False,
+        "error_type": REDACTION_UNAVAILABLE_ERROR,
+        "summary": (
+            "This result was not rendered. Redacting it did not produce a document, so nothing can say its "
+            "secret-named values were replaced, and the unredacted result is not what gets printed instead."
+        ),
+    }
+    if command:
+        refusal["command"] = command
+    return refusal
 
 
 def result_succeeded(result: JsonObject) -> bool:
@@ -306,7 +358,11 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = subparsers.add_parser("init", help="project half: write this workspace's authoritative config with every permission granted but the two flashing is interlocked against, and verify it with doctor. A config that is already there is kept, unchanged, and only the steps that do not touch it run")
     init_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     init_parser.add_argument("--agent", default=None, help="also ask this agent to refuse its own write tools on the config and the state root; on a config that is already there, adding or refreshing those rules is the whole of what this command does")
-    init_parser.add_argument("--force", action="store_true")
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="regenerate this workspace's config from the attached hardware, replacing the file that is there: every permission goes back to the generated set, and `state_root` and the file's own location are rewritten to roots this profile accepts. That last part is the repair for a config naming a state root this host refuses, which `doctor` reports and which every plan is otherwise refused at its first step for. It is not the way to open one permission; `agentic-hil grant` moves one and leaves the rest of the file alone",
+    )
 
     adopt_parser = subparsers.add_parser(
         "adopt-hardware",
@@ -393,6 +449,13 @@ def build_parser() -> argparse.ArgumentParser:
     # be a second process claiming a run it did not start.
     reactor_parser.add_argument("--run-handle", default=None, help=argparse.SUPPRESS)
 
+    run_evidence_parser = subparsers.add_parser(
+        "run-evidence",
+        help="turn a run report into the CI evidence the action design specifies: a JSON run summary, a job summary in Markdown, and a copy of the run's event logs. Reads the report and this workspace only, needs no configuration and touches no hardware",
+    )
+    run_evidence_parser.add_argument("--report", required=True, metavar="PATH", help="the run report JSON, as test-reactor wrote it")
+    run_evidence_parser.add_argument("--out", required=True, metavar="DIR", help="the directory the evidence is written to; created if it is not there")
+
     reactor_status_parser = subparsers.add_parser("test-reactor-status", help="say what a test run handle is doing: running (which step), finished, stopped, or its worker gone")
     reactor_status_parser.add_argument("--run", default=None, help="the handle the run was started under; without it, list the runs this bench still has records of")
 
@@ -412,6 +475,12 @@ def build_parser() -> argparse.ArgumentParser:
     test_schema_parser = subparsers.add_parser("test-schema", help="print or write bundled test configuration schema")
     test_schema_parser.add_argument("--output", default=None)
     test_schema_parser.add_argument("--force", action="store_true")
+
+    check_plan_parser = subparsers.add_parser(
+        "check-plan",
+        help="load each named test plan through the reactor's own loader and say whether it holds, without a configuration and without touching hardware: the same duplicate-key rejection, non-finite-number rejection and plan-version feature gates the bench would apply, so a plan this accepts is one the reactor can load. Exit is nonzero if any plan is refused. This is the loadability check a hosted simulator job runs; a schema-only reader passes plans the reactor then refuses",
+    )
+    check_plan_parser.add_argument("plans", nargs="+", metavar="PLAN", help="one or more test plan paths inside this workspace")
 
     mcp_config_parser = subparsers.add_parser("mcp-config", help="print or write project .mcp.json for MCP client discovery")
     mcp_config_parser.add_argument("--output", default=None)
@@ -489,6 +558,12 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
                 return detached_junit_refusal(args.junit_xml)
             return start_detached_test_reactor(args.test_config, wait_s=args.wait_s)
         return run_test_reactor(args.test_config, wait_s=args.wait_s, run_handle=args.run_handle, junit_xml=args.junit_xml)
+    if args.command == "run-evidence":
+        # No configuration is loaded on the way in, and that is the point: the
+        # evidence step of a workflow runs after a run that may have been
+        # refused for having no configuration at all, and a command that needed
+        # one to explain that would leave exactly that job with nothing.
+        return write_run_evidence(args.report, args.out)
     if args.command == "test-reactor-status":
         return run_status(load_cli_authoritative_config(None), args.run)
     if args.command == "test-reactor-stop":
@@ -512,6 +587,8 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
         return schema(args.output, args.force)
     if args.command == "test-schema":
         return test_schema(args.output, args.force)
+    if args.command == "check-plan":
+        return check_plan(args.plans)
     if args.command == "mcp-config":
         return mcp_config(args.output, args.force)
     if args.command == "skill-install":
@@ -1772,6 +1849,101 @@ _NO_AGENT_ON_EXISTING_CONFIG = (
 )
 
 
+def _kept_configuration_roots(target_path: Path) -> list[tuple[str, Path]]:
+    """The two roots an existing configuration commits this bench to.
+
+    Its own directory, which every lock and every rewrite of the file goes
+    through, and the `state_root` the document names, which every report, log,
+    lease and audit record is written under. The state root is read out of the
+    file rather than taken from a load, because the question is what *this file*
+    names and a load can be refused for a dozen reasons that say nothing about
+    it; `_configured_state_root` already normalises one the way the loader does
+    and answers None for a document that names none this rule could be applied
+    to.
+    """
+    roots: list[tuple[str, Path]] = [("config_path", target_path.parent)]
+    state_root = _configured_state_root(target_path)
+    if state_root is not None:
+        roots.append(("state_root", state_root))
+    return roots
+
+
+def _kept_configuration_findings(target_path: Path) -> list[JsonObject]:
+    """A kept configuration's roots, each held to the rule a write is held to.
+
+    A plain `init` over an existing file writes nothing, which is right, and used
+    to say nothing either: the run ended `config skipped ... unchanged` and exit
+    0 over a file naming a `state_root` this host refuses every write under, and
+    every plan under it was then refused `audit_unavailable` at its first
+    hardware action (#399, #387). The one command that repairs it, `--force`, was
+    the one the report never mentioned.
+
+    `writable_stable_directory` is the same pair of tests `provisionable_state_root`
+    picks a generated root by, so what is asked of a file being kept is exactly
+    what would have been asked of one being written. Nothing is written and
+    nothing is repaired: each finding names the root, the spelling it resolves to
+    and the command that rewrites the file, and the verdict on the run is left to
+    `doctor`, which asks the same question about the same bench.
+    """
+    findings: list[JsonObject] = []
+    for field, directory in _kept_configuration_roots(target_path):
+        try:
+            writable_stable_directory(directory, field=field, config_path=str(target_path))
+        except ConfigError as error:
+            findings.append({"field": field, **error.to_dict()})
+    return findings
+
+
+# What a kept root being unusable costs, per root, because the two cost
+# different things: one stops the bench recording anything, the other stops the
+# file itself being locked and rewritten in place.
+_KEPT_ROOT_COST = {
+    "state_root": "No hardware action can be recorded under it, so every plan is refused at its first step with `audit_unavailable`.",
+    "config_path": "The configuration cannot be locked or rewritten where it stands, so every command that changes a permission is refused.",
+}
+
+
+def _kept_root_warning(finding: JsonObject) -> str:
+    """One finding as the sentence a person reads, with the repair named.
+
+    Both spellings where there are two, because the resolved one is the answer:
+    it is where the writes would actually land, and a reader who has only the
+    configured spelling goes looking for a symlink that is not there. Where there
+    is one spelling the refusal's own sentence says why instead. `--force` last,
+    because it is what to type.
+    """
+    resolved = finding.get("resolved_parent")
+    field = str(finding.get("field"))
+    because = (
+        f" It resolves to {resolved}, which is where a write under it would actually land, so the enforcer refuses every one of them."
+        if isinstance(resolved, str) and resolved
+        else f" {finding.get('summary')}"
+    )
+    return (
+        f"This configuration is kept exactly as it is, and the `{field}` it names is a root this profile will not "
+        f"accept: {finding.get('path')}.{because} {_KEPT_ROOT_COST.get(field, 'Nothing can be written under it.')} "
+        f"`{CONFIG_REOPEN_COMMAND}` regenerates the file with roots this profile does accept; it rewrites every "
+        f"permission in the file too, so read the file first."
+    )
+
+
+def _unchecked_open_run_warning(config_result: JsonObject) -> list[str]:
+    """A regeneration's unasked open-run question, lifted into the run's warnings.
+
+    The note is written where the question is asked, and the sentence it carries
+    is the one a person needs, so it is carried up rather than restated: two
+    spellings of one finding are two spellings that drift. It has to reach the
+    rendering, though. `--json` is not where an operator reads `agentic-hil
+    init`, and a check that silently did not happen is exactly the shape of
+    finding that gets missed.
+    """
+    note = config_result.get("open_run_check")
+    if not isinstance(note, dict) or note.get("checked") is not False:
+        return []
+    summary = note.get("summary")
+    return [summary] if isinstance(summary, str) and summary else []
+
+
 def init_project(config_path: str | None = None, agent: str | None = None, force: bool = False) -> JsonObject:
     """Set up one project: its authoritative config, verified by doctor.
 
@@ -1816,6 +1988,7 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
     permission_changes: list[str] = []
     state_actions = ensure_safe_state_root(workspace, target_path)
     config_result: JsonObject
+    kept_findings: list[JsonObject] = []
     doctor_result = _skipped_setup_step("Doctor was not reached.")
     permission_result: JsonObject
     if resolved_agent is None:
@@ -1832,9 +2005,28 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
         snapshots = _capture_file_snapshots(mutation_paths)
         try:
             if keep_existing:
-                config_result = {"ok": True, "skipped": True, "existing": True, "summary": "Existing authoritative config, unchanged: not a byte of it was written, and this never replaces operator policy.", "path": str(target_path)}
+                # The file stays as it is either way. What the check decides is
+                # whether the report says which of its roots this profile
+                # refuses; a kept file whose `state_root` is unusable is still
+                # kept, and is now named.
+                kept_findings = _kept_configuration_findings(target_path)
+                config_result = {
+                    "ok": True,
+                    "skipped": True,
+                    "existing": True,
+                    "summary": "Existing authoritative config, unchanged: not a byte of it was written, and this never replaces operator policy."
+                    + (f" One of the roots it names is a root this profile will not accept; see the warnings and `{CONFIG_REOPEN_COMMAND}`." if kept_findings else ""),
+                    "path": str(target_path),
+                    **({"unusable_roots": kept_findings} if kept_findings else {}),
+                }
             else:
-                config_result = init_config(config_path, force=force, _locked=True, _target=target_path)
+                # Scoped to the write itself, not the `doctor` that follows: the
+                # repair path keeps the device locks it takes for the read held
+                # until the configuration is written, so a foreign UART- or
+                # CAN-only run cannot start in between (review round 1, finding 2),
+                # and releases before `doctor` probes the board through them.
+                with generation_locks(frontend="operator-cli") as generation_bench:
+                    config_result = init_config(config_path, force=force, _locked=True, _target=target_path, _generation_bench=generation_bench)
 
             if overall_success(config_result):
                 doctor_result = doctor(config_path)
@@ -1852,6 +2044,14 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
 
         ok = all(overall_success(result) for result in (config_result, doctor_result, permission_result))
         rollback_errors = [] if ok else _restore_file_snapshots(snapshots)
+        # A kept file's unusable roots and a regeneration's unasked open-run
+        # question are the same kind of fact about one run: the command did what
+        # it was told to do and something beside it could not be established.
+        # Only one of the two can arise, because keeping and regenerating are the
+        # two halves of `--force`, and both belong in the sentences a person
+        # reads rather than in `--json` alone.
+        warnings = [_kept_root_warning(finding) for finding in kept_findings]
+        warnings.extend(_unchecked_open_run_warning(config_result))
         return {
             "ok": ok and not rollback_errors,
             "tool": "agentic_hil_init",
@@ -1859,6 +2059,11 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
             "summary": "Agentic HIL project configured." if ok else "Agentic HIL project setup failed; its own committed file changes were rolled back.",
             "agent": agent,
             "config_path": str(target_path),
+            # A warning rather than a failure of this step: the file is kept (or
+            # rewritten), and that is what was asked. The verdict on the bench
+            # belongs to `doctor`, which checks the same root and is a step of
+            # this run.
+            **({"warnings": warnings} if warnings else {}),
             "state_root_changes": state_actions,
             "permission_changes": permission_changes,
             "rollback": {"attempted": not ok, "ok": not rollback_errors, "errors": rollback_errors},
@@ -2069,7 +2274,7 @@ def _discarded_narrowings(previous_text: str | None, written: JsonObject) -> tup
     closed = (path for path, permitted in permission_surface(previous).items() if not permitted)
     return sorted(path for path in closed if granted.get(path)), None
 
-def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, str | None]:
+def _init_bench_read(workspace: Path, generation_bench: BenchMutex | None = None) -> tuple[JsonObject, JsonObject | None, str | None, JsonObject | None]:
     """Read the attached board for `init`, holding what a probe read holds.
 
     `init` called `discover_attached_hardware` directly: no `before_connect`, no
@@ -2101,9 +2306,11 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
     answers the question the other write sites ask, so this asks it too.
 
     Returns the discovery, the refusal that is the whole answer when the read did
-    not happen or did not end cleanly, and (when the board was read without a
-    lease) the reason it could not be leased.
+    not happen or did not end cleanly, (when the board was read without a lease)
+    the reason it could not be leased, and (when the open-run question could not
+    be asked at all) the note saying so.
     """
+    unchecked: JsonObject | None = None
     try:
         current: AgenticHILConfig | None = load_authoritative_config(workspace)
     except ConfigError as error:
@@ -2122,21 +2329,93 @@ def _init_bench_read(workspace: Path) -> tuple[JsonObject, JsonObject | None, st
         current, unleased = None, error.error_type
     else:
         unleased = None
-        holds = bench_open_holds(current)
+        holds, unchecked = _init_open_holds(current)
         if holds is not None:
-            return {}, _init_open_run_refusal(current, holds), unleased
+            return {}, _init_open_run_refusal(current, holds), unleased, unchecked
     discovery, refusal, unaudited = discover_for_generation(
         current,
         None,
         tool=CLI_INIT,
         reason_prefix=CLI_INIT,
         frontend="operator-cli",
+        # Held past this read on the repair path so a foreign UART- or CAN-only
+        # run cannot start between it and the authoritative write below; the
+        # caller owns the bench and releases it once the write is done (review
+        # round 1, finding 2).
+        generation_bench=generation_bench,
     )
     # `unleased` is this function's own answer and is the more specific of the
     # two: it names why the file could not be loaded at all. `unaudited` is the
     # case where it loaded and nothing can be written under the `state_root` it
     # names, which is the other way a generation reads a board with no lease.
-    return discovery, refusal, unleased or unaudited
+    return discovery, refusal, unleased or unaudited, unchecked
+
+
+def _init_open_holds(existing: AgenticHILConfig) -> tuple[JsonObject | None, JsonObject | None]:
+    """The open-run question, and the answer when it cannot be asked at all.
+
+    The question is read out of the lease record, and the lease record lives
+    under the `state_root` this configuration names. On a file whose `state_root`
+    is a root this profile refuses (#387, #399) that read cannot happen: the
+    enforcer refuses it, and the coordinator turns the refusal into
+    `coordination_state_invalid`. So `init --force`, the one command every one of
+    those messages names as the repair, died reading state under the state root
+    it exists to replace, before it generated anything (#402).
+
+    The check is there to protect a run in progress. A run records itself under
+    the very root that cannot be written, so on this profile there is no run it
+    could be protecting, and a question with no answer is not a refusal. It is
+    reported as not asked, and the regeneration goes on.
+
+    Held to `writable_stable_directory`, the same rule `provisionable_state_root`
+    picks a root by and `doctor` judges one by, and it is the whole of the
+    licence: a root that passes it can be read under, so anything that failed
+    above is a real fault in the coordination state and is raised exactly as it
+    was before. Corruption on a healthy root still answers
+    `coordination_state_invalid`; that is what a repair may not paper over.
+    """
+    try:
+        return bench_open_holds(existing), None
+    except (CoordinationError, ConfigError):
+        root = Path(existing.state_root)
+        try:
+            writable_stable_directory(root, field="state_root", config_path=existing.config_path)
+        except ConfigError as refusal:
+            return None, _init_open_run_unchecked(root, refusal)
+        raise
+
+
+def _init_open_run_unchecked(root: Path, refusal: ConfigError) -> JsonObject:
+    """The pre-flight that could not look, as a finding instead of a traceback.
+
+    Both spellings where the refusal carries two, for the same reason
+    `_kept_root_warning` carries them: the resolved one is where a read under the
+    root would actually have landed, and a reader holding only the configured
+    spelling goes looking for a symlink that is not there. What it cost is stated
+    too, because "no open run was found" and "nobody could look" are different
+    answers and only one of them is a promise about the bench.
+    """
+    resolved = refusal.details.get("resolved_parent")
+    because = (
+        f" It resolves to {resolved}, which is where a read under it would actually land, so the enforcer refuses it."
+        if isinstance(resolved, str) and resolved
+        else f" {refusal.summary}"
+    )
+    return {
+        "checked": False,
+        "tool": CLI_INIT,
+        "field": "state_root",
+        "path": str(root),
+        **({"resolved_parent": resolved} if isinstance(resolved, str) and resolved else {}),
+        "error_type": refusal.error_type,
+        "summary": (
+            "Whether a bench run is open could not be checked, because that reads the lease record under the "
+            f"`state_root` this configuration names, {root}, and that is a root this profile will not accept.{because} "
+            "A run records itself under that same root, so there is no run this check could have been protecting, and "
+            "replacing that root is what this command does: the configuration was regenerated. If a run is open on "
+            "this bench, `agentic-hil lease-status` names it."
+        ),
+    }
 
 
 def _init_open_run_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObject:
@@ -2198,7 +2477,7 @@ def _init_lease_note(unleased: str | None) -> JsonObject:
     }
 
 
-def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False, _target: Path | None = None) -> JsonObject:
+def init_config(config_path: str | None = None, force: bool = False, *, _locked: bool = False, _target: Path | None = None, _generation_bench: BenchMutex | None = None) -> JsonObject:
     # Asked again rather than taken from the caller: this is the function that
     # writes `workspace_root`, so the one directory a project may not be rooted
     # in is settled here as well as in `init_project`, and a later caller cannot
@@ -2221,8 +2500,13 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     if _path_entry_exists(target_path) and not force:
         return {"ok": False, "error_type": "config_exists", "summary": "Agentic HIL configuration already exists. Use --force to overwrite it.", "path": str(target_path)}
     if not _locked:
-        with secure_user_file_lock(target_path):
-            return init_config(config_path, force, _locked=True, _target=target_path)
+        # `generation_locks` beside the file lock and held across the whole locked
+        # pass: on the repair path the read below takes its device locks into this
+        # bench and keeps them until the write is done, so a foreign UART- or
+        # CAN-only run cannot start between the read and the replacement (review
+        # round 1, finding 2). Empty and a no-op on every other path.
+        with secure_user_file_lock(target_path), generation_locks(frontend="operator-cli") as generation_bench:
+            return init_config(config_path, force, _locked=True, _target=target_path, _generation_bench=generation_bench)
     original_bytes, existing, unreadable_existing = _existing_config_text(target_path)
     # Look first, and let the profile decide only what is written down. A
     # workspace profile says how to name and narrow a bench that was found; it
@@ -2235,7 +2519,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     # `project_config_create` has always used, so both paths now write one file for
     # one machine.
     profile = load_project_profile(workspace)
-    discovery, refusal, unleased = _init_bench_read(workspace)
+    discovery, refusal, unleased, open_run_unchecked = _init_bench_read(workspace, _generation_bench)
     if refusal is not None:
         # Either the read was refused or it was never reached, and both leave
         # nothing to write a file from. Nothing was written; the refusal is the
@@ -2392,6 +2676,10 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         "available_com_ports": available_com_ports,
         "hardware_discovery": discovery,
         "hardware_lease": _init_lease_note(unleased),
+        # Only when it could not be made. The check passing is the ordinary case
+        # and says nothing a reader needs; the check not happening is a promise
+        # this result would otherwise be making silently.
+        **({"open_run_check": open_run_unchecked} if open_run_unchecked is not None else {}),
         "next_steps": next_steps,
     }
 
@@ -2636,6 +2924,12 @@ def run_test_reactor(test_config_path: str | None = None, *, wait_s: float = 0.0
     try:
         config = load_authoritative_config(Path.cwd())
     except ConfigError as error:
+        # Name the plan the operator asked to run, so the refusal document a CI
+        # job captures for a bench with no configuration says which plan it is
+        # about. The evidence bundle reads `test_config_path`, and this refusal
+        # comes before any configuration exists, so it is the only place that
+        # value can be attached to it.
+        error.details.setdefault("test_config_path", test_config_path or DEFAULT_TEST_CONFIG_PATH)
         write_refusal_junit_xml(junit_xml, {"tool": "test_reactor", **error.to_dict()})
         raise
     return run_plan(config, test_config_path, wait_s=wait_s, run_handle=run_handle, junit_xml=junit_xml)
@@ -2729,6 +3023,48 @@ def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
 
 
 test_schema.__test__ = False  # type: ignore[attr-defined] - keep pytest from collecting the CLI helper
+
+
+def check_plan(plans: list[str]) -> JsonObject:
+    """Load each plan through the reactor's own loader and report whether it holds.
+
+    The hosted simulator job's one job is to establish that every plan in the
+    repository is one the reactor can load, and a schema-only reader cannot: it
+    ignores `x-since-version`, so a plan using a key from a later plan version
+    passes it and is then refused on the bench; and `yaml.safe_load` silently
+    collapses the duplicate keys `UniqueKeyLoader` refuses. So this calls
+    `load_test_config`, the same function the reactor loads a plan with, which is
+    the whole of that guarantee: the duplicate-key rejection, the non-finite
+    number rejection, the plan-version supersession and the feature gates, in one
+    place rather than reimplemented in a workflow. It loads no configuration and
+    touches no hardware; the workspace is this working directory, which is the
+    checkout the simulator runs in and the root a plan must stay inside.
+
+    A red plan does not stop the ones after it: every plan is reported, so one
+    run names all of them rather than the first to fail, and `ok` is false when
+    any was refused so the command exits nonzero.
+    """
+    work_dir = str(Path.cwd())
+    checked: list[JsonObject] = []
+    for plan in plans:
+        try:
+            loaded = load_test_config(plan, work_dir)
+        except ConfigError as error:
+            detail = error.to_dict()
+            checked.append({"plan": plan, "ok": False, "error_type": detail.get("error_type"), "summary": detail.get("summary")})
+        else:
+            checked.append({"plan": plan, "ok": True, "name": loaded.name, "steps": sum(1 for _ in flatten_steps(loaded.steps))})
+    refused = [entry["plan"] for entry in checked if not entry["ok"]]
+    ok = not refused
+    summary = (
+        f"All {len(checked)} test plan(s) load through the reactor's loader."
+        if ok
+        else f"{len(refused)} of {len(checked)} test plan(s) would be refused by the reactor: {', '.join(str(name) for name in refused)}."
+    )
+    return {"ok": ok, "tool": "check_plan", "summary": summary, "plans": checked}
+
+
+check_plan.__test__ = False  # type: ignore[attr-defined] - keep pytest from collecting the CLI helper
 
 
 def _mcp_cache_roots() -> list[Path]:
@@ -3943,6 +4279,37 @@ def _section_preview(config: AgenticHILConfig, section: str) -> object:
     return sorted(getattr(config, section))
 
 
+def _doctor_state_root(config: AgenticHILConfig) -> JsonObject:
+    """Whether this bench can record a hardware action, asked before one is tried.
+
+    `doctor` is the command a newcomer runs to find out whether the bench will
+    work, and it never read `state_root` at all. The audit trail, the leases and
+    the reports all live under that root, so a root the enforcer refuses refuses
+    the first hardware action of every plan with `audit_unavailable` (#387) while
+    `doctor` reported the bench healthy and nine commands ran against a file two
+    of them had called sound (#399).
+
+    Asked with `writable_stable_directory`, which is the pair of tests each of
+    those writes actually meets: the audit gate's `safe_file_path` refuses any
+    file whose parent resolves elsewhere, and redirection is a property of the
+    tree, so the root answers for everything under it. Not by running
+    `ensure_audit_ready`, which would initialize this project's report state and
+    take the report lock; `doctor` reports on a bench and does not open one.
+    """
+    root = Path(config.state_root)
+    try:
+        writable_stable_directory(root, field="state_root", config_path=config.config_path)
+    except ConfigError as error:
+        refusal = error.to_dict()
+        return {
+            **refusal,
+            "field": "state_root",
+            "path": str(root),
+            "summary": f"{error.summary} The audit trail, the leases and the reports are all written under this root, so no hardware action can be recorded and every plan is refused at its first step with `audit_unavailable`. `{CONFIG_REOPEN_COMMAND}` rewrites the configuration with a state root this profile accepts.",
+        }
+    return {"ok": True, "field": "state_root", "path": str(root), "summary": "The configured state root accepts the writes every hardware action is recorded by."}
+
+
 def doctor(config_path: str | None = None) -> JsonObject:
     try:
         config = load_cli_authoritative_config(config_path)
@@ -3950,6 +4317,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         result = error.to_dict()
         result["tool"] = "agentic_hil_doctor"
         return result
+    state_root_check = _doctor_state_root(config)
     # Check every probe whose toolchain this configuration required to resolve,
     # not only a bound one. Reporting a green doctor because nothing was bound
     # would hide an unplugged board, a wrong probe_id, or a broken toolchain on
@@ -3982,7 +4350,13 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # debugger toolchain installed yet.
     unsupported = sorted(name for name, support in target_support.items() if support.get("ok") is not True)
     undetermined = sorted(name for name, support in target_support.items() if support.get("status") == "undetermined")
-    all_ok = all(result.get("ok") is True for result in checks.values()) and not unsupported
+    # The state root counts against the verdict, and it is the one check here
+    # that decides whether *any* hardware action can happen: a probe that will
+    # not answer breaks one debugger, and a state root the enforcer refuses
+    # refuses the whole bench before it touches anything. A green doctor over
+    # exactly that is what #387 was, and what let nine more commands run.
+    state_root_ok = state_root_check.get("ok") is True
+    all_ok = all(result.get("ok") is True for result in checks.values()) and not unsupported and state_root_ok
     if not checked:
         summary = "Agentic HIL authoritative configuration loaded; debugger check skipped."
     elif all_ok:
@@ -3994,7 +4368,17 @@ def doctor(config_path: str | None = None) -> JsonObject:
             parts.append(f"the debugger check failed for: {', '.join(failed)}")
         if unsupported:
             parts.append(f"the configured target_type is not resolvable for: {', '.join(unsupported)}")
-        summary = f"Agentic HIL configuration loaded, but {'; and '.join(parts)}."
+        summary = f"Agentic HIL configuration loaded, but {'; and '.join(parts)}." if parts else "Agentic HIL configuration loaded."
+    if not state_root_ok:
+        # Compact here and complete under `state_root`: the headline has to carry
+        # the verdict, the path and the repair, because that is what a person
+        # reads before anything else and what a caller that keeps only `summary`
+        # is left with. The enforcer's own sentence stays with the check.
+        summary = (
+            f"{summary} This bench cannot record a hardware action: the configured state_root {state_root_check.get('path')} is a root this "
+            f"profile will not accept, so every plan is refused at its first step with `audit_unavailable`. `{CONFIG_REOPEN_COMMAND}` rewrites "
+            "the configuration with a state root it does accept."
+        )
     if undetermined:
         summary += f" Target support could not be determined here for: {', '.join(undetermined)}; that is unknown, not broken."
     # Checked at the end, against the configuration this run was decided by. The
@@ -4047,6 +4431,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
     return {
         **report,
         "config_path": config.config_path,
+        "state_root": state_root_check,
         **({"missing_extras": missing_extras} if missing_extras is not None else {}),
         "installation": _doctor_installation_report(),
         "mcp": _doctor_mcp_report(),
@@ -4463,5 +4848,20 @@ def upsert_marked_block(file_path: Path, block: str) -> JsonObject:
     return {"updated": False}
 
 
-def print_json(value: JsonObject) -> None:
-    sys.stdout.write(json.dumps(redact_sensitive(value), indent=2) + "\n")
+def print_json(value: JsonObject, command: str | None = None) -> bool:
+    """The machine sink: redact, then dump. Returns whether the value was withheld.
+
+    Byte-for-byte what it always was on the path that works -- a document in,
+    the redacted document out. It now fails closed on the same condition the
+    rendered sink does: a redaction that hands back something other than a
+    document cannot be dumped, `null` and a bare list included, so a
+    `redaction_unavailable` refusal is dumped in its place and `True` is
+    returned. Both sinks share `redact_sensitive`, so neither can be the safe one
+    to retry when it fails, and this is what makes that true rather than
+    advertised."""
+    redacted = redact_sensitive(value)
+    if not isinstance(redacted, dict):
+        sys.stdout.write(json.dumps(redaction_unavailable(command), indent=2) + "\n")
+        return True
+    sys.stdout.write(json.dumps(redacted, indent=2) + "\n")
+    return False

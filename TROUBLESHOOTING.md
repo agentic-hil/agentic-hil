@@ -426,7 +426,7 @@ An upgrade that moved the version also rewrites what it had written outside the 
 
 | Result | What happened | What to do |
 |---|---|---|
-| `ok: true`, `restart_required: true` | `previous_version` and `version` differ; the summary names both | Restart the agent hosts |
+| `ok: true`, `restart_required: true` | `previous_version` and `version` differ; the summary names both | Restart the agent hosts. `restart_required_by` names the processes still running the previous release, by pid and image |
 | `ok: true`, `already_current: true` | Nothing newer to install; both version fields are the same number | Nothing. Do not restart: the same release would be reloaded |
 | `ok: false`, `error_type: upgrade_blocked_by_pin` | The manager records an exact version pin, so the upgrade could not move it | Run the line in `reinstall_command`, with the host stopped |
 | `ok: false`, `error_type: upgrade_failed`, `installation_intact: true` | The manager failed and the installation it was replacing still works; `version` is what it still runs | Fix what the manager reported and run it again, or run the install line from section 1: it repairs in place. Nothing was lost |
@@ -443,9 +443,20 @@ Only the pinned case and the two failures are refusals, and only they exit non-z
 
 **An upgrade behind a TLS-intercepting proxy retries itself once.** A manager that came back with `invalid peer certificate`, `certificate verify failed` or one of the other signatures the one-line installers recognise is run a second time against this machine's own certificate store (`UV_SYSTEM_CERTS=1` for `uv`, the discovered bundle as `PIP_CERT` for `pip` and `pipx`), in the child process's environment only and with verification on in both attempts. `certificates` on the result says what was tried whichever way it ends: a success names the store that made it work, and a refusal names the cause, carries both attempts' output under `install`, and points at exporting that variable so the next upgrade needs no second attempt. A variable the operator has already exported is never overridden, and there is then nothing new to try, so no second attempt is made and the result says that instead; the same applies on a host where no bundle file is found for `pip`, which is every Windows host.
 
-An exact pin comes from the requirement the installation was created with: `uv tool install "agentic-hil==X.Y.Z"` records `==X.Y.Z`, and every later `uv tool upgrade` honours it and reports `hint: agentic-hil is pinned to ... (installed with an exact version pin)` on stderr. The Claude Code plugin's skill installs that way on purpose (it ships guidance for one release and says so), so a bench set up from the plugin is the case this refusal names. `reinstall_command` is the fix, and it carries the extras `installed_extras` found on the installation; `uv`'s own hint suggests `agentic-hil@latest`, which re-resolves the bare distribution and uninstalls whatever `[can]` or `[pyocd]` brought in. Stop the agent host before running it: it reinstalls the environment, and none of `uv tool install`'s forms have the `installation_in_use` check. Agentic HIL never runs that reinstall for you: which version a machine runs is the operator's decision, and a pin can be deliberate.
+An exact pin comes from the requirement the installation was created with: `uv tool install "agentic-hil==X.Y.Z"` records `==X.Y.Z`, and every later `uv tool upgrade` honours it and reports `hint: agentic-hil is pinned to ... (installed with an exact version pin)` on stderr. The Claude Code plugin's skill installs that way on purpose (it ships guidance for one release and says so), so a bench set up from the plugin is the case this refusal names. `reinstall_command` is the fix, and it carries the extras `installed_extras` found on the installation; `uv`'s own hint suggests `agentic-hil@latest`, which re-resolves the bare distribution and uninstalls whatever `[can]` or `[pyocd]` brought in. Stop the agent host before running it: it reinstalls the environment, which means deleting it first, and none of `uv tool install`'s forms moves the launcher on PATH out of the way the way `agentic-hil upgrade` does. Agentic HIL never runs that reinstall for you: which version a machine runs is the operator's decision, and a pin can be deliberate.
 
-**Stop the agent host before upgrading.** The host starts the Agentic HIL MCP server itself, so the server runs for as long as the host does: a working setup is exactly the state an upgrade fails in. On Windows a file that is mapped as a running image cannot be deleted, and `uv` removes a tool environment before it rebuilds it. When that removal fails, the rebuild never happens, and neither the old installation nor the new one is left:
+**An upgrade you type is never refused because your bench is working.** The agent host starts the Agentic HIL MCP server itself, so that server runs for as long as the host does, and a working setup used to be exactly the state `agentic-hil upgrade` refused in. It does not any more. It runs the manager, and the result names every process that was started out of this installation under `restart_required_by`, with pid and image: each of them keeps the files it has mapped and goes on answering with the previous release until the host that started it restarts, which is the whole of what is left to do.
+
+On Windows the one file that genuinely could not be replaced is the launcher on PATH, because every live session was started through it and a file mapped as a running image cannot be overwritten:
+
+```text
+Caused by: Failed to install entrypoint
+Caused by: failed to copy file from ...\uv\tools\agentic-hil\Scripts\agentic-hil.exe to ...\.local\bin\agentic-hil.exe: Der Prozess kann nicht auf die Datei zugreifen, da sie von einem anderen Prozess verwendet wird. (os error 32)
+```
+
+Windows does not refuse to *rename* that file, so `agentic-hil upgrade` renames it aside (`agentic-hil.exe.superseded`, beside the original) before the manager runs, and the manager's copy lands on the free name. Running launchers keep the old image, new sessions start on the new one, and a later upgrade deletes the renamed leftovers once nothing maps them; one that is still mapped is left alone and is not an error. The same is done for every entry point the installed extras brought. Nothing is renamed on Linux or macOS: there the old file is unlinked and the process running it keeps reading its own copy.
+
+Running `uv tool install --upgrade` or `uv tool install --force` by hand has none of this. Those remove the environment before they rebuild it, which on Windows fails against a mapped image and leaves neither the old installation nor the new one:
 
 ```text
 error: failed to remove directory ...\uv\tools\agentic-hil\Scripts: Zugriff verweigert (os error 5)
@@ -453,7 +464,7 @@ Failed find package agentic-hil in tool environment
 ModuleNotFoundError: No module named 'agentic_hil'
 ```
 
-`agentic-hil upgrade` refuses with `installation_in_use` before anything is removed, naming each holding process by pid and image path, and leaves the installation working. Close the host and run it again. Running `uv tool install --upgrade` or `uv tool install --force` by hand is what the refusal is protecting against: those have no such check.
+Close the agent host before a reinstall you type yourself, and use `agentic-hil upgrade` when what you want is the newest release.
 
 If an upgrade already destroyed the installation, nothing is recoverable in place; reinstall it, naming the extras. When the destruction happened under `agentic-hil upgrade` itself, that result is `installation_broken` and `reinstall_command` on it is already the exact line for this machine, extras included. When it happened under a manager run by hand, take the environment name from the error message:
 

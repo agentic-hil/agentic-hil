@@ -660,6 +660,127 @@ def test_cli_returns_failure_for_audit_failed_result(monkeypatch: pytest.MonkeyP
     assert json.loads(capsys.readouterr().out)["audit_ok"] is False
 
 
+def test_check_plan_accepts_a_loadable_plan(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    """The hosted simulator's happy path: a plan the reactor can load passes,
+    with no configuration and no hardware."""
+    monkeypatch.chdir(tmp_path)
+    plan = tmp_path / "nominal.testconfig.yaml"
+    plan.write_text("version: 3\nname: nominal\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert result["ok"] is True
+    assert result["plans"][0]["name"] == "nominal"
+    assert result["plans"][0]["steps"] == 1
+
+
+def test_check_plan_refuses_what_a_schema_only_reader_would_pass(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    """The two failures the schema-only reader the examples used to run would miss.
+
+    `yaml.safe_load` silently collapses duplicate keys the reactor's
+    `UniqueKeyLoader` refuses, and `jsonschema` ignores the `x-since-version`
+    gates, so a plan using a key from a later plan version passes it and is then
+    refused on the bench. `check-plan` loads through `load_test_config`, so both
+    are caught here, one run names every red plan rather than the first, and the
+    command exits nonzero.
+    """
+    monkeypatch.chdir(tmp_path)
+    good = tmp_path / "good.testconfig.yaml"
+    good.write_text("version: 3\nname: good\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+    duplicate_key = tmp_path / "dupe.testconfig.yaml"
+    duplicate_key.write_text("version: 3\nname: one\nname: two\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+    too_new_for_its_version = tmp_path / "too_new.testconfig.yaml"
+    too_new_for_its_version.write_text("version: 2\nname: too-new\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(good), str(duplicate_key), str(too_new_for_its_version), "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    verdicts = {Path(entry["plan"]).name: entry for entry in result["plans"]}
+    assert verdicts["good.testconfig.yaml"]["ok"] is True
+    assert verdicts["dupe.testconfig.yaml"]["ok"] is False
+    assert verdicts["too_new.testconfig.yaml"]["ok"] is False
+    # The feature gate jsonschema ignores is what catches the version mismatch.
+    assert verdicts["too_new.testconfig.yaml"]["error_type"] == "test_config_invalid"
+
+
+def test_check_plan_renders_a_refusal_for_a_person(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    """Without `--json` the operator reading the CI log gets prose, and it names
+    which plan would be refused rather than a machine document."""
+    monkeypatch.chdir(tmp_path)
+    plan = tmp_path / "v1.testconfig.yaml"
+    plan.write_text("version: 1\nname: old\nsteps:\n  - {debugger: dut, action: reset}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan)])
+
+    assert exit_code == 1
+    printed = capsys.readouterr().out
+    assert "v1.testconfig.yaml" in printed
+
+
+def test_a_run_names_the_per_run_report_copy_the_next_run_will_not_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Three runs must leave three reports, and the run must say where its own is.
+
+    `last-report.json` is the newest run and nothing else, so a bench collecting
+    the evidence of three runs kept one of them and found out when the third had
+    already overwritten the first. The per-run copy under the state root is what
+    the earlier ones survive in, and it is only useful if the run names it: both
+    in the document, for whatever parses it, and in the one line the run prints,
+    for whoever is still standing at the terminal."""
+    import hashlib
+
+    from agentic_hil.cli import run_test_reactor
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # Its own copy of the fake backend, because the device lock is machine-wide
+    # and keyed on the hardware: a shared executable path would make this test
+    # declare the same board as its neighbours.
+    probe = tmp_path / "fake_openocd.py"
+    probe.write_bytes(FAKE_OPENOCD.read_bytes())
+    write_authoritative_config(workspace, monkeypatch, debugger_executable=probe)
+    monkeypatch.chdir(workspace)
+    plan = write_test_config(workspace, "version: 3\nname: keeps-evidence\nsteps:\n  - {device: dut, action: delay, duration_ms: 5}\n")
+
+    first = run_test_reactor(str(plan))
+
+    assert first["ok"] is True, first
+    workspace_report = workspace / ".agentic-hil" / "reports" / "last-report.json"
+    canonical = Path(first["canonical_report_path"])
+    assert first["summary"] == f"Test reactor sequence completed. This run's own report is kept at {canonical}; later runs do not overwrite it."
+    # The mirror in the workspace carries the same field, so a reader who finds
+    # only that file still learns where the earlier runs went.
+    assert json.loads(workspace_report.read_text(encoding="utf-8"))["canonical_report_path"] == str(canonical)
+    # It is a real file, outside the workspace, and the same document byte for
+    # byte as the mirror rather than a differently shaped summary of it.
+    assert canonical.is_file()
+    assert workspace.resolve() not in canonical.resolve().parents
+    assert hashlib.sha256(canonical.read_bytes()).hexdigest() == hashlib.sha256(workspace_report.read_bytes()).hexdigest()
+
+    second = run_test_reactor(str(plan))
+
+    assert second["run"] != first["run"]
+    assert Path(second["canonical_report_path"]) != canonical
+    # The workspace file is the second run's now; the first run's own copy is
+    # still the first run's, which is the whole of what this buys.
+    assert json.loads(workspace_report.read_text(encoding="utf-8"))["run"] == second["run"]
+    assert json.loads(canonical.read_text(encoding="utf-8"))["run"] == first["run"]
+
+    exit_code = entrypoint(["test-reactor", "--test-config", str(plan)])
+
+    # Printed, not merely returned: the summary is the line an operator reads.
+    printed = " ".join(capsys.readouterr().out.split())
+    assert exit_code == 0
+    assert f"This run's own report is kept at {canonical.parent}" in printed
+    assert "later runs do not overwrite it." in printed
+
+
 def test_reactor_builds_one_service_per_named_debugger(tmp_path: Path) -> None:
     # Multi-board: the bound probe shares the base service; every other named
     # probe drives its own service built for that debugger, sharing the base
@@ -2530,6 +2651,344 @@ steps:
 
     assert result["ok"] is True, result
     assert result["steps"][1]["result"]["captured_value"] == 25.0
+    # The reading that settled is also the text the step reports having matched,
+    # so a green record cannot show the value the bench had already left behind.
+    assert result["steps"][1]["result"]["matched_text"]["text"] == "temp=25C"
+
+
+def test_a_met_equals_comparator_records_the_line_it_matched(tmp_path: Path) -> None:
+    # The green half of `received_tail`. A red step quotes what the port did say;
+    # a green one used to quote nothing, so a report could not show what the
+    # board answered and the evidence lived only in the COM log.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: equals-green
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {equals: "DIAG ON"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"boot: stage 1\r\n", b"DIAG ON\r\nidle\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["summary"] == "The COM port output equalled the expected value."
+    # The line that met the claim, not the whole rolling window: the banner
+    # before it is what the port said, not what the step passed on.
+    assert read["matched_text"] == {"hex": b"DIAG ON".hex(), "text": "DIAG ON", "encoding": "utf-8"}
+    assert read["matched_text_truncated"] is False
+    # And the red path's field is not borrowed for it: a met claim is not a tail.
+    assert "received_tail" not in read
+
+
+def test_a_met_pattern_comparator_records_the_slice_that_satisfied_it(tmp_path: Path) -> None:
+    # A pattern matches somewhere inside the window, so what a green step has to
+    # show is the span it matched rather than everything that had arrived.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: pattern-green
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "READY v[0-9.]+"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"boot: stage 1\r\nREADY v2.4 (dut)\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["matched_text"]["text"] == "READY v2.4"
+    assert read["matched_text"]["hex"] == b"READY v2.4".hex()
+    assert read["matched_text_truncated"] is False
+
+
+def test_a_met_pattern_over_invalid_utf8_reports_the_bytes_that_were_on_the_wire(tmp_path: Path) -> None:
+    # `matched_text.hex` is sliced out of the receive buffer, not re-encoded from
+    # the decoded string: a `replace` decode turns the invalid byte 0xff into `�`,
+    # and re-encoding that character would put `efbfbd` in the report as though it
+    # had arrived. A green record must never attest to bytes the port never sent.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: invalid-utf8
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "val=.Z"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"val=\xffZ\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    # The raw bytes the pattern matched, 0xff and all; not the codec's rendering
+    # of the replacement character it decoded to.
+    assert read["matched_text"]["hex"] == b"val=\xffZ".hex()
+    assert "efbfbd" not in read["matched_text"]["hex"]
+    assert bytes.fromhex(read["matched_text"]["hex"]) in b"val=\xffZ\r\n"
+
+
+def test_a_met_pattern_under_a_stateful_encoding_does_not_fabricate_a_bom(tmp_path: Path) -> None:
+    # A stateful codec is the other way a re-encoding invents bytes: `utf-8-sig`
+    # decodes a bufferless payload cleanly but re-encoding the match prepends a
+    # BOM (`efbbbf`) that was never on the wire. The raw slice carries only what
+    # arrived.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: stateful-encoding
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "READY v[0-9.]+"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=[b"READY v2.4\r\n"], uart_encoding="utf-8-sig")
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["matched_text"]["hex"] == b"READY v2.4".hex()
+    assert not read["matched_text"]["hex"].startswith("efbbbf")
+    assert bytes.fromhex(read["matched_text"]["hex"]) in b"READY v2.4\r\n"
+
+
+def test_matched_span_bytes_omits_the_byte_field_for_an_interior_stateful_match() -> None:
+    """Round-1 finding 4: an interior character of a multi-character emission.
+
+    A stateful codec such as UTF-7 buffers a run and emits several characters
+    only when the byte closing the run arrives, so where inside the run each of
+    them began is not recoverable. A span that matches only an interior character
+    -- ``本`` inside ``日本語`` -- has no honest byte boundary, and must return
+    ``None`` (which the caller renders as "byte field unavailable") rather than
+    the empty slice it used to hand back and dress up as ``{"hex": "", ...}``. The
+    run's outer edges are still sound, so matching the whole run, or the ASCII
+    characters framing it, still yields the exact wire bytes."""
+    from agentic_hil.comports import decode_bytes, matched_span_bytes
+
+    raw = "x日本語y".encode("utf-7")
+    assert decode_bytes(raw, "utf-7") == "x日本語y"
+    # The interior character has no recoverable byte boundary: None, not b"".
+    assert matched_span_bytes(raw, "utf-7", (2, 3)) is None
+    # The whole run does, and it round-trips to the characters it stands for.
+    whole_run = matched_span_bytes(raw, "utf-7", (1, 4))
+    assert whole_run is not None and whole_run.decode("utf-7") == "日本語"
+    # The ASCII characters on either side of the run are unambiguous too.
+    assert matched_span_bytes(raw, "utf-7", (0, 1)) == b"x"
+    assert matched_span_bytes(raw, "utf-7", (4, 5)) == b"y"
+
+
+def test_a_met_pattern_on_an_interior_stateful_char_reports_honest_text_not_empty_bytes(tmp_path: Path) -> None:
+    # The reactor-level face of round-1 finding 4: a comparator that matches only
+    # `本` inside a UTF-7 `日本語` run has no honest byte slice, so the report
+    # quotes the matched text and marks the byte field unavailable rather than
+    # attesting to `{"hex": "", "text": "", ...}` -- an empty slice dressed up as
+    # evidence of a match that really happened.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: interior-stateful
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "本"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=["x日本語y\r\n".encode("utf-7")], uart_encoding="utf-7")
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    # The match is real and its text is quoted, but no fabricated byte field: the
+    # honest fallback rather than the empty-slice `{"hex": ""}` the bug produced.
+    assert read["matched_text"]["text"] == "本"
+    assert "hex" not in read["matched_text"]
+    assert read["matched_text_bytes_unavailable"] is True
+
+
+def test_matched_span_bytes_omits_the_byte_field_for_a_shift_state_dependent_match() -> None:
+    """Round-2 finding 2: a character whose byte slice is only itself in the
+    decoder state earlier bytes established.
+
+    ISO-2022-JP switches into two-byte mode with an escape that arrives before
+    the run, so the interior ``本`` is emitted on its own -- not as part of a
+    multi-character emission the ``ambiguous`` set catches -- yet its two bytes
+    ``4b 5c`` decode to the ASCII ``K`` and a backslash from the initial state,
+    not to ``本``. That isolated slice is false wire evidence, so the byte field
+    must be omitted (``None``) and the caller left with the honest text-only
+    match. The whole run, escape included, still slices honestly because it
+    carries the state it needs, as do the ASCII characters framing it."""
+    from agentic_hil.comports import decode_bytes, matched_span_bytes
+
+    raw = "x日本語y".encode("iso2022_jp")
+    assert decode_bytes(raw, "iso2022_jp") == "x日本語y"
+    # The interior character's byte slice only decodes to it inside the shifted
+    # run, so on its own it is not honest evidence: None, not b"K\\".
+    assert matched_span_bytes(raw, "iso2022_jp", (2, 3)) is None
+    # The whole run carries the escape that establishes its state, so it slices
+    # honestly and round-trips to the characters it stands for.
+    whole_run = matched_span_bytes(raw, "iso2022_jp", (1, 4))
+    assert whole_run is not None and whole_run.decode("iso2022_jp") == "日本語"
+    # The leading ASCII character needs no shift state and slices to its one byte.
+    assert matched_span_bytes(raw, "iso2022_jp", (0, 1)) == b"x"
+
+
+def test_a_met_pattern_on_a_shifted_interior_char_reports_honest_text_not_false_bytes(tmp_path: Path) -> None:
+    # The reactor-level face of round-2 finding 2: a comparator that matches only
+    # `本` inside an ISO-2022-JP `日本語` run has no honest byte slice, because the
+    # two bytes it decoded from mean the ASCII `K` and a backslash outside the
+    # shift the earlier escape set up. The report quotes the matched text and
+    # marks the byte field unavailable rather than attesting to `K\`, a slice that
+    # decodes to something the port never matched.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: shifted-interior
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "本"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=["x日本語y\r\n".encode("iso2022_jp")], uart_encoding="iso2022_jp")
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    # The match is real and its text is quoted, but no false byte field: the
+    # honest fallback rather than the state-dependent `4b5c` slice.
+    assert read["matched_text"]["text"] == "本"
+    assert "hex" not in read["matched_text"]
+    assert read["matched_text_bytes_unavailable"] is True
+
+
+def test_an_unmet_comparator_still_answers_with_the_tail_and_claims_no_match(tmp_path: Path) -> None:
+    # The other direction of the same field: a step that matched nothing must not
+    # carry a matched text at all, because absence is what says nothing met it.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: pattern-red
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "READY v[0-9.]+"}, timeout_s: 0.05}
+""",
+    )
+    service = RecordingService(uart_reads=[b"boot: stage 1\r\nHardFault\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    read = result["steps"][1]["result"]
+    assert read["error_type"] == "comparator_unmet"
+    assert read["received_tail"]["text"] == "boot: stage 1\r\nHardFault\r\n"
+    assert read["received_tail_truncated"] is False
+    assert "matched_text" not in read
+    assert "matched_text_truncated" not in read
+
+
+def test_a_match_longer_than_the_cap_is_bounded_and_says_so(tmp_path: Path) -> None:
+    # The cap the red path has, on the green one and for the same reason: a claim
+    # met by a value longer than the report should carry must not put all of it
+    # in the report, and a bounded quote that did not say it was bounded would
+    # read as the whole of what matched. A long unterminated answer is the case
+    # that reaches it, because the read window widens with what the plan wrote.
+    from agentic_hil.test_reactor import UART_EXPECT_TAIL_BYTES
+
+    long_value = "A" * (UART_EXPECT_TAIL_BYTES + 88)
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        f"""version: 3
+name: long-match
+steps:
+  - {{device: dut_uart, action: uart_open}}
+  - {{device: dut_uart, action: uart_read, comparator: {{equals: "{long_value}"}}, timeout_s: 0.05}}
+""",
+    )
+    service = RecordingService(uart_reads=[long_value.encode()])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert len(bytes.fromhex(read["matched_text"]["hex"])) == UART_EXPECT_TAIL_BYTES
+    # Kept from the front, because a match begins where it begins.
+    assert read["matched_text"]["hex"] == long_value.encode()[:UART_EXPECT_TAIL_BYTES].hex()
+    assert read["matched_text_truncated"] is True
+
+
+def test_a_met_range_comparator_records_the_reading_around_the_number(tmp_path: Path) -> None:
+    # The claim a `range` really makes: a reading inside the bounds, quoted whole
+    # rather than only as the number pulled out of it, so a green record shows
+    # the unit and the surrounding text the plan wrote the pattern against.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: range-green-text
+steps:
+  - {device: dut_uart, action: uart_open}
+  - device: dut_uart
+    action: uart_read
+    comparator:
+      pattern: "temp=(\\\\d+)C"
+      range: {min: 20, max: 30}
+    timeout_s: 5
+""",
+    )
+    service = RecordingService(uart_reads=[b"temp=", b"24C\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["captured_text"] == "24"
+    assert read["matched_text"]["text"] == "temp=24C"
+    assert read["matched_text_truncated"] is False
+
+
+def test_a_met_range_quotes_the_reading_that_met_it_not_a_later_one(tmp_path: Path) -> None:
+    # An in-range reading followed by an out-of-range one in the same window: the
+    # step passes, and what it says it matched must be the reading that met the
+    # bounds. `captured_value` is the last reading the pattern found, which is a
+    # different question and keeps its own answer.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: range-then-drift
+steps:
+  - {device: dut_uart, action: uart_open}
+  - device: dut_uart
+    action: uart_read
+    comparator:
+      pattern: "temp=(\\\\d+)C"
+      range: {min: 20, max: 30}
+    timeout_s: 5
+""",
+    )
+    service = RecordingService(uart_reads=[b"temp=24C\r\ntemp=91C\r\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    assert read["matched_text"]["text"] == "temp=24C"
+    assert read["captured_value"] == 91.0
 
 
 def test_a_range_without_a_capture_group_is_refused_before_the_run(tmp_path: Path) -> None:

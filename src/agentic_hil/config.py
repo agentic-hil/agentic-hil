@@ -1280,6 +1280,27 @@ def resolve_stable_directory(directory: Path, *, field: str, config_path: str | 
     return directory
 
 
+def writable_stable_directory(directory: str | Path, *, field: str, config_path: str | None = None) -> Path:
+    """The whole rule a configured root is held to before anything is written.
+
+    ``safe_writable_directory`` asks whether this process can create inside the
+    directory and ``resolve_stable_directory`` asks whether it is the spelling
+    every later write will accept, and a root has to pass both: one of them alone
+    is what wrote a ``state_root`` that opened, created and wrote exactly as it
+    read while resolving onto a package's private tree (#353, #387).
+
+    Stated once and called from every place that has to ask it, because the three
+    that ask are asking the same question about one host at three different
+    moments: ``provisionable_state_root`` before it writes a root down,
+    ``agentic-hil init`` about a file it is keeping, and ``doctor`` about the file
+    a bench is running under. A copy of the pair in any of them is a copy that can
+    drift from the enforcer, and drifting from the enforcer is exactly how a bench
+    came to be reported healthy and refuse every plan at its first step (#399).
+    """
+    path = Path(directory)
+    return resolve_stable_directory(safe_writable_directory(path, field=field, config_path=config_path), field=field, config_path=config_path)
+
+
 def secure_optional_read_bytes(file_path: str | Path) -> bytes | None:
     """Read a user file as bytes, or return None when it is absent.
 
@@ -1740,7 +1761,7 @@ def authoritative_config_target(workspace: Path) -> Path:
     failure: ConfigError | None = None
     for target in candidates:
         try:
-            resolve_stable_directory(safe_writable_directory(target.parent, field="config_path"), field="config_path")
+            writable_stable_directory(target.parent, field="config_path")
         except ConfigError as error:
             failure = error
             continue
@@ -1808,7 +1829,7 @@ def provisionable_state_root(workspace: Path, config_target: Path | None = None)
             # somewhere else, would be written down and then refused, and the
             # second of those refuses the whole bench with `audit_unavailable`
             # on a `state_root` nothing in the generated file can repair (#353).
-            return resolve_stable_directory(safe_writable_directory(candidate, field="state_root"), field="state_root")
+            return writable_stable_directory(candidate, field="state_root")
         except ConfigError as error:
             failure = error
     raise failure or ConfigError("unsafe_configured_path", "No trusted state_root location is available on this profile.", {"field": "state_root"})

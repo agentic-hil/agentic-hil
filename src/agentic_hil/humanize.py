@@ -662,17 +662,29 @@ def _state_root_changes(result: JsonObject) -> list[str]:
 
 
 def _restart_lines(result: JsonObject) -> list[str]:
+    """What is left to restart, and which processes are waiting for it.
+
+    The sentence first, then the processes it is about. `restart_required_by` is
+    what an upgrade puts there: the servers that were started out of the
+    installation before it was replaced and go on answering with the old release
+    until their host restarts. They are rendered the way every other list of
+    named things is, pid on the bullet and image under it, because the operator
+    reads them to decide which window to close.
+    """
+    body: list[str] = []
     notice = result.get("restart_notice")
     if isinstance(notice, str) and notice.strip():
         # `_with_restart_notice` appends this sentence to the summary as well, so
         # that a caller reading only `summary` still gets it. On one screen that
         # is the same paragraph twice, which reads as two different notices.
-        if _flat(notice) in _summary(result):
-            return []
-        return _section("Restart", _wrap(notice, indent=_INDENT))
-    if result.get("restart_required") is True:
-        return _section("Restart", _wrap("Restart the agent host before it uses this registration.", indent=_INDENT))
-    return []
+        if _flat(notice) not in _summary(result):
+            body.extend(_wrap(notice, indent=_INDENT))
+    elif result.get("restart_required") is True:
+        body.extend(_wrap("Restart the agent host before it uses this registration.", indent=_INDENT))
+    waiting = _entries(result.get("restart_required_by"))
+    if waiting:
+        body.extend(_nested_sequence(waiting, indent=_INDENT))
+    return _section("Restart", body)
 
 
 def _left_behind(result: JsonObject) -> list[str]:
@@ -780,6 +792,21 @@ def render_upgrade(result: JsonObject) -> list[str]:
     extras = _mapping(result.get("extras_warning"))
     if extras:
         lines.extend(_section("Extras", [*_wrap(_summary(extras), indent=_INDENT), *_fields([("reinstall_command", extras.get("reinstall_command"))])]))
+    superseded = _strings(result.get("superseded_entrypoints"))
+    if superseded:
+        lines.extend(
+            _section(
+                "Superseded launchers",
+                [
+                    *_wrap(
+                        "Renamed aside so the new copy could land while a running process still had the old image mapped. "
+                        "A later upgrade deletes them once nothing maps them any more; nothing needs doing about them here.",
+                        indent=_INDENT,
+                    ),
+                    *_bullets(superseded),
+                ],
+            )
+        )
     lines.extend(_restart_lines(result))
     lines.extend(_tail(result))
     return lines
@@ -836,6 +863,26 @@ def render_doctor(result: JsonObject) -> list[str]:
     )
     if _summary(status) and status.get("state") not in {None, "current"}:
         lines.extend(_wrap(_summary(status), indent=_INDENT))
+
+    # Beside the configuration and before anything about devices, because this is
+    # the root the audit trail, the leases and the reports are written under: a
+    # bench whose state root the enforcer refuses cannot record a hardware action
+    # at all, whatever every device below says about itself.
+    state_root = _mapping(result.get("state_root"))
+    if state_root:
+        verdict = "ok" if state_root.get("ok") is True else "FAILED"
+        body = _fields([("path", state_root.get("path")), ("verdict", verdict)])
+        body.extend(_wrap(_summary(state_root), indent=_INDENT))
+        error_type = _error_type(state_root)
+        if error_type:
+            body.extend(_fields([("error_type", error_type)], indent=_INDENT))
+            resolved = state_root.get("resolved_parent")
+            if isinstance(resolved, str) and resolved:
+                body.extend(_fields([("resolved_parent", resolved)], indent=_INDENT))
+            remedy, avoid = _remediation(dict(state_root))
+            body.extend(_numbered(remedy, indent=_INDENT * 2))
+            body.extend(_bullets([f"do not: {item}" for item in avoid], indent=_INDENT * 2))
+        lines.extend(_section("State root", body))
 
     installation = _mapping(result.get("installation"))
     if installation:

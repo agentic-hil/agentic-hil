@@ -60,6 +60,7 @@ from agentic_hil.report import (
     attach_canonical_audit_evidence,
     canonical_audit_evidence,
     canonical_audit_log_path,
+    canonical_run_report_path,
     ensure_audit_ready,
     logs_directory,
     overall_success,
@@ -741,6 +742,170 @@ def test_com_write_that_stays_short_after_retry_records_event_without_quarantine
     assert session.lease.cleanup_reasons() == []
     assert session.lease.reported_cleanup_reasons() == ["serial_write_incomplete"]
     assert service.coordinator.blocked is False
+
+
+class AnswersDuringTheWriteSerialHandle:
+    """A target whose answer is on the line before the write that asked returns.
+
+    This is the ordering a reactor plan produces at every send-then-match step,
+    and it is the one the session log used to record backwards. The reader is
+    parked on empty reads until `write` puts the answer there, and `write` then
+    waits until the reader has taken it and is at the log with it before
+    returning, so the answer is provably in the reader's hands while the write
+    is still in flight instead of whenever the scheduler got round to it.
+
+    The pause before returning is what leaves the ordering to the fix rather
+    than to the machine: with nothing serialising the log, the reader's line is
+    in the file long before the write path has built its own, whichever thread
+    the interpreter happens to be running.
+    """
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self, answer: bytes = b"ready\n") -> None:
+        self.answer = answer
+        self.answered = False
+        self.writes: list[bytes] = []
+        self.answer_on_the_line = threading.Event()
+        self.reader_at_the_log = threading.Event()
+        self.reader_arrived = False
+
+    def read(self, size: int) -> bytes:
+        if self.answered or not self.answer_on_the_line.wait(POLL_INTERVAL_S):
+            return b""
+        self.answered = True
+        return self.answer
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(bytes(data))
+        self.answer_on_the_line.set()
+        self.reader_arrived = self.reader_at_the_log.wait(WAIT_TIMEOUT_S)
+        time.sleep(0.05)
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def log_entries(log_path: Path) -> list[dict]:
+    return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_com_write_logs_the_command_before_the_answer_it_provoked(tmp_path: Path) -> None:
+    """The bug this pins: the reader thread and the write path appended to the
+    session log independently, so the file's line order was the order two
+    threads reached it rather than the order the events happened in. A target
+    that answers while the write is still in flight, which is what every
+    command a plan sends does, put its `rx` entry in the file ahead of the `tx`
+    entry for the command that caused it, and a log read top to bottom showed a
+    board replying before it was asked. Those lines are the evidence a plan
+    leaves behind, and validation's recovery item is checked against them, so
+    an out-of-order log is read wrong or has to be re-sorted before it can be
+    read at all.
+
+    Both halves of the invariant are pinned here: the `tx` entry is in the file
+    ahead of the `rx` it provoked, and the timestamps the entries carry are in
+    the same order as the lines, because the timestamp is now taken inside the
+    same section as the append rather than before a canonical mirror another
+    thread can append across.
+    """
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-log-order.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = AnswersDuringTheWriteSerialHandle()
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), start_reader=False)
+    service.sessions["dut"] = session
+
+    session_append = session.append_audit
+
+    def announce_the_reader(event, event_config=None):
+        # Announced before the append, not after: what decides the order of the
+        # file is which line reaches it, so the write is released while the
+        # reader still has its line to write rather than once it has written
+        # it. Announcing afterwards would ask the fix to let the reader finish
+        # first, which is the ordering being refused.
+        if event.get("direction") == "rx":
+            handle.reader_at_the_log.set()
+        return session_append(event, event_config)
+
+    session.append_audit = announce_the_reader  # type: ignore[method-assign]
+    session.start_reader()
+    reader = session.reader
+    assert reader is not None
+    try:
+        result = service.write_bytes("dut", b"version\n")
+
+        assert result["ok"] is True, result
+        assert handle.reader_arrived, "the answer never reached the reader while the write was in flight"
+        assert wait_until(lambda: len(log_entries(log_path)) == 2), log_entries(log_path)
+    finally:
+        session.active = False
+        reader.join(WAIT_TIMEOUT_S)
+    assert not reader.is_alive(), "reader thread never finished"
+
+    entries = log_entries(log_path)
+    assert [entry.get("direction") for entry in entries] == ["tx", "rx"], entries
+    assert entries[0]["text"] == "version\n"
+    assert entries[1]["text"] == "ready\n"
+    # The line order is the timestamp order, so a reader who follows the lines
+    # and one who sorts by `time` read the same session.
+    assert [entry["time"] for entry in entries] == sorted(entry["time"] for entry in entries), entries
+
+
+class AcceptingSerialHandle:
+    """Takes every write whole and never answers."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self) -> None:
+        self.writes: list[bytes] = []
+
+    def read(self, size: int) -> bytes:
+        return b""
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(bytes(data))
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def test_com_write_whose_tx_entry_cannot_be_written_still_quarantines(tmp_path: Path) -> None:
+    """Serialising the log changed when a line is written, never whether, and
+    an unwritable log still means what it always did. The bytes went out and
+    the entry recording them did not, which is a committed effect with no audit
+    behind it: the result carries the audit failure, the session is
+    audit-broken, and the port is held for cleanup instead of being handed to
+    the next call."""
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    # A directory, so the append cannot be written.
+    log_path = tmp_path / ".agentic-hil" / "logs"
+    log_path.mkdir(parents=True, exist_ok=True)
+    handle = AcceptingSerialHandle()
+    lease = service.coordinator.acquire(uart_device(config, "dut"))
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), lease, start_reader=False)
+    service.sessions["dut"] = session
+
+    result = service.write_bytes("dut", b"version\n")
+
+    assert handle.writes == [b"version\n"]
+    assert result["audit_ok"] is False, result
+    assert overall_success(result) is False
+    assert result["audit_error"]["backend_error"]
+    assert session.audit_broken is True
+    assert session.lease.state == "cleanup_required"
+    assert service._active_session("dut", "com_write")["error_type"] == "resource_quarantined"
 
 
 class DyingMidReadSerialHandle:
@@ -2695,6 +2860,241 @@ def test_report_path_is_not_claimed_when_workspace_snapshot_write_fails(tmp_path
 
     assert result["audit_ok"] is False
     assert "report_path" not in result
+
+
+def test_canonical_report_is_not_left_green_when_the_workspace_mirror_write_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trusted per-run copy is written before the mirror; a mirror write that
+    fails afterwards must not leave that copy asserting a success the returned
+    result rejects. The archive is what an auditor enumerates, so it inspects the
+    file itself rather than only the stripped path field."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-mirror-fault")
+    original_write = report_module.safe_write_text
+
+    def fail_snapshot(config, path, text, **kwargs):
+        if Path(path).name == "last-report.json":
+            raise OSError("snapshot denied")
+        return original_write(config, path, text, **kwargs)
+
+    monkeypatch.setattr("agentic_hil.report.safe_write_text", fail_snapshot)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-mirror-fault"})
+
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
+    assert "canonical_report_path" not in result
+    # The per-run file is either gone or the audit-failed document, never the
+    # green record the failed call would otherwise have left standing.
+    if canonical.exists():
+        recorded = json.loads(canonical.read_text(encoding="utf-8"))
+        # Reconciled to the audit-failed result the call returned, so the trusted
+        # archive never carries the `audit_ok: true` the original green document
+        # had. `ok` tracks the returned result, which `mark_audit_failure` leaves
+        # untouched; `audit_ok` is the field the stale-green defect turned on.
+        assert recorded.get("audit_ok") is False
+        assert recorded.get("audit_ok") == result.get("audit_ok")
+
+
+def test_canonical_report_is_not_left_green_when_the_state_write_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same stale-green hole from the other required write: the per-run copy
+    and the mirror have both landed green by the time ``write_report_state``
+    fails, and the returned result is audit-failed, so the trusted copy must be
+    reconciled to it rather than left claiming success."""
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-state-fault")
+    monkeypatch.setattr("agentic_hil.report.write_report_state", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("state denied")))
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-state-fault"})
+
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
+    assert "canonical_report_path" not in result
+    if canonical.exists():
+        recorded = json.loads(canonical.read_text(encoding="utf-8"))
+        # Reconciled to the audit-failed result the call returned, so the trusted
+        # archive never carries the `audit_ok: true` the original green document
+        # had. `ok` tracks the returned result, which `mark_audit_failure` leaves
+        # untouched; `audit_ok` is the field the stale-green defect turned on.
+        assert recorded.get("audit_ok") is False
+        assert recorded.get("audit_ok") == result.get("audit_ok")
+
+
+def test_canonical_report_stays_non_green_when_both_cleanup_attempts_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-1 finding 1: even when BOTH the corrective rewrite and the removal
+    of the per-run copy fail after a required write faults, the trusted archive
+    must never be left standing as a success the returned result rejected.
+
+    The copy is staged as a non-green placeholder and promoted to the green
+    document only after every other required write commits, so a mirror-write
+    fault leaves the placeholder in place with no promotion. With both cleanup
+    attempts denied, that non-green placeholder is what remains -- never a green
+    attestation, which is what makes the guarantee independent of best-effort
+    cleanup succeeding."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-both-cleanups-fail")
+
+    original_atomic = report_module.atomic_write_text
+    canonical_writes = {"count": 0}
+
+    def flaky_atomic(path, text, **kwargs):
+        # The first write to the per-run path is the staged placeholder and must
+        # land so the file is genuinely on disk; every later write to it (the
+        # corrective rewrite) fails, standing in for a disk gone read-only.
+        if Path(path) == canonical:
+            canonical_writes["count"] += 1
+            if canonical_writes["count"] > 1:
+                raise OSError("canonical rewrite denied")
+        return original_atomic(path, text, **kwargs)
+
+    original_safe = report_module.safe_write_text
+
+    def fail_mirror(config, path, text, **kwargs):
+        if Path(path).name == "last-report.json":
+            raise OSError("mirror denied")
+        return original_safe(config, path, text, **kwargs)
+
+    original_unlink = Path.unlink
+
+    def fail_canonical_unlink(self, *args, **kwargs):
+        if self == canonical:
+            raise OSError("unlink denied")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(report_module, "atomic_write_text", flaky_atomic)
+    monkeypatch.setattr(report_module, "safe_write_text", fail_mirror)
+    monkeypatch.setattr(Path, "unlink", fail_canonical_unlink)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-both-cleanups-fail"})
+
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
+    assert "canonical_report_path" not in result
+    # Both cleanup attempts were denied, so the staged file is still on disk...
+    assert canonical.exists()
+    recorded = json.loads(canonical.read_text(encoding="utf-8"))
+    # ...but it is the non-green placeholder, never the green success the original
+    # green document would have been. The staged form is what protects the
+    # invariant when cleanup cannot run at all.
+    assert recorded.get("audit_ok") is False
+    assert not (recorded.get("ok") is True and recorded.get("audit_ok") is not False)
+
+
+def test_canonical_report_promotion_after_replace_is_reported_as_the_committed_green(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-2 finding 1: the promotion's ``os.replace`` commits the green
+    document before ``atomic_write_bytes`` fsyncs the parent directory, so an
+    error raised there can leave the green document already on disk. The returned
+    result must not then claim an audit failure while that green record stands. It
+    is reconciled to what actually committed, so the result reports the success
+    the trusted copy now records rather than a failure the file would contradict.
+
+    The promotion write is modelled as a rename that landed followed by a
+    durability fsync that did not: the green document is written through, then an
+    error is raised. Both reconciliation attempts (the corrective rewrite and the
+    removal) are denied as well, to show the consistency does not depend on
+    best-effort cleanup running: the committed green document is itself the honest
+    answer, and the returned result matches it."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-promote-after-replace")
+
+    original_atomic = report_module.atomic_write_text
+    canonical_writes = {"count": 0}
+
+    def flaky_atomic(path, text, **kwargs):
+        if Path(path) == canonical:
+            canonical_writes["count"] += 1
+            if canonical_writes["count"] == 2:
+                # The promotion: let the rename land the green document, then
+                # raise as a parent-directory fsync failing after os.replace.
+                original_atomic(path, text, **kwargs)
+                raise OSError("directory fsync failed after replace")
+            if canonical_writes["count"] > 2:
+                # Any corrective rewrite is denied, standing in for a disk that
+                # can no longer be written.
+                raise OSError("canonical rewrite denied")
+        return original_atomic(path, text, **kwargs)
+
+    original_unlink = Path.unlink
+
+    def fail_canonical_unlink(self, *args, **kwargs):
+        if self == canonical:
+            raise OSError("unlink denied")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(report_module, "atomic_write_text", flaky_atomic)
+    monkeypatch.setattr(Path, "unlink", fail_canonical_unlink)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-promote-after-replace"})
+
+    # The green document committed, so the result reports the success it records
+    # rather than an audit failure the standing green file would contradict.
+    assert result["audit_ok"] is not False
+    assert result["ok"] is True
+    assert canonical.exists()
+    recorded = json.loads(canonical.read_text(encoding="utf-8"))
+    # The committed file is the green document, and the returned result agrees
+    # with it: no returned audit failure coexists with a green trusted record.
+    assert recorded.get("audit_ok") is True
+    assert "canonical_write_pending" not in recorded
+    assert recorded.get("audit_ok") == result.get("audit_ok")
+    # Exactly two writes reached the per-run path: the staged placeholder and the
+    # promotion whose rename landed. No corrective rewrite was needed, because the
+    # result was reconciled to the committed green document, not the other way.
+    assert canonical_writes["count"] == 2
+
+
+def test_canonical_report_promotion_failing_before_its_replace_stays_non_green(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of round-2 finding 1: when the promotion fails before its
+    rename, the green document never committed and the staged placeholder is
+    still on disk. Reading the copy back shows it is not the green document, so
+    the result is marked audit-failed as before, and with both reconciliation
+    attempts denied the non-green placeholder is what remains, never a green
+    record the returned failure rejects."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-promote-before-replace")
+
+    original_atomic = report_module.atomic_write_text
+    canonical_writes = {"count": 0}
+
+    def flaky_atomic(path, text, **kwargs):
+        if Path(path) == canonical:
+            canonical_writes["count"] += 1
+            if canonical_writes["count"] >= 2:
+                # The promotion and any corrective rewrite raise before touching
+                # the file, standing in for an atomic write that failed ahead of
+                # its os.replace, so the staged placeholder is left untouched.
+                raise OSError("canonical write denied")
+        return original_atomic(path, text, **kwargs)
+
+    original_unlink = Path.unlink
+
+    def fail_canonical_unlink(self, *args, **kwargs):
+        if self == canonical:
+            raise OSError("unlink denied")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(report_module, "atomic_write_text", flaky_atomic)
+    monkeypatch.setattr(Path, "unlink", fail_canonical_unlink)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-promote-before-replace"})
+
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
+    assert "canonical_report_path" not in result
+    # The staged placeholder never got promoted and both cleanups were denied, so
+    # it is still on disk: non-green, never the green success the failed call
+    # would otherwise have left standing.
+    assert canonical.exists()
+    recorded = json.loads(canonical.read_text(encoding="utf-8"))
+    assert recorded.get("audit_ok") is False
+    assert recorded.get("canonical_write_pending") is True
 
 
 def test_path_lock_registry_does_not_keep_short_lived_paths(tmp_path: Path) -> None:

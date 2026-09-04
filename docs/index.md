@@ -15,6 +15,7 @@ short tour; the pages here carry the depth:
 - [MCP tools](mcp-tools.md): the tool inventory and the typical loop.
 - [Testing](testing.md): the test reactor, declarative plans, and the pytest plugin.
 - [Test plan contract](test-plan-contract.md): what a plan may state, what only the bench configuration binds, and what a run attests.
+- [CI examples](ci-examples.md): worked GitHub Actions and GitLab CI files that run a plan on a self-hosted bench and keep the evidence.
 - [Safety model](safety-model.md): locks, runs, incidents and recovery.
 - [Security design](security-design.md): permissions, quarantine and recovery, audit.
 - [MCP host configuration](mcp-hosts.md): wiring the server into Claude Code, Codex, opencode and others.

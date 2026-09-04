@@ -152,7 +152,7 @@ def junit_xml_document(result: JsonObject, *, plan_steps: Sequence[TestStep] = (
     suite_name = _attribute(str(result.get("name") or "test-reactor"))
     named_steps = _named_steps(result, plan_steps)
     records = {int(record["index"]): record for record in _step_records(result) if isinstance(record.get("index"), int)}
-    refusal = _refusal(result)
+    refusal = run_refusal(result)
 
     cases: list[ElementTree.Element] = []
     failures = 0
@@ -262,8 +262,13 @@ def _step_records(result: JsonObject) -> list[JsonObject]:
     return [record for record in steps if isinstance(record, dict)] if isinstance(steps, list) else []
 
 
-def _refusal(result: JsonObject) -> JsonObject | None:
+def run_refusal(result: JsonObject) -> JsonObject | None:
     """The refusal that ended the run before any step ran, or None.
+
+    Public because it is the whole of what "the run was refused" means in this
+    project's evidence, and two documents assert it: this one's `preflight` case
+    and the run summary's `outcome: refused`. One predicate, so the JUnit file
+    and the JSON summary of one run cannot disagree about whether anything ran.
 
     Two shapes reach here and both mean the same thing to a reader: the
     reactor's own `validation_error` from a plan refused at preflight, and a
