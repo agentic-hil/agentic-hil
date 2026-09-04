@@ -3358,6 +3358,157 @@ def test_a_run_whose_audit_genuinely_failed_is_recorded_as_the_last_failure(tmp_
     assert classify_failure_report(config, lambda _error_type: [])["error_type"] == "audit_failed"
 
 
+def test_a_success_state_write_that_lands_after_a_failed_replace_stays_a_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 1, finding 1: the first state write can raise after its
+    ``os.replace`` has already committed the document, the same post-replace
+    ambiguity the promotion path resolves by reading disk. When the requested state
+    is on disk only the durability fsync failed, so the run is reconciled to what
+    committed rather than turned into an audit failure whose error nothing records.
+    The earlier code returned ``audit_ok: false`` while ``read_last_report`` still
+    held the staged, non-green placeholder and ``read_last_failure`` answered
+    ``report_not_found``: a failed call no operator could look up.
+
+    No failure precedes the run here. The staged state write lands and then raises;
+    the run is reconciled to the success it committed and the trusted records agree
+    with it."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+
+    original_state = report_module.write_report_state
+    staged_writes = {"count": 0}
+
+    def flaky_state(cfg, state):
+        last = state.get("last_report")
+        if isinstance(last, dict) and last.get("canonical_write_pending") is True:
+            # The first (staged, non-green) state write of the promoting run: let
+            # the rename land it, then raise as a parent-directory fsync failing
+            # after os.replace.
+            staged_writes["count"] += 1
+            original_state(cfg, state)
+            raise OSError("state directory fsync failed after replace")
+        return original_state(cfg, state)
+
+    monkeypatch.setattr(report_module, "write_report_state", flaky_state)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-after-replace"})
+
+    monkeypatch.setattr(report_module, "write_report_state", original_state)
+
+    # The staged write raised after committing, exactly once.
+    assert staged_writes["count"] == 1
+    # The committed state stands, so the run is the success it recorded rather than
+    # an audit failure the trusted records would contradict.
+    assert result["audit_ok"] is not False
+    assert result["ok"] is True
+    # read_last_report is the green run, never the staged placeholder a failed call
+    # would have left behind, and a run that worked records no failure.
+    last = read_last_report(config)
+    assert last.get("run") == "run-after-replace"
+    assert last.get("audit_ok") is True
+    assert "canonical_write_pending" not in last
+    assert read_last_failure(config).get("error_type") == "report_not_found"
+    assert classify_failure_report(config, lambda _error_type: [])["error_type"] == "report_not_found"
+
+
+def test_a_success_state_write_that_lands_after_a_failed_replace_leaves_a_previous_failure_intact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of review round 1, finding 1: with an older failure present,
+    the earlier code returned an audit failure while ``read_last_failure`` still
+    answered the *stale* previous failure, so an operator reading it after the
+    failed call was pointed at the wrong error.
+
+    The staged state write lands and then raises. Because the requested state is on
+    disk the run is reconciled to the success it committed, so it is no failure at
+    all: the previous failure legitimately stands, and no failed call coexists with
+    a failure record that does not name it."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+
+    red = write_report(config, {"ok": False, "tool": "flash_firmware", "run": "run-red", "error_type": "flash_failed", "summary": "Flashing failed."})
+    assert red["audit_ok"] is True
+    assert read_last_failure(config)["error_type"] == "flash_failed"
+
+    original_state = report_module.write_report_state
+    staged_writes = {"count": 0}
+
+    def flaky_state(cfg, state):
+        last = state.get("last_report")
+        if isinstance(last, dict) and last.get("canonical_write_pending") is True:
+            staged_writes["count"] += 1
+            original_state(cfg, state)
+            raise OSError("state directory fsync failed after replace")
+        return original_state(cfg, state)
+
+    monkeypatch.setattr(report_module, "write_report_state", flaky_state)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-green"})
+
+    monkeypatch.setattr(report_module, "write_report_state", original_state)
+
+    assert staged_writes["count"] == 1
+    # The run is the success it committed, so it is not the last failure and does
+    # not erase the one that was.
+    assert result["audit_ok"] is not False
+    assert result["ok"] is True
+    recorded = read_last_failure(config)
+    assert recorded.get("run") == "run-red"
+    assert recorded.get("error_type") == "flash_failed"
+    assert "canonical_write_pending" not in recorded
+    assert classify_failure_report(config, lambda _error_type: [])["error_type"] == "flash_failed"
+    # And the readback is the green run, not the staged placeholder.
+    last = read_last_report(config)
+    assert last.get("run") == "run-green"
+    assert last.get("audit_ok") is True
+    assert "canonical_write_pending" not in last
+
+
+def test_a_state_write_that_never_lands_records_the_run_as_the_last_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reconciliation's other branch: when the first state write fails before
+    its replace, the requested state never lands, so a run that asked to be a
+    success is a genuinely failed run. It must be recorded as both the last report
+    and the last failure with its own error, never leaving an operator's failure
+    lookup stale for a call that returned ``audit_ok: false`` (review round 1,
+    finding 1)."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+
+    original_state = report_module.write_report_state
+    staged_writes = {"count": 0}
+
+    def flaky_state(cfg, state):
+        last = state.get("last_report")
+        if isinstance(last, dict) and last.get("canonical_write_pending") is True:
+            # The first (staged) state write fails before its replace, so the
+            # requested state never reaches disk.
+            staged_writes["count"] += 1
+            raise OSError("state write denied")
+        return original_state(cfg, state)
+
+    monkeypatch.setattr(report_module, "write_report_state", flaky_state)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-state-lost"})
+
+    monkeypatch.setattr(report_module, "write_report_state", original_state)
+
+    assert staged_writes["count"] == 1
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
+    assert "canonical_report_path" not in result
+    # The failed run is recorded with its own error, not lost behind a stale record.
+    recorded = read_last_failure(config)
+    assert recorded.get("run") == "run-state-lost"
+    assert recorded.get("audit_ok") is False
+    assert recorded.get("audit_error", {}).get("backend_error") == "state write denied"
+    assert "canonical_write_pending" not in recorded
+    assert classify_failure_report(config, lambda _error_type: [])["error_type"] == "audit_failed"
+    # The trusted readback names the same audit-failed run.
+    last = read_last_report(config)
+    assert last.get("run") == "run-state-lost"
+    assert last.get("audit_ok") is False
+
+
 def test_path_lock_registry_does_not_keep_short_lived_paths(tmp_path: Path) -> None:
     _PATH_LOCKS.clear()
 
