@@ -704,7 +704,9 @@ def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(
 
     Discovery here fails with `debugger_not_found`, a missing STM32CubeProgrammer
     and not a missing board, so the summary names that reason rather than
-    reporting an absent bench: the toolchain, not the board, is what to install."""
+    reporting an absent bench: the toolchain, not the board, is what to install.
+    The first next step is matched to that too, and installing the toolchain,
+    not attaching a board, is what it tells the operator to do."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
@@ -724,6 +726,11 @@ def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(
     assert "No attached bench was found" not in result["summary"]
     assert "STM32CubeProgrammer CLI was not found." in result["next_steps"][0]
     assert "agentic-hil adopt-hardware" in result["next_steps"][0]
+    # The remedy is the missing tool, not the board: a `debugger_not_found`
+    # placeholder no longer tells the operator to attach a bench that may be
+    # plugged in the whole time.
+    assert "Install STM32CubeProgrammer" in result["next_steps"][0]
+    assert "Attach the bench" not in result["next_steps"][0]
 
 
 def test_init_reserves_absent_bench_wording_for_the_empty_probe_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -743,6 +750,10 @@ def test_init_reserves_absent_bench_wording_for_the_empty_probe_result(tmp_path:
     assert result["ok"] is True, result
     assert result["hardware_discovery"]["error_type"] == "adapter_not_found"
     assert result["summary"].startswith("No attached bench was found, so the placeholder")
+    # This is the one placeholder whose first next step does say "attach the
+    # bench", because here the bench is what is missing.
+    assert "Attach the bench and run" in result["next_steps"][0]
+    assert "agentic-hil adopt-hardware" in result["next_steps"][0]
 
 
 def test_init_and_the_server_describe_one_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

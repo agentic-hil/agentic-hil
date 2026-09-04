@@ -2144,6 +2144,61 @@ def _placeholder_reason(discovery: JsonObject) -> str:
     return f"Hardware discovery did not configure a bench ({reason})"
 
 
+_ADOPT_FILLS = (
+    "the probe id, the toolchain executable, the detected controller and the probe's own COM port without "
+    "anything being retyped"
+)
+
+
+def _placeholder_next_step(discovery: JsonObject) -> str:
+    """The first next step for a placeholder file, matched to why it was written.
+
+    Every branch opens the same way -- the file describes no board yet and the
+    whole result is under `hardware_discovery` -- and then names the remedy the
+    discovery result actually calls for. "Attach the bench" is the right move for
+    `adapter_not_found`, where enumeration ran and listed no probe. It is the
+    wrong move for a missing toolchain, two attached probes, a target that did
+    not answer, or a timeout: each of those can happen with the board plugged in
+    the whole time, so telling the operator to attach one sends them to reseat
+    hardware that is already there instead of to the fix. Each names its own
+    remedy and keeps `agentic-hil adopt-hardware` as the command that fills the
+    file in once the reason is cleared. This is the `next_steps` sibling of
+    `_placeholder_reason`, which does the same for the headline (#416).
+    """
+    summary = discovery.get("summary") or "no attached bench was identified"
+    preamble = (
+        "This file describes no board yet, because hardware discovery ran without configuring one: "
+        f"{summary} (the whole result is under `hardware_discovery`). "
+    )
+    error_type = discovery.get("error_type")
+    if error_type == "debugger_not_found":
+        remedy = (
+            "Install STM32CubeProgrammer so its CLI resolves on this host (the board itself may already be "
+            f"attached), then run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
+        )
+    elif error_type == "ambiguous_hardware":
+        remedy = (
+            "More than one probe is attached, so leave one connected or name the board this project is about "
+            "with `agentic-hil adopt-hardware --probe-id <serial>`; the attached serials are listed under "
+            f"`hardware_discovery.probes`. Adoption then fills in {_ADOPT_FILLS}."
+        )
+    elif error_type == "target_not_detected":
+        remedy = (
+            "The ST-Link answered but named no target, so check the board is powered and wired to the probe, "
+            f"then run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
+        )
+    elif error_type == "timeout":
+        remedy = (
+            "Discovery timed out before it could read the bench, so run `agentic-hil adopt-hardware` once the "
+            f"board responds, which fills in {_ADOPT_FILLS}."
+        )
+    elif error_type == "adapter_not_found":
+        remedy = f"Attach the bench and run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
+    else:
+        remedy = f"Run `agentic-hil adopt-hardware` once the bench is ready, which fills in {_ADOPT_FILLS}."
+    return preamble + remedy
+
+
 def setup_project(agent: str, force: bool = False) -> JsonObject:
     """First run in one command: the user-wide half, then the project half.
 
@@ -2669,15 +2724,13 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     if not discovered:
         # The placeholders are a finding, not a default. An operator who is not
         # told that discovery ran and came back empty reads the same file as
-        # "detection is broken", which is exactly how this was reported.
-        next_steps.insert(
-            0,
-            "This file describes no board yet, because hardware discovery ran without configuring one: "
-            f"{discovery.get('summary') or 'no attached bench was identified'} "
-            "(the whole result is under `hardware_discovery`). Attach the bench and run "
-            "`agentic-hil adopt-hardware`, which fills in the probe id, the toolchain executable, the detected "
-            "controller and the probe's own COM port without anything being retyped.",
-        )
+        # "detection is broken", which is exactly how this was reported. The
+        # remedy is matched to what discovery reported: only `adapter_not_found`
+        # is answered with "attach the bench", because only there is the bench
+        # the thing that is missing. The others -- a missing toolchain, two
+        # probes, a target that did not answer, a timeout -- can happen with the
+        # board plugged in the whole time, and name their own fix (#416).
+        next_steps.insert(0, _placeholder_next_step(discovery))
     # First, and before anything about COM ports or OpenOCD scripts: a bench that
     # was narrowed and is open again is the one thing here that changes what this
     # machine may be told to do.

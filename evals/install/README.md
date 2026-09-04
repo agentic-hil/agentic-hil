@@ -669,10 +669,15 @@ Options:
   the published release does not carry. Cannot be combined with `-FromBranch`,
   which names a different source;
 - `-ExpectedVersion`: the release `-Guide` pins, as `X.Y.Z`. Left empty, it is
-  read from the newest release tag, which published mode already needs present
-  to check the install's digest; name it for a clone whose tags are not fetched.
-  It applies only with `-Guide`, and is refused with local or remote mode, which
-  install this tree and take its own version.
+  read from the newest release tag; name it to pick a specific release instead
+  of the newest, such as an older one you want to measure. A matching `vX.Y.Z`
+  tag has to be present in this clone either way: published mode reads that tag
+  to stage the trusted package the install's bytes and the agent skill are
+  checked against, so a release with no tag here cannot yield a passing verdict
+  and is refused before the matrix starts. It cannot stand in for tags that were
+  never fetched (run `git fetch --tags` for that), only pick among the ones
+  present. It applies only with `-Guide`, and is refused with local or remote
+  mode, which install this tree and take its own version.
 
 Without `-FromBranch` or `-Guide` the script builds a local-mode matrix against
 the working tree, which is why the one-command path needs one of those two to

@@ -268,6 +268,11 @@ def test_setup_headline_names_a_discovery_failure_that_is_not_an_absent_bench(
     )
     # And it does not tell an operator their attached toolchain's board is gone.
     assert "No attached bench was found" not in result["summary"]
+    # The nested config step's first next step is matched to the reason too:
+    # install the toolchain, not attach a board.
+    first_step = result["steps"]["config"]["next_steps"][0]
+    assert "Install STM32CubeProgrammer" in first_step
+    assert "Attach the bench" not in first_step
 
 
 def test_setup_headline_reserves_absent_bench_for_the_empty_probe_result(
@@ -302,7 +307,9 @@ def test_setup_headline_over_two_probes_does_not_report_an_absent_bench(
 
     `ambiguous_hardware` writes a placeholder because discovery will not choose a
     board, not because none is there, so the headline names that reason rather
-    than sending the operator to plug in what is plugged in twice."""
+    than sending the operator to plug in what is plugged in twice. The first next
+    step is matched to the same reason: it asks the operator to name one of the
+    attached probes, not to attach one."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
@@ -319,6 +326,12 @@ def test_setup_headline_over_two_probes_does_not_report_an_absent_bench(
         "so the project configuration written is the placeholder."
     )
     assert "No attached bench was found" not in result["summary"]
+    # The remedy is matched too: name one of the probes that is attached, not
+    # attach a board. The two-probe case is where "attach the bench" would be
+    # most plainly wrong.
+    first_step = result["steps"]["config"]["next_steps"][0]
+    assert "adopt-hardware --probe-id" in first_step
+    assert "Attach the bench" not in first_step
 
 
 def test_setup_headline_over_a_discovered_bench_is_the_plain_sentence(

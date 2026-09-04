@@ -51,9 +51,13 @@ param(
     # carries a .devN version the release does not; pinning that development
     # version fails every otherwise-correct published install against a version
     # nobody can install yet. Left empty, the release is read from the newest
-    # vX.Y.Z tag in this clone, which published mode already requires be present
-    # to check the install's digest. Name it here to override that, for a clone
-    # whose tags are not fetched. Only -Guide reads it.
+    # vX.Y.Z tag in this clone. Name it here to pick a specific release instead
+    # of the newest, e.g. to measure an older one. A matching vX.Y.Z tag has to
+    # be present in this clone either way: published mode reads that tag to stage
+    # the trusted package the install's bytes and the agent skill are checked
+    # against, so it cannot stand in for a missing tag, only pick among the ones
+    # present, and a version with no tag here is refused before the matrix
+    # starts. Only -Guide reads it.
     [string]$ExpectedVersion,
     [switch]$SkipBuild,
     [switch]$NoFileLogin,
@@ -257,33 +261,48 @@ function Get-PublishedReleaseVersion {
     # installed distribution to equal `target.expected_version`, so pinning the
     # development version there fails a wholly correct install of the release.
     #
-    # An override wins when given and is validated first, so a typo is refused
-    # rather than pinned. Otherwise the release is the newest vX.Y.Z tag in the
-    # clone: published mode already needs that tag present to check the install's
-    # digest, and the version gate keeps the newest one equal to the release the
-    # index serves, so it is read from the same place rather than guessed from
-    # the tree.
+    # The release is the newest vX.Y.Z tag in this clone, or the one an
+    # -ExpectedVersion override names when a specific release is wanted. Either
+    # way a matching tag has to be present here, and not merely to name the
+    # release: published mode reads `src/agentic_hil` at that tag to stage the
+    # trusted package the installed bytes and the agent skill are compared
+    # against (see `released_package_digest` and `packaged_skill_reference`),
+    # so a release this clone carries no tag for cannot produce a passing
+    # published verdict at all. An override for a version with no tag is refused
+    # here, before the matrix starts, rather than after a run has spent model
+    # time and API budget on a verdict it could never reach.
     param(
         [Parameter(Mandatory)][string]$RepositoryRoot,
         [string]$Override
     )
-
-    if ($Override) {
-        if ($Override -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
-            throw "-ExpectedVersion must name a released version as X.Y.Z, not '$Override'."
-        }
-        return $Override
-    }
 
     $tags = @(
         git -C $RepositoryRoot tag --list 'v[0-9]*' 2>$null |
             Where-Object { $_ -match '^v[0-9]+\.[0-9]+\.[0-9]+$' } |
             ForEach-Object { $_.Substring(1) }
     )
+
+    if ($Override) {
+        if ($Override -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "-ExpectedVersion must name a released version as X.Y.Z, not '$Override'."
+        }
+        if ($tags -notcontains $Override) {
+            throw (
+                "-ExpectedVersion $Override names a release this clone carries no v$Override tag for. Published " +
+                "mode reads that tag to stage the trusted package the install's bytes and the agent skill are " +
+                "checked against, so a run pinned to a version with no tag here cannot pass. Fetch the tags " +
+                "(git fetch --tags), or name a release this clone already has a tag for."
+            )
+        }
+        return $Override
+    }
+
     if ($tags.Count -eq 0) {
         throw (
             "Published mode names the current release, which this clone cannot state: it carries no vX.Y.Z " +
-            "release tag. Fetch the tags (git fetch --tags), or pass -ExpectedVersion X.Y.Z to name the release."
+            "release tag. That tag is also what published mode reads to stage the trusted package it verifies " +
+            "the install against, so fetch the tags (git fetch --tags) before running it; -ExpectedVersion " +
+            "cannot stand in for a missing tag, only pick among the ones present."
         )
     }
     return ($tags | Sort-Object { [version]$_ } | Select-Object -Last 1)
