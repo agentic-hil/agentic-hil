@@ -29,6 +29,7 @@ class StdinReader:
     input_stream: BinaryIO
     owned_fd: list[int | None]
     fd_lock: threading.Lock
+    owns_fd: bool
 
 
 def run_com_stdio(
@@ -136,6 +137,7 @@ def start_stdin_reader(input_stream: BinaryIO) -> StdinReader:
     fd_lock = threading.Lock()
     with suppress(AttributeError, OSError, TypeError, ValueError):
         owned_fd[0] = os.dup(input_stream.fileno())
+    owns_fd = owned_fd[0] is not None
 
     def pump() -> None:
         try:
@@ -176,7 +178,7 @@ def start_stdin_reader(input_stream: BinaryIO) -> StdinReader:
         stop.set()
         close_owned_stdin_fd(owned_fd, fd_lock)
         raise
-    return StdinReader(messages, thread, stop, input_stream, owned_fd, fd_lock)
+    return StdinReader(messages, thread, stop, input_stream, owned_fd, fd_lock, owns_fd)
 
 
 def stop_stdin_reader(reader: StdinReader, timeout_s: float) -> list[BaseException]:
@@ -185,7 +187,10 @@ def stop_stdin_reader(reader: StdinReader, timeout_s: float) -> list[BaseExcepti
     reader.thread.join(timeout=min(0.05, timeout_s))
     if reader.thread.is_alive():
         try:
-            if reader.owned_fd[0] is not None:
+            if reader.owns_fd:
+                # The reader closes its own dup'd descriptor as it unwinds, so an
+                # already emptied slot here means the read is ending on its own,
+                # not that the stream was borrowed without a way to cancel it.
                 close_owned_stdin_fd(reader.owned_fd, reader.fd_lock)
             else:
                 cancel_read = getattr(reader.input_stream, "cancel_read", None)

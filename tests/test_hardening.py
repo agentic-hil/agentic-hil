@@ -1772,6 +1772,74 @@ def test_stdin_reader_stops_without_external_input_on_posix(tmp_path: Path) -> N
             os.close(read_fd)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX select-based reader poll")
+def test_stdin_reader_stop_accepts_a_reader_that_closed_its_own_fd_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentic_hil import comstdio
+
+    read_fd, write_fd = os.pipe()
+    at_teardown = threading.Event()
+    real_close = comstdio.close_owned_stdin_fd
+
+    class PipeStream:
+        def fileno(self) -> int:
+            return read_fd
+
+        def read(self, size: int) -> bytes:  # pragma: no cover - fallback path only
+            return os.read(read_fd, size)
+
+    def close_then_linger(owned_fd: list[int | None], lock: threading.Lock) -> None:
+        real_close(owned_fd, lock)
+        if threading.current_thread() is not threading.main_thread():
+            # Hold the reader thread alive past the short first join with its
+            # descriptor already closed and its slot already emptied, which is
+            # the shutdown window a loaded runner lands in.
+            at_teardown.set()
+            time.sleep(0.5)
+
+    monkeypatch.setattr(comstdio, "close_owned_stdin_fd", close_then_linger)
+    reader = comstdio.start_stdin_reader(PipeStream())
+    try:
+        reader.stop.set()
+        assert at_teardown.wait(WAIT_TIMEOUT_S), "the reader thread never reached its own descriptor teardown"
+        # A reader still winding down from its own teardown is not a borrowed
+        # stream, so shutdown must report nothing about a cancellable interface.
+        errors = comstdio.stop_stdin_reader(reader, WAIT_TIMEOUT_S)
+        assert errors == []
+        assert not reader.thread.is_alive()
+    finally:
+        reader.thread.join(timeout=WAIT_TIMEOUT_S)
+        os.close(write_fd)
+        with suppress(OSError):
+            os.close(read_fd)
+
+
+def test_stdin_reader_stop_reports_a_stream_it_cannot_cancel() -> None:
+    from agentic_hil import comstdio
+
+    class UncancellableStdin:
+        """Borrowed stream with neither a descriptor to close nor a cancel hook."""
+
+        def __init__(self) -> None:
+            self.release = threading.Event()
+
+        def read(self, size: int) -> bytes:
+            self.release.wait(WAIT_TIMEOUT_S)
+            return b""
+
+    stdin = UncancellableStdin()
+    reader = comstdio.start_stdin_reader(stdin)
+    try:
+        errors = comstdio.stop_stdin_reader(reader, 0.2)
+        assert [str(error) for error in errors] == [
+            "Borrowed stdin stream has no cancellable read interface.",
+            "COM stdio stdin reader remained blocked during shutdown.",
+        ]
+        assert all(isinstance(error, RuntimeError) for error in errors)
+    finally:
+        stdin.release.set()
+        reader.thread.join(timeout=WAIT_TIMEOUT_S)
+
+
 def test_stdin_reader_start_failure_closes_dup_fd(monkeypatch: pytest.MonkeyPatch) -> None:
     from agentic_hil import comstdio
 
