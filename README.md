@@ -8,7 +8,7 @@
 
 **Your AI agent writes the firmware, flashes it to the board on your desk, drives UART and CAN against it, reads back what the hardware actually did, and fixes what it got wrong; the run on the real board is what decides whether the work is done, and you review the pull request with that run's evidence in it.**
 
-https://github.com/user-attachments/assets/d19b3b24-0250-4226-91c4-61bea65fa4b2
+https://github.com/user-attachments/assets/8d39ba93-beeb-484e-b9e9-d9ce79538523
 
 Nothing in that run is staged. One restart after the install line, in a freshly created firmware project, the first sentence makes the agent set the bench up itself and the second makes the board say Hello World and prove it said it: the configuration is created over MCP with the permissions reported out loud, the firmware is written on the spot, `flash_firmware` and `com_read` go through the gate, the twelve bytes come back off the wire, and the plan it pins is run once green and once against a wrong expectation, because a test that cannot fail proves nothing. What remains in the project afterwards is the plan as a reviewable file and the run's own report: lease released, safe state confirmed, nothing quarantined.
 
