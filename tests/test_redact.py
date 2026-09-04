@@ -427,6 +427,21 @@ def test_a_stream_that_arrives_as_a_list_of_lines_is_masked_line_by_line() -> No
     assert redacted["stdout"] == [f"index https://buildbot:{MARKER}@h/simple/", "done"]
 
 
+def test_carried_backend_warnings_take_the_same_pass_as_the_stream_they_came_from() -> None:
+    """The shorter field holds the same bytes, so it cannot be the cheaper way out.
+
+    `backend_warnings` is a debugger backend's copy of the failure-worded lines of
+    a run its own success marker reported as a success (#425). They are lifted
+    verbatim out of the capture, so a credentialed URL a toolchain echoed is
+    masked under `stderr` and would otherwise be published in clear one key over.
+    """
+    line = f"Error: index https://buildbot:{INDEX_SECRET}@packages.example.internal/simple/ refused the artifact"
+
+    redacted = redact_sensitive({"ok": True, "backend_warnings": [line, "Error: Error setting register pc"]})
+
+    assert redacted["backend_warnings"] == [line.replace(INDEX_SECRET, MARKER), "Error: Error setting register pc"]
+
+
 def test_both_operator_facing_sinks_publish_the_masked_stream(capsys: pytest.CaptureFixture[str]) -> None:
     """The document and the rendering are the two ways a stream leaves this process.
 

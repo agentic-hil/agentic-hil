@@ -241,6 +241,8 @@ Not this: `error_type: "debugger_command_rejected"`, which carries `target_conta
 
 Not this either: `error_type: "flash_erase_failed"`, which is section 10a.
 
+On an OpenOCD bench, an `Error:` line in the log is not by itself the reason a step was refused. A run that exits 0 and prints the success marker this server `echo`es after the operation (`AGENTIC_HIL_RESULT:<tool>:ok`) is a success: OpenOCD stops evaluating its command string at the first command that fails, so the marker after `reset run`, `program ... verify` or `targets` is OpenOCD saying that command returned success. Lines like `Error: Error setting register pc`, which the Ubuntu 24.04 build of OpenOCD 0.12 writes on `reset run` over hla_swd once the core has already restarted, arrive on the successful result as `backend_warnings` (verbatim, with the summary saying how many) instead of turning it into `reset_failed`. So a `reset_failed` here is a run whose marker is missing or whose exit code was not 0, and it is worth reading the log for which of the two it was. A successful reset that carries `backend_warnings` every time is worth reporting against the OpenOCD build, not against the reset line.
+
 ## 10a. The First Flash After Power-Up Is Refused At The Erase
 
 Symptom: `flash_firmware` on an ST-Link fails with `error_type: "flash_erase_failed"`, and `programmer_output` in the result ends:

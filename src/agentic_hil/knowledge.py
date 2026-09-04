@@ -1262,7 +1262,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "OpenOCD printed, which may be neither of them or the stage marker alone. Either way the outcome went "
             "unreported, and that is the absence of a verdict rather than a verdict that no target answered: `init` "
             "may have completed, examined the core and halted it. The board's run state is unknown, which is why this "
-            "quarantines the bench instead of refusing."
+            "quarantines the bench instead of refusing.\n\n"
+            "The success marker is what this branch turns on, and it settles the opposite case too: a run that exits 0 "
+            "*with* the marker is a success even when OpenOCD printed a failure-worded line on the way to it, because "
+            "OpenOCD stops evaluating its command string at the first command that fails and could not have reached the "
+            "`echo` otherwise. Those lines arrive verbatim on the successful result as `backend_warnings`, with the "
+            "summary saying how many came along, rather than deciding an outcome the marker already reported."
         ),
         remediation=(
             "Read `quarantine_guidance` in this result first: it names what is confirmed, what is not, and the physical "
