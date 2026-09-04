@@ -75,8 +75,9 @@ def test_every_document_a_reader_receives_is_covered() -> None:
     assert "src/agentic_hil/skills/agentic-hil/SKILL.md" in covered
     assert "plugins/agentic-hil/skills/agentic-hil/SKILL.md" in covered
     assert "docs/mcp-hosts.md" in covered
-    # llms.txt is served from the short host and fetched on its own, so it
-    # reaches a reader with no repository around them either.
+    # llms.txt is meant to be fetched on its own, by a reader with no repository
+    # around them, so the reference gate covers it like every other shipped
+    # document.
     assert "llms.txt" in covered
 
 
@@ -113,9 +114,12 @@ def test_the_index_this_repository_serves_links_only_files_that_are_here() -> No
     """The whole of llms.txt is its links, so a link that rots takes the file with it.
 
     The first llms.txt was deleted because nothing served it and its onward
-    references were bare filenames an external fetcher could not resolve. This
-    one is served beside the installers, which is what makes the same rot a
-    reader's problem rather than a dead file's.
+    references were bare filenames an external fetcher could not resolve. This one
+    carries absolute links only, and this gate holds each in-repository link to a
+    path that is still here, so the same rot fails the build rather than reaching a
+    reader. The gate stops there: a link that leaves the repository is read for its
+    form and not followed, and where the file is served is the site repository's to
+    decide.
     """
     assert index_problems(REPOSITORY_ROOT) == []
 
