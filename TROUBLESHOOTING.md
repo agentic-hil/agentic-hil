@@ -422,6 +422,27 @@ Which reasons are machine-recoverable is the bench's `recovery.auto_recover` pol
 
 For the operator case, `lease-status` carries a `quarantine_guidance` entry per reason: `attempted` (what was being done when confirmation was lost), `confirmed` (what still holds), `unknown` (the gap that makes a machine answer impossible), and `physical_check` (what to verify on the physical board). Perform the named check, confirm the bench matches, then release it with `agentic-hil recover --confirm-safe-state --quarantine-id <id>` using the current `quarantine_id` (an old incident ID cannot release a newer quarantine). The signature attests exactly that check. An incident recorded by a different Agentic HIL version gets an explicit fallback entry pointing at its own records. If the authoritative config changed since the incident was recorded, recovery refuses with `config_changed` showing both hashes; after verifying the config delta, rerun with the explicit `--accept-config-change` override. The MCP tool takes the same override as `accept_config_change: true`, and both write `config_change_accepted` to the recovery ledger beside both digests.
 
+## 13a. `test_config_invalid`: The Plan Was Refused Before Any Step Ran
+
+Symptom: `agentic-hil test-reactor` or `test_reactor_run` answers `Refused: test_config_invalid` and names one step, for example `Test step references a COM port that is not in the authoritative config`. Nothing was locked, opened or driven.
+
+A plan is one document and the authoritative configuration is another, and this refusal is always the two disagreeing. Read `validation_error` first; it says which of them is wrong.
+
+| What `validation_error` carries | Which document is wrong | What to do |
+|---|---|---|
+| A `field` naming a plan key (`steps[2].action`, `version`), with `allowed_values` or a schema `validator` | The plan | Correct that key. `agentic-hil://reference/test-plan` is the format the plan was validated against, and it is generated out of the shipped schema rather than describing it |
+| A `field` naming a route key (`steps[2].port_id`, `steps[1].debugger`) and a `configured_com_ports`, `configured_can_buses` or `configured_debuggers` list with names in it | The plan | The step names a device this bench does not have. Correct `device:` on the step to one of the listed names |
+| The same, and that `configured_*` list is empty | The configuration | This project declares no such section at all. Attach the board and run `agentic-hil init --force` from the project root |
+| `error_type: com_port_not_bound` and an `unbound_key` | The configuration | The port is declared and its `device` is empty. Section 11 has this case |
+
+Every one of those carries `next_step`, which is the same answer written for the case in front of you, with the name of the key and the command in it. The result also carries the catalogue's `remediation` and `do_not`, the same text `agentic-hil://reference/errors/test_config_invalid` serves.
+
+`init --force` is a reset rather than a repair: it regenerates the whole file from the project profile and the attached hardware, and it takes every narrowed permission, baudrate, `resource_id` and artifact root with it. It names what it reopened in its own result. On a bench whose sections are already there and simply not filled in, `agentic-hil adopt-hardware --apply` is the smaller move and keeps everything else.
+
+Not this: adding a `com_ports`, `can_buses` or `debuggers` entry so that a plan loads. A plan naming a device this bench does not have was written for another bench, and an entry invented to satisfy it points a stimulus at whatever hardware answers to that name. Correct the plan, or bind the bench the plan is for.
+
+Not this either: raising the plan's `version:` to reach a step it refuses. The version says what the plan was written against, and a step that is too new for it is named here rather than failing on an older install with nothing said about why.
+
 ## 14. Upgrading, And Adding `[pyocd]` Or `[can]` Later
 
 Use `agentic-hil upgrade` to move an existing installation forward. It upgrades through the manager that owns the interpreter running it (`uv tool`, `pipx`, `uv pip`, or `pip`) instead of whichever `agentic-hil` `PATH` resolves first, so a second copy is never upgraded by mistake. Restart the agent hosts afterwards; they load the MCP server at startup and keep running the old one until they do.

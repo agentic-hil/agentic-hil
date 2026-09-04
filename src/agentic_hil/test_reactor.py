@@ -38,7 +38,7 @@ from agentic_hil.devices import (
     uart_device,
 )
 from agentic_hil.knowledge import DEFAULT_TEST_CONFIG_PATH as DEFAULT_TEST_CONFIG_PATH
-from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR, plan_schema_document
+from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR, plan_schema_document, remediation_fields
 from agentic_hil.knowledge import PLAN_FEATURE_VERSION_KEY as PLAN_FEATURE_VERSION_KEY
 from agentic_hil.knowledge import TEST_CONFIG_SCHEMA_RESOURCE as TEST_CONFIG_SCHEMA_RESOURCE
 from agentic_hil.report import audit_errors, overall_success
@@ -1032,6 +1032,10 @@ class StepDevice:
     route_field: ClassVar[str] = ""
     configured_field: ClassVar[str] = ""
     unknown_name_summary: ClassVar[str] = ""
+    # The authoritative configuration's own section for this kind, so a refusal
+    # about a name can say which key to look at rather than leaving the reader to
+    # map "COM port" onto `com_ports` themselves.
+    config_section: ClassVar[str] = ""
     # Every action this kind serves, collected from the `@step_action`
     # decorations on the methods that implement them. Derived, never written:
     # `step_actions` is the action → schema projection ACTION_SCHEMAS is built
@@ -1112,8 +1116,41 @@ class StepDevice:
         if name is None:
             return cls.unnamed_refusal(reactor, location, step)
         if name not in entries:
-            return preflight_error(location, step, cls.route_field, cls.unknown_name_summary, {cls.configured_field: sorted(entries)})
+            return preflight_error(
+                location,
+                step,
+                cls.route_field,
+                cls.unknown_name_summary,
+                {cls.configured_field: sorted(entries), "next_step": cls.unknown_name_next_step(reactor.config, name)},
+            )
         return cls.unbound_refusal(reactor, location, step, name)
+
+    @classmethod
+    def unknown_name_next_step(cls, config: AgenticHILConfig, name: str) -> str:
+        """The one move that answers a step naming an entry nobody configured.
+
+        The failure this replaces: the refusal said the plan referenced a device
+        that is not in the authoritative config and stopped there, so a reader who
+        had got as far as running a plan was left to work out for themselves which
+        of two entirely different things had happened. Either the plan is for
+        another bench, and the step is what gets corrected, or this bench really
+        has no such entry, and the configuration is what gets filled in. The list
+        of configured names decides which sentence is true here, so the refusal
+        says the true one rather than both."""
+        configured = sorted(cls.config_entries(config))
+        if configured:
+            return (
+                f"Correct the step to name one of the `{cls.config_section}` entries this project declares "
+                f"({', '.join(configured)}), or declare `{cls.config_section}.{name}` in the authoritative "
+                f"configuration yourself. With the board attached, `{ADOPT_HARDWARE_COMMAND}` then fills that "
+                "entry's hardware in."
+            )
+        return (
+            f"This project declares no `{cls.config_section}` at all, so there is no name to correct the step to. "
+            "Attach the board and run `agentic-hil init --force` from the project root, which writes the "
+            "configuration again from the project profile and the hardware it finds. It replaces the whole file, "
+            "every narrowed permission included, so read what it reports before running a plan against it."
+        )
 
     @classmethod
     def unbound_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, name: str) -> JsonObject | None:
@@ -1390,6 +1427,7 @@ class UartRunner(SessionDevice):
     route_field: ClassVar[str] = "port_id"
     configured_field: ClassVar[str] = "configured_com_ports"
     unknown_name_summary: ClassVar[str] = "Test step references a COM port that is not in the authoritative config."
+    config_section: ClassVar[str] = "com_ports"
     # The two ways a v2 `uart_expect` says what to wait for, as its schema names
     # them. Exactly one appears on a step; the key is also the one the result
     # reports under, so `expected_text` and `expected_pattern` say which kind of
@@ -1748,6 +1786,7 @@ class CanRunner(SessionDevice):
     route_field: ClassVar[str] = "bus_id"
     configured_field: ClassVar[str] = "configured_can_buses"
     unknown_name_summary: ClassVar[str] = "Test step references a CAN bus that is not in the authoritative config."
+    config_section: ClassVar[str] = "can_buses"
     session_noun: ClassVar[str] = "CAN bus"
     not_owned_error: ClassVar[str] = "can_session_not_owned"
     not_owned_summary: ClassVar[str] = "A test plan cannot close a CAN bus session it did not open."
@@ -2001,6 +2040,7 @@ class DebuggerRunner(StepDevice):
     route_field: ClassVar[str] = "debugger"
     configured_field: ClassVar[str] = "configured_debuggers"
     unknown_name_summary: ClassVar[str] = "Test step references a debugger that is not in the authoritative config."
+    config_section: ClassVar[str] = "debuggers"
     # A debug session closes before any serial line or CAN bus this plan opened.
     cleanup_order: ClassVar[int] = 0
     # This kind's own typed-debug actions: the session's lifecycle, the two reads
@@ -2158,8 +2198,26 @@ class DebuggerRunner(StepDevice):
         defaulted to one: picking a board for the author is how the wrong board
         gets flashed."""
         if not reactor.config.debuggers:
-            return preflight_error(location, step, "debugger", "The authoritative config declares no debuggers, so this step cannot run.")
-        return preflight_error(location, step, "debugger", "Name the debugger this step runs on; the authoritative config declares several.", {"configured_debuggers": sorted(reactor.config.debuggers)})
+            return preflight_error(
+                location,
+                step,
+                "debugger",
+                "The authoritative config declares no debuggers, so this step cannot run.",
+                {"next_step": cls.unknown_name_next_step(reactor.config, "dut")},
+            )
+        return preflight_error(
+            location,
+            step,
+            "debugger",
+            "Name the debugger this step runs on; the authoritative config declares several.",
+            {
+                "configured_debuggers": sorted(reactor.config.debuggers),
+                "next_step": (
+                    "Write `device: <name>` on this step, naming one of the configured debuggers. Nothing is chosen "
+                    "for the plan here on purpose: picking a board for its author is how the wrong board gets flashed."
+                ),
+            },
+        )
 
     @classmethod
     def name_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep) -> JsonObject | None:
@@ -2834,18 +2892,26 @@ class TestReactor:
                 **exception_result("test_reactor", "preflight_exception", "Test reactor preflight raised an exception.", error),
             }
         if validation_error is not None:
+            # The catalogue's own fix, on the refusal itself, from the same
+            # source the MCP error reference serves. A plan refused here is the
+            # end of the road for whoever wrote it, and until this was attached
+            # the result carried the fault and nothing to do about it: every
+            # other refusing surface in this package merges these fields, and
+            # this one, which is where a plan author lands, did not.
+            refused_as = str(validation_error.get("error_type") or "test_config_invalid")
             result: JsonObject = {
                 "ok": False,
                 "tool": "test_reactor",
                 "name": test_config.name,
                 "test_config_path": test_config.path,
                 **plan_digest_field(test_config),
-                "error_type": validation_error.get("error_type", "test_config_invalid"),
+                "error_type": refused_as,
                 "validation_error": validation_error,
                 "steps": [],
                 "cleanup": [],
                 "cleanup_ok": True,
                 "summary": "Test reactor configuration failed semantic validation; no steps were executed.",
+                **remediation_fields(refused_as),
             }
             if "step" in validation_error:
                 result["failed_step"] = validation_error["step"]

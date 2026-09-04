@@ -403,6 +403,127 @@ steps:
     assert service.calls == []
 
 
+def test_a_step_naming_a_port_this_bench_declares_none_of_says_what_to_do(tmp_path: Path) -> None:
+    """The refusal a first plan run lands on, with somewhere to go (#431).
+
+    `Test step references a COM port that is not in the authoritative config` was
+    the whole of it: true, and no help. Two entirely different things produce it,
+    and a reader who has got as far as running a plan cannot tell them apart from
+    that sentence. Here the project declares no `com_ports` at all, so there is
+    no name to correct the step to and the configuration is what has to be
+    written; the refusal says so and names the command that writes it.
+    """
+    config = load_config(str(write_config(tmp_path)))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {port_id: dut_uart, action: uart_open}\n")
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["error_type"] == "test_config_invalid"
+    validation = result["validation_error"]
+    assert validation["configured_com_ports"] == []
+    next_step = validation["next_step"]
+    assert "`com_ports`" in next_step
+    assert "agentic-hil init --force" in next_step
+    # And it says what that command costs, because it replaces the file.
+    assert "narrowed permission" in next_step
+    assert service.calls == []
+
+
+def test_a_step_naming_a_port_this_bench_does_not_have_points_at_the_ones_it_does(tmp_path: Path) -> None:
+    """The other half of the same refusal: the plan is what gets corrected.
+
+    This project declares a port, and the step names another one. The bench is
+    not missing anything, so telling the reader to regenerate the configuration
+    would be the wrong instruction; the next step names the declared entries the
+    step can be corrected to, and the command that fills a declared entry's
+    hardware in.
+    """
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  console:\n    device: "COM7"\n    baudrate: 115200\n')))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {port_id: dut_uart, action: uart_open}\n")
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    validation = result["validation_error"]
+    assert validation["configured_com_ports"] == ["console"]
+    next_step = validation["next_step"]
+    assert "console" in next_step
+    assert "`com_ports.dut_uart`" in next_step
+    assert "adopt-hardware" in next_step
+    # The empty-section instruction is the wrong one here and must not appear.
+    assert "init --force" not in next_step
+    assert service.calls == []
+
+
+def test_a_step_naming_a_debugger_this_bench_does_not_have_answers_the_same_way(tmp_path: Path) -> None:
+    """The rule is the device kind's, not the COM port's.
+
+    Every kind routes through one `name_refusal`, so a debugger name nobody
+    configured has to arrive with the same next step, spelled for `debuggers`.
+    """
+    config = load_config(str(write_config(tmp_path)))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: typo, action: flash, image_path: build/app.elf}\n")
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    next_step = result["validation_error"]["next_step"]
+    assert "`debuggers`" in next_step
+    assert "`debuggers.typo`" in next_step
+    assert "dut" in next_step
+    assert service.calls == []
+
+
+def test_troubleshooting_has_a_section_for_the_refusal_a_first_plan_hits() -> None:
+    """The page a refused reader is sent to had nothing under this error type.
+
+    `test_config_invalid` is where every plan that does not run lands, and
+    TROUBLESHOOTING.md went from `com_port_not_bound` to CAN buses without ever
+    naming it. The section has to separate the two documents a plan refusal can
+    be about and carry the same commands the refusal itself names, or the page
+    and the result are two different answers to one question.
+    """
+    page = (Path(__file__).resolve().parents[1] / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+    heading = next((line for line in page.splitlines() if line.startswith("## ") and "test_config_invalid" in line), None)
+
+    assert heading is not None, "TROUBLESHOOTING.md has no section for test_config_invalid"
+    section = page.split(heading, 1)[1].split("\n## ", 1)[0]
+    # The three routes out, the same three the refusal's own `next_step` names.
+    assert "agentic-hil init --force" in section
+    assert "agentic-hil adopt-hardware --apply" in section
+    assert "configured_com_ports" in section
+    # And the field a reader is told to read first, which is where the concrete
+    # answer for their case is.
+    assert "`next_step`" in section
+    assert "`validation_error`" in section
+
+
+def test_a_refused_plan_carries_the_error_catalogues_own_fix(tmp_path: Path) -> None:
+    """The refusal a plan author reads is the one surface that carried nothing.
+
+    Every other refusing path in this package merges `remediation_fields`, so the
+    result says what the MCP error reference says. A plan refused at preflight
+    did not, and a plan is exactly where a reader has the least idea what to try
+    next: the catalogue's steps and its `do_not` now travel on the result.
+    """
+    from agentic_hil.knowledge import remediation_fields
+
+    config = load_config(str(write_config(tmp_path)))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {port_id: dut_uart, action: uart_open}\n")
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    catalogue = remediation_fields("test_config_invalid")
+    assert catalogue["remediation"], "the catalogue has to carry an entry for this error type"
+    assert result["remediation"] == catalogue["remediation"]
+    assert result["do_not"] == catalogue["do_not"]
+
+
 def test_preflight_rejects_closing_a_uart_the_plan_never_opened(tmp_path: Path) -> None:
     # A plan may only close the session it opened, so a close on a second
     # configured port fails before any step runs.

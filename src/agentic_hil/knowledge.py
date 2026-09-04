@@ -331,6 +331,7 @@ def _substitutions() -> dict[str, str]:
         "safe_user_config": safe_user_config_suggestion(),
         "reopen_command": CONFIG_REOPEN_COMMAND,
         "grant_command": CONFIG_GRANT_COMMAND,
+        "test_plan_reference": TEST_PLAN_URI,
     }
 
 
@@ -1157,6 +1158,48 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not work around this by splitting the access into a separate session outside the run. That is exactly "
             "the outside observation the declaration exists to keep out of a running test.",
+        ),
+    ),
+    # The refusal every test plan that does not run lands on, and for a long
+    # time the one that said only what was wrong. A plan is the first thing a
+    # newcomer writes that this project executes, so a reader who reaches one is
+    # further in than a reader who reaches `config_file_not_found` and has more
+    # to lose by guessing: the three answers below are the whole of what the
+    # refusal can mean, and which one applies is in the result's own
+    # `validation_error`.
+    "test_config_invalid": ErrorRemedy(
+        meaning=(
+            "A test plan was refused before its first step ran, so nothing was locked, opened or driven. The plan is "
+            "one document and the authoritative configuration is another, and this refusal is the two disagreeing: "
+            "either the plan is not valid against the plan schema, or it is valid and names a device this bench does "
+            "not have. `validation_error` says which. `field` there is the dotted path into the plan "
+            "(`steps[2].port_id`), `step` the step number the report repeats as `failed_step`, and `next_step` the "
+            "one move that fixes this case. A refusal about a name also carries what the configuration does declare, "
+            "under `configured_com_ports`, `configured_can_buses` or `configured_debuggers`."
+        ),
+        remediation=(
+            "Read `next_step` inside `validation_error` first. It names the key that is wrong and the command or the "
+            "configuration field that fixes it; the steps below are the general form of the same three answers.",
+            "A step naming a device the configuration does not declare is corrected in the plan: `device:` has to be "
+            "one of the names the refusal lists under the `configured_*` key for that kind.",
+            "A bench that genuinely has no such entry is filled in rather than argued with. With the board attached, "
+            "`agentic-hil adopt-hardware --apply` fills a declared entry's hardware in; where the section is empty "
+            "because `agentic-hil init` ran with no bench attached, `agentic-hil init --force` from the project root "
+            "writes the file again from the project profile and the hardware it finds. `--force` replaces the whole "
+            "file, every narrowed permission included, so it is a reset rather than a repair.",
+            "A `field` naming a plan key rather than a device is a plan the schema rejects. "
+            "`{test_plan_reference}` is what it was validated against; it reads the shipped schema rather than "
+            "describing it, so the version that admits a step is in the same table as the step.",
+            "Nothing needs recovering. The whole plan is refused at preflight, before the first hardware action, so "
+            "no session was opened and no board was driven.",
+        ),
+        do_not=(
+            "Do not add a `com_ports`, `can_buses` or `debuggers` entry just to make a plan load. A plan naming a "
+            "device this bench does not have is a plan for another bench, and an entry written to satisfy it is a "
+            "stimulus pointed at whatever hardware took that name.",
+            "Do not raise the plan's `version:` to reach a step it refuses. The version is what the plan was written "
+            "against, and a step that is too new for it is refused by name here rather than failing on an older "
+            "install for no stated reason.",
         ),
     ),
     "run_already_active": ErrorRemedy(
