@@ -5676,11 +5676,11 @@ def _identity_database(
 
 
 # The host the refusal was reported from: a stock Ubuntu 24.04 profile after
-# `uv tool install "agentic-hil[can]"`, umask 0002, `jarvis` uid 1001 with the
-# private group `jarvis` gid 1001, and every directory and the console script
+# `uv tool install "agentic-hil[can]"`, umask 0002, `alice` uid 1001 with the
+# private group `alice` gid 1001, and every directory and the console script
 # itself left group-writable by it, which is what that umask produces.
-UBUNTU_USERS = {1001: ("jarvis", 1001)}
-UBUNTU_GROUPS = {1001: ("jarvis", 1001, [])}
+UBUNTU_USERS = {1001: ("alice", 1001)}
+UBUNTU_GROUPS = {1001: ("alice", 1001, [])}
 
 
 @pytest.mark.parametrize("mode", [0o775, 0o777, 0o1777, 0o755])
@@ -5818,16 +5818,16 @@ def test_a_group_that_holds_a_second_account_is_not_a_private_group(monkeypatch:
     """One added member is one more principal, and the relaxation is gone.
 
     Whether the group carries the owner's name and gid says nothing on its own:
-    `usermod -aG jarvis ci` leaves both intact and hands the build account write
+    `usermod -aG alice ci` leaves both intact and hands the build account write
     access to everything the umask made group-writable. The member list is what
     decides it, and the owner's own name in it is not a second member.
     """
-    _identity_database(monkeypatch, users=UBUNTU_USERS, groups={1001: ("jarvis", 1001, ["ci"])})
+    _identity_database(monkeypatch, users=UBUNTU_USERS, groups={1001: ("alice", 1001, ["ci"])})
 
     assert is_user_private_group(1001, 1001) is False
-    assert untrusted_launcher_file(_file_stat(0o775, 1001, 1001), trusted_uids=frozenset({0, 1001})) == "group-writable by group jarvis, which is not your private group"
+    assert untrusted_launcher_file(_file_stat(0o775, 1001, 1001), trusted_uids=frozenset({0, 1001})) == "group-writable by group alice, which is not your private group"
 
-    _identity_database(monkeypatch, users=UBUNTU_USERS, groups={1001: ("jarvis", 1001, ["jarvis"])})
+    _identity_database(monkeypatch, users=UBUNTU_USERS, groups={1001: ("alice", 1001, ["alice"])})
 
     assert is_user_private_group(1001, 1001) is True
 
@@ -5846,14 +5846,14 @@ def test_a_foreign_group_writable_launcher_stays_refused(monkeypatch: pytest.Mon
     _identity_database(
         monkeypatch,
         users=UBUNTU_USERS,
-        groups={50: ("staff", 50, ["jarvis", "ci"]), 1001: ("jarvis", 1001, []), 2001: ("jarvis", 2001, [])},
+        groups={50: ("staff", 50, ["alice", "ci"]), 1001: ("alice", 1001, []), 2001: ("alice", 2001, [])},
     )
 
     assert untrusted_launcher_file(_file_stat(0o775, 1001, 50), trusted_uids=frozenset({0, 1001})) == "group-writable by group staff, which is not your private group"
-    assert untrusted_launcher_file(_file_stat(0o775, 1001, 2001), trusted_uids=frozenset({0, 1001})) == "group-writable by group jarvis, which is not your private group"
+    assert untrusted_launcher_file(_file_stat(0o775, 1001, 2001), trusted_uids=frozenset({0, 1001})) == "group-writable by group alice, which is not your private group"
     assert is_user_private_group(1001, 2001) is False
 
-    _identity_database(monkeypatch, users={1001: ("jarvis", 3001)}, groups={3001: ("developers", 3001, [])})
+    _identity_database(monkeypatch, users={1001: ("alice", 3001)}, groups={3001: ("developers", 3001, [])})
 
     assert is_user_private_group(1001, 3001) is False
     assert untrusted_launcher_file(_file_stat(0o775, 1001, 3001), trusted_uids=frozenset({0, 1001})) == "group-writable by group developers, which is not your private group"
@@ -5897,7 +5897,7 @@ def test_a_passwd_source_that_will_not_enumerate_leaves_group_write_refused(monk
     gid. Reading that absence as "no other member" is the widening the whole rule
     refuses, so both shapes keep the launcher refused.
     """
-    owner = SimpleNamespace(pw_name="jarvis", pw_uid=1001, pw_gid=1001)
+    owner = SimpleNamespace(pw_name="alice", pw_uid=1001, pw_gid=1001)
 
     def raising_getpwall() -> list[SimpleNamespace]:
         raise OSError("this NSS source does not enumerate")
@@ -5906,7 +5906,7 @@ def test_a_passwd_source_that_will_not_enumerate_leaves_group_write_refused(monk
         "agentic_hil.config.pwd",
         SimpleNamespace(getpwuid=lambda uid: owner, getpwall=raising_getpwall),
     )
-    monkeypatch.setattr("agentic_hil.config.grp", SimpleNamespace(getgrgid=lambda gid: SimpleNamespace(gr_name="jarvis", gr_gid=1001, gr_mem=[])))
+    monkeypatch.setattr("agentic_hil.config.grp", SimpleNamespace(getgrgid=lambda gid: SimpleNamespace(gr_name="alice", gr_gid=1001, gr_mem=[])))
 
     assert is_user_private_group(1001, 1001) is False
 
@@ -5939,7 +5939,7 @@ def test_a_launcher_owned_by_another_account_stays_refused(monkeypatch: pytest.M
     A file a third account owns can be rewritten by that account whatever its
     mode says, so the private-group relaxation never reaches it.
     """
-    _identity_database(monkeypatch, users={4242: ("deploy", 4242), 1001: ("jarvis", 1001)}, groups={4242: ("deploy", 4242, [])})
+    _identity_database(monkeypatch, users={4242: ("deploy", 4242), 1001: ("alice", 1001)}, groups={4242: ("deploy", 4242, [])})
 
     assert untrusted_launcher_file(_file_stat(0o755, 4242, 4242), trusted_uids=frozenset({0, 1001})) == "owned by deploy"
 
@@ -5979,7 +5979,7 @@ def test_the_reported_uv_tool_installation_on_ubuntu_is_trusted(monkeypatch: pyt
     """The record this was reported from, element by element.
 
     A stock Ubuntu 24.04 profile after `uv tool install "agentic-hil[can]"`:
-    `jarvis` uid 1001 with the private group `jarvis` gid 1001, umask 0002, both
+    `alice` uid 1001 with the private group `alice` gid 1001, umask 0002, both
     directories and the console script left `drwxrwxr-x` / `-rwxrwxr-x` by it.
     `agentic-hil doctor` refused both candidates and then recommended the
     installer that had just written them, so `agentic-hil setup --agent <agent>`
@@ -5992,10 +5992,10 @@ def test_the_reported_uv_tool_installation_on_ubuntu_is_trusted(monkeypatch: pyt
     _identity_database(monkeypatch, users=UBUNTU_USERS, groups=UBUNTU_GROUPS)
     trusted = frozenset({0, 1001})
 
-    # drwxrwxr-x jarvis jarvis: ~/.local/bin and the uv tool's own bin directory.
+    # drwxrwxr-x alice alice: ~/.local/bin and the uv tool's own bin directory.
     for final in (True, False):
         assert untrusted_launcher_directory(_directory_stat(0o775, 1001), final=final, trusted_uids=trusted) is None
-    # -rwxrwxr-x jarvis jarvis: the console script the launcher symlink resolves to.
+    # -rwxrwxr-x alice alice: the console script the launcher symlink resolves to.
     assert untrusted_launcher_file(_file_stat(0o775, 1001, 1001), trusted_uids=trusted) is None
 
 
@@ -6024,8 +6024,8 @@ def test_a_uv_tool_layout_under_a_private_group_registers_end_to_end(tmp_path: P
     owned = target.stat()
     _identity_database(
         monkeypatch,
-        users={owned.st_uid: ("jarvis", owned.st_gid)},
-        groups={owned.st_gid: ("jarvis", owned.st_gid, [])},
+        users={owned.st_uid: ("alice", owned.st_gid)},
+        groups={owned.st_gid: ("alice", owned.st_gid, [])},
     )
 
     assert trusted_persistent_executable(launcher, workspace=workspace) == str(launcher)
