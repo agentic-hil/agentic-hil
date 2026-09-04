@@ -30,7 +30,8 @@ target:
 # profile leaves them so because flashing on that probe is refused while either
 # is true. `init` honours what this file names, so setting one true here would
 # open it in the generated configuration and stop flashing; over MCP
-# `project_config_create` holds the pair false regardless of this file.
+# `project_config_create` never reads this file, so a value set here cannot
+# influence what it writes either way.
 debuggers:
   dut:
     type: "openocd"          # or "stlink" for STM32CubeProgrammer CLI
