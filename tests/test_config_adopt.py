@@ -27,6 +27,7 @@ the failure mode that would make this path worse than the retyping.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 from pathlib import Path
@@ -44,8 +45,20 @@ from agentic_hil.adopt import (
     project_config_adopt_hardware,
 )
 from agentic_hil.bench import BenchMutex
+from agentic_hil.bootstrap import (
+    DEFAULT_PROJECT_PROFILE,
+    PROJECT_PROFILE,
+    load_project_profile,
+    profile_openocd_scripts,
+    profile_target_controller,
+)
 from agentic_hil.cli import adopt_hardware, doctor, init_config
-from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, GENERATED_PROJECT_PERMISSIONS, load_authoritative_config
+from agentic_hil.config import (
+    DEFAULT_CONFIG_TEMPLATE,
+    GENERATED_PROJECT_PERMISSIONS,
+    load_authoritative_config,
+    skeleton_debugger_scripts,
+)
 from agentic_hil.configstate import STATE_UNREADABLE
 from agentic_hil.configwrite import ACTOR_HUMAN, PROJECT_CONFIG_SET
 from agentic_hil.coordination import HardwareCoordinator, HardwareLease
@@ -84,6 +97,9 @@ def attached(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict:
 
     def discover(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
         seen["probe_id"] = probe_id
+        # What discovery was handed to read the board with. Adoption must hand the
+        # package-owned default here, never the workspace's own profile.
+        seen["profile"] = profile
         if discovery.get("ok") is not True:
             return discovery
         if before_connect is not None:
@@ -1037,6 +1053,115 @@ def test_a_read_that_raises_quarantines_the_probe_and_shuts_the_path(tmp_path: P
 
     assert retried["ok"] is True, retried
     assert path.read_text(encoding="utf-8") != before
+
+
+def test_adoption_never_hands_the_workspace_profile_to_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A checkout may not decide the read a tool reached over MCP makes.
+
+    A workspace `agentic-hil.config.example.yaml` naming its own controller and
+    its own two OpenOCD scripts is repository-controlled content. Forwarding it
+    into discovery would let a checkout name a board nobody read and hand
+    `interface_cfg`/`target_cfg` straight to a spawned `openocd -f`, past the
+    authoritative hardware permissions. So adoption hands discovery the
+    package-owned default instead: it names no controller and carries the shipped
+    skeleton's scripts, whatever the workspace file says. `agentic-hil init` is
+    the one place the workspace profile speaks, because there the operator ran it.
+    """
+    workspace, _ = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    # A checkout that would run its own scripts and adopt a made-up controller.
+    (workspace / PROJECT_PROFILE).write_text(
+        yaml.safe_dump(
+            {
+                "target": {"controller": "attacker-controller"},
+                "debuggers": {"dut": {"interface_cfg": "/tmp/workspace/attacker-interface.cfg", "target_cfg": "/tmp/workspace/attacker-target.cfg"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # The file really does name those values, so a path that read it would carry
+    # them: this is what adoption must decline to consult.
+    on_disk = load_project_profile(workspace)
+    assert profile_target_controller(on_disk) == "attacker-controller"
+    assert profile_openocd_scripts(on_disk) == ("/tmp/workspace/attacker-interface.cfg", "/tmp/workspace/attacker-target.cfg")
+
+    discovery = attached(monkeypatch)
+    tools = service(workspace)
+    try:
+        planned = tools.call(PROJECT_CONFIG_ADOPT)
+    finally:
+        tools.close()
+
+    assert planned["ok"] is True, planned
+    given = discovery["_selected"]["profile"]
+    # The package-owned default, read through the very helpers the OpenOCD path
+    # uses: no controller, and the shipped skeleton's scripts, never the
+    # workspace's `attacker-*.cfg` or its `attacker-controller`.
+    assert given == DEFAULT_PROJECT_PROFILE
+    assert profile_target_controller(given) is None
+    assert profile_openocd_scripts(given) == skeleton_debugger_scripts()
+    assert "attacker-controller" not in profile_openocd_scripts(given)
+
+
+def test_a_timed_out_openocd_read_quarantines_the_probe_and_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reaped OpenOCD read may have halted the core; the bench is held, not filled.
+
+    An OpenOCD `init` reaped mid-attach comes back `ok: false` with
+    `hardware_state: unknown`, so `overall_success` refuses it and no probe or
+    controller is carried into the file. And because the read may have left the
+    target halted with nothing to resume it, the lease is not handed back as a
+    clean release: it declines to confirm a safe state it never reached, which
+    quarantines the probe `safe_state_unconfirmed` and refuses
+    `resource_quarantined`. The audit record says the same, and the file is
+    untouched.
+    """
+    workspace, path = placeholder_bench(tmp_path, monkeypatch, **{CONFIG_DESCRIPTION_RIGHT: True})
+    before = path.read_text(encoding="utf-8")
+
+    def timed_out(timeout_s: float = 10.0, *, probe_id: str | None = None, before_connect: Any = None, profile: Any = None) -> dict:
+        # The HOTPLUG/attach lock is taken exactly as the real read takes it, then
+        # the reaped read comes back with the board's state unknown.
+        if before_connect is not None:
+            before_connect(PROBE_SERIAL)
+        return {
+            "ok": False,
+            "tool": "bootstrap_hardware_discovery",
+            "error_type": "timeout",
+            "probe_id": PROBE_SERIAL,
+            "target": None,
+            "side_effect_committed": False,
+            "side_effect_status": "unknown",
+            "hardware_state": "unknown",
+            "cleanup_required": False,
+            "summary": "OpenOCD did not finish its read before it was reaped.",
+        }
+
+    monkeypatch.setattr("agentic_hil.adopt.discover_attached_hardware", timed_out)
+    coordinator = HardwareCoordinator(load_authoritative_config(workspace), "python")
+    try:
+        refused = project_config_adopt_hardware(workspace, load_authoritative_config(workspace), {"apply": True}, coordinator=coordinator)
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined"
+        assert refused["quarantined"] is True
+        assert refused["cleanup_required"] is True
+        # The read's own unknown effect survives into the refusal rather than
+        # being reported as an untouched bench.
+        assert refused["hardware_state"] == "unknown"
+        assert refused["side_effect_status"] == "unknown"
+        assert "safe_state_unconfirmed" in refused["cleanup_reasons"]
+        # The lease was quarantined, not handed back: a clean release would have
+        # cleared `blocked`, and it is still held. (It is not an `audit_incident`,
+        # so it does not `stand` forever -- the target's state is what the next
+        # reset and probe say it is -- but this process did not vouch for it.)
+        assert coordinator.blocked is True
+        assert coordinator.incident_stands is False
+    finally:
+        # A close over a held incident leaves it persisted and may report the
+        # locks could not all come back; either way the file must be untouched.
+        with contextlib.suppress(Exception):
+            coordinator.close()
+
+    assert path.read_text(encoding="utf-8") == before, "a timed-out read carries nothing into the file"
 
 
 def _probe_release_fails(monkeypatch: pytest.MonkeyPatch) -> None:

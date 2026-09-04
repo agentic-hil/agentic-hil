@@ -436,7 +436,38 @@ def _openocd_target_identity(
         "timed_out": probed.timed_out,
         "returncode": probed.returncode,
     }
-    controller = None if probed.not_found or probed.timed_out else openocd_target_name(f"{probed.stdout}{probed.stderr}")
+    if probed.not_found:
+        # The OpenOCD that resolved on PATH was gone by the time this spawned, so
+        # nothing was said to the board: a pre-contact failure, the same one the
+        # ST-Link path reports when its own CLI disappears. The bench is
+        # untouched, so the state stays `unchanged`, but the read did not happen
+        # and this is not a probe that answered with no name.
+        return None, _discovery_failure(
+            "debugger_not_found",
+            f"OpenOCD (`{executable}`) disappeared before the target could be read. Nothing was said to the board.",
+            **attempt,
+        )
+    if probed.timed_out:
+        # A reaped read, not an answered one. OpenOCD's `init` attaches over SWD
+        # and can halt the target before `targets` and `shutdown` are ever
+        # reached, and the process was killed rather than allowed to run its own
+        # `shutdown`, so neither the point it stopped at nor the state it left the
+        # core in is known. `hardware_state: unknown` fails `overall_success` (so
+        # no configuration is generated or adopted from it) and is what the leased
+        # caller quarantines the probe on; collapsing this into "no target named"
+        # released a board that may be sitting halted.
+        return None, _discovery_failure(
+            "timeout",
+            (
+                f"OpenOCD did not finish its read-only init/targets/shutdown through `{interface_cfg}` and "
+                f"`{target_cfg}` before it was reaped, and its `init` attaches to the target, so what it left on the "
+                "board is not known."
+            ),
+            hardware_state="unknown",
+            side_effect_status="unknown",
+            **attempt,
+        )
+    controller = openocd_target_name(f"{probed.stdout}{probed.stderr}")
     if controller is None:
         return None, {
             **attempt,
@@ -548,6 +579,14 @@ def discover_attached_hardware(
         summary = "One attached STM32 target was identified through ST-Link HOTPLUG discovery."
     else:
         target, target_discovery = _openocd_target_identity(executable, probe_id, profile, timeout_s)
+        if target is None and target_discovery.get("ok") is False:
+            # A read that failed -- OpenOCD gone before it spawned, or reaped
+            # mid-attach -- is not a probe that answered with no target, and the
+            # ST-Link path above returns exactly this for the same case. Letting
+            # it fall through would build an `ok: true` bench from a read that
+            # never finished (and, on a timeout, from a board whose state is not
+            # known); the failure is the whole answer.
+            return {**target_discovery, "executable": executable, "probe_id": probe_id, "com_ports": com_ports, **found_by}
         summary = (
             f"One attached ST-Link was identified from this host's USB serial inventory and its target is "
             f"'{target['controller']}'."

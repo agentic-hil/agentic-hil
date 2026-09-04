@@ -56,7 +56,7 @@ from typing import Any
 
 import yaml
 
-from agentic_hil.bootstrap import discover_attached_hardware, load_project_profile, port_device_name
+from agentic_hil.bootstrap import DEFAULT_PROJECT_PROFILE, discover_attached_hardware, port_device_name
 from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, ConfigError
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
@@ -776,11 +776,20 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
         reason_prefix="adopt",
         resources=configured_resources,
         probe_id=requested_probe,
-        # The same profile `agentic-hil init` reads, from the same workspace.
-        # Adoption's whole job is to fill in what `init` could not, so a bench
-        # whose board is named by its project profile must not be a board this
-        # path cannot name either.
-        profile=load_project_profile(workspace),
+        # Package-owned discovery inputs, never this workspace's own
+        # `agentic-hil.config.example.yaml`. Adoption is a tool an agent reaches
+        # over MCP, and its contract is that it carries facts read off the
+        # machine, not values a checkout supplied. A repository profile read here
+        # would decide the target with nothing said to the board, and its
+        # `interface_cfg`/`target_cfg` would become the `openocd -f` scripts this
+        # path spawns: a checkout naming its own two `.cfg` files would run them
+        # on the fallback backend, past the authoritative hardware permissions.
+        # So the controller is read off the attached target and the OpenOCD
+        # scripts are the package skeleton's, exactly as `project_config_create`
+        # reads them over MCP through `GENERATED_PROJECT_PROFILE`. `agentic-hil
+        # init` stays the one place a workspace profile speaks, because there it
+        # is an operator's statement about their own bench, made at their own CLI.
+        profile=DEFAULT_PROJECT_PROFILE,
     )
     if refusal is not None:
         return {**refusal, "path": str(target_path), "workspace_root": existing.workspace_root}
@@ -1017,10 +1026,16 @@ def discover_under_hardware_lease(
       instead: same effect on the next caller, which is that there is no next
       hardware call until an operator resolves it.
 
-    ``profile`` is the workspace's own `agentic-hil.config.example.yaml`, passed
-    straight through: on a host with no STM32CubeProgrammer it is what names the
-    board, so a project that ships one is read without a word being said to the
-    target. It decides nothing else, and nothing at all where that CLI answers.
+    ``profile`` is the discovery input passed straight through to
+    `discover_attached_hardware`: on a host with no STM32CubeProgrammer it names
+    the board and the OpenOCD scripts a read goes through, so it is read without a
+    word said to the target, and it decides nothing where that CLI answers. Which
+    profile a caller hands is the caller's trust decision, not this function's:
+    `agentic-hil init` hands the workspace's own `agentic-hil.config.example.yaml`
+    because the operator ran it, while `project_config_adopt_hardware` and
+    `project_config_create` are reached over MCP and hand the package-owned
+    default, so a checkout cannot supply the scripts or the controller a hardware
+    read here uses.
 
     ``tool`` names the caller in every result and record, and ``reason_prefix``
     names it in a quarantine reason: the callers are `project_config_adopt_hardware`,
@@ -1080,6 +1095,15 @@ def discover_under_hardware_lease(
             **_combined_status(held),
             "retry_safe": False,
         }
+    # A read whose own result says it could not establish the state it left the
+    # board in -- an OpenOCD `init` reaped mid-attach reports `hardware_state:
+    # unknown` -- is not a lease this process may hand back as a clean release.
+    # `overall_success` already fails such a discovery so no file is written from
+    # it, but the board itself is quarantined only if the release declines to
+    # confirm a safe state the read never reached; that turns the lease into the
+    # same `safe_state_unconfirmed` incident an operator resolves as any other
+    # release that could not vouch for the bench.
+    safe_state = discovery.get("hardware_state") != "unknown"
     released = True
     for lease in reversed(held):
         if lease.state == "active":
@@ -1088,8 +1112,9 @@ def discover_under_hardware_lease(
             # Discarding that answer reported a clean read of a board this
             # process is still holding, and let the configuration write go ahead
             # under it: the one place where "the hardware is fine now" has to be
-            # a checked claim rather than an assumption.
-            released = lease.release() and released
+            # a checked claim rather than an assumption. It also returns False
+            # when this read declines to confirm the board is safe, above.
+            released = lease.release(safe_state_confirmed=safe_state) and released
     status = _combined_status(held)
     if not released or status["cleanup_required"] or status["quarantined"]:
         return {}, _refuse_after_failed_release(existing, record, discovery, status, tool)

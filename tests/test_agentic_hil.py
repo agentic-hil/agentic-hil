@@ -5653,17 +5653,25 @@ def _identity_database(
     a uid to (name, primary gid) and `groups` maps a gid to (name, gid, other
     members); an id neither one holds raises `KeyError`, exactly as the real
     databases do for an account that has been deleted.
+
+    `getpwall` answers the whole of `users`, because the rule enumerates the
+    passwd database to find a second account sharing a primary gid -- a member no
+    group's `gr_mem` ever lists -- so a host with two such accounts has to be
+    stateable here too.
     """
 
     def getpwuid(uid: int) -> SimpleNamespace:
         name, primary = users[uid]
         return SimpleNamespace(pw_name=name, pw_uid=uid, pw_gid=primary)
 
+    def getpwall() -> list[SimpleNamespace]:
+        return [SimpleNamespace(pw_name=name, pw_uid=uid, pw_gid=primary) for uid, (name, primary) in users.items()]
+
     def getgrgid(gid: int) -> SimpleNamespace:
         name, own, members = groups[gid]
         return SimpleNamespace(gr_name=name, gr_gid=own, gr_mem=list(members))
 
-    monkeypatch.setattr("agentic_hil.config.pwd", SimpleNamespace(getpwuid=getpwuid))
+    monkeypatch.setattr("agentic_hil.config.pwd", SimpleNamespace(getpwuid=getpwuid, getpwall=getpwall))
     monkeypatch.setattr("agentic_hil.config.grp", SimpleNamespace(getgrgid=getgrgid))
 
 
@@ -5849,6 +5857,67 @@ def test_a_foreign_group_writable_launcher_stays_refused(monkeypatch: pytest.Mon
 
     assert is_user_private_group(1001, 3001) is False
     assert untrusted_launcher_file(_file_stat(0o775, 1001, 3001), trusted_uids=frozenset({0, 1001})) == "group-writable by group developers, which is not your private group"
+
+
+def test_a_second_account_with_the_same_primary_gid_is_not_a_private_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The member `gr_mem` never lists: a second account's own login group.
+
+    `gr_mem` carries supplementary members only, so an account whose *primary*
+    gid is this group does not appear in it. Two accounts sharing gid 1000 as
+    their login group -- `alice` and `bob` here, with an empty member list --
+    left the name, the gid and the member-list checks all satisfied, and the
+    relaxation trusted a `0775` file `alice` wrote that `bob` could rewrite. The
+    passwd database is enumerated for exactly this: a second account naming the
+    gid as its primary makes the group foreign, the same as a named supplementary
+    member does.
+    """
+    _identity_database(
+        monkeypatch,
+        users={1000: ("alice", 1000), 1001: ("bob", 1000)},
+        groups={1000: ("alice", 1000, [])},
+    )
+
+    assert is_user_private_group(1000, 1000) is False
+    assert untrusted_launcher_file(_file_stat(0o775, 1000, 1000), trusted_uids=frozenset({0, 1000})) == "group-writable by group alice, which is not your private group"
+
+    # And with `bob` gone from the passwd database, the very same group is the
+    # private group it always was: the enumeration is what decides it, not the
+    # name or the gid.
+    _identity_database(monkeypatch, users={1000: ("alice", 1000)}, groups={1000: ("alice", 1000, [])})
+
+    assert is_user_private_group(1000, 1000) is True
+
+
+def test_a_passwd_source_that_will_not_enumerate_leaves_group_write_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail closed where membership cannot be established, not just where it is unknown.
+
+    A `getpwuid` that answers for the owner beside a `getpwall` that raises (or
+    one that returns a set the owner is not even in, which is what an NSS source
+    declining enumeration looks like) cannot rule out a second account on the
+    gid. Reading that absence as "no other member" is the widening the whole rule
+    refuses, so both shapes keep the launcher refused.
+    """
+    owner = SimpleNamespace(pw_name="jarvis", pw_uid=1001, pw_gid=1001)
+
+    def raising_getpwall() -> list[SimpleNamespace]:
+        raise OSError("this NSS source does not enumerate")
+
+    monkeypatch.setattr(
+        "agentic_hil.config.pwd",
+        SimpleNamespace(getpwuid=lambda uid: owner, getpwall=raising_getpwall),
+    )
+    monkeypatch.setattr("agentic_hil.config.grp", SimpleNamespace(getgrgid=lambda gid: SimpleNamespace(gr_name="jarvis", gr_gid=1001, gr_mem=[])))
+
+    assert is_user_private_group(1001, 1001) is False
+
+    # An enumeration that comes back without the owner it just resolved is
+    # incomplete by construction, and is refused rather than read as empty.
+    monkeypatch.setattr(
+        "agentic_hil.config.pwd",
+        SimpleNamespace(getpwuid=lambda uid: owner, getpwall=lambda: []),
+    )
+
+    assert is_user_private_group(1001, 1001) is False
 
 
 def test_a_world_writable_launcher_stays_refused_whatever_its_group_is(monkeypatch: pytest.MonkeyPatch) -> None:

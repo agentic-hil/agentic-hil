@@ -2012,17 +2012,29 @@ def is_user_private_group(uid: int, gid: int) -> bool:
     owner's own write bit did not already admit, and reading it as a second
     writer refused the installation this project's own installer produces.
 
-    All three conditions have to hold, because each one alone is satisfiable by
-    a group that really does hold other people: the group carries the owner's
-    name, it is the owner's primary group, and it lists no member but the owner.
-    A group merely named after somebody, the owner's primary group with a second
-    account added to it, and any other group stay foreign, and group write
-    through them stays refused.
+    All of these conditions have to hold, because each one alone is satisfiable
+    by a group that really does hold other people: the group carries the owner's
+    name, it is the owner's primary group, it lists no supplementary member but
+    the owner, and no other account names it as its own primary group. A group
+    merely named after somebody, the owner's primary group with a second account
+    added to it as a supplementary or as a login group, and any other group stay
+    foreign, and group write through them stays refused.
+
+    The last condition is the one ``gr_mem`` cannot answer: that member list
+    holds only *supplementary* members, so an account whose *primary* gid is this
+    group never appears in it. Two accounts sharing gid 1000 as their login
+    group, with an empty ``gr_mem``, would otherwise pass -- and a ``0775``
+    launcher the first writes would be writable by the second. So the passwd
+    database is enumerated and any second account with this primary gid refuses
+    the group, exactly as a named supplementary member does.
 
     False wherever the passwd and group databases are unavailable (Windows,
     which never reaches this) or cannot answer for these ids: an identity
     nothing could confirm leaves the old refusal standing rather than widening
-    it on a guess.
+    it on a guess. That extends to an enumeration that does not come back
+    complete -- one whose passwd source declines ``getpwall`` and so cannot even
+    list the owner it just resolved: membership that cannot be established is
+    refused rather than assumed empty.
     """
     if pwd is None or grp is None:
         return False
@@ -2033,7 +2045,19 @@ def is_user_private_group(uid: int, gid: int) -> bool:
         return False
     if group.gr_name != owner.pw_name or group.gr_gid != owner.pw_gid:
         return False
-    return not [member for member in (group.gr_mem or []) if member != owner.pw_name]
+    if [member for member in (group.gr_mem or []) if member != owner.pw_name]:
+        return False
+    try:
+        accounts = list(pwd.getpwall())
+    except (AttributeError, OSError, KeyError, TypeError, ValueError):
+        return False
+    if not any(account.pw_uid == uid for account in accounts):
+        # The owner is a real account -- getpwuid answered for it above -- so an
+        # enumeration that does not contain it did not enumerate completely (an
+        # NSS source that declines getpwall). Membership cannot be established,
+        # so fail closed rather than read the absence as "no other member".
+        return False
+    return not any(account.pw_gid == gid and account.pw_uid != uid for account in accounts)
 
 
 def untrusted_write_access(info: os.stat_result) -> str | None:

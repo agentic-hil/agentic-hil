@@ -51,7 +51,7 @@ from agentic_hil.knowledge import (
     read_resource,
     remediation_fields,
 )
-from agentic_hil.report import read_last_report
+from agentic_hil.report import overall_success, read_last_report
 from agentic_hil.test_reactor import TestReactor, load_test_config
 from agentic_hil.tools import AgenticHILToolService, project_config_create
 from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, com_port_is_unbound, fold_hardware_id
@@ -1936,6 +1936,60 @@ def test_a_probe_that_answers_with_no_target_still_configures_the_bench(monkeypa
     assert "no target" in result["target_discovery"]["summary"]
 
 
+def test_a_timed_out_openocd_read_is_a_failure_not_an_unnamed_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reaped OpenOCD read is a failed read whose effect is unknown.
+
+    `init` attaches over SWD before `targets` runs, and the process was killed
+    rather than allowed to reach its own `shutdown`, so a timeout can leave the
+    core halted with nothing to resume it. Collapsing that into "the ST-Link
+    answered with no target" returned `ok: true` about a bench that may be sitting
+    halted, from which `init`/adoption/creation would go on to write a file. Now
+    the read is `ok: false`, its `error_type` is `timeout`, and `hardware_state`
+    is `unknown` -- which `overall_success` refuses -- and no controller is
+    invented from the empty output."""
+
+    def spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand("", "", None, True, False)
+
+    _linux_openocd_host(monkeypatch, spawn=spawn)
+
+    result = discover_attached_hardware(profile={"target": {"name": "demo"}})
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "timeout"
+    assert result["hardware_state"] == "unknown"
+    assert result["side_effect_status"] == "unknown"
+    assert result.get("target") is None
+    assert overall_success(result) is False
+    # The probe and toolchain are still named, so the failure says which board it
+    # was about, and the timeout is carried where a reader can see it.
+    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["timed_out"] is True
+    assert result["source"] == "openocd"
+
+
+def test_openocd_gone_before_the_read_is_a_pre_contact_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`not_found` is told apart from `timeout`: nothing was said to the board.
+
+    The OpenOCD that resolved on PATH was gone by the time the read spawned, so
+    unlike a reaped attach this touched no target: the failure is
+    `debugger_not_found` and the bench stays `unchanged`. Lumping it in with the
+    timeout would quarantine a board a pre-contact miss never reached."""
+
+    def spawn(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand("", "", None, False, True)
+
+    _linux_openocd_host(monkeypatch, spawn=spawn)
+
+    result = discover_attached_hardware(profile={"target": {"name": "demo"}})
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "debugger_not_found"
+    assert result["hardware_state"] == "unchanged"
+    assert result.get("target") is None
+    assert overall_success(result) is False
+
+
 def test_the_generated_entry_names_the_backend_that_actually_answered() -> None:
     """A file that says `stlink` where there is no STM32CubeProgrammer is a file
     that loads and refuses at the first call.
@@ -2061,7 +2115,14 @@ def test_adopt_hardware_fills_a_placeholder_on_a_host_with_only_openocd(tmp_path
 
     The three values it carries are the three nobody retypes correctly: the
     24-character probe serial, the toolchain path, and which of the host's
-    thirty-odd serial devices is this board's."""
+    thirty-odd serial devices is this board's.
+
+    The controller is read off the board through OpenOCD, never out of the
+    workspace profile: adoption is a tool reached over MCP, so a checkout does not
+    get to name the part. OpenOCD reports the family `stm32f4x`; the file already
+    holds the exact part the operator's own `init` carried out of the profile, so
+    adoption keeps that under `kept` rather than replacing it with the coarser
+    board read."""
     workspace = tmp_path / "starter"
     workspace.mkdir()
     (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
@@ -2072,7 +2133,10 @@ def test_adopt_hardware_fills_a_placeholder_on_a_host_with_only_openocd(tmp_path
     assert placeholder["ok"] is True, placeholder
     assert load_authoritative_config(workspace).debuggers["dut"].probe_id is None
 
-    _linux_openocd_host(monkeypatch)
+    def openocd_reads_the_target(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand(OPENOCD_TARGETS_OUTPUT, "", 0, False, False)
+
+    _linux_openocd_host(monkeypatch, spawn=openocd_reads_the_target)
     result = adopt_hardware(com_port_id="dut_uart")
 
     assert result["ok"] is True, result
@@ -2080,10 +2144,12 @@ def test_adopt_hardware_fills_a_placeholder_on_a_host_with_only_openocd(tmp_path
     carried = {item["key"]: item["value"] for item in result["carried"]}
     assert carried["debuggers.dut.probe_id"] == "066AFF303435554157113106"
     assert carried["debuggers.dut.executable"] == FAKE_OPENOCD_PATH
-    # The controller is already right: the placeholder carried it out of this
-    # project's profile, so adoption reports it as current rather than writing
-    # it again. What only the attached hardware knows is what is left to carry.
-    assert {"key": "target.controller", "value": "stm32f446ret6"} in result["already_current"]
+    # The board read (`stm32f4x`) and the operator's exact part (`stm32f446ret6`)
+    # differ, so the operator's value is kept and the coarser read is reported
+    # under `kept` rather than carried or waved through as current.
+    kept = {item["key"]: item for item in result["kept"]}
+    assert kept["target.controller"]["configured_value"] == "stm32f446ret6"
+    assert kept["target.controller"]["discovered_value"] == "stm32f4x"
     assert carried["com_ports.dut_uart.device"] == NUCLEO_VCP["stable_device"]
     assert carried["com_ports.dut_uart.serial_number"] == "066AFF303435554157113106"
     # And nothing under `unavailable` is about the toolchain: the entry the
@@ -2092,6 +2158,7 @@ def test_adopt_hardware_fills_a_placeholder_on_a_host_with_only_openocd(tmp_path
     assert [item["key"] for item in result["unavailable"]] == []
     written = load_authoritative_config(workspace)
     assert written.debuggers["dut"].executable == FAKE_OPENOCD_PATH
+    assert written.target.controller == "stm32f446ret6", "the operator's exact part survives the coarser board read"
     assert written.com_ports["dut_uart"].device == NUCLEO_VCP["stable_device"]
 
 
