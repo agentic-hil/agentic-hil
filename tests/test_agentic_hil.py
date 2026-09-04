@@ -86,6 +86,22 @@ from agentic_hil.report import logs_directory
 from agentic_hil.tools import AgenticHILToolService, UnprovisionedToolService
 from agentic_hil.types import CURRENT_CONFIG_VERSION
 
+# One Nucleo's virtual COM port, exactly as pyserial reports it on a Linux host:
+# the ST-Link's own USB vendor and product ids, and the serial the probe
+# published, which is the string OpenOCD's `adapter serial` takes. The probe
+# listing on an OpenOCD bench is read out of a reading shaped like this one.
+NUCLEO_VCP_PORT: dict = {
+    "device": "/dev/ttyACM0",
+    "name": "ttyACM0",
+    "description": "STM32 STLink - ST-Link VCP Ctrl",
+    "manufacturer": "STMicroelectronics",
+    "product": "STM32 STLink",
+    "serial_number": "066AFF303435554157113106",
+    "vid": 0x0483,
+    "pid": 0x374B,
+    "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066AFF303435554157113106-if02",
+}
+
 
 def mcp_tool_call(service: AgenticHILToolService, name: str, arguments: dict | None = None) -> dict:
     response = handle_mcp_message(
@@ -6306,14 +6322,118 @@ def test_openocd_passes_configured_probe_id(tmp_path: Path) -> None:
     assert "adapter serial STLINK123" in log_text
 
 
-def test_openocd_probe_listing_reports_not_supported(tmp_path: Path) -> None:
+def test_openocd_probe_listing_reads_the_hosts_usb_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal an OpenOCD bench got where TROUBLESHOOTING sends it (#432).
+
+    `Refused: not_supported, OpenOCD cannot enumerate all connected probe IDs`
+    was the whole answer on a configured `type: openocd` bench, and section 4
+    names this command as the way an OpenOCD reader finds a probe. It is also
+    the one thing this project already knew how to do: bootstrap discovery has
+    read ST-Link serials out of the host's USB descriptors since #423, and the
+    serial the caller wanted was in `agentic-hil com-ports` all along. The
+    configured backend now reads the same inventory and says which enumeration
+    answered.
+    """
+    monkeypatch.setattr(
+        "agentic_hil.backends.openocd.list_available_com_ports",
+        lambda tool: {"ok": True, "tool": tool, "ports": [NUCLEO_VCP_PORT, {"device": "/dev/ttyS0", "name": "ttyS0"}]},
+    )
     service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
     try:
         result = mcp_tool_call(service, "debugger_probes_list")
     finally:
         service.close()
+
+    assert result["ok"] is True, result
+    assert result["backend"] == "openocd"
+    assert result["discovered_by"] == "usb_serial_inventory"
+    assert result["probes"] == [{"probe_id": NUCLEO_VCP_PORT["serial_number"]}]
+    # The port the id was read out of, so an empty listing beside a visible
+    # ST-Link cannot be reported as "no probe attached".
+    assert result["stlink_ports"][0]["device"] == NUCLEO_VCP_PORT["device"]
+    # Nothing was said to a board to answer this.
+    assert result["target_contacted"] is False
+    assert result["hardware_state"] == "unchanged"
+
+
+def test_openocd_probe_listing_still_refuses_an_adapter_nothing_enumerates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`not_supported` survives exactly where it is still true.
+
+    OpenOCD drives adapters whose USB identity this host does not read, and an
+    ST-Link inventory is not their enumeration. Answering those with an empty
+    listing would say "no probe attached" about a bench nobody looked at, so the
+    entry whose `interface_cfg` names one is refused, and the refusal names the
+    script that decided it.
+    """
+    called: list[str] = []
+    monkeypatch.setattr(
+        "agentic_hil.backends.openocd.list_available_com_ports",
+        lambda tool: called.append(tool) or {"ok": True, "tool": tool, "ports": [NUCLEO_VCP_PORT]},
+    )
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path, interface_cfg="interface/jlink.cfg"))))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+
     assert result["ok"] is False
     assert result["error_type"] == "not_supported"
+    assert "interface/jlink.cfg" in result["summary"]
+    assert result["interface_cfg"] == "interface/jlink.cfg"
+    assert result["target_contacted"] is False
+    # And the inventory is not even read for an adapter it cannot answer for.
+    assert called == []
+
+
+def test_openocd_probe_listing_says_so_when_the_inventory_cannot_be_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reading that failed is not a bench with no probes on it.
+
+    Without OpenOCD's own listing the host inventory *is* the enumeration, so an
+    inventory that could not be read is a discovery that could not run. Reporting
+    `ok: true` with an empty `probes` there would tell an operator their board is
+    missing on the evidence of a check that never happened.
+    """
+    monkeypatch.setattr(
+        "agentic_hil.backends.openocd.list_available_com_ports",
+        lambda tool: {"ok": False, "tool": tool, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported."},
+    )
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "probe_discovery_failed"
+    assert "pyserial is not installed" in result["summary"]
+    assert result["target_contacted"] is False
+
+
+@pytest.mark.parametrize(
+    ("interface_cfg", "enumerated"),
+    [
+        ("interface/stlink.cfg", True),
+        ("interface/stlink-dap.cfg", True),
+        ("interface/stlink-v2-1.cfg", True),
+        ("C:/openocd/share/openocd/scripts/interface/stlink.cfg", True),
+        (r"C:\openocd\scripts\interface\stlink.cfg", True),
+        ("interface/STLINK.CFG", True),
+        ("interface/jlink.cfg", False),
+        ("interface/cmsis-dap.cfg", False),
+        ("interface/ftdi/olimex-arm-usb-ocd.cfg", False),
+        ("", False),
+    ],
+)
+def test_the_interface_script_decides_whether_a_probe_can_be_enumerated(interface_cfg: str, enumerated: bool) -> None:
+    """The rule reads the script's own name, both separators, either case.
+
+    A Windows configuration writes forward slashes by convention and backslashes
+    by accident, and an operator may name an absolute path to a script of their
+    own; none of that may change which adapter the entry is understood to name.
+    """
+    from agentic_hil.backends.openocd import openocd_interface_enumerates_by_usb
+
+    assert openocd_interface_enumerates_by_usb(interface_cfg) is enumerated
 
 
 def test_stlink_lists_all_connected_probe_ids(tmp_path: Path) -> None:

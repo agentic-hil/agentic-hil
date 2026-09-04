@@ -1136,7 +1136,17 @@ def render_adopt_hardware(result: JsonObject) -> list[str]:
 
 def render_debugger_probes(result: JsonObject) -> list[str]:
     lines = _headline(result)
-    header = _fields([("source", result.get("source")), ("backend", result.get("backend")), ("quarantine_id", result.get("quarantine_id"))])
+    # `discovered_by` beside the backend, because on an OpenOCD bench the two are
+    # not the same fact: the backend is the toolchain the entry drives, and the
+    # enumeration that produced these ids is this host's USB serial inventory
+    # rather than anything OpenOCD ran. A reader deciding whether a serial was
+    # read off the probe or off the descriptor it published needs that on screen.
+    header = _fields([
+        ("source", result.get("source")),
+        ("backend", result.get("backend")),
+        ("discovered_by", result.get("discovered_by")),
+        ("quarantine_id", result.get("quarantine_id")),
+    ])
     if header:
         lines.append("")
         lines.extend(header)

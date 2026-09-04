@@ -3246,7 +3246,7 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narro
         "probe that way: validated flashing and unrestricted debugger access are mutually exclusive policies, so while "
         "either is true on a probe, flash_firmware on that probe is refused. Neither has a tool behind it here, so "
         "turning one on costs you flashing and buys nothing.",
-        "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (OpenOCD cannot enumerate: read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
+        "If multiple debug probes are connected, give each debuggers entry the full unique id of its own probe; run `agentic-hil debugger-probes` to list them (on an OpenOCD bench the ids come from this host's USB serial inventory, which reaches an ST-Link and no other adapter: for one of those, read the serial off the probe). Test-reactor plan steps then address a board by its name; the MCP tools require exactly one configured probe.",
     ])
     if available_com_ports.get("ok"):
         ports = available_com_ports.get("ports", [])

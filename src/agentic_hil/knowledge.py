@@ -2713,9 +2713,10 @@ UNNAMED_PROBE_RULE = {
         "A lone configured debugger does not have to carry a probe_id: it has no other entry to be confused with, so "
         "the rule above would not remove any ambiguity there, only block the bench outright - including the "
         "Nucleo-F446RE + ST-Link + OpenOCD bench this project documents as its supported first path, for which OpenOCD "
-        "cannot self-enumerate a serial to satisfy the demand with (debugger_probes_list answers not_supported), and a "
-        "probe with no serial pyOCD or ST-Link can read either - the debugger analogue of the CH340-style adapters "
-        "com_ports already has to tolerate - would have no way to satisfy it at all. The exemption is from being "
+        "has no probe listing of its own: debugger_probes_list answers there out of this host's USB serial inventory, "
+        "which names an ST-Link and no other adapter, so an OpenOCD entry on any other probe still has no serial it "
+        "could be made to carry. And a probe with no serial pyOCD or ST-Link can read either - the debugger analogue "
+        "of the CH340-style adapters com_ports already has to tolerate - would have no way to satisfy it at all. The exemption is from being "
         "forced to, not from being able to: probe_id still works, and is still checked against the attached hardware, "
         "with exactly one debugger configured."
     ),

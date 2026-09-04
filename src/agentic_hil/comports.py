@@ -84,6 +84,98 @@ def list_available_com_ports(tool: str = "com_ports_available") -> JsonObject:
 
 
 # ---------------------------------------------------------------------------
+# Which of the ports this host lists is a debug probe.
+#
+# An ST-Link publishes its serial in the USB descriptor of the virtual COM
+# port it exposes, and that string is exactly what OpenOCD's `adapter serial`
+# takes. So the inventory above is also a probe enumeration, and it is the only
+# one two callers have: bootstrap discovery on a host with no
+# STM32CubeProgrammer, and the configured OpenOCD backend, which has no
+# backend-independent command of its own to enumerate probes with. It lives
+# here, beside the reading it interprets, so those two cannot grow different
+# answers to one question about one host.
+
+# Which enumeration produced a probe id, carried on every result that reports
+# one. The vendor CLI reads the probe itself; this reads the USB descriptor the
+# probe published to the host, and only the first of those has also spoken to a
+# target. A caller that has to tell them apart reads this rather than inferring
+# it from which fields are present.
+DISCOVERED_BY_USB_INVENTORY = "usb_serial_inventory"
+
+# STMicroelectronics' USB vendor id, and the product ids the ST-Link generations
+# enumerate under. One vendor and a closed set of products, because a serial
+# number is unique only within a vendor: matching on the vendor alone would read
+# any ST USB device's serial as a probe serial, and matching on "it has a
+# serial" would read a CH340's.
+#
+# The list is the ST-Link products whose composite device publishes a virtual
+# COM port, which is what puts them in a serial inventory at all: V2-1 and V3 in
+# their several personalities. An ST-Link this does not know is not enumerated
+# here, and the refusal says the CLI is the way to reach it, which is honest:
+# guessing from the vendor id would be the wrong-board failure this repository
+# spends its identity rules avoiding.
+STLINK_USB_VENDOR_ID = 0x0483
+STLINK_USB_PRODUCT_IDS = frozenset({0x3744, 0x3748, 0x374B, 0x374D, 0x374E, 0x374F, 0x3752, 0x3753, 0x3754})
+
+def usb_stlink_ports(available: JsonObject) -> list[JsonObject]:
+    """The host serial ports that are an ST-Link, off one inventory reading.
+
+    The whole of the fallback enumeration's evidence, kept as records rather
+    than as bare serials so that a refusal can say *which port* carried each
+    one. That is the sentence the reported failure was missing: an operator
+    whose ST-Link and its VCP are both in the listing was told no bench was
+    found, with nothing in the result to argue against it.
+
+    Vendor *and* product, never vendor alone: a USB serial number is unique
+    within a vendor and nowhere else, so `0483` plus "it published a serial"
+    would read an ST sensor bridge's serial as a probe serial.
+
+    A port that publishes no serial number is still listed here, and is
+    deliberately *not* an enumerated probe below. The two answer different
+    questions: this one is what the host is showing, and that has to include the
+    ST-Link nobody can name, because "no bench was found" beside a listed
+    ST-Link VCP is exactly the contradiction this evidence exists to prevent.
+    """
+    ports = available.get("ports") if available.get("ok") is True else None
+    if not isinstance(ports, list):
+        return []
+    matched: list[JsonObject] = []
+    for port in ports:
+        if not isinstance(port, dict):
+            continue
+        vid, pid = port.get("vid"), port.get("pid")
+        if isinstance(vid, bool) or isinstance(pid, bool) or vid != STLINK_USB_VENDOR_ID or pid not in STLINK_USB_PRODUCT_IDS:
+            continue
+        matched.append(dict(port))
+    return matched
+
+
+def usb_stlink_probe_ids(available: JsonObject) -> list[str]:
+    """One serial per attached ST-Link, in the spelling the host published.
+
+    A V2-1 or V3 enumerates several interfaces under one serial (the VCP and,
+    on some hosts, a second port), so the same physical probe appears in the
+    inventory more than once. Folded with ``fold_hardware_id``, which is the
+    identity rule everything else here selects, locks and compares by, so two
+    interfaces of one probe collapse to one probe and never to
+    ``ambiguous_hardware``. The first spelling wins, so what is written into a
+    configuration is what the host actually said.
+
+    A port that published no serial number is not a probe this can name, and a
+    probe with no id is one OpenOCD cannot be told to open, so it is left out
+    rather than guessed at. It stays in ``usb_stlink_ports`` above, which is
+    what lets the refusal say the ST-Link is there and unnameable rather than
+    that no bench was found.
+    """
+    found: dict[str, str] = {}
+    for port in usb_stlink_ports(available):
+        serial = str(port.get("serial_number") or "")
+        if serial:
+            found.setdefault(fold_hardware_id(serial), serial)
+    return list(found.values())
+
+
+# ---------------------------------------------------------------------------
 # Which board is behind this entry.
 #
 # `device` says how to reach a port, not which one it is. On both platforms

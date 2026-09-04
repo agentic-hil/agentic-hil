@@ -21,6 +21,12 @@ from agentic_hil.backends.common import (
     which,
 )
 from agentic_hil.backends.gdbdebug import GdbDebugSessions
+from agentic_hil.comports import (
+    DISCOVERED_BY_USB_INVENTORY,
+    list_available_com_ports,
+    usb_stlink_ports,
+    usb_stlink_probe_ids,
+)
 from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
 from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
 from agentic_hil.report import (
@@ -125,6 +131,29 @@ OPENOCD_INIT_PREFIX = f'init; echo "{OPENOCD_INIT_STAGE_MARKER}"; '
 OPENOCD_UNREGISTERED_COMMAND = re.compile(r'invalid command name "([^"]+)"', re.IGNORECASE)
 OPENOCD_WRONG_STAGE_COMMAND = re.compile(r"the '([^']+)' command must be used (?:after|before) 'init'", re.IGNORECASE)
 
+# The adapter scripts whose probes this host can enumerate without OpenOCD's
+# help. OpenOCD ships one family of them under that prefix (`stlink.cfg`,
+# `stlink-dap.cfg`, and the older per-generation names), and an ST-Link is the
+# one adapter whose USB identity `usb_stlink_probe_ids` reads. Matched on the
+# script's own name rather than on a list of releases, because the name is what
+# the operator wrote and what OpenOCD resolves; an entry naming any other
+# adapter has no enumeration behind it and is told so instead of being answered
+# with an empty listing that would read as "no probe attached".
+OPENOCD_USB_ENUMERATED_INTERFACE = "stlink"
+
+
+def openocd_interface_enumerates_by_usb(interface_cfg: str) -> bool:
+    """Whether this entry's adapter is one the USB serial inventory enumerates.
+
+    The script may be an OpenOCD search name (`interface/stlink.cfg`) or an
+    absolute path to a file of the operator's own, so only the final component
+    is read, without its extension and case-insensitively. Both separators are
+    split on: a Windows configuration writes forward slashes by convention and
+    backslashes by accident, and the answer must not depend on which."""
+    name = re.split(r"[\\/]", str(interface_cfg or "").strip())[-1].lower()
+    stem = name[: -len(".cfg")] if name.endswith(".cfg") else name
+    return stem.startswith(OPENOCD_USB_ENUMERATED_INTERFACE)
+
 
 class OpenOCDBackend:
     backend_name = "openocd"
@@ -194,14 +223,80 @@ class OpenOCDBackend:
         }
 
     def list_probes(self) -> JsonObject:
+        """Enumerate the probes attached to this host, or say why there is no way to.
+
+        OpenOCD still has no command that lists connected probes: it is told
+        which adapter to open and opens it. What it has, on an ST-Link bench, is
+        a host that already knows. The probe publishes its serial in the USB
+        descriptor of the virtual COM port it exposes, that string is exactly
+        what `adapter serial` takes, and bootstrap discovery has read probes out
+        of it since #423. The configured bench simply did not use it, so
+        `agentic-hil debugger-probes` refused `not_supported` on the very bench
+        TROUBLESHOOTING.md sends an OpenOCD reader to it from, while the serial
+        they were after was already in `agentic-hil com-ports`.
+
+        `not_supported` survives where it is still true: an entry whose
+        `interface_cfg` names an adapter that publishes no USB serial identity
+        this host can read has no enumeration behind it, and inventing one out of
+        the vendor id alone would be the wrong-board guess this project's
+        identity rules exist to refuse. The result says which enumeration
+        answered under `discovered_by`, so a caller never has to infer it.
+
+        Nothing is contacted either way: this reads a USB descriptor listing and
+        says nothing to a board."""
+        tool = "debugger_probes_list"
         if not self.config.probe_allowed():
-            return self._permission_denied("debugger_probes_list", "Debugger probe discovery is disabled by the authoritative config.")
+            return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.")
+        interface_cfg = self.config.debugger.interface_cfg
+        if not openocd_interface_enumerates_by_usb(interface_cfg):
+            return {
+                "ok": False,
+                "tool": tool,
+                "backend": self.backend_name,
+                "error_type": "not_supported",
+                "summary": (
+                    "OpenOCD has no command that enumerates connected probe IDs, and this entry's adapter is not one "
+                    f"this host can enumerate from its USB serial inventory either: `interface_cfg` is `{interface_cfg}`, "
+                    "which names neither an ST-Link nor any other adapter whose USB identity is read here. Read the id "
+                    "off the probe, or off the adapter vendor's own tool."
+                ),
+                "interface_cfg": interface_cfg,
+                **NOT_CONTACTED,
+            }
+        inventory = list_available_com_ports(tool)
+        if inventory.get("ok") is not True:
+            return {
+                "ok": False,
+                "tool": tool,
+                "backend": self.backend_name,
+                "error_type": "probe_discovery_failed",
+                "discovered_by": DISCOVERED_BY_USB_INVENTORY,
+                "summary": (
+                    "OpenOCD enumerates ST-Link probes from this host's USB serial inventory, and that inventory could "
+                    f"not be read: {inventory.get('summary', 'the serial backend did not answer')}"
+                ),
+                "interface_cfg": interface_cfg,
+                **NOT_CONTACTED,
+            }
+        probe_ids = usb_stlink_probe_ids(inventory)
         return {
-            "ok": False,
-            "tool": "debugger_probes_list",
+            "ok": True,
+            "tool": tool,
             "backend": self.backend_name,
-            "error_type": "not_supported",
-            "summary": "OpenOCD cannot enumerate all connected probe IDs through a backend-independent command.",
+            "discovered_by": DISCOVERED_BY_USB_INVENTORY,
+            "probes": [{"probe_id": probe_id} for probe_id in probe_ids],
+            # The ports the enumeration was read out of, including any ST-Link
+            # that published no serial. An empty `probes` beside a listed port is
+            # a probe that is there and cannot be named, which is a different
+            # fact from no probe at all.
+            "stlink_ports": usb_stlink_ports(inventory),
+            "interface_cfg": interface_cfg,
+            "summary": (
+                f"{len(probe_ids)} connected debugger probe(s) read from this host's USB serial inventory. OpenOCD has "
+                "no probe listing of its own, so the ids come from the USB descriptors the probes published and nothing "
+                "was said to a board."
+            ),
+            **NOT_CONTACTED,
         }
 
     def probe_target(self) -> JsonObject:
