@@ -181,7 +181,14 @@ def test_setup_runs_all_steps_in_one_command(tmp_path: Path, monkeypatch: pytest
     assert result["steps"]["config"]["ok"] is True
     assert result["steps"]["skill_install"]["ok"] is True
     assert result["steps"]["mcp_config"]["ok"] is True
-    assert result["steps"]["doctor"]["ok"] is True
+    # Nothing is attached on this host, so the file this command just wrote
+    # describes a bench with no hardware behind it. `doctor` says so rather than
+    # reporting green (#433), and `setup` keeps the file anyway: rolling back the
+    # documented outcome of the documented first command would be the worse of
+    # the two answers.
+    assert result["steps"]["doctor"]["ok"] is False
+    assert result["steps"]["doctor"]["unhealthy"] == ["bench_binding"]
+    assert result["steps"]["doctor"]["bench_binding"]["ok"] is False
     # MCP registration is USER-level, never written into the (untrusted) repo.
     assert not (workspace / ".mcp.json").exists()
     claude_json = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
@@ -2487,7 +2494,9 @@ def test_init_project_is_idempotent_and_keeps_the_config_it_finds(
 
     assert first["ok"] is True, first
     assert first["steps"]["config"]["ok"] is True
-    assert first["steps"]["doctor"]["ok"] is True
+    # No board on this host, so the bench is unbound and `doctor` is red about
+    # exactly that, while the run itself succeeds and keeps the file.
+    assert first["steps"]["doctor"]["unhealthy"] == ["bench_binding"]
     config_path = initialized_config_path(workspace)
     before = config_path.read_bytes()
 
@@ -2550,7 +2559,9 @@ def test_init_with_an_agent_hardens_a_config_an_earlier_plain_init_wrote(
     assert result["steps"]["config"]["ok"] is True
     assert result["steps"]["config"]["existing"] is True
     assert result["steps"]["config"]["skipped"] is True
-    assert result["steps"]["doctor"]["ok"] is True
+    # Unbound bench, red doctor, and the permission half still runs: the rules
+    # this command exists to add do not wait on a board being plugged in.
+    assert result["steps"]["doctor"]["unhealthy"] == ["bench_binding"]
     restriction = result["steps"]["agent_write_restriction"]
     assert restriction["ok"] is True
     assert restriction["added"] == _expected_deny_rules(config_path)
@@ -3051,7 +3062,7 @@ def test_both_halves_are_reachable_from_the_command_line(
     assert entrypoint(["init", "--agent", "claude-code", "--json"]) == 0
     project = json.loads(capsys.readouterr().out)
     assert project["scope"] == "project"
-    assert project["steps"]["doctor"]["ok"] is True
+    assert project["steps"]["doctor"]["unhealthy"] == ["bench_binding"]
     assert initialized_config_path(workspace).is_file()
 
 
@@ -3384,6 +3395,163 @@ def test_doctor_reports_every_named_debugger_and_its_permissions(tmp_path: Path,
     # Two probes, so nothing is bound and every grant is still denied.
     assert all(entry["bound"] is False for entry in result["debuggers"].values())
     assert result["debuggers"]["dut_a"]["permissions"]["allow_flash"] is False
+
+
+def test_doctor_says_a_bench_nobody_plugged_a_board_into_cannot_run_a_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The green report a newcomer acted on (#433).
+
+    `agentic-hil init` with nothing attached writes a workable file with
+    placeholders in it, which is the ordinary case: installing the tool and
+    connecting the board are two different moments. `doctor` reported that file
+    as loaded and exited 0, so the reader went and wrote the first plan, which
+    the same bench then refused. The verdict, the sentence and the exit code now
+    say what state this is, and name the command that ends it.
+    """
+    workspace = tmp_path / "firmware"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    assert init_config()["ok"] is True
+
+    report = doctor()
+
+    assert report["ok"] is False, report
+    # Named rather than left to be worked out from the sections.
+    assert report["unhealthy"] == ["bench_binding"]
+    binding = report["bench_binding"]
+    assert binding["ok"] is False
+    assert [entry["field"] for entry in binding["unbound"]] == ["debuggers"]
+    assert "no test plan can run" in binding["unbound"][0]["summary"]
+    # The command, on the result and in the headline a caller that keeps only
+    # `summary` is left with.
+    assert "adopt-hardware" in binding["next_step"]
+    assert "init --force" in binding["next_step"]
+    assert "not bound to hardware" in report["summary"]
+    assert "adopt-hardware" in report["summary"]
+    # And the placeholder in the description, reported beside it.
+    assert [entry["field"] for entry in binding["placeholders"]] == ["target.controller"]
+
+
+def test_doctor_names_a_declared_com_port_that_names_no_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second way a device is declared and unreachable.
+
+    A project profile names its ports before anybody knows which of the host's
+    thirty-odd serial devices they are, so `init` with no bench writes the entry
+    with no `device`. Every plan step and every COM call that opens it is refused
+    `com_port_not_bound`, and `doctor` is where that has to be visible before a
+    plan finds out.
+    """
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n")
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert report["ok"] is False, report
+    assert report["unhealthy"] == ["bench_binding"]
+    unbound = report["bench_binding"]["unbound"]
+    assert [entry["field"] for entry in unbound] == ["com_ports"]
+    assert unbound[0]["entries"] == ["dut_uart"]
+    assert "com_ports.dut_uart.device" in unbound[0]["summary"]
+    assert "com_port_not_bound" in unbound[0]["summary"]
+
+
+def test_doctor_stays_green_on_a_bench_whose_devices_all_name_hardware(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour that must not move: a bound bench is still healthy.
+
+    Everything this check adds has to be invisible on a configuration that names
+    its hardware, or `doctor` becomes a command nobody can get to green and the
+    verdict stops meaning anything.
+    """
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n    baudrate: 115200\n')
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert report["ok"] is True, report
+    assert report["unhealthy"] == []
+    assert report["bench_binding"]["ok"] is True
+    assert report["bench_binding"]["unbound"] == []
+    assert "not bound to hardware" not in report["summary"]
+    assert "adopt-hardware" not in report["summary"]
+
+
+def test_a_placeholder_controller_alone_is_reported_and_decides_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The description is not a device, and the verdict is about devices.
+
+    `target.controller` says what part this is; nothing routes through it, so a
+    board that flashes and runs plans with the key still at the skeleton value is
+    a working bench. It is reported, because it is the loudest sign the file was
+    written with nothing attached, and it does not make `doctor` red.
+    """
+    workspace = tmp_path / "workspace"
+    config_path = write_authoritative_config(workspace, monkeypatch)
+    document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    document["target"]["controller"] = "unknown-controller"
+    config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert report["ok"] is True, report
+    assert report["unhealthy"] == []
+    binding = report["bench_binding"]
+    assert binding["ok"] is True
+    assert binding["unbound"] == []
+    assert [entry["field"] for entry in binding["placeholders"]] == ["target.controller"]
+    # Still said out loud, with the command beside it.
+    assert "unknown-controller" in report["summary"]
+    assert "adopt-hardware" in report["summary"]
+
+
+def test_a_lone_debugger_without_a_probe_id_is_not_called_unbound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented Nucleo bench, which has no probe id and works.
+
+    Exactly one configured debugger is exempt from carrying a `probe_id`: it has
+    no second entry to be confused with, and OpenOCD has no listing of its own to
+    satisfy the demand from. Reading an unset `probe_id` as an unbound device
+    would call this project's own supported first path a broken bench.
+    """
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch, probe_id=None, auto_probe_ids=False)
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert report["debuggers"]["dut"]["probe_id"] is None
+    assert report["bench_binding"]["ok"] is True, report["bench_binding"]
+    assert report["unhealthy"] == []
+
+
+def test_troubleshooting_describes_the_unbound_doctor_the_way_it_behaves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The section a reader with placeholders lands on, and the command's answer.
+
+    Section 5b is where somebody whose board was plugged in after `setup` ends
+    up, and it said `doctor` skips the debugger check and nothing else. It now
+    has to name the fields and the exit code, and the check has to still produce
+    them: a page describing a verdict the command stopped giving would be worse
+    than the silence it replaced.
+    """
+    workspace = tmp_path / "firmware"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    assert init_config()["ok"] is True
+    report = doctor()
+
+    page = (Path(__file__).resolve().parents[1] / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+    section = page.split("## 5b.", 1)[1].split("\n## ", 1)[0]
+
+    # Every field the page tells a reader to look at is on the result.
+    for field in ("bench_binding", "unhealthy"):
+        assert f"`{field}" in section
+        assert field in report
+    assert report["bench_binding"]["ok"] is False
+    assert "next_step" in report["bench_binding"]
+    assert "placeholders" in report["bench_binding"]
+    # And the two claims the page makes about the verdict.
+    assert "exits non-zero" in section
+    assert "no test plan can run" in section
+    assert report["ok"] is False
 
 
 def test_mcp_config_writes_project_mcp_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

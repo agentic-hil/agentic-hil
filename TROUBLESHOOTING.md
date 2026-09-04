@@ -139,7 +139,11 @@ Installed packs live in `cmsis-pack-manager`'s data directory (`%LOCALAPPDATA%\c
 
 ## 5b. The board was plugged in after `setup` ran
 
-Symptom: the configuration holds `probe_id: null`, `executable: null`, `target.controller: "unknown-controller"` and no `com_ports` entry, and `doctor` skips the debugger check.
+Symptom: the configuration holds `probe_id: null`, `executable: null`, `target.controller: "unknown-controller"` and no `com_ports` entry. `agentic-hil doctor` skips the debugger check, reports the bench as unbound under `Bench binding` and exits non-zero.
+
+That exit code is what it says it is: no test plan can run against this file yet, and a green `doctor` over it used to send a newcomer straight into a refusal from the first plan they wrote. The document carries the same fact in fields a script reads: `bench_binding.ok` is `false`, `bench_binding.unbound` names each device the file declares and does not identify (the `debuggers` section with no toolchain behind it, and each `com_ports` entry with no `device`), `bench_binding.next_step` carries the command, and `unhealthy` lists which checks decided the verdict. A `target.controller` still at the placeholder is reported under `bench_binding.placeholders` and decides nothing: nothing routes through that key, so it refuses no call.
+
+`agentic-hil setup` and `agentic-hil init` run this same check and keep the configuration anyway. Writing that file with nothing attached is what they are for, and rolling it back over the state it was asked to produce would be the worse of the two answers; they report the absent bench in their own headline instead. This is the one `doctor` finding they read and do not act on.
 
 Likely cause: `setup` discovers hardware once. It ran while nothing was attached, so `init` wrote the skeleton with placeholders. That is the ordinary case, because installing the tool and connecting the board are two separate moments. `init` now looks whatever else is in the workspace (it used to look only when the project shipped an `agentic-hil.config.example.yaml`, so on a fresh installation these placeholders could also mean nothing had been looked for), and its result names what discovery answered under `hardware_discovery`. Check that first, because a probe that was attached and refused reads differently from one that was not there.
 

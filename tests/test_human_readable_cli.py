@@ -1004,11 +1004,20 @@ def test_a_real_doctor_at_a_terminal_reads_as_a_report(tmp_path: Path, monkeypat
 
     stream = FakeStdout(tty=True)
     monkeypatch.setattr("sys.stdout", stream)
-    assert cli.entrypoint(["doctor"]) == 0
+    # Nothing is attached on this host, so this bench is unbound and the exit
+    # code says so (#433). The report is what this test is about, and it is a
+    # report either way.
+    assert cli.entrypoint(["doctor"]) == 1
     out = stream.getvalue()
     assert '"ok"' not in out
     assert "Installation" in out and "MCP registration" in out and "Debuggers" in out
     assert str(cli.initialized_config_path(workspace)) in out
+    # The one section a newcomer needed and did not have: the bench, the reason,
+    # and the command that binds it, on screen and above the device sections.
+    assert "Bench binding" in out
+    assert "UNBOUND" in out
+    assert "adopt-hardware" in out
+    assert out.index("Bench binding") < out.index("Debuggers")
 
 
 def test_a_real_doctor_asked_for_as_a_document_is_one_json_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1019,9 +1028,14 @@ def test_a_real_doctor_asked_for_as_a_document_is_one_json_document(tmp_path: Pa
 
     stream = FakeStdout(tty=False)
     monkeypatch.setattr("sys.stdout", stream)
-    assert cli.entrypoint(["doctor", "--json"]) == 0
+    assert cli.entrypoint(["doctor", "--json"]) == 1
     document = json.loads(stream.getvalue())
     assert document["tool"] == "agentic_hil_doctor"
+    # The fields a script reads for the same fact the report puts on screen.
+    assert document["ok"] is False
+    assert document["unhealthy"] == ["bench_binding"]
+    assert document["bench_binding"]["ok"] is False
+    assert "adopt-hardware" in document["bench_binding"]["next_step"]
     assert document["config_path"] == str(cli.initialized_config_path(workspace))
 
 

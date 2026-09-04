@@ -16,7 +16,7 @@ from pathlib import Path, PurePath
 import yaml
 
 from agentic_hil import __version__, upgrade
-from agentic_hil.adopt import project_config_adopt_hardware
+from agentic_hil.adopt import is_unset, project_config_adopt_hardware
 from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import (
     BOOTSTRAP_BACKEND,
@@ -29,6 +29,7 @@ from agentic_hil.bootstrap import (
 from agentic_hil.comports import list_available_com_ports, port_identity_fields
 from agentic_hil.comstdio import run_com_stdio
 from agentic_hil.config import (
+    ADOPT_HARDWARE_COMMAND,
     CONFIG_ENV,
     DEFAULT_CONFIG_TEMPLATE,
     OPENOCD_SCRIPT_SEARCH_NAME,
@@ -40,6 +41,7 @@ from agentic_hil.config import (
     bind_debugger,
     config_schema_text,
     debugger_drives_hardware,
+    debugger_is_placeholder,
     ensure_safe_state_root,
     is_path_within_frozen,
     load_authoritative_config,
@@ -104,7 +106,7 @@ from agentic_hil.tools import (
     narrowed_permissions,
     unbound_debugger_error,
 )
-from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject
+from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject, com_port_is_unbound
 from agentic_hil.upgrade import CLI_UPGRADE_TOOL, missing_configured_extras, replace_installation
 
 SKILL_NAME = "agentic-hil"
@@ -403,7 +405,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="e.g. debuggers.dut.allow_mass_erase; several may be named and are applied together or not at all",
     )
 
-    doctor_parser = subparsers.add_parser("doctor", help="validate config and check debugger availability")
+    doctor_parser = subparsers.add_parser("doctor", help="validate config, check debugger availability, and say whether this bench is bound to hardware yet: a configuration whose devices name no hardware exits non-zero and names the command that binds them, because no test plan can run against it")
     doctor_parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
 
     config_reload_parser = subparsers.add_parser(
@@ -1896,6 +1898,34 @@ def _kept_configuration_findings(target_path: Path) -> list[JsonObject]:
     return findings
 
 
+# The one `doctor` finding `setup` reads and does not act on. `setup` run with
+# no board attached writes placeholders on purpose, which is the documented
+# first command on a machine where the tool is installed before the board is
+# plugged in, and `doctor` is its verification step. Rolling the file back
+# because that file describes an unbound bench would delete the documented
+# outcome of the documented command; saying nothing about it would be the green
+# report #433 is about. So `doctor` is red and `setup` keeps the file, and the
+# absent bench stays what `setup`'s own headline already reports it as.
+DOCTOR_UNBOUND_FINDING = "bench_binding"
+DOCTOR_FINDINGS_SETUP_KEEPS = frozenset({DOCTOR_UNBOUND_FINDING})
+
+
+def doctor_findings_setup_keeps(doctor_result: JsonObject) -> bool:
+    """Whether this `doctor` step lets `setup` keep the configuration it wrote.
+
+    True for a `doctor` that passed, and for one whose every finding is in
+    `DOCTOR_FINDINGS_SETUP_KEEPS`. A `doctor` that reports no findings at all
+    while failing is not one of them: an older or unexpected shape must fail
+    closed rather than be read as an unbound bench and kept.
+    """
+    if overall_success(doctor_result):
+        return True
+    findings = doctor_result.get("unhealthy")
+    if not isinstance(findings, list) or not findings:
+        return False
+    return all(isinstance(finding, str) and finding in DOCTOR_FINDINGS_SETUP_KEEPS for finding in findings)
+
+
 # What a kept root being unusable costs, per root, because the two cost
 # different things: one stops the bench recording anything, the other stops the
 # file itself being locked and rewritten in place.
@@ -2032,7 +2062,7 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
 
             if overall_success(config_result):
                 doctor_result = doctor(config_path)
-            if resolved_agent is not None and all(overall_success(result) for result in (config_result, doctor_result)):
+            if resolved_agent is not None and overall_success(config_result) and doctor_findings_setup_keeps(doctor_result):
                 # Last, because it forbids writing the very file the steps above
                 # had to create.
                 permission_result = restrict_agent_write_access(
@@ -2044,7 +2074,11 @@ def init_project(config_path: str | None = None, agent: str | None = None, force
                 error.details["rollback_errors"] = rollback_errors
             raise
 
-        ok = all(overall_success(result) for result in (config_result, doctor_result, permission_result))
+        # `doctor_findings_setup_keeps` rather than `overall_success` for the
+        # doctor step alone: a bench nobody has plugged a board into yet is
+        # what this command writes when it is run that way, and the file it
+        # just wrote is not rolled back for describing it.
+        ok = all(overall_success(result) for result in (config_result, permission_result)) and doctor_findings_setup_keeps(doctor_result)
         rollback_errors = [] if ok else _restore_file_snapshots(snapshots)
         # A kept file's unusable roots and a regeneration's unasked open-run
         # question are the same kind of fact about one run: the command did what
@@ -4582,6 +4616,102 @@ def _doctor_state_root(config: AgenticHILConfig) -> JsonObject:
     return {"ok": True, "field": "state_root", "path": str(root), "summary": "The configured state root accepts the writes every hardware action is recorded by."}
 
 
+def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
+    """Whether this configuration names hardware yet, asked before a plan does.
+
+    `agentic-hil init` writes a workable file with nothing attached, which is
+    the ordinary case: installing the tool and connecting the board are two
+    different moments. What it writes then is a description with no bench behind
+    it, and `doctor` reported that file as loaded and exited 0 (#433). A
+    newcomer read green, wrote the first plan, and got a refusal from a bench
+    that had never been bound, with nothing in the green report to have warned
+    them.
+
+    Two facts decide the verdict, each a device this file declares and does not
+    identify, and each refusing by itself:
+
+    * every configured debugger is a placeholder, so nothing here can flash,
+      reset, probe or open a debug session, and no plan runs at all;
+    * a `com_ports` entry names no device, so every step that opens it is
+      refused `com_port_not_bound`.
+
+    Together they are unhealthy the way `state_root` is: a bench that cannot run
+    the thing this tool exists to run is not a healthy bench, and the exit code
+    is the one signal a provisioning script reads.
+
+    `target.controller` at the skeleton's own placeholder is reported beside
+    them, under `placeholders`, and decides nothing. Nothing routes through it,
+    so it refuses no call, and turning `doctor` red over a working board whose
+    part nobody has written down would be a verdict about a description.
+
+    A `probe_id` that is unset is neither. Exactly one configured debugger needs
+    no probe id (see the `debugger-backends` reference): it has no second entry
+    to be confused with, so demanding one would call the documented Nucleo bench
+    broken. The state an unset `probe_id` actually arrives in is a placeholder
+    entry, which the first rule already catches."""
+    unbound: list[JsonObject] = []
+    # `debugger_is_placeholder`, not `debugger_drives_hardware`: the second
+    # also reads the permissions, and a bench narrowed to nothing is a policy
+    # decision rather than an unbound device. The question here is only
+    # whether this entry has a toolchain and an identity behind it.
+    bound = [name for name, entry in config.debuggers.items() if not debugger_is_placeholder(entry)]
+    if config.debuggers and not bound:
+        unbound.append({
+            "field": "debuggers",
+            "entries": sorted(config.debuggers),
+            "summary": (
+                "No configured debugger has a toolchain behind it, so nothing here can flash, reset, probe or open a "
+                "debug session, and no test plan can run."
+            ),
+        })
+    if not config.debuggers:
+        unbound.append({"field": "debuggers", "entries": [], "summary": "This configuration declares no debugger at all, so no test plan can run."})
+    unbound_ports = sorted(port_id for port_id, port in config.com_ports.items() if com_port_is_unbound(port))
+    if unbound_ports:
+        unbound.append({
+            "field": "com_ports",
+            "entries": unbound_ports,
+            "summary": (
+                f"{len(unbound_ports)} declared COM port(s) name no device, so every plan step and every COM tool call "
+                "that opens one is refused `com_port_not_bound`: " + ", ".join(f"com_ports.{port_id}.device" for port_id in unbound_ports)
+            ),
+        })
+    # Named, and deliberately not part of the verdict. `target.controller` is
+    # what the file says the part is; nothing routes through it, so a placeholder
+    # there blocks no call and calling the bench unhealthy over it would turn
+    # `doctor` red on a working board whose entry nobody has described. It is
+    # still the loudest sign that this file was written with nothing attached,
+    # so it is reported, under its own key, with the same command beside it.
+    placeholders: list[JsonObject] = []
+    if is_unset(config.target.controller, "target", "controller"):
+        placeholders.append({
+            "field": "target.controller",
+            "value": config.target.controller,
+            "summary": f"`target.controller` is still the placeholder ({config.target.controller}), so this file does not say what part the bench is. Nothing is refused for it.",
+        })
+    if not unbound and not placeholders:
+        return {"ok": True, "field": "bench_binding", "unbound": [], "placeholders": [], "summary": "Every device this configuration declares names the hardware behind it."}
+    stated = [*(str(entry["summary"]) for entry in unbound), *(str(entry["summary"]) for entry in placeholders)]
+    return {
+        # The verdict is about devices, and only about devices: a placeholder in
+        # the description is reported without deciding anything.
+        "ok": not unbound,
+        "field": "bench_binding",
+        "unbound": unbound,
+        "placeholders": placeholders,
+        "summary": (
+            ("This configuration describes a bench that is not bound to hardware: " if unbound else "This configuration still carries what `init` writes when nothing is attached: ")
+            + " ".join(stated)
+        ),
+        "next_step": (
+            f"Attach the board and run `{ADOPT_HARDWARE_COMMAND}`, which fills the identity keys that are still unset "
+            "from the attached hardware and leaves everything a person has set alone. Where the file was written before "
+            "the project had a profile at all, `agentic-hil init --force` writes it again from the project profile and "
+            "the hardware it finds; that one replaces the whole file, every narrowed permission included."
+        ),
+    }
+
+
 def doctor(config_path: str | None = None) -> JsonObject:
     try:
         config = load_cli_authoritative_config(config_path)
@@ -4590,6 +4720,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         result["tool"] = "agentic_hil_doctor"
         return result
     state_root_check = _doctor_state_root(config)
+    binding_check = _doctor_bench_binding(config)
     # Check every probe whose toolchain this configuration required to resolve,
     # not only a bound one. Reporting a green doctor because nothing was bound
     # would hide an unplugged board, a wrong probe_id, or a broken toolchain on
@@ -4628,7 +4759,25 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # refuses the whole bench before it touches anything. A green doctor over
     # exactly that is what #387 was, and what let nine more commands run.
     state_root_ok = state_root_check.get("ok") is True
-    all_ok = all(result.get("ok") is True for result in checks.values()) and not unsupported and state_root_ok
+    # And the binding counts the same way, for the same reason: a file that
+    # names no hardware refuses the first plan run against it, and a green
+    # verdict over that is a newcomer being told to go ahead (#433).
+    binding_ok = binding_check.get("ok") is True
+    # Which checks decided the verdict, named rather than left to be
+    # reconstructed. `doctor`'s `ok` is read by two callers with different
+    # stakes: a person or a script asking whether this bench will work, and
+    # `setup`, which rolls the configuration it has just written back when this
+    # step fails. Those two must part company on exactly one entry, because
+    # `setup` with no board attached deliberately writes the unbound file this
+    # check is about, and rolling it back would delete the documented outcome of
+    # the documented first command. See `doctor_findings_setup_keeps`.
+    unhealthy = [
+        *(["debuggers"] if any(result.get("ok") is not True for result in checks.values()) else []),
+        *(["target_support"] if unsupported else []),
+        *([] if state_root_ok else ["state_root"]),
+        *([] if binding_ok else [DOCTOR_UNBOUND_FINDING]),
+    ]
+    all_ok = not unhealthy
     if not checked:
         summary = "Agentic HIL authoritative configuration loaded; debugger check skipped."
     elif all_ok:
@@ -4651,6 +4800,14 @@ def doctor(config_path: str | None = None) -> JsonObject:
             f"profile will not accept, so every plan is refused at its first step with `audit_unavailable`. `{CONFIG_REOPEN_COMMAND}` rewrites "
             "the configuration with a state root it does accept."
         )
+    if "next_step" in binding_check:
+        # In the headline, beside the state root sentence and for the same
+        # reason: a caller that keeps only `summary` has to be told that this
+        # file is a description with no hardware behind it, and given the
+        # command that binds it. Printed for a reported placeholder too, which
+        # decides nothing and is still the sentence a newcomer needed. The
+        # per-device detail stays under `bench_binding`.
+        summary = f"{summary} {binding_check['summary']} {binding_check['next_step']}"
     if undetermined:
         summary += f" Target support could not be determined here for: {', '.join(undetermined)}; that is unknown, not broken."
     # Checked at the end, against the configuration this run was decided by. The
@@ -4704,6 +4861,15 @@ def doctor(config_path: str | None = None) -> JsonObject:
         **report,
         "config_path": config.config_path,
         "state_root": state_root_check,
+        # One field a script reads for the whole question, beside the one it
+        # already reads for the state root: `bench_binding.ok` is false exactly
+        # when this file names a device it does not identify, and `unbound`
+        # names each of them with the key to fill in.
+        "bench_binding": binding_check,
+        # Always present, empty on a healthy bench: which checks decided `ok`.
+        # A caller that has to tell "this bench is broken" from "this bench is
+        # not bound yet" reads this rather than diffing the sections itself.
+        "unhealthy": unhealthy,
         **({"missing_extras": missing_extras} if missing_extras is not None else {}),
         "installation": _doctor_installation_report(),
         "mcp": _doctor_mcp_report(),
