@@ -2,14 +2,15 @@
 
 <!-- mcp-name: io.github.agentic-hil/agentic-hil -->
 
-**Your AI agent can develop firmware on its own, because Agentic HIL closes the loop with real hardware.**
+[![PyPI version](https://img.shields.io/pypi/v/agentic-hil)](https://pypi.org/project/agentic-hil/)
+[![CI](https://img.shields.io/github/actions/workflow/status/agentic-hil/agentic-hil/ci.yml?branch=master&label=CI)](https://github.com/agentic-hil/agentic-hil/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/agentic-hil/agentic-hil)](LICENSE)
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop-dark.svg">
-  <img alt="The Agentic HIL loop: build, flash, stimulate, observe, then diagnose and fix, closing back onto build. Flash and stimulate write to the real board on your bench; observe reads back from it. Your agent runs the loop unattended; you review the pull request." src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop.svg">
-</picture>
+**Your AI agent writes the firmware, flashes it to the board on your desk, drives UART and CAN against it, reads back what the hardware actually did, and fixes what it got wrong; you review the pull request.**
 
-Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, reports, and logs, all without giving an agent arbitrary host or debugger access. Each project has exactly one authoritative configuration stored outside the repository, out of reach of the agent's own file tools.
+https://github.com/user-attachments/assets/d19b3b24-0250-4226-91c4-61bea65fa4b2
+
+Nothing in that run is staged. One restart after the install line, in a freshly created firmware project, the first sentence makes the agent set the bench up itself and the second makes the board say Hello World and prove it said it: the configuration is created over MCP with the permissions reported out loud, the firmware is written on the spot, `flash_firmware` and `com_read` go through the gate, the twelve bytes come back off the wire, and the plan it pins is run once green and once against a wrong expectation, because a test that cannot fail proves nothing. What remains in the project afterwards is the plan as a reviewable file and the run's own report: lease released, safe state confirmed, nothing quarantined.
 
 ## Install
 
@@ -17,60 +18,44 @@ Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes boun
 
 ```bash
 curl -LsSf https://agentic-hil.github.io/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 **Windows**, in PowerShell:
 
 ```powershell
 irm https://agentic-hil.github.io/install.ps1 | iex
+[Environment]::SetEnvironmentVariable('Path', "$env:USERPROFILE\.local\bin;" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')
 ```
 
-**Windows**, from `cmd.exe` or the Run box:
+Each second line adds `uv`'s default user bin directory (`$HOME/.local/bin`, or `%USERPROFILE%\.local\bin` on Windows) to your `PATH`, which is where the copy of `uv` the script fetches for itself installs the command. A `pip --user` install often lands there too, but its destination follows the selected interpreter on every platform, so it is `$HOME/.local/bin` only where that interpreter puts its user scripts there: a macOS framework Python installs into an interpreter-specific base instead (commonly `~/Library/Python/X.Y/bin`), and on Windows it is the interpreter's own user scripts directory (for example `%APPDATA%\Python\PythonXY\Scripts`), neither of them `.local\bin`. So the one line reaches a uv install everywhere and a pip install only where the interpreter's user bin happens to be that directory. The installer does not assume any of this, though: it asks the package manager where the command actually went (`uv tool dir --bin` honours `UV_TOOL_BIN_DIR` and XDG placement, and for `pip --user` it asks the selected interpreter itself, via `sysconfig.get_path("scripts", "posix_user")` on Linux and macOS) and when that directory is not already on your `PATH` it prints the exact line to add it. If the directory it names differs from the default above, copy the line the installer printed rather than the one here. Put the POSIX form in your shell profile and open a new shell, while the PowerShell form writes your user `Path` once.
 
-```cmd
-powershell -c "irm https://agentic-hil.github.io/install.ps1|iex"
-```
+One line installs the package user-local and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository. Finding no `claude`, `codex` or `opencode` CLI there, it says so and writes nothing of any agent's: install the agent CLI, then run `agentic-hil agent-install --agent <claude-code|codex|opencode>` yourself, which is the line the installer prints for that case. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
 
-One line installs the package user-local (through `uv` where it exists, `pip --user` otherwise) and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository: no project configuration is written, no shell profile is edited. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
+The line above and the checksummed route in [installation](docs/installation.md) run the same installer, and on a machine with nothing here yet both install the same thing, the release from PyPI: the script resolves `agentic-hil[can]` against the package index and carries no branch or git reference at all, and `--version <x.y.z>` pins one exact release instead. On a rerun it repairs what is already installed rather than forcing the public release over it: an installation reporting a `.devN` version (an editable checkout of this repository) is kept untouched, and a uv-managed tool installed from a path, URL or git reference is refreshed from that same recorded source rather than switched to the index. What the checksummed route adds is the script itself, read before it runs: `install.sh` and its `install.sh.sha256` come from the same release, one is checked against the other, and the file that runs is the file you checked.
 
-The same line is also the repair line: run it again on a machine that already has Agentic HIL and it reinstalls in place, which is the way back when `agentic-hil upgrade` itself fails.
+[The STM32 starter](https://github.com/agentic-hil/stm32-starter) is the shortest way to watch that happen on hardware: three steps on a Nucleo-F446RE, with the firmware, the test plans and one planted defect already in place.
 
-Prefer to read before you run? Take the script and its SHA-256 from the same release, check one against the other, and run the file you checked:
+Claude Code can also take the skill from the plugin marketplace:
+`/plugin marketplace add agentic-hil/agentic-hil`, then `/plugin install agentic-hil@agentic-hil`.
+The plugin carries the skill and nothing else; the MCP server itself still comes from the install line above, which registers a verified absolute executable path outside your repository.
 
-```bash
-curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh
-curl -LsSfO https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.sh.sha256
-sha256sum -c install.sh.sha256 && sh install.sh
-```
+[Installation](docs/installation.md) has every other path: the `cmd.exe` spelling, the repair run (the same line again, which reinstalls in place when `agentic-hil upgrade` itself fails), that checksummed route in full, registering one agent instead of all of them, driving your own package manager, `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend. [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
 
-```powershell
-iwr -OutFile install.ps1 https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1
-iwr -OutFile install.ps1.sha256 https://github.com/agentic-hil/agentic-hil/releases/latest/download/install.ps1.sha256
-if ((Get-FileHash install.ps1).Hash -eq (-split (Get-Content install.ps1.sha256))[0]) { .\install.ps1 }
-```
+A first command that needs no board, in a clone of this repository: `agentic-hil check-plan examples/nucleo-f446re_demo/testconfig.yaml` answers `All 1 test plan(s) load through the reactor's loader.` and exits 0, having loaded no configuration and touched no hardware.
 
-The one-line form above installs from the default branch, which is where a fix lands first; this form installs the release, which is the pair a checksum can speak for.
-
-Pass `--agent claude-code` (or `codex`, `opencode`) to register one agent instead of all of them, `--help` for the rest; piped, that reads `| sh -s -- --agent claude-code`. If you would rather drive your own package manager, the same two halves by hand:
-
-```bash
-uv tool install "agentic-hil[can]"               # or: pip install --user "agentic-hil[can]"
-agentic-hil agent-install --agent claude-code    # or: codex / opencode
-```
-
-[Installation](docs/installation.md) has `setup` for a bench that is already attached, the optional extras, upgrading, and every platform and debugger backend; [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers what to do when something does not start.
-
-### It proves itself on the board
-
-One restart after the install line, in a freshly created firmware project: the first sentence makes the agent set the bench up itself, the second makes the board say Hello World and prove it said it.
-
-https://github.com/user-attachments/assets/d19b3b24-0250-4226-91c4-61bea65fa4b2
-
-Nothing in that run is staged: the configuration is created over MCP with the permissions reported out loud, the firmware is written on the spot, `flash_firmware` and `com_read` go through the gate, the twelve bytes come back off the wire, and the plan it pins is run once green and once against a wrong expectation, because a test that cannot fail proves nothing. What remains in the project afterwards is the plan as a reviewable file and the run's own report: lease released, safe state confirmed, nothing quarantined.
+Agentic Hardware-in-the-Loop (Agentic HIL) is a Python package that exposes bounded MCP tools for probing, flashing, resetting, artifact validation, serial and CAN stimulus/feedback, reports, and logs, all without giving an agent arbitrary host or debugger access. Each project has exactly one authoritative configuration stored outside the repository, out of reach of the agent's own file tools.
 
 ## Why
 
-A green build is not enough in embedded development: firmware has to behave correctly on the real board. Classic tools automate single steps (flash here, read a log there), but the moment real hardware has to respond, a human is back in the loop. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible. Agentic HIL closes the gap with a small, auditable gate:
+A green build is not enough in embedded development: firmware has to behave correctly on the real board. Classic tools automate single steps (flash here, read a log there), but the moment real hardware has to respond, a human is back in the loop. Handing an agent a raw debugger shell or direct serial access instead is neither safe nor reproducible.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop-dark.svg">
+  <img alt="The Agentic HIL loop: build, flash, stimulate, observe, then diagnose and fix, closing back onto build. Flash and stimulate write to the real board on your bench; observe reads back from it. Your agent runs the loop unattended; you review the pull request." src="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/hero-loop.svg">
+</picture>
+
+Agentic HIL closes the gap with a small, auditable gate:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/docs/diagrams/architecture-dark.svg">
@@ -89,7 +74,7 @@ One YAML plan drives the whole bench: flash, reset, write, read with a comparato
 
 ## Security by construction
 
-Deny-by-default permissions per device, every hardware action validated, leased machine-wide, and written to a SHA-256 audit chain. The authoritative configuration lives outside the workspace, where the agent cannot edit it. Enforcement sits in the tool rather than in the agent host on purpose: a host's permission system judges shell strings and differs per host, while the bench's permissions judge the hardware action itself and travel with the bench, so the CLI, pytest, CI and the test reactor all walk the same gate. A failed run still gives the bench back: it aborts with its verdict, the recovery action resets and re-reads the target, and the standing quarantine is kept for the one state no later contact can rebuild, a broken audit trail. [The safety model](docs/safety-model.md) is the short version, [the security design](docs/security-design.md) the long one.
+A device does not exist on this bench until your configuration declares it, and a call naming any other one is refused with `unknown_device` before a driver is opened. On a device it does declare, a generated configuration grants every permission that has a tool behind it and holds `allow_raw_debugger_commands` and `allow_mass_erase` false, the interlocked pair that refuses flashing while either is true. `agentic-hil revoke <key>` takes any single grant back and `agentic-hil grant <key>` reopens it, from your own shell; over MCP an agent narrows its own authority and never widens it. Every hardware action is validated, leased machine-wide, and written to a SHA-256 audit chain. The authoritative configuration lives outside the workspace, where the agent cannot edit it. Enforcement sits in the tool rather than in the agent host on purpose: a host's permission system judges shell strings and differs per host, while the bench's permissions judge the hardware action itself and travel with the bench, so the CLI, pytest, CI and the test reactor all walk the same gate. A failed run still gives the bench back: it aborts with its verdict, the recovery action resets and re-reads the target, and the standing quarantine is kept for the one state no later contact can rebuild, a broken audit trail. [The safety model](docs/safety-model.md) is the short version, [the security design](docs/security-design.md) the long one.
 
 ## Quickstart: one real run
 

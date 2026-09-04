@@ -1109,6 +1109,40 @@ def fixture_preserved(agent: str, fixture: str) -> tuple[bool, str]:
     return preserved, "operator sentinel and unrelated MCP entry preserved"
 
 
+def every_declared_permission_granted(section: str, name: str, permissions: dict[str, Any]) -> tuple[bool, str]:
+    """Whether one entry's permission block is what a generation writes.
+
+    An install decides the permission state completely rather than half, and
+    since 0.8.0 it decides it open: every flag that IS declared has to be on,
+    whichever model the file uses. What this still catches is the thing it
+    always caught: an install that left some flags to a template's memory and
+    some to chance.
+
+    The exception is the pair the flash interlock refuses on. An install that
+    granted those wrote a bench that cannot flash, so `true` there is the
+    failure and `false` is the requirement, checked in both directions, because
+    an install silently reopening them is exactly what this eval exists to
+    catch.
+
+    Lifted out of `valid_authoritative_config` so that one statement of the rule
+    serves both readers of it. This container judges a configuration an agent's
+    install produced; the repository suite runs the same function over the
+    configuration each bootstrap profile this project ships would generate, so a
+    profile that would fail here fails in the pull request that writes it rather
+    than in a matrix run weeks later. That is what
+    `com_ports.dut_uart.permissions were not all granted by the install:
+    ['allow_write']` was: a shipped profile, not an install.
+    """
+    expected_false = set(EXCLUSIVE_FLASH_PERMISSIONS) & set(permissions)
+    withheld = sorted(flag for flag, value in permissions.items() if flag.startswith("allow_") and flag not in expected_false and value is not True)
+    if withheld:
+        return False, f"{section}.{name}.permissions were not all granted by the install: {withheld}"
+    granted_exclusive = sorted(flag for flag in expected_false if permissions[flag] is not False)
+    if granted_exclusive:
+        return False, f"{section}.{name}.permissions grant what the flash interlock refuses on, so the install cannot flash: {granted_exclusive}"
+    return True, f"{section}.{name}.permissions are what a generation writes"
+
+
 def valid_authoritative_config(path: Path) -> tuple[bool, str]:
     import yaml
 
@@ -1221,23 +1255,9 @@ def valid_authoritative_config(path: Path) -> tuple[bool, str]:
                 return False, f"{section}.{name}.permissions missing: {missing}"
             if read_free and forbidden_flag in permissions:
                 return False, f"{section}.{name}.permissions carries the removed {forbidden_flag}"
-            # An install decides the permission state completely rather than
-            # half, and since 0.8.0 it decides it open: every flag that
-            # IS declared has to be on, whichever model the file uses. What this
-            # still catches is the thing it always caught: an install that left
-            # some flags to a template's memory and some to chance.
-            #
-            # The exception is the pair the flash interlock refuses on. An
-            # install that granted those wrote a bench that cannot flash, so
-            # `true` there is the failure and `false` is the requirement, checked in both directions, because an install
-            # silently reopening them is exactly what this eval exists to catch.
-            expected_false = set(EXCLUSIVE_FLASH_PERMISSIONS) & set(permissions)
-            withheld = sorted(flag for flag, value in permissions.items() if flag.startswith("allow_") and flag not in expected_false and value is not True)
-            if withheld:
-                return False, f"{section}.{name}.permissions were not all granted by the install: {withheld}"
-            granted_exclusive = sorted(flag for flag in expected_false if permissions[flag] is not False)
-            if granted_exclusive:
-                return False, f"{section}.{name}.permissions grant what the flash interlock refuses on, so the install cannot flash: {granted_exclusive}"
+            granted, detail = every_declared_permission_granted(section, name, permissions)
+            if not granted:
+                return False, detail
     debug = data.get("debug")
     if not isinstance(debug, dict) or debug.get("allow_all_symbols") is not True or debug.get("allowed_symbols") != []:
         return False, "debug access was not granted by the install"

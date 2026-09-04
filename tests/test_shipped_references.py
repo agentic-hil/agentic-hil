@@ -8,7 +8,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from check_shipped_references import main, package_version, shipped_documents, violations  # noqa: E402
+from check_shipped_references import (  # noqa: E402
+    index_problems,
+    main,
+    package_version,
+    shipped_documents,
+    violations,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -69,6 +75,10 @@ def test_every_document_a_reader_receives_is_covered() -> None:
     assert "src/agentic_hil/skills/agentic-hil/SKILL.md" in covered
     assert "plugins/agentic-hil/skills/agentic-hil/SKILL.md" in covered
     assert "docs/mcp-hosts.md" in covered
+    # llms.txt is meant to be fetched on its own, by a reader with no repository
+    # around them, so the reference gate covers it like every other shipped
+    # document.
+    assert "llms.txt" in covered
 
 
 @pytest.mark.parametrize(
@@ -98,3 +108,72 @@ def test_a_reference_a_reader_must_not_copy_is_refused(line: str, expected: str)
 )
 def test_a_legitimate_reference_is_accepted(line: str) -> None:
     assert violations(Path("doc.md"), line, "9.9.9") == []
+
+
+def test_the_index_this_repository_serves_links_only_files_that_are_here() -> None:
+    """The whole of llms.txt is its links, so a link that rots takes the file with it.
+
+    The first llms.txt was deleted because nothing served it and its onward
+    references were bare filenames an external fetcher could not resolve. This one
+    carries absolute links only, and this gate holds each in-repository link to a
+    path that is still here, so the same rot fails the build rather than reaching a
+    reader. The gate stops there: a link that leaves the repository is read for its
+    form and not followed, and where the file is served is the site repository's to
+    decide.
+    """
+    assert index_problems(REPOSITORY_ROOT) == []
+
+
+def _index(tmp_path: Path, body: str) -> Path:
+    (tmp_path / "llms.txt").write_text(body, encoding="utf-8")
+    return tmp_path
+
+
+def test_a_relative_link_in_the_index_is_refused(tmp_path: Path) -> None:
+    """The failure that killed the first one: a filename with no host in front of it."""
+    root = _index(tmp_path, "- [Installation](docs/installation.md): the install paths.\n")
+
+    found = index_problems(root)
+
+    assert found, "a bare filename resolves to nothing for an external fetcher"
+    assert "resolves only inside a checkout" in found[0]
+
+
+def test_a_link_to_a_path_this_repository_no_longer_holds_is_refused(tmp_path: Path) -> None:
+    root = _index(
+        tmp_path,
+        "- [Tools](https://github.com/agentic-hil/agentic-hil/blob/master/docs/moved-away.md): the tools.\n",
+    )
+
+    found = index_problems(root)
+
+    assert found
+    assert "docs/moved-away.md is not in this repository" in found[0]
+
+
+def test_a_link_that_leaves_the_repository_is_read_and_not_followed(tmp_path: Path) -> None:
+    """Another repository's paths are not this gate's to assert on, only its form is."""
+    root = _index(
+        tmp_path,
+        "- [STM32 starter](https://github.com/agentic-hil/stm32-starter): three steps on a board.\n"
+        "- [Read the Docs](https://agentic-hil.readthedocs.io/): the rendered documentation.\n",
+    )
+
+    assert index_problems(root) == []
+
+
+def test_a_link_that_climbs_out_of_the_repository_is_refused(tmp_path: Path) -> None:
+    root = _index(
+        tmp_path,
+        "- [Elsewhere](https://github.com/agentic-hil/agentic-hil/blob/master/../secrets.md): no.\n",
+    )
+
+    found = index_problems(root)
+
+    assert found
+    assert "not a path in this repository" in found[0]
+
+
+def test_a_tree_with_no_index_is_not_a_failure(tmp_path: Path) -> None:
+    """The gate runs against sdists and checkouts that carry no llms.txt."""
+    assert index_problems(tmp_path) == []

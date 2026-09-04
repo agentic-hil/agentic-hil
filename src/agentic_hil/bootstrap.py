@@ -380,15 +380,19 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             # discovery path is the one a bench with a board attached takes, so
             # it was the copy that mattered.
             #
-            # A profile that names one is still honoured, which can now only
-            # narrow: a person who wrote `allow_mass_erase: false` into their
-            # project's example configuration meant it, and a default that
-            # overrode it would be the same silent widening the carried-over
-            # permissions on the regeneration path exist to prevent. Over MCP
-            # this profile decides nothing at all (`project_config_create`
-            # rewrites every permission afterwards) because there it is
-            # repository-controlled data rather than a file a person ran `init`
-            # against.
+            # A profile that names one is still honoured: a person who wrote
+            # `allow_mass_erase: false` into their project's example
+            # configuration meant it, and a default that overrode it would be the
+            # same silent widening the carried-over permissions on the
+            # regeneration path exist to prevent. For a flag the skeleton grants
+            # this only narrows; the two interlocks default false, so an example
+            # that writes one true opens it and the generated file carries that
+            # grant, which is why the missing-configuration remediation tells a
+            # reader to read the reported permissions rather than assume both are
+            # false. Over MCP this profile decides nothing at all
+            # (`project_config_create` rewrites every permission afterwards)
+            # because there it is repository-controlled data rather than a file a
+            # person ran `init` against.
             "permissions": {flag: bool(requested_permissions.get(flag, default)) for flag, default in generated_permissions("debuggers").items()},
         }
     }

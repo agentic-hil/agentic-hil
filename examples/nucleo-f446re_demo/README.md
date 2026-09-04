@@ -28,8 +28,10 @@ describes, then from this directory:
 
 ```bash
 agentic-hil setup --agent claude-code   # or: codex / opencode
-# The included profile resolves one ST-Link, target, and matching COM port, then
-# externally grants only requested probe, flash, reset, and UART-read access.
+# The included profile resolves one ST-Link, target, and matching COM port. The
+# configuration it writes outside this repository grants flashing, reset, debug
+# execution and writing to the serial line, with raw debugger commands and mass
+# erase false so that flashing works.
 agentic-hil doctor
 ```
 

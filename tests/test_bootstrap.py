@@ -35,7 +35,7 @@ from agentic_hil.config import (
 )
 from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
 from agentic_hil.devices import config_devices, debugger_device
-from agentic_hil.knowledge import remediation_fields
+from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS, remediation_fields
 from agentic_hil.report import read_last_report
 from agentic_hil.tools import AgenticHILToolService, project_config_create
 from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, fold_hardware_id
@@ -270,6 +270,37 @@ def test_discovery_applies_project_requirements() -> None:
     assert configured["com_ports"]["dut_uart"]["permissions"] == {"allow_write": False}
 
 
+def test_a_profile_can_open_a_flash_interlock() -> None:
+    """`agentic-hil init` honours a project's example configuration in both
+    directions, including the two flash interlocks it otherwise leaves false.
+
+    The default for `allow_raw_debugger_commands` and `allow_mass_erase` is
+    false, so an example that names them is the one place a profile *widens*
+    rather than narrows: the operator wrote them into a file they own and ran
+    `init` against, and this path writes what they wrote. That is why the
+    missing-configuration remediation must not promise both interlocks are
+    false for the shell route; this pins the behaviour it now describes so a
+    later change that silently clamps them false fails here and takes the
+    remediation with it."""
+    template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
+    profile = {
+        "target": {"name": "demo", "controller": "stm32f446ret6"},
+        "debuggers": {"dut": {"permissions": {flag: True for flag in EXCLUSIVE_FLASH_PERMISSIONS}}},
+    }
+    discovery = {
+        "executable": "C:/ST/STM32_Programmer_CLI.exe",
+        "probe_id": "STLINK123",
+        "target": {"controller": "STM32F446RE"},
+    }
+
+    configured = apply_discovery_to_template(template, profile, discovery)
+
+    permissions = configured["debuggers"]["dut"]["permissions"]
+    assert [flag for flag in EXCLUSIVE_FLASH_PERMISSIONS if not permissions[flag]] == [], (
+        "a profile that opens the flash interlocks is honoured, so the generated file carries both true"
+    )
+
+
 def _shipped_profiles() -> list[Path]:
     """Every `agentic-hil.config.example.yaml` this repository ships.
 
@@ -324,6 +355,80 @@ def test_a_shipped_profile_names_nothing_that_would_be_read_past(profile_path: P
 def test_the_guard_over_shipped_profiles_has_a_profile_to_guard() -> None:
     """A walk that finds nothing parametrizes to nothing and proves nothing."""
     assert _shipped_profiles()
+
+
+# The bench the profiles below are filled in against. It decides no permission,
+# which is the point: what is under test is what the profile and the generation
+# agree to write, never what happened to be plugged in.
+_PROFILE_BENCH = {
+    "ok": True,
+    "executable": str(Path(__file__).resolve()),
+    "probe_id": "STLINK123",
+    "target": {"probe_id": "STLINK123", "controller": "STM32F446RE"},
+    "com_port": {"device": "COM3", "serial_number": "STLINK123"},
+}
+
+
+def _generated_from(profile_path: Path) -> JsonObject:
+    """The configuration `agentic-hil init` writes for a bench with this profile."""
+    profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    assert isinstance(profile, dict), profile_path
+    template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
+    assert isinstance(template, dict)
+    return apply_discovery_to_template(template, profile, _PROFILE_BENCH)
+
+
+@pytest.mark.parametrize("profile_path", _shipped_profiles(), ids=lambda path: path.parent.name)
+def test_a_shipped_profile_generates_a_configuration_the_install_check_calls_safe(profile_path: Path) -> None:
+    """A profile this project publishes may not produce a bench its own eval refuses.
+
+    The install evaluation holds a generated configuration to "every declared
+    `allow_*` is true except the two flash interlocks", and the demo profile
+    shipped `com_ports.dut_uart.permissions.allow_write: false` while the STM32
+    starter's copy of the same file shipped `true`. An agent that fetched the
+    example from this repository and ran `agentic-hil init --force` therefore
+    failed `authoritative config is safe :: com_ports.dut_uart.permissions were
+    not all granted by the install: ['allow_write']`, and a stranger following
+    the same trail landed on a bench whose serial line could not be written to,
+    which surfaces much later as a refused test plan rather than here.
+
+    Stated against the verifier's own function rather than against a restatement
+    of its rule, so the two published profiles cannot come apart again and a
+    change to the rule reaches this guard on the day it is made.
+
+    Only the profiles in this checkout are walked. The starter's copy lives in
+    `agentic-hil/stm32-starter`, a separate repository this suite has no offline
+    reach into, so what pins the two together is that the rule they both have to
+    satisfy is now enforced here and enforced by the eval that reads the
+    starter's own generated configuration in a matrix run.
+    """
+    # Repository tooling, not package content: imported here so the shipped
+    # test module still collects from a source distribution without evals/.
+    from evals.install.verifier import every_declared_permission_granted
+
+    generated = _generated_from(profile_path)
+
+    findings = []
+    for section in ("debuggers", "com_ports", "can_buses"):
+        for name, entry in (generated.get(section) or {}).items():
+            granted, detail = every_declared_permission_granted(section, name, entry["permissions"])
+            if not granted:
+                findings.append(detail)
+    assert findings == [], f"{profile_path} generates a configuration the install check refuses"
+
+
+@pytest.mark.parametrize("profile_path", _shipped_profiles(), ids=lambda path: path.parent.name)
+def test_a_shipped_profile_still_generates_a_bench_that_can_flash(profile_path: Path) -> None:
+    """The other half, or "grant everything" would satisfy the guard above.
+
+    The two interlocked flags stay false, so the invariant is not met by writing
+    `true` everywhere: a profile that reopened either would ship a bench whose
+    `flash_firmware` is refused on that probe, which is the failure the pair
+    exists to make impossible rather than one it would report."""
+    permissions = _generated_from(profile_path)["debuggers"]["dut"]["permissions"]
+
+    assert permissions["allow_flash"] is True
+    assert [flag for flag in EXCLUSIVE_FLASH_PERMISSIONS if permissions[flag]] == []
 
 
 def test_the_profile_that_fills_in_for_a_missing_one_is_held_to_the_same_rule() -> None:
@@ -514,6 +619,63 @@ def test_init_reports_the_permissions_the_profile_actually_left_narrowed(tmp_pat
     assert not any(step.startswith("Every permission in this file is true:") for step in result["next_steps"])
 
 
+def test_init_tells_the_operator_when_a_profile_opened_a_flash_interlock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A profile that opens a flash interlock disables flashing, and `init` must say so.
+
+    `allow_mass_erase` and `allow_raw_debugger_commands` default false so that
+    `flash_firmware` works, and a project profile is the one input `init`
+    honours that can write one true. When it does, flashing is refused on that
+    probe -- so the summary and the permission next step must not repeat the
+    standing "the two that are false so that flashing works". That told an
+    operator whose profile opened `allow_mass_erase` the opposite of both the
+    file it wrote and the bench it describes (review round 2, finding 1). The
+    full true/false surface in `permissions` already carried the real value; this
+    pins the user-facing prose to it, `allow_mass_erase` above all because it
+    cannot be taken back once it has run."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    (workspace / "agentic-hil.config.example.yaml").write_text(
+        "target:\n  name: demo\n  controller: stm32f446ret6\n"
+        "debuggers:\n  dut:\n    permissions:\n      allow_mass_erase: true\n",
+        encoding="utf-8",
+    )
+    executable = Path(__file__).resolve()
+    monkeypatch.setattr(
+        "agentic_hil.tools.discover_attached_hardware",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "executable": str(executable),
+            "probe_id": "STLINK123",
+            "target": {"controller": "STM32F446RE"},
+            "com_port": {"device": "COM3"},
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+        },
+    )
+
+    result = init_config()
+    written = yaml.safe_load(Path(result["path"]).read_text(encoding="utf-8"))
+    interlock = "debuggers.dut.permissions.allow_mass_erase"
+
+    assert result["ok"] is True, result
+    # The file honoured the profile, so the interlock really is open, and it is
+    # a widening rather than a narrowing, so it is deliberately absent from
+    # `narrowed_permissions`; `permissions` below carries its true value.
+    assert written["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is True
+    assert result["permissions"]["debuggers"]["dut"]["allow_mass_erase"] is True
+    assert interlock not in result["narrowed_permissions"]
+    # Neither user-facing field may claim the interlocks are false or that
+    # flashing works: both must name the open interlock and say flashing is off.
+    assert "the two that are false so that flashing works" not in result["summary"]
+    assert interlock in result["summary"]
+    assert "flashing is disabled" in result["summary"]
+    granted_step = next(step for step in result["next_steps"] if step.startswith("Every permission in this file is true"))
+    assert "which are false so that flashing works" not in granted_step
+    assert interlock in granted_step
+    assert "flash_firmware is refused" in granted_step
+
+
 def test_init_without_a_profile_still_reports_a_fully_granted_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The skeleton path, which is the one the issue is about.
 
@@ -629,7 +791,13 @@ def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(
     This is the other half of the report. An operator handed `probe_id: null` and
     a placeholder target, with no sentence anywhere about the board they can see
     plugged in, concludes that detection is broken. The result now names what
-    discovery answered and the one command that fills the file in afterwards."""
+    discovery answered and the one command that fills the file in afterwards.
+
+    Discovery here fails with `debugger_not_found`, a missing STM32CubeProgrammer
+    and not a missing board, so the summary names that reason rather than
+    reporting an absent bench: the toolchain, not the board, is what to install.
+    The first next step is matched to that too, and installing the toolchain,
+    not attaching a board, is what it tells the operator to do."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
@@ -642,9 +810,40 @@ def test_init_that_found_nothing_says_so_instead_of_writing_silent_placeholders(
     # outcomes this key could not tell apart, and only one of them exists now.
     assert result["hardware_discovery"]["ok"] is False
     assert result["hardware_discovery"]["error_type"] == "debugger_not_found"
-    assert result["summary"].startswith("No attached bench was found")
+    assert result["summary"].startswith(
+        "Hardware discovery did not configure a bench (STM32CubeProgrammer CLI was not found), so the placeholder"
+    )
     assert result["summary"].endswith("with every permission granted except the two that are false so that flashing works.")
+    assert "No attached bench was found" not in result["summary"]
     assert "STM32CubeProgrammer CLI was not found." in result["next_steps"][0]
+    assert "agentic-hil adopt-hardware" in result["next_steps"][0]
+    # The remedy is the missing tool, not the board: a `debugger_not_found`
+    # placeholder no longer tells the operator to attach a bench that may be
+    # plugged in the whole time.
+    assert "Install STM32CubeProgrammer" in result["next_steps"][0]
+    assert "Attach the bench" not in result["next_steps"][0]
+
+
+def test_init_reserves_absent_bench_wording_for_the_empty_probe_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`adapter_not_found` is the one placeholder that means "attach a board".
+
+    A programmer that ran and enumerated no ST-Link is the empty-bench result,
+    and there "No attached bench was found" is exactly the instruction. The
+    wording stays reserved for it so it does not appear over a missing tool or a
+    board that answered ambiguously."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _fixed_stlink(monkeypatch, "No ST-LINK detected\n")
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    assert result["hardware_discovery"]["error_type"] == "adapter_not_found"
+    assert result["summary"].startswith("No attached bench was found, so the placeholder")
+    # This is the one placeholder whose first next step does say "attach the
+    # bench", because here the bench is what is missing.
+    assert "Attach the bench and run" in result["next_steps"][0]
     assert "agentic-hil adopt-hardware" in result["next_steps"][0]
 
 

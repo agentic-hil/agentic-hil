@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+from evals.install.adapters import REASONING_EFFORTS
 
 WINDOWS_ONLY = pytest.mark.skipif(
     os.name != "nt",
@@ -21,6 +24,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SETUP_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "setup-environment-windows.ps1"
 DOCKER_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "install-docker-windows.ps1"
 LOOP_SCRIPT = REPOSITORY_ROOT / "evals" / "install" / "run-install-eval-windows.ps1"
+README = REPOSITORY_ROOT / "evals" / "install" / "README.md"
+
+# `[switch]$DryRun` and `[int]$Repetitions = 2`: the type in front of the name is
+# what a declaration has and a mention in a comment has not.
+PARAMETER_DECLARATION = re.compile(r"\]\$([A-Za-z][A-Za-z0-9]*)")
+# A single leading hyphen, so a Python flag such as `--dry-run` in the same
+# sentence is not read as a PowerShell parameter.
+DOCUMENTED_OPTION = re.compile(r"`-(?!-)([A-Za-z][A-Za-z0-9]*)`")
 
 
 def _windows_powershell() -> Path:
@@ -59,6 +70,122 @@ def _run_script(
         stderr=subprocess.STDOUT,
         check=False,
         timeout=timeout,
+    )
+
+
+def _script_parameters(script: Path) -> set[str]:
+    """Every parameter the script declares, read out of its `param()` block.
+
+    Each declaration carries its type, so the closing bracket in front of the
+    name is what tells a parameter from a variable used in a comment.
+    """
+    source = script.read_text(encoding="utf-8")
+    start = source.index("param(")
+    end = source.index("\n)\n", start)
+    return set(PARAMETER_DECLARATION.findall(source[start:end]))
+
+
+def _documented_options(heading: str) -> set[str]:
+    """Every option the README names in the first list after that heading.
+
+    The list is the run of bullets between "Options:" and the next blank line,
+    so prose further down the section that mentions a flag does not count as
+    documenting it.
+    """
+    readme = README.read_text(encoding="utf-8")
+    marker = "\nOptions:\n"
+    section = readme[readme.index(heading) + len(heading) :]
+    listing = section[section.index(marker) + len(marker) :].strip("\n")
+    if "\n\n" in listing:
+        listing = listing[: listing.index("\n\n")]
+    assert listing.startswith("- `-"), f"{heading} has no option list: {listing[:60]!r}"
+    return set(DOCUMENTED_OPTION.findall(listing))
+
+
+@pytest.mark.parametrize(
+    ("script", "heading"),
+    [
+        (SETUP_SCRIPT, "### Windows prerequisite"),
+        (LOOP_SCRIPT, "## One command on Windows"),
+    ],
+    ids=["setup", "loop"],
+)
+def test_every_windows_script_parameter_is_documented(script: Path, heading: str) -> None:
+    """A parameter nobody can find is a parameter nobody uses.
+
+    Seven of them had accumulated on the evaluation loop script, `-Guide` and
+    `-FromBranch` among them, which are the two that select the target mode: the
+    one-command Windows path documented no way at all to reach the mode a release
+    is judged in. This reads text only, so it holds on every platform rather than
+    on the one where these scripts happen to run.
+    """
+    declared = _script_parameters(script)
+    documented = _documented_options(heading)
+
+    assert not declared - documented, (
+        f"{script.name} declares parameters the README does not document under "
+        f"{heading!r}: {sorted(declared - documented)}"
+    )
+    assert not documented - declared, (
+        f"the README documents options under {heading!r} that {script.name} does "
+        f"not declare: {sorted(documented - declared)}"
+    )
+
+
+def test_the_documented_reasoning_efforts_are_the_ones_the_matrix_accepts() -> None:
+    """One list of levels, stated in three places, that must not drift apart.
+
+    The loader validates against `REASONING_EFFORTS`, the Windows script refuses
+    anything outside its own `-Allowed` list before it writes a matrix, and the
+    README is where somebody reads which levels exist. A level added to the
+    first two and missing from the third is a level nobody asks for.
+    """
+    script = LOOP_SCRIPT.read_text(encoding="utf-8")
+    allowed_start = script.index('-Label "reasoning effort"')
+    allowed = re.findall(r'"([a-z]+)"', script[script.rindex("-Allowed @(", 0, allowed_start) : allowed_start])
+    readme = README.read_text(encoding="utf-8")
+    bullet = readme[readme.index("- `-ReasoningEfforts`") :]
+    documented = re.findall(r"`([a-z]+)`", bullet[: bullet.index(";")])
+
+    assert tuple(allowed) == REASONING_EFFORTS
+    assert tuple(documented) == REASONING_EFFORTS
+
+
+def test_published_mode_pins_the_release_not_the_development_version() -> None:
+    """A published-mode matrix must name the release, never this `.devN` tree.
+
+    Published mode installs the current release from the index, and the verifier
+    requires the installed distribution to equal `target.expected_version`, which
+    the runner preserves through published mode unchanged. The wrapper reads
+    `pyproject.toml` for the tree's own version, which between releases carries a
+    development suffix the release does not, so pinning it in a published target
+    failed every otherwise-correct install of the release against a version
+    nobody could install yet. The published target now takes the resolved release
+    version; local and remote, which install this tree, keep its own. This reads
+    text only, so it holds on every platform rather than the one PowerShell runs
+    on."""
+    source = LOOP_SCRIPT.read_text(encoding="utf-8")
+    guide_start = source.index("if ($Guide) {")
+    guide_block = source[guide_start : source.index("\n$matrixPath", guide_start)]
+
+    assert 'mode = "published"' in guide_block
+    # The one line the defect was: the published target pinned the tree version.
+    assert "expected_version = $projectVersion" not in guide_block
+    assert "expected_version = $publishedVersion" in guide_block
+    assert "Get-PublishedReleaseVersion" in guide_block
+
+    # Local and remote install this working tree, so they rightly expect its own
+    # version, development suffix and all.
+    assert 'mode = "local"; expected_version = $projectVersion.Trim()' in source
+    remote_start = source.index('mode = "remote"')
+    remote_block = source[remote_start : source.index("}", remote_start)]
+    assert "expected_version = $projectVersion.Trim()" in remote_block
+
+    # -ExpectedVersion names the release, so it is refused where nothing is a
+    # release: local and remote take the tree's own version.
+    assert (
+        "-ExpectedVersion names the published release and only applies with -Guide"
+        in source
     )
 
 
@@ -241,6 +368,88 @@ def test_a_control_arm_runs_only_when_it_is_asked_for() -> None:
     assert "-without-skill" not in defaults
     assert "[switch]$WithControlArms" in source
     assert "Naming a control arm directly" in source
+
+
+@WINDOWS_ONLY
+def test_published_release_version_reads_the_newest_tag_or_a_validated_override() -> None:
+    """The resolver, exercised against a `.dev0` clone's tag set.
+
+    Published mode installs the guide's own unpinned current release, so the
+    version it pins is the newest `vX.Y.Z` tag and not the tree's development
+    version. Ordering is by version and not by string, so `v0.9.10` wins over
+    `v0.9.2`; a pre-release tag and a non-tag line are ignored. A
+    `-ExpectedVersion` override is an assertion of the current release, not a
+    selector for an older one: it is accepted only when it names that newest tag,
+    is refused when it names a present but superseded tag (the unpinned install
+    fetches the current release, so an older pin would fail every exact-version
+    check), is refused when it carries a development suffix, and is refused when
+    it is well formed but names a release with no tag here -- published mode reads
+    that tag to stage the trusted package the install's bytes and skill are
+    checked against, so a version with no tag could never pass and must not reach
+    the matrix. The illustrative versions here are deliberately not this project's
+    own release, so the version-consistency sweep does not have to carry this file
+    as one that pins the release."""
+    escaped_path = str(LOOP_SCRIPT).replace("'", "''")
+    command = f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    '{escaped_path}',
+    [ref]$tokens,
+    [ref]$errors
+)
+$functionAst = $ast.Find({{
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Get-PublishedReleaseVersion'
+}}, $true)
+if ($null -eq $functionAst) {{ throw 'Function not found.' }}
+Invoke-Expression $functionAst.Extent.Text
+
+# git is shadowed by a function so the tag listing is deterministic and offline.
+function git {{
+    param([Parameter(ValueFromRemainingArguments = $true)]$Rest)
+    if ($Rest -contains 'tag') {{
+        return @('v0.9.0', 'v0.9.2', 'v0.9.10', 'not-a-tag', 'v0.9.2-rc1')
+    }}
+    return @()
+}}
+
+$derived = Get-PublishedReleaseVersion -RepositoryRoot 'X'
+if ($derived -ne '0.9.10') {{ throw "Unexpected derived version: $derived" }}
+
+# The override confirms the current release, so it is accepted only when it names
+# the newest tag, which the numeric ordering makes v0.9.10 and not v0.9.2.
+$override = Get-PublishedReleaseVersion -RepositoryRoot 'X' -Override '0.9.10'
+if ($override -ne '0.9.10') {{ throw "Unexpected override version: $override" }}
+
+# A present but superseded tag is refused: the unpinned install fetches v0.9.10,
+# so a run pinned to v0.9.2 would fail every exact-version check.
+$refusedSuperseded = $false
+try {{ Get-PublishedReleaseVersion -RepositoryRoot 'X' -Override '0.9.2' | Out-Null }}
+catch {{ $refusedSuperseded = $true }}
+if (-not $refusedSuperseded) {{ throw 'A superseded override was accepted.' }}
+
+$refused = $false
+try {{ Get-PublishedReleaseVersion -RepositoryRoot 'X' -Override '0.9.3.dev0' | Out-Null }}
+catch {{ $refused = $true }}
+if (-not $refused) {{ throw 'A development-version override was accepted.' }}
+
+$refusedMissing = $false
+try {{ Get-PublishedReleaseVersion -RepositoryRoot 'X' -Override '0.9.99' | Out-Null }}
+catch {{ $refusedMissing = $true }}
+if (-not $refusedMissing) {{ throw 'An override with no matching tag was accepted.' }}
+"""
+    result = subprocess.run(
+        [str(_windows_powershell()), "-NoProfile", "-Command", command],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+        timeout=SCRIPT_TIMEOUT_S,
+    )
+
+    assert result.returncode == 0, result.stdout
 
 
 @WINDOWS_ONLY
