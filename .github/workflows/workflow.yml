@@ -69,6 +69,16 @@ jobs:
       - name: Check distributions
         run: twine check dist/*
 
+      # Kept for the verification job below: the hash of the wheel this run
+      # uploads is the hash that job requires PyPI to serve back.
+      - name: Keep the built distributions for the verification job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
@@ -108,15 +118,43 @@ jobs:
       - name: Read the pinned example version
         run: echo "EXAMPLE_PIN=$(python tools/verify_published_examples.py --print-pin)" >> "$GITHUB_ENV"
 
-      # Isolated, so this is the distribution PyPI serves and never the checkout,
-      # and retried because index metadata lags a fresh upload by up to minutes.
-      - name: Install the pinned distribution from PyPI
+      # The wheel this workflow built, so that the hash the install below
+      # requires is the hash of the file the publish job uploaded: PyPI has to
+      # serve the same bytes back, or the job fails instead of verifying a
+      # substitute.
+      - name: Fetch the distributions the publish job built
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      # Isolated, so this is the distribution PyPI serves and never the checkout.
+      # The runtime dependencies come from the hash-locked requirements/runtime.txt,
+      # and the wheel is installed by its own hash, taken from the file this run
+      # built, with dependency resolution off so nothing unhashed rides in beside
+      # it. The index lookup is retried because index metadata lags a fresh upload
+      # by up to minutes; a hash mismatch is reported at once and never retried.
+      - name: Install the pinned distribution from PyPI by the hash of the built wheel
         run: |
           set -euo pipefail
           python -m venv verify-env
+          verify-env/bin/pip install --no-cache-dir --require-hashes -r requirements/runtime.txt
+          wheel=$(ls dist/agentic_hil-*.whl)
+          case "$wheel" in
+            *"-${EXAMPLE_PIN}-"*) ;;
+            *) echo "the built wheel $wheel is not the pinned release ${EXAMPLE_PIN}" >&2; exit 1 ;;
+          esac
+          hash_option=$(verify-env/bin/pip hash --algorithm sha256 "$wheel" | grep '^--hash=')
+          printf 'agentic-hil==%s %s\n' "${EXAMPLE_PIN}" "$hash_option" > verify-pin.txt
+          cat verify-pin.txt
           for attempt in 1 2 3 4 5 6; do
-            if verify-env/bin/pip install --no-cache-dir "agentic-hil==${EXAMPLE_PIN}"; then
+            if verify-env/bin/pip install --no-cache-dir --no-deps --require-hashes -r verify-pin.txt 2>&1 | tee pip-install.log; then
+              verify-env/bin/pip check
               exit 0
+            fi
+            if grep -q "DO NOT MATCH THE HASHES" pip-install.log; then
+              echo "PyPI serves a different agentic-hil==${EXAMPLE_PIN} than this run built and uploaded" >&2
+              exit 1
             fi
             if [ "$attempt" = 6 ]; then
               echo "agentic-hil==${EXAMPLE_PIN} is not installable from PyPI" >&2

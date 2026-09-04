@@ -1,0 +1,8 @@
+# Runtime dependencies of the published wheel, as declared in pyproject.toml,
+# locked with hashes so the release workflow can install the published
+# distribution with --require-hashes and the wheel's own hash beside it.
+# Regenerate with the command recorded at the top of runtime.txt.
+jsonschema>=4.22
+PyYAML>=6.0
+pyserial>=3.5
+tomli>=2; python_version < "3.11"

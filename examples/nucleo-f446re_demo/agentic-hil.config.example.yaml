@@ -26,9 +26,12 @@ target:
 # names is locked for the whole run, and a device the plan does not name is
 # refused. A permission this profile does not name follows the generated
 # default, which is granted; `allow_debug_execution` below is unnamed for that
-# reason and arrives true. The exception is the pair of flash interlocks, which
-# a generation always writes false because flashing on that probe is refused
-# while either of them is true.
+# reason and arrives true. The pair of flash interlocks default false, and this
+# profile leaves them so because flashing on that probe is refused while either
+# is true. `init` honours what this file names, so setting one true here would
+# open it in the generated configuration and stop flashing; over MCP
+# `project_config_create` never reads this file, so a value set here cannot
+# influence what it writes either way.
 debuggers:
   dut:
     type: "openocd"          # or "stlink" for STM32CubeProgrammer CLI
