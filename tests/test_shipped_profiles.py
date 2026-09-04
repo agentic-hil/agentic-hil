@@ -63,6 +63,23 @@ def _openocd_entries(document: dict) -> list[tuple[str, dict]]:
     return entries
 
 
+def _profile_scripts(profile: dict) -> dict[str, str]:
+    """The two OpenOCD script values the profile's openocd entry names.
+
+    This is what ``init`` carries into the generated file unchanged, so the
+    generated document is compared against it: a value that is dropped, nulled or
+    silently substituted no longer matches, where classifying it alone would let
+    ``None`` through as a search name.
+    """
+    _, entry = _openocd_entries(profile)[0]
+    scripts = {}
+    for field in SCRIPT_FIELDS:
+        value = entry.get(field)
+        assert isinstance(value, str) and value, f"the profile's openocd entry has no {field}"
+        scripts[field] = value
+    return scripts
+
+
 @pytest.mark.parametrize("profile_path", _shipped_profiles(), ids=lambda path: path.parent.name)
 def test_a_shipped_profile_names_openocd_scripts_by_search_name(profile_path: Path) -> None:
     """The loader accepts a search name as written and holds a path to a file on
@@ -82,11 +99,24 @@ def test_the_configuration_generated_from_a_shipped_profile_keeps_search_names(p
     """What ``init`` writes on an OpenOCD host carries the profile's script names
     unchanged, so the generated file is accepted for the same reason the profile is."""
     profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    expected = _profile_scripts(profile)
     template = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE)
     generated = apply_discovery_to_template(template, profile, OPENOCD_BENCH)
     for name, entry in _openocd_entries(generated):
         assert entry.get("type") == "openocd"
         for field in SCRIPT_FIELDS:
-            assert openocd_script_kind(str(entry.get(field))) == OPENOCD_SCRIPT_SEARCH_NAME, (
-                f"{profile_path}: generated debuggers.{name}.{field} is {entry.get(field)!r}"
+            value = entry.get(field)
+            # A missing or null value would `str()` to the literal "None", which
+            # `openocd_script_kind` reads as a search name; assert a real string
+            # and hold it to the profile's own value so a dropped, nulled or
+            # substituted script fails here rather than passing green.
+            assert isinstance(value, str) and value, (
+                f"{profile_path}: generated debuggers.{name}.{field} is {value!r}, not a script name"
+            )
+            assert value == expected[field], (
+                f"{profile_path}: generated debuggers.{name}.{field} is {value!r}, "
+                f"not the profile's {expected[field]!r}"
+            )
+            assert openocd_script_kind(value) == OPENOCD_SCRIPT_SEARCH_NAME, (
+                f"{profile_path}: generated debuggers.{name}.{field} is {value!r}"
             )

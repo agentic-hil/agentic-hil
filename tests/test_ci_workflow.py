@@ -126,9 +126,10 @@ DEMO_DIRECTORY = "examples/nucleo-f446re_demo"
 # and the board label that says which board it holds.
 BENCH_LABELS = ["self-hosted", "agentic-hil", "nucleo-f446re"]
 
-# One physical board, two repositories. The STM32 starter's hardware workflow
-# uses this same group name, so its runs and this one queue behind each other
-# instead of meeting on the board.
+# This repository's own bench queue. A GitHub concurrency group is scoped to one
+# repository, so this serialises this workflow's own runs and nothing across
+# repositories; the single self-hosted runner (see BENCH_LABELS) is what keeps
+# the STM32 starter and this one off the same board.
 BENCH_CONCURRENCY_GROUP = "nucleo-f446re-bench"
 
 # Every trigger that would put code from a head repository, or from a branch
@@ -237,7 +238,15 @@ def test_the_bench_workflow_asks_the_board_for_one_run_a_night() -> None:
 
 
 def test_the_bench_job_selects_its_runner_by_label_alone() -> None:
-    """No host name, no user and no address: three labels and a time limit."""
+    """No host name, no user and no address: three labels and a time limit.
+
+    These labels are also the cross-repository serialisation this bench relies
+    on. One self-hosted runner is registered on the machine wired to the board,
+    it runs one job at a time, and the STM32 starter's hardware workflow selects
+    the same runner by the same labels, so a run from either repository waits in
+    that one runner's queue while the other holds the board. The concurrency
+    group cannot do this — it is scoped to one repository.
+    """
     job = bench_job()
 
     assert job["runs-on"] == BENCH_LABELS
@@ -255,13 +264,16 @@ def test_the_bench_workflow_reads_the_repository_and_nothing_more() -> None:
     assert workflow_document(BENCH_WORKFLOW)["permissions"] == {"contents": "read"}
 
 
-def test_the_bench_queues_behind_the_starter_and_is_never_cancelled_mid_plan() -> None:
-    """One board, one queue, and a plan is never stopped half way through it.
+def test_the_bench_serialises_its_own_runs_and_is_never_cancelled_mid_plan() -> None:
+    """This repository's own runs share one queue, and a plan is never stopped
+    half way through it.
 
-    The group name is the STM32 starter's, because the starter's hardware
-    workflow drives the same physical board; two group names would be two runs
-    reaching for one probe. Cancelling in progress is how a board is left half
-    flashed.
+    A GitHub concurrency group only coordinates runs within one repository, so
+    this group serialises this workflow's own runs — a manual dispatch that lands
+    while the nightly is on the board — and not the STM32 starter's; the single
+    self-hosted runner selected by BENCH_LABELS is what serialises the two
+    repositories on one board (see that test). Cancelling in progress is how a
+    board is left half flashed, so the group never does.
     """
     concurrency = workflow_document(BENCH_WORKFLOW)["concurrency"]
 

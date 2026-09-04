@@ -38,13 +38,23 @@ on:
 permissions:
   contents: read
 
-# One bench, one run at a time. The group name is shared with the STM32
-# starter's hardware workflow on purpose: the two repositories drive the same
-# physical board, so their runs have to queue behind each other rather than meet
-# on it. The device locks are machine-wide, so a second run would be refused with
-# `device_busy` naming the holder; this group turns that refusal into a wait.
-# Never `cancel-in-progress: true`: cancelling a run in the middle of a plan is
-# how a board is left half flashed.
+# One bench, one run at a time. A GitHub concurrency group only coordinates runs
+# within one repository, so this group is *not* what serialises this workflow
+# against the STM32 starter's: two repositories that name the same string get two
+# independent groups, and neither waits on the other. What actually serialises
+# the two repositories is the bench itself. One board is wired to one machine,
+# one self-hosted runner is registered on it with these labels, and a runner runs
+# one job at a time, so a run from either repository sits in that single runner's
+# own queue while the other holds the board. The machine-wide device locks are
+# the backstop under that: a run that somehow reached the board while another
+# held it is refused with `device_busy` naming the holder rather than meeting it
+# on the probe.
+#
+# This group's job is narrower, and real: it keeps this repository's own runs
+# from piling up on that queue — a manual dispatch started while the nightly is
+# still on the board, or two dispatches in a row — by letting the newer run wait
+# for the older instead of both queuing. Never `cancel-in-progress: true`:
+# cancelling a run in the middle of a plan is how a board is left half flashed.
 concurrency:
   group: nucleo-f446re-bench
   cancel-in-progress: false
