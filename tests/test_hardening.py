@@ -2983,6 +2983,120 @@ def test_canonical_report_stays_non_green_when_both_cleanup_attempts_fail(tmp_pa
     assert not (recorded.get("ok") is True and recorded.get("audit_ok") is not False)
 
 
+def test_canonical_report_promotion_after_replace_is_reported_as_the_committed_green(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-2 finding 1: the promotion's ``os.replace`` commits the green
+    document before ``atomic_write_bytes`` fsyncs the parent directory, so an
+    error raised there can leave the green document already on disk. The returned
+    result must not then claim an audit failure while that green record stands. It
+    is reconciled to what actually committed, so the result reports the success
+    the trusted copy now records rather than a failure the file would contradict.
+
+    The promotion write is modelled as a rename that landed followed by a
+    durability fsync that did not: the green document is written through, then an
+    error is raised. Both reconciliation attempts (the corrective rewrite and the
+    removal) are denied as well, to show the consistency does not depend on
+    best-effort cleanup running: the committed green document is itself the honest
+    answer, and the returned result matches it."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-promote-after-replace")
+
+    original_atomic = report_module.atomic_write_text
+    canonical_writes = {"count": 0}
+
+    def flaky_atomic(path, text, **kwargs):
+        if Path(path) == canonical:
+            canonical_writes["count"] += 1
+            if canonical_writes["count"] == 2:
+                # The promotion: let the rename land the green document, then
+                # raise as a parent-directory fsync failing after os.replace.
+                original_atomic(path, text, **kwargs)
+                raise OSError("directory fsync failed after replace")
+            if canonical_writes["count"] > 2:
+                # Any corrective rewrite is denied, standing in for a disk that
+                # can no longer be written.
+                raise OSError("canonical rewrite denied")
+        return original_atomic(path, text, **kwargs)
+
+    original_unlink = Path.unlink
+
+    def fail_canonical_unlink(self, *args, **kwargs):
+        if self == canonical:
+            raise OSError("unlink denied")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(report_module, "atomic_write_text", flaky_atomic)
+    monkeypatch.setattr(Path, "unlink", fail_canonical_unlink)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-promote-after-replace"})
+
+    # The green document committed, so the result reports the success it records
+    # rather than an audit failure the standing green file would contradict.
+    assert result["audit_ok"] is not False
+    assert result["ok"] is True
+    assert canonical.exists()
+    recorded = json.loads(canonical.read_text(encoding="utf-8"))
+    # The committed file is the green document, and the returned result agrees
+    # with it: no returned audit failure coexists with a green trusted record.
+    assert recorded.get("audit_ok") is True
+    assert "canonical_write_pending" not in recorded
+    assert recorded.get("audit_ok") == result.get("audit_ok")
+    # Exactly two writes reached the per-run path: the staged placeholder and the
+    # promotion whose rename landed. No corrective rewrite was needed, because the
+    # result was reconciled to the committed green document, not the other way.
+    assert canonical_writes["count"] == 2
+
+
+def test_canonical_report_promotion_failing_before_its_replace_stays_non_green(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of round-2 finding 1: when the promotion fails before its
+    rename, the green document never committed and the staged placeholder is
+    still on disk. Reading the copy back shows it is not the green document, so
+    the result is marked audit-failed as before, and with both reconciliation
+    attempts denied the non-green placeholder is what remains, never a green
+    record the returned failure rejects."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-promote-before-replace")
+
+    original_atomic = report_module.atomic_write_text
+    canonical_writes = {"count": 0}
+
+    def flaky_atomic(path, text, **kwargs):
+        if Path(path) == canonical:
+            canonical_writes["count"] += 1
+            if canonical_writes["count"] >= 2:
+                # The promotion and any corrective rewrite raise before touching
+                # the file, standing in for an atomic write that failed ahead of
+                # its os.replace, so the staged placeholder is left untouched.
+                raise OSError("canonical write denied")
+        return original_atomic(path, text, **kwargs)
+
+    original_unlink = Path.unlink
+
+    def fail_canonical_unlink(self, *args, **kwargs):
+        if self == canonical:
+            raise OSError("unlink denied")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(report_module, "atomic_write_text", flaky_atomic)
+    monkeypatch.setattr(Path, "unlink", fail_canonical_unlink)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-promote-before-replace"})
+
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
+    assert "canonical_report_path" not in result
+    # The staged placeholder never got promoted and both cleanups were denied, so
+    # it is still on disk: non-green, never the green success the failed call
+    # would otherwise have left standing.
+    assert canonical.exists()
+    recorded = json.loads(canonical.read_text(encoding="utf-8"))
+    assert recorded.get("audit_ok") is False
+    assert recorded.get("canonical_write_pending") is True
+
+
 def test_path_lock_registry_does_not_keep_short_lived_paths(tmp_path: Path) -> None:
     _PATH_LOCKS.clear()
 

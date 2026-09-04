@@ -2757,6 +2757,63 @@ steps:
     assert read["matched_text_bytes_unavailable"] is True
 
 
+def test_matched_span_bytes_omits_the_byte_field_for_a_shift_state_dependent_match() -> None:
+    """Round-2 finding 2: a character whose byte slice is only itself in the
+    decoder state earlier bytes established.
+
+    ISO-2022-JP switches into two-byte mode with an escape that arrives before
+    the run, so the interior ``本`` is emitted on its own -- not as part of a
+    multi-character emission the ``ambiguous`` set catches -- yet its two bytes
+    ``4b 5c`` decode to the ASCII ``K`` and a backslash from the initial state,
+    not to ``本``. That isolated slice is false wire evidence, so the byte field
+    must be omitted (``None``) and the caller left with the honest text-only
+    match. The whole run, escape included, still slices honestly because it
+    carries the state it needs, as do the ASCII characters framing it."""
+    from agentic_hil.comports import decode_bytes, matched_span_bytes
+
+    raw = "x日本語y".encode("iso2022_jp")
+    assert decode_bytes(raw, "iso2022_jp") == "x日本語y"
+    # The interior character's byte slice only decodes to it inside the shifted
+    # run, so on its own it is not honest evidence: None, not b"K\\".
+    assert matched_span_bytes(raw, "iso2022_jp", (2, 3)) is None
+    # The whole run carries the escape that establishes its state, so it slices
+    # honestly and round-trips to the characters it stands for.
+    whole_run = matched_span_bytes(raw, "iso2022_jp", (1, 4))
+    assert whole_run is not None and whole_run.decode("iso2022_jp") == "日本語"
+    # The leading ASCII character needs no shift state and slices to its one byte.
+    assert matched_span_bytes(raw, "iso2022_jp", (0, 1)) == b"x"
+
+
+def test_a_met_pattern_on_a_shifted_interior_char_reports_honest_text_not_false_bytes(tmp_path: Path) -> None:
+    # The reactor-level face of round-2 finding 2: a comparator that matches only
+    # `本` inside an ISO-2022-JP `日本語` run has no honest byte slice, because the
+    # two bytes it decoded from mean the ASCII `K` and a backslash outside the
+    # shift the earlier escape set up. The report quotes the matched text and
+    # marks the byte field unavailable rather than attesting to `K\`, a slice that
+    # decodes to something the port never matched.
+    config = uart_config(tmp_path)
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 3
+name: shifted-interior
+steps:
+  - {device: dut_uart, action: uart_open}
+  - {device: dut_uart, action: uart_read, comparator: {pattern: "本"}, timeout_s: 5}
+""",
+    )
+    service = RecordingService(uart_reads=["x日本語y\r\n".encode("iso2022_jp")], uart_encoding="iso2022_jp")
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    read = result["steps"][1]["result"]
+    # The match is real and its text is quoted, but no false byte field: the
+    # honest fallback rather than the state-dependent `4b5c` slice.
+    assert read["matched_text"]["text"] == "本"
+    assert "hex" not in read["matched_text"]
+    assert read["matched_text_bytes_unavailable"] is True
+
+
 def test_an_unmet_comparator_still_answers_with_the_tail_and_claims_no_match(tmp_path: Path) -> None:
     # The other direction of the same field: a step that matched nothing must not
     # carry a matched text at all, because absence is what says nothing met it.

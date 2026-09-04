@@ -1448,7 +1448,17 @@ def matched_span_bytes(received: bytes, encoding: str, span: tuple[int, int]) ->
     begins or ends on one of those interior boundaries also returns ``None`` (a
     match on ``本`` alone inside a UTF-7 ``日本語`` run, for one), so the byte field
     is omitted rather than reported as an empty or misaligned slice (review round
-    1, finding 4)."""
+    1, finding 4).
+
+    A single character can also depend on decoder state carried from earlier
+    bytes even when it is emitted on its own. In an ISO-2022-JP stream the escape
+    that switches into two-byte mode arrives before the run, so the interior
+    ``本`` maps to the bytes ``4b 5c`` -- which read as the two ASCII characters
+    ``K`` and a backslash when decoded from the initial state, not as ``本``.
+    Every candidate slice is therefore checked to decode, on its own, back to
+    exactly the matched substring; a slice that does not is state-dependent, so
+    ``None`` is returned and the caller keeps the honest text-only match (review
+    round 2, finding 2)."""
     start, end = span
     if start < 0 or end < start:
         return None
@@ -1493,7 +1503,19 @@ def matched_span_bytes(received: bytes, encoding: str, span: tuple[int, int]) ->
         # span -- an empty or misaligned slice -- and let the caller fall back to
         # the honest text-only match (review round 1, finding 4).
         return None
-    return received[char_byte_starts[start] : char_byte_starts[end]]
+    candidate = received[char_byte_starts[start] : char_byte_starts[end]]
+    if decode_bytes(candidate, encoding) != "".join(produced[start:end]):
+        # The slice reads as the matched substring only in the decoder state the
+        # bytes before it established. A stateful codec that carries shift state
+        # -- an ISO-2022-JP run switched in by an earlier escape, whose interior
+        # ``本`` is the two ASCII-looking bytes ``4b 5c`` -- decodes that same
+        # slice to something else from the initial state (here ``K`` and a
+        # backslash), so on its own it is false wire evidence, not a
+        # multi-character emission the ``ambiguous`` set already caught. Omit the
+        # byte field and let the caller fall back to the honest text-only match
+        # (review round 2, finding 2).
+        return None
+    return candidate
 
 
 def encode_text(text: str, encoding: str) -> bytes:

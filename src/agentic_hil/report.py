@@ -271,8 +271,8 @@ def staged_canonical_document(snapshot: JsonObject) -> str:
     commits reads as unfinished rather than as the success it will only become
     once the mirror and the report state have both landed and it is promoted in
     place. Staging non-green is what makes the fail-safe unconditional: the green
-    document is written last of all, so no failure after it — and no failure of a
-    best-effort cleanup — can leave a success the returned result rejected."""
+    document is written last of all, so no failure after it, and no failure of a
+    best-effort cleanup, can leave a success the returned result rejected."""
     marker = {
         "error_type": "canonical_write_pending",
         "summary": "This per-run report copy was staged but not yet committed as a success.",
@@ -382,8 +382,8 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     enriched.setdefault(CONFIG_IN_FORCE_KEY, config_in_force(config))
     # The per-run copy, staged non-green on disk and tracked here so it can be
     # promoted once every other required write has committed. Because the green
-    # document is written last of all, no failure after it — and no failure of a
-    # best-effort cleanup — can leave a green trusted record the live call
+    # document is written last of all, no failure after it, and no failure of a
+    # best-effort cleanup, can leave a green trusted record the live call
     # rejected: an auditor enumerating the canonical archive can never find a
     # success the returned result turned around and rejected as unaudited.
     committed_canonical: Path | None = None
@@ -429,21 +429,32 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
             if committed_canonical is not None and enriched.get("audit_ok") is not False:
                 # Promote the staged placeholder now that the mirror and the
                 # report state have both committed. This is the last required
-                # write. If it fails, the result is marked audit-failed like any
-                # other required write, the report state is brought back in line,
-                # and the trusted copy stays in its non-green placeholder form
-                # (a failed `atomic_write_text` leaves the previous contents in
-                # place) — never a green attestation the returned result rejects.
+                # write.
+                #
+                # `atomic_write_bytes` renames the finished document into place
+                # and only then fsyncs the parent directory, so a failure raised
+                # here may already have committed the green document: the rename
+                # landed and the later durability fsync did not. It is not safe to
+                # assume the failed write left the placeholder in place, so the
+                # trusted copy is read back and what is on disk decides the
+                # result. If the green document is there the promotion committed
+                # and only durability was lost, so the result stays green and
+                # consistent with the committed file. If it is not, the
+                # placeholder never became green, so the result is marked
+                # audit-failed like any other required write and the leftover is
+                # reconciled below. Either way a returned audit failure can never
+                # coexist with a green trusted record.
                 try:
                     atomic_write_text(committed_canonical, document)
                 except (ConfigError, OSError, ValueError) as error:
-                    enriched = mark_audit_failure(enriched, error)
-                    enriched.pop("report_path", None)
-                    enriched.pop(CANONICAL_REPORT_KEY, None)
-                    state["last_report"] = enriched
-                    if is_failure_report(enriched):
-                        state["last_failure"] = enriched
-                    write_report_state(config, state)
+                    if _canonical_on_disk(committed_canonical) != document:
+                        enriched = mark_audit_failure(enriched, error)
+                        enriched.pop("report_path", None)
+                        enriched.pop(CANONICAL_REPORT_KEY, None)
+                        state["last_report"] = enriched
+                        if is_failure_report(enriched):
+                            state["last_failure"] = enriched
+                        write_report_state(config, state)
     except (ConfigError, OSError, ValueError) as error:
         failed = mark_audit_failure(enriched, error)
         # report_path can't be trusted after a failed commit: strip it so the
@@ -466,6 +477,24 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
     return enriched
 
 
+def _canonical_on_disk(canonical: Path) -> str | None:
+    """The per-run copy's current text, or ``None`` when it cannot be read.
+
+    Used only on the promotion failure path. ``atomic_write_bytes`` renames the
+    finished document into place before its final directory fsync, so a promotion
+    that raises may already have committed the green document. Reading the file
+    back is how ``write_report`` tells that committed green document from a
+    placeholder that was never promoted, so the returned result is reconciled to
+    what is on disk rather than to an assumption that the failed write left the
+    previous contents in place. Any read error answers ``None``, which the caller
+    reads as "not the green document", so it marks the audit failure and
+    reconciles the leftover rather than trusting an unverifiable file."""
+    try:
+        return safe_read_text(canonical)
+    except (ConfigError, OSError, ValueError):
+        return None
+
+
 def _revoke_stale_canonical(canonical: Path | None, result: JsonObject) -> None:
     """Reconcile a staged per-run placeholder to the audit-failed result, or remove it.
 
@@ -473,8 +502,8 @@ def _revoke_stale_canonical(canonical: Path | None, result: JsonObject) -> None:
     per-run file has already been staged as a non-green placeholder but a later
     required write failed and the returned result is now ``audit_ok: false``.
     The placeholder is already non-green, so this no longer carries the fail-safe
-    guarantee — that comes from staging the copy non-green and promoting it to
-    the green document only as the very last write. What it adds is accuracy: the
+    guarantee: that comes from staging the copy non-green and promoting it to the
+    green document only as the very last write. What it adds is accuracy: the
     leftover record names the real error rather than the generic pending marker.
 
     Best effort by construction, and safe in every outcome: the corrective
