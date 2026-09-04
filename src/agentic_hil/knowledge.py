@@ -1115,6 +1115,34 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "board, and a stimulus sent to the wrong board is the failure the port identity check exists to prevent.",
         ),
     ),
+    "com_port_not_bound": ErrorRemedy(
+        meaning=(
+            "A configured `com_ports` entry names a port and no device, so there is nothing to open. `field` names the "
+            "key that is empty. The entry exists because the project declared this port (its name, its baudrate and "
+            "its permissions) before any bench was attached: `agentic-hil init` writes the project profile's ports "
+            "that way when discovery found no board. Nothing was contacted and nothing is in doubt.\n\n"
+            "It is deliberately not `com_port_not_configured`, which means the project declares no such port at all. "
+            "There the caller or the plan named a port that does not exist; here both are right and the bench is not "
+            "filled in, and telling an operator their plan referenced an unconfigured port sent them to look for a "
+            "mistake that was not there."
+        ),
+        remediation=(
+            "Plug the board in and run `agentic-hil adopt-hardware --apply`. It fills `com_ports.<name>.device` in "
+            "from the attached hardware, together with the serial number and USB ids that make the name checkable, "
+            "and it fills in the probe and the toolchain path in the same call.",
+            "If the port is not the probe's own virtual COM port, run `agentic-hil com-ports` to see what this host "
+            "has and name the device yourself. On Linux prefer the `/dev/serial/by-id/...` name, which survives a "
+            "replug.",
+            "Nothing needs recovering: `retry_safe` is true, no handle was created and no line was driven.",
+        ),
+        do_not=(
+            "Do not delete the entry to make the refusal go away. The entry is the project's statement that this bench "
+            "has a `dut_uart` at this baudrate with these permissions, and a plan that names it is correct; removing "
+            "it turns a precise refusal back into `com_port_not_configured`.",
+            "Do not point it at whichever device happens to be free. A serial device name is an enumeration order, so "
+            "a guess is a stimulus sent to whatever board took that name.",
+        ),
+    ),
     "undeclared_device": ErrorRemedy(
         meaning=(
             "A run reached for a device its test description does not name. `declared_devices` lists what it declared, "

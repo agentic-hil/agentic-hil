@@ -57,6 +57,7 @@ from agentic_hil.types import (
     ValidationConfig,
     com_port_carries_hardware_identity,
     com_port_identity_source,
+    com_port_is_unbound,
     fold_device_path,
     fold_hardware_id,
 )
@@ -3268,8 +3269,13 @@ def artifacts_config(raw: JsonObject) -> ArtifactsConfig:
 
 def com_port_config(name: str, value: Any) -> ComPortConfig:
     raw = mapping(value, f"com_ports.{name}")
+    # Absent or null is an entry that names a port and no device yet: the empty
+    # string is how that reaches the rest of the code, and `com_port_is_unbound`
+    # is how it is asked about. `str(None)` used to make it the literal "None",
+    # which is a device name nothing can open and nothing recognises as unset.
+    device = raw.get("device")
     return ComPortConfig(
-        device=str(raw["device"]),
+        device="" if device is None else str(device),
         baudrate=int(raw.get("baudrate", 115200)),
         timeout_s=float(raw.get("timeout_s", 0.1)),
         write_timeout_s=float(raw.get("write_timeout_s", 1.0)),
@@ -3635,7 +3641,12 @@ def validate_com_port_identity_declarations(com_ports: dict[str, ComPortConfig],
     under version 1 too."""
     for name, port in com_ports.items():
         declared = port.identity_source
-        if declared is None:
+        # An entry with no device yet has no identity to declare or contradict:
+        # what identifies a port is settled once it is bound, and until then a
+        # derived `device` would be a claim about a device name that is not
+        # there. The check runs in full the moment `adopt-hardware` or an
+        # operator names one.
+        if declared is None or com_port_is_unbound(port):
             continue
         derived = com_port_identity_source(port)
         if declared == derived:
@@ -3686,7 +3697,12 @@ def reject_unidentified_com_ports(com_ports: dict[str, ComPortConfig], config_pa
     if version < IDENTIFIED_COM_PORT_CONFIG_VERSION:
         return
     for name, port in com_ports.items():
-        if com_port_carries_hardware_identity(port) or port.identity_source is not None:
+        # An entry with no device yet is not identified by an enumeration order,
+        # because it is not identified by anything and cannot be opened at all.
+        # Version 3's rule is about a name that can come to reach another board;
+        # a port nothing can reach has no such name. It is asked the moment the
+        # device is filled in, which is the point at which the answer exists.
+        if com_port_carries_hardware_identity(port) or port.identity_source is not None or com_port_is_unbound(port):
             continue
         derived = com_port_identity_source(port)
         undeclared = (

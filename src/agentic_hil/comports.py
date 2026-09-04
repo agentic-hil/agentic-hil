@@ -11,7 +11,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentic_hil.config import ConfigError, display_path, safe_append_text
+from agentic_hil.config import ADOPT_HARDWARE_COMMAND, ConfigError, display_path, safe_append_text
 from agentic_hil.coordination import (
     CoordinationError,
     DetachedHardwareLease,
@@ -46,6 +46,7 @@ from agentic_hil.types import (
     AgenticHILConfig,
     ComPortConfig,
     JsonObject,
+    com_port_is_unbound,
     fold_device_path,
     fold_hardware_id,
     format_usb_id,
@@ -101,6 +102,45 @@ COM_PORT_IDENTITY_MISMATCH = "com_port_identity_mismatch"
 # the right board, but nothing proved it does, and an entry that asked for the
 # guarantee is not opened on a check that did not run.
 COM_PORT_IDENTITY_UNVERIFIED = "com_port_identity_unverified"
+
+
+# A configured port that names no device yet. Distinct from
+# `com_port_not_configured`, which is a name the project does not declare at all:
+# there the plan or the call is wrong, here the plan is right and the bench is
+# not filled in. `agentic-hil init` writes such entries when a project profile
+# names its ports and no bench was attached.
+COM_PORT_NOT_BOUND = "com_port_not_bound"
+
+
+def com_port_unbound(tool: str, port_id: str) -> JsonObject:
+    """Refuse a declared COM port that has no device to open.
+
+    Nothing is reached, so this is a refusal rather than an incident, and it is
+    retry-safe in the only sense that matters: bind the port and call again. The
+    summary names the port and the key that is empty, because the whole failure
+    this replaces was a message that named neither."""
+    return {
+        "ok": False,
+        "tool": tool,
+        "port_id": port_id,
+        "error_type": COM_PORT_NOT_BOUND,
+        "field": f"com_ports.{port_id}.device",
+        "summary": (
+            f"COM port '{port_id}' is declared in the authoritative config and names no device yet, so there is "
+            "nothing to open. The entry carries this port's name, baudrate and permissions; what it does not "
+            "carry is which of this host's serial devices it is."
+        ),
+        "next_step": (
+            f"Plug the board in and run `{ADOPT_HARDWARE_COMMAND}`, which fills `com_ports.{port_id}.device` in from "
+            "the attached hardware together with its serial number, or name the device yourself. `agentic-hil "
+            "com-ports` lists what this host has."
+        ),
+        "target_contacted": False,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "hardware_state": "unchanged",
+        "retry_safe": True,
+    }
 
 
 def usb_id_phrase(vid: int | None, pid: int | None) -> str:
@@ -1241,6 +1281,15 @@ class ComPortService:
         port_config = self.config.com_ports.get(port_id)
         if port_config is None:
             return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "com_port_not_configured", "summary": "COM port is not available in the authoritative config.", "configured_ports": sorted(self.config.com_ports.keys())}
+        if com_port_is_unbound(port_config):
+            # Declared and not yet bound to a device. The one gate every COM
+            # tool already goes through, so `com_session_start`, `com_write`,
+            # `com_read` and `com_session_stop` all answer the same thing rather
+            # than each finding out for itself at an open on the empty string.
+            # A distinct error_type, because "this project does not configure
+            # that port" and "this port has no device yet" have different
+            # remedies and only one of them is a mistake in the caller.
+            return com_port_unbound(tool, port_id)
         return {"ok": True, "port_config": port_config}
 
     def _active_session(self, port_id: str, tool: str) -> JsonObject:

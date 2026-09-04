@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 from collections.abc import Callable
@@ -11,6 +12,7 @@ from agentic_hil.backends.common import find_stm32_programmer_cli, invocation, s
 from agentic_hil.backends.stlink import stlink_empty_result, stlink_probe_ids, stlink_target_info
 from agentic_hil.comports import list_available_com_ports
 from agentic_hil.config import (
+    ADOPT_HARDWARE_COMMAND,
     GDB_AUTODETECT_CANDIDATES,
     ConfigError,
     generated_permissions,
@@ -855,6 +857,109 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
             }
         }
     return template
+
+
+# The two regions of the shipped skeleton a profile can fill in when no bench
+# was found, quoted exactly. They are anchors rather than a re-parse of the
+# document because the skeleton's value to an operator is its comments, and a
+# YAML round trip drops every one of them: what is written when discovery finds
+# nothing has to stay the annotated file it has always been.
+#
+# `apply_profile_to_placeholder` refuses rather than silently skipping when
+# either is missing, and a test holds the skeleton to both, so the two cannot
+# come apart without something saying so.
+PLACEHOLDER_TARGET_ANCHOR = 'target:\n  name: "example-target"\n  controller: "unknown-controller"\n'
+PLACEHOLDER_COM_PORTS_ANCHOR = "com_ports: {}\n"
+
+
+def apply_profile_to_placeholder(template_text: str, profile: JsonObject) -> str:
+    """The skeleton, carrying the names this project's profile already states.
+
+    What `init` wrote when nothing was attached said `example-target`,
+    `unknown-controller` and `com_ports: {}` for a workspace whose own
+    `agentic-hil.config.example.yaml` names the board and names the ports. The
+    ports were the expensive half: a plan that opens `dut_uart` was refused
+    "references a COM port that is not in the authoritative config" for a port
+    the project declares, and the operator went looking for a mistake in the
+    plan.
+
+    So the profile's names go in, and only the names: the board's name and
+    controller, and each port's name, baudrate and permissions. Not a device,
+    because which of this host's serial devices a port is, is exactly what
+    discovery did not find out; the entry is written unbound (see
+    ``types.com_port_is_unbound``) and every call that names it is refused as
+    `com_port_not_bound`, which says the bench is not filled in rather than that
+    the plan is wrong.
+
+    Text rather than a document, so the comments survive. Both regions are
+    quoted from the skeleton and a missing one raises: the skeleton is shipped
+    with this module, and a silent no-op would leave an operator with the
+    placeholder this exists to replace and nothing saying why.
+    """
+    target_profile = profile.get("target") if isinstance(profile.get("target"), dict) else {}
+    name = str(target_profile.get("name") or "").strip()
+    controller = str(target_profile.get("controller") or "").strip()
+    text = template_text
+    if name or controller:
+        if PLACEHOLDER_TARGET_ANCHOR not in text:
+            raise ConfigError(
+                "config_invalid",
+                "The bundled configuration skeleton no longer carries the placeholder target block, so this project's "
+                f"{PROJECT_PROFILE} could not be applied to it.",
+                {"field": "target", "profile": PROJECT_PROFILE},
+            )
+        # `json.dumps` rather than a one-value `yaml.safe_dump`, which appends
+        # YAML's own document-end marker and would turn the rest of the skeleton
+        # into a second document. JSON is a subset of YAML, so this writes the
+        # same quoted scalar the anchor it replaces already was, and it is how
+        # `init` spells both roots a few lines further on.
+        text = text.replace(
+            PLACEHOLDER_TARGET_ANCHOR,
+            "target:\n"
+            f"  name: {json.dumps(name or 'example-target')}\n"
+            f"  controller: {json.dumps(controller or 'unknown-controller')}\n",
+        )
+    ports = _placeholder_com_ports(profile)
+    if ports:
+        if PLACEHOLDER_COM_PORTS_ANCHOR not in text:
+            raise ConfigError(
+                "config_invalid",
+                "The bundled configuration skeleton no longer carries the empty com_ports block, so this project's "
+                f"{PROJECT_PROFILE} could not be applied to it.",
+                {"field": "com_ports", "profile": PROJECT_PROFILE},
+            )
+        rendered = yaml.safe_dump({"com_ports": ports}, sort_keys=False, allow_unicode=False)
+        text = text.replace(
+            PLACEHOLDER_COM_PORTS_ANCHOR,
+            f"# Named by this project's {PROJECT_PROFILE}. No bench was attached when this file was written, so each\n"
+            "# entry carries the port's name, baudrate and permissions and no `device`: which of this host's serial\n"
+            "# devices it is, is what discovery did not find out. Nothing opens an entry in this state, and a call or\n"
+            f"# a plan step that names one is refused `com_port_not_bound`. `{ADOPT_HARDWARE_COMMAND}` fills the\n"
+            "# device in from the attached board.\n"
+            f"{rendered}",
+        )
+    return text
+
+
+def _placeholder_com_ports(profile: JsonObject) -> JsonObject:
+    """The profile's ports as unbound entries, permissions exactly as asked.
+
+    ``device`` is deliberately absent rather than null: both read as unbound, and
+    leaving the key out is what a file that has never been bound looks like.
+    ``allow_write`` follows the profile the way the discovered path follows it,
+    so a project that closed a port keeps it closed and one that said nothing
+    gets the generated default."""
+    profile_ports = profile.get("com_ports") if isinstance(profile.get("com_ports"), dict) else {}
+    entries: JsonObject = {}
+    for name, value in profile_ports.items():
+        if not isinstance(value, dict):
+            continue
+        requested = value.get("permissions") if isinstance(value.get("permissions"), dict) else {}
+        entries[str(name)] = {
+            "baudrate": profile_baudrate(value, str(name)),
+            "permissions": {flag: bool(requested.get(flag, default)) for flag, default in generated_permissions("com_ports").items()},
+        }
+    return entries
 
 
 def _discovery_failure(error_type: str, summary: str, **details: object) -> JsonObject:

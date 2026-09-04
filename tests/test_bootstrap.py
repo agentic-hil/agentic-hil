@@ -19,9 +19,12 @@ from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
     DISCOVERED_BY_STLINK_CLI,
     DISCOVERED_BY_USB_INVENTORY,
+    PLACEHOLDER_COM_PORTS_ANCHOR,
+    PLACEHOLDER_TARGET_ANCHOR,
     PROFILE_KEYS_READ,
     PROJECT_PROFILE,
     apply_discovery_to_template,
+    apply_profile_to_placeholder,
     autodetected_gdb,
     correlate_com_port,
     discover_attached_hardware,
@@ -40,11 +43,12 @@ from agentic_hil.config import (
     load_config,
 )
 from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
-from agentic_hil.devices import config_devices, debugger_device
+from agentic_hil.devices import config_devices, debugger_device, uart_device
 from agentic_hil.knowledge import EXCLUSIVE_FLASH_PERMISSIONS, remediation_fields
 from agentic_hil.report import read_last_report
+from agentic_hil.test_reactor import TestReactor, load_test_config
 from agentic_hil.tools import AgenticHILToolService, project_config_create
-from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, fold_hardware_id
+from agentic_hil.types import CURRENT_CONFIG_VERSION, JsonObject, com_port_is_unbound, fold_hardware_id
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -2070,7 +2074,10 @@ def test_adopt_hardware_fills_a_placeholder_on_a_host_with_only_openocd(tmp_path
     carried = {item["key"]: item["value"] for item in result["carried"]}
     assert carried["debuggers.dut.probe_id"] == "066AFF303435554157113106"
     assert carried["debuggers.dut.executable"] == FAKE_OPENOCD_PATH
-    assert carried["target.controller"] == "stm32f446ret6"
+    # The controller is already right: the placeholder carried it out of this
+    # project's profile, so adoption reports it as current rather than writing
+    # it again. What only the attached hardware knows is what is left to carry.
+    assert {"key": "target.controller", "value": "stm32f446ret6"} in result["already_current"]
     assert carried["com_ports.dut_uart.device"] == NUCLEO_VCP["stable_device"]
     assert carried["com_ports.dut_uart.serial_number"] == "066AFF303435554157113106"
     # And nothing under `unavailable` is about the toolchain: the entry the
@@ -2080,3 +2087,214 @@ def test_adopt_hardware_fills_a_placeholder_on_a_host_with_only_openocd(tmp_path
     written = load_authoritative_config(workspace)
     assert written.debuggers["dut"].executable == FAKE_OPENOCD_PATH
     assert written.com_ports["dut_uart"].device == NUCLEO_VCP["stable_device"]
+
+
+# ---------------------------------------------------------------------------
+# The placeholder a project profile fills in, and the port it can declare
+# without binding.
+
+
+def test_the_placeholder_carries_the_profiles_names_instead_of_the_examples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workspace that says what its board is should not be handed `example-target`.
+
+    The profile is on disk and names the board and the ports; the placeholder
+    said `example-target`, `unknown-controller` and `com_ports: {}` anyway, so
+    every fact the project had already stated had to be typed again after
+    `adopt-hardware`. Now the names go in, and only the names: no device, which
+    is the one thing discovery did not find out."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[])
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    written = load_authoritative_config(workspace)
+    assert written.target.name == "nucleo-f446re-starter"
+    assert written.target.controller == "stm32f446ret6"
+    assert sorted(written.com_ports) == ["dut_uart"]
+    port = written.com_ports["dut_uart"]
+    assert port.baudrate == 115200
+    assert port.permissions.allow_write is True
+    # Declared and not bound: the entry says which port this project has and
+    # says nothing about which of the host's devices it is.
+    assert com_port_is_unbound(port) is True
+    assert port.device == ""
+    # The skeleton is still the annotated file an operator reads, which a YAML
+    # round trip of the document would have thrown away.
+    assert "# Every debug probe is a named entry" in Path(written.config_path).read_text(encoding="utf-8")
+
+
+def test_a_workspace_with_no_profile_still_gets_the_shipped_skeleton(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing to carry, nothing carried.
+
+    The built-in `DEFAULT_PROJECT_PROFILE` fills a *discovered* bench; it is not
+    consulted here, because putting a `dut_uart` into a workspace that declared
+    none would be this command inventing an entry rather than honouring one."""
+    workspace = tmp_path / "bare"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[])
+
+    result = init_config()
+
+    assert result["ok"] is True, result
+    written = load_authoritative_config(workspace)
+    assert written.target.name == "example-target"
+    assert written.target.controller == "unknown-controller"
+    assert written.com_ports == {}
+
+
+def test_the_placeholder_anchors_are_in_the_skeleton_they_quote() -> None:
+    """The substitution is textual, so what it quotes has to still be there.
+
+    A skeleton that reworded either region would silently stop carrying the
+    profile, which is the failure this whole change removes. `init` raises
+    instead of writing that file, and this is the check that keeps the raise
+    from ever being reached in the field."""
+    assert PLACEHOLDER_TARGET_ANCHOR in DEFAULT_CONFIG_TEMPLATE
+    assert PLACEHOLDER_COM_PORTS_ANCHOR in DEFAULT_CONFIG_TEMPLATE
+    with pytest.raises(ConfigError) as refused:
+        apply_profile_to_placeholder("target: {}\n", {"target": {"name": "demo"}})
+    assert refused.value.error_type == "config_invalid"
+
+
+def test_a_plan_naming_an_unbound_port_is_refused_by_the_port_not_by_the_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal the reported operator actually saw, corrected.
+
+    `test_config_invalid: Test step references a COM port that is not in the
+    authoritative config (steps[1].port_id dut_uart)` was wrong twice: the plan
+    named a port the project declares, and the thing that was missing was the
+    device. The plan is not the thing to fix, so the refusal names the port, the
+    key that is empty, and the command that fills it."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[])
+    assert init_config()["ok"] is True
+    config = load_authoritative_config(workspace)
+
+    plan = workspace / "nominal.testconfig.yaml"
+    plan.write_text(
+        yaml.safe_dump(
+            {
+                "version": 2,
+                "name": "nominal",
+                "steps": [{"action": "uart_open", "port_id": "dut_uart"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = AgenticHILToolService(config)
+    try:
+        refused = TestReactor(config, service).run(load_test_config(str(plan), str(workspace)))
+    finally:
+        service.close()
+
+    assert refused["ok"] is False
+    validation = refused["validation_error"]
+    assert validation["error_type"] == "com_port_not_bound"
+    assert validation["port_id"] == "dut_uart"
+    assert validation["unbound_key"] == "com_ports.dut_uart.device"
+    assert "names no device yet" in validation["summary"]
+    assert "not in the authoritative config" not in validation["summary"]
+    assert "adopt-hardware" in validation["next_step"]
+
+
+def test_every_com_tool_refuses_an_unbound_port_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One gate, so the four tools cannot answer this differently.
+
+    `com_session_start` would otherwise reach an open on the empty string and
+    report whatever the operating system said about it, which is a backend error
+    about a bench that was never bound rather than a refusal about a
+    configuration."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[])
+    assert init_config()["ok"] is True
+    service = AgenticHILToolService(load_authoritative_config(workspace))
+    try:
+        for tool, arguments in (
+            ("com_session_start", {"port_id": "dut_uart"}),
+            ("com_write", {"port_id": "dut_uart", "text": "hello"}),
+            ("com_read", {"port_id": "dut_uart"}),
+        ):
+            refused = service.call(tool, arguments)
+            assert refused["ok"] is False, (tool, refused)
+            assert refused["error_type"] == "com_port_not_bound", tool
+            assert refused["field"] == "com_ports.dut_uart.device", tool
+            assert refused["side_effect_committed"] is False, tool
+            assert refused["retry_safe"] is True, tool
+    finally:
+        service.close()
+
+
+def test_a_bound_port_is_untouched_by_any_of_it(tmp_path: Path) -> None:
+    """The neighbouring behaviour: a configuration that names a device is read
+    exactly as it was, identity rule included."""
+    path = write_config(
+        tmp_path,
+        com_ports_yaml=(
+            "com_ports:\n"
+            "  dut_uart:\n"
+            '    device: "COM7"\n'
+            "    baudrate: 115200\n"
+            '    serial_number: "066AFF303435554157113106"\n'
+        ),
+    )
+    config = load_config(str(path))
+
+    port = config.com_ports["dut_uart"]
+    assert port.device == "COM7"
+    assert com_port_is_unbound(port) is False
+    assert uart_device(config, "dut_uart").lock_key == "com:serial:066aff303435554157113106"
+
+
+def test_an_unbound_port_locks_under_its_own_name_and_says_what_it_is(tmp_path: Path) -> None:
+    """A key that is always something, and a warning that is true.
+
+    `com:` for every unbound entry on the host would be one lock key shared by
+    unrelated benches; the volatile-name warning would tell an operator their
+    port may come to mean another board when it currently means none."""
+    path = write_config(
+        tmp_path,
+        com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n",
+    )
+    config = load_config(str(path))
+
+    device = uart_device(config, "dut_uart")
+    assert device.lock_key == "com:unbound:dut_uart"
+    assert "names no device yet" in str(device.identity_warning)
+
+
+def test_version_3_does_not_demand_an_identity_from_a_port_with_no_device(tmp_path: Path) -> None:
+    """Version 3 is about a name that can come to reach another board.
+
+    An entry with no device has no such name, so demanding it declare what
+    identifies it would refuse the very file `init` writes when no bench was
+    attached. The rule applies in full from the moment a device is named."""
+    path = write_config(
+        tmp_path,
+        config_version=CURRENT_CONFIG_VERSION,
+        com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n",
+    )
+
+    config = load_config(str(path))
+
+    assert com_port_is_unbound(config.com_ports["dut_uart"]) is True
+    # And the same file with a kernel name and nothing else is still refused,
+    # which is the rule this leaves alone.
+    refused = write_config(
+        tmp_path / "bound",
+        config_version=CURRENT_CONFIG_VERSION,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n    baudrate: 115200\n',
+    )
+    with pytest.raises(ConfigError) as error:
+        load_config(str(refused))
+    assert error.value.error_type == "config_invalid"
+    assert "com_ports.dut_uart" in error.value.summary

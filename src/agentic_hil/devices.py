@@ -41,6 +41,7 @@ from agentic_hil.types import (
     JsonObject,
     com_port_carries_hardware_identity,
     com_port_identity_source,
+    com_port_is_unbound,
     fold_device_path,
     fold_hardware_id,
 )
@@ -76,6 +77,16 @@ VOLATILE_SERIAL_DEVICE_WARNING = (
 # because half the problem is genuinely solved (a CH340 answering to a name
 # written for an ST-Link is refused at open), and the other half provably cannot
 # be, since two identical adapters publish identical ids.
+# What an entry that names a port and no device yet is told about itself. It is
+# not the volatile-name warning: that one is about a name that may come to reach
+# another board, and this entry has no name to reach anything with.
+UNBOUND_SERIAL_DEVICE_WARNING = (
+    "This COM port names no device yet, so nothing can be opened on it. The entry exists because the project "
+    "declared this port by name, baudrate and permissions before any bench was attached; run `agentic-hil "
+    "adopt-hardware --apply` with the board plugged in to fill the device in from the hardware, or name it "
+    "yourself with `agentic-hil grant`-style edits to `com_ports.<name>.device`."
+)
+
 TYPE_ONLY_SERIAL_DEVICE_WARNING = (
     "This COM port is identified by `vid`/`pid` and a kernel name: the type check refuses a different kind of "
     "adapter under this name, but two adapters of the same type are indistinguishable to it, and the lock "
@@ -406,6 +417,15 @@ class UartDevice(Device):
             # announces itself as a wait naming its holder, while an
             # under-collapse lets two runs each believe they hold the board.
             return f"com:serial:{fold_hardware_id(self.port.serial_number)}"
+        if com_port_is_unbound(self.port):
+            # An entry that names no device yet. There is no physical unit to
+            # exclude anybody from, and `com:` for every such entry on the host
+            # would be one key shared by unrelated benches, so the entry's own
+            # name is the key. Nothing can open the port while it is unbound, so
+            # this key is never the thing that keeps two owners apart; it exists
+            # so that a lock key is always something, and so that a regeneration
+            # holding this bench's entries holds a name of its own.
+            return f"com:unbound:{fold_hardware_id(self.config_id)}"
         # A serial device is a host path: COM7 and com7 are one port on Windows,
         # /dev/ttyACM0 and /dev/ttyacm0 are two names on Linux.
         return f"com:{fold_device_path(self.port.device)}"
@@ -447,6 +467,13 @@ class UartDevice(Device):
         a different sentence rather than the same one. A `serial_number` without
         them is complete and warns about nothing: the serial is the anchor and
         the ids only narrow it."""
+        if com_port_is_unbound(self.port):
+            # Not a warning about which board a name reaches: this entry has no
+            # name yet, so nothing reaches anything. Said plainly rather than
+            # dressed as the volatile-name warning, which would tell an operator
+            # their port might come to mean another board when it currently
+            # means none.
+            return UNBOUND_SERIAL_DEVICE_WARNING
         if com_port_carries_hardware_identity(self.port):
             return None
         return TYPE_ONLY_SERIAL_DEVICE_WARNING if self.identity_source != "device" else VOLATILE_SERIAL_DEVICE_WARNING

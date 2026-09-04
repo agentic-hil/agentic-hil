@@ -22,6 +22,7 @@ from agentic_hil.bootstrap import (
     BOOTSTRAP_BACKEND,
     DEFAULT_PROJECT_PROFILE,
     apply_discovery_to_template,
+    apply_profile_to_placeholder,
     enumerate_attached_probes,
     load_project_profile,
 )
@@ -2728,7 +2729,27 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
         document = {"workspace_root": str(workspace), "state_root": str(state_root), **configured}
         text = yaml.safe_dump(document, sort_keys=False, allow_unicode=False)
     else:
-        text = f"workspace_root: {json.dumps(str(workspace))}\nstate_root: {json.dumps(str(state_root))}\n\n{DEFAULT_CONFIG_TEMPLATE}"
+        # The placeholder, carrying whatever this project's own profile already
+        # states about the bench: the board's name and controller, and the ports
+        # it declares by name, baudrate and permissions. Not a device for any of
+        # them, which is precisely what discovery did not find out, so each entry
+        # is written unbound and every call that names one is refused
+        # `com_port_not_bound`.
+        #
+        # `com_ports: {}` was the expensive half of the old placeholder: a plan
+        # opening the `dut_uart` the project's own profile declares was refused
+        # "references a COM port that is not in the authoritative config", which
+        # sent the operator to look for a mistake in a plan that was right.
+        #
+        # Only with a profile on disk. Without one there is nothing to carry and
+        # the shipped skeleton is written exactly as it always has been; the
+        # built-in `DEFAULT_PROJECT_PROFILE` is deliberately not consulted here,
+        # because it would put entries into a workspace that asked for none.
+        try:
+            placeholder = DEFAULT_CONFIG_TEMPLATE if profile is None else apply_profile_to_placeholder(DEFAULT_CONFIG_TEMPLATE, profile)
+        except ConfigError as error:
+            return {**error.to_dict(), "summary": f"{error.summary} No configuration was written.", "path": str(target_path)}
+        text = f"workspace_root: {json.dumps(str(workspace))}\nstate_root: {json.dumps(str(state_root))}\n\n{placeholder}"
     safe_directory(target_path.parent)
     descriptor, temporary_name = tempfile.mkstemp(prefix=".agentic-hil-config-validate-", dir=target_path.parent)
     temporary_path = Path(temporary_name)

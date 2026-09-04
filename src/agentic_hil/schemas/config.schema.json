@@ -379,13 +379,10 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "device"
-        ],
         "properties": {
           "device": {
-            "type": "string",
-            "description": "How the port is opened. On Linux prefer the stable /dev/serial/by-id/... symlink, which names the vendor, the product and the device's own serial number: /dev/ttyACM0 is an enumeration order, so attaching a second adapter can hand one board the name the other had. Windows has no openable stable name (COMn is all there is), so name the port there and let serial_number carry the identity."
+            "type": ["string", "null"],
+            "description": "How the port is opened. On Linux prefer the stable /dev/serial/by-id/... symlink, which names the vendor, the product and the device's own serial number: /dev/ttyACM0 is an enumeration order, so attaching a second adapter can hand one board the name the other had. Windows has no openable stable name (COMn is all there is), so name the port there and let serial_number carry the identity. Null or absent declares the port by name without binding it to a device yet, which is what `agentic-hil init` writes for a project profile's ports when no bench was attached; nothing opens such an entry, and every call that names it is refused as com_port_not_bound until `agentic-hil adopt-hardware --apply` or an operator names the device."
           },
           "baudrate": {
             "type": "integer",
