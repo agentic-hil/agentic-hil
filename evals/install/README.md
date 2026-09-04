@@ -412,7 +412,7 @@ For release evaluation, use `target.mode: "remote"` with immutable values:
 ```json
 {
   "mode": "remote",
-  "expected_version": "0.21.1",
+  "expected_version": "0.21.2",
   "install_spec": "git+https://github.com/agentic-hil/agentic-hil@0123456789abcdef0123456789abcdef01234567",
   "expected_commit": "0123456789abcdef0123456789abcdef01234567"
 }
