@@ -4,6 +4,12 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Fixed
+
+- `write_report` now decides the `last_failure` record from the run's own verdict instead of from the trusted readback, so the non-green placeholder that readback is staged as while a successful run waits for its per-run copy to be promoted is no longer filed as the last failure: a success leaves the previous failure record standing, a run that genuinely failed is recorded with its own error type, and `classify_last_error` no longer answers `audit_failed` for a run that worked while the real failure an operator or an agent looks up after a red run has been overwritten by a marker that never was one (#411).
+
 ## [0.21.2] - 2026-09-04
 
 ### Added
