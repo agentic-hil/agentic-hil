@@ -88,6 +88,7 @@ from agentic_hil.knowledge import REDACTION_UNAVAILABLE_ERROR
 from agentic_hil.redact import redact_sensitive, redact_stream_text
 from agentic_hil.report import overall_success
 from agentic_hil.test_reactor import (
+    TEST_CONFIG_SHA256_KEY,
     flatten_steps,
     load_test_config,
     result_error_type,
@@ -325,7 +326,7 @@ def run_summary(report: JsonObject, workspace: Path, environment: Mapping[str, s
     plan_block = plan if plan is not None else _plan_of(report, workspace)
     summary: JsonObject = {"outcome": run_outcome(report)}
     for key, block in (
-        ("plan", {name: value for name, value in plan_block.items() if name in {"path", "name", "sha256"}}),
+        ("plan", {name: value for name, value in plan_block.items() if name in {"path", "name", "sha256", "sha256_mismatch"}}),
         ("firmware", _firmware(environment)),
         ("tools", _tools(report)),
         ("bench", _bench(report, plan_block, environment)),
@@ -498,12 +499,24 @@ def _run(report: JsonObject) -> JsonObject:
 def _plan_of(report: JsonObject, workspace: Path) -> JsonObject:
     """The plan block, plus the logical device names grouped by kind.
 
-    The plan file is read where it is in this workspace, which is what makes a
-    refused run's summary say anything at all about devices: a run refused
-    before its first step recorded no steps, so the names exist only in the plan
-    that never ran. A report from somewhere else names a plan that is not here,
-    and then the executed records are all there is, which for a refusal is
-    nothing."""
+    The plan's provenance is the digest the run recorded when it read the file,
+    carried in the report as ``test_config_sha256`` and published here verbatim.
+    The file on disk is not re-hashed into the summary: it can be edited between
+    the run loading it and this collection, and hashing whatever is there now
+    would pair the old run's name and step results with a new file's digest and
+    device list, a plan that was never executed (review round 0, finding 4). If
+    the file is still present and its bytes have diverged from the recorded
+    digest, that divergence is reported (`sha256_mismatch`) rather than papered
+    over by substituting the current digest.
+
+    The plan file is still read where it is in this workspace, but only to fill in
+    what a refused run left out: a run refused before its first step recorded no
+    steps, so its device names exist only in the plan that never ran. That
+    re-read is trusted for those names only when the file still matches the
+    recorded digest, i.e. is the same bytes that ran; a diverged or
+    digest-less-legacy file falls back to the executed records alone. A report
+    from somewhere else names a plan that is not here, and then the executed
+    records are all there is, which for a refusal is nothing."""
     plan: JsonObject = {}
     name = report.get("name")
     if isinstance(name, str) and name:
@@ -517,12 +530,28 @@ def _plan_of(report: JsonObject, workspace: Path) -> JsonObject:
     resolved = _within_workspace(plan_path, workspace) if isinstance(plan_path, str) else None
     if resolved is not None:
         plan["path"] = _relative(resolved, workspace)
+        recorded = report.get(TEST_CONFIG_SHA256_KEY)
+        recorded = recorded if isinstance(recorded, str) and recorded else None
+        current: str | None = None
         with suppress(OSError):
-            plan["sha256"] = hashlib.sha256(resolved.read_bytes()).hexdigest()
-        with suppress(ConfigError, OSError, ValueError):
-            loaded = load_test_config(str(resolved), str(workspace))
-            plan.setdefault("name", loaded.name)
-            routes = [(step.route, step.action) for step in flatten_steps(loaded.steps) if step.route != "-"] + routes
+            current = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        # The recorded digest is authoritative; the file's own is only ever used
+        # for a legacy report that carried none. A file that has diverged from the
+        # recorded digest is flagged, never substituted for it.
+        digest = recorded or current
+        if digest is not None:
+            plan["sha256"] = digest
+        if recorded is not None and current is not None and current != recorded:
+            plan["sha256_mismatch"] = True
+        # Augment from the file only when it is provably the plan that ran: the
+        # digest it carries matches what the run recorded (or the report predates
+        # the field and there is nothing better to gate on). A diverged file is
+        # not this run's plan, so its names are left out rather than mixed in.
+        if recorded is None or (current is not None and current == recorded):
+            with suppress(ConfigError, OSError, ValueError):
+                loaded = load_test_config(str(resolved), str(workspace))
+                plan.setdefault("name", loaded.name)
+                routes = [(step.route, step.action) for step in flatten_steps(loaded.steps) if step.route != "-"] + routes
     devices = _grouped_devices(routes)
     if devices:
         plan["devices"] = devices

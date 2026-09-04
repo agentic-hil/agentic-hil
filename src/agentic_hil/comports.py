@@ -628,22 +628,42 @@ class ComPortSession:
     def _reader_loop(self) -> None:
         while self.active:
             try:
+                chunk = b""
                 with self.io_lock:
                     waiting = int(getattr(self.serial_handle, "in_waiting", 0) or 0)
                     read_size = min(max(waiting, 1), self.port_config.max_buffer_bytes, 4096)
                     data = self.serial_handle.read(read_size)
                     if data:
                         chunk = bytes(data)
-                        with self.lock:
-                            self.buffer.extend(chunk)
-                            overflow = len(self.buffer) - self.port_config.max_buffer_bytes
-                            if overflow > 0:
-                                del self.buffer[:overflow]
-                                self.overflow_bytes += overflow
-                if not data:
+                        # Take audit_lock -- the lock the write path holds across
+                        # its send and its tx entry -- before the bytes are made
+                        # visible in the buffer and before io_lock is dropped, and
+                        # keep it held across the rx entry below. So input this
+                        # reader has buffered is on the log ahead of any write that
+                        # has not yet begun: the reader used to buffer under io_lock
+                        # and only reach for audit_lock at the append afterwards,
+                        # and a concurrent write could take audit_lock in that gap
+                        # and record its tx ahead of input already received (review
+                        # round 0, finding 3). The blocking read itself stays
+                        # outside audit_lock, so an idle read never stalls a write.
+                        self.audit_lock.acquire()
+                        try:
+                            with self.lock:
+                                self.buffer.extend(chunk)
+                                overflow = len(self.buffer) - self.port_config.max_buffer_bytes
+                                if overflow > 0:
+                                    del self.buffer[:overflow]
+                                    self.overflow_bytes += overflow
+                        except BaseException:
+                            self.audit_lock.release()
+                            raise
+                if not chunk:
                     time.sleep(0.01)
                     continue
-                audit_error = self.append_audit({"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
+                try:
+                    audit_error = self.append_audit({"direction": "rx", "bytes": len(chunk), "hex": chunk.hex(), "text": decode_bytes(chunk, self.port_config.encoding)})
+                finally:
+                    self.audit_lock.release()
                 if audit_error is not None:
                     self.reader_error = {"error_type": "audit_write_failed", "summary": "COM port feedback could not be audited.", "backend_error": str(audit_error)}
                     self.audit_broken = True

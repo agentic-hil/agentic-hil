@@ -21,7 +21,14 @@ from agentic_hil.coordination import CoordinationError
 from agentic_hil.junit import result_with_junit_xml, write_refusal_junit_xml
 from agentic_hil.report import write_report
 from agentic_hil.runlifecycle import RunRegistration, new_run_handle, start_detached_run
-from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, TestConfig, TestReactor, load_test_config, plan_devices
+from agentic_hil.test_reactor import (
+    DEFAULT_TEST_CONFIG_PATH,
+    TestConfig,
+    TestReactor,
+    load_test_config,
+    plan_devices,
+    plan_digest_field,
+)
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -119,6 +126,7 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
                     "tool": "test_reactor",
                     "name": test_config.name,
                     "test_config_path": test_config.path,
+                    **plan_digest_field(test_config),
                     "steps": [],
                     "cleanup": [],
                     "cleanup_ok": True,
@@ -159,6 +167,7 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
             "tool": "test_reactor",
             "name": test_config.name,
             "test_config_path": test_config.path,
+            **plan_digest_field(test_config),
             "error_type": "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "reactor_exception",
             "exception_type": type(error).__name__,
             "summary": "Test reactor was interrupted; all containment steps were attempted.",

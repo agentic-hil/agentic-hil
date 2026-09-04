@@ -262,23 +262,28 @@ CANONICAL_REPORT_KEY = "canonical_report_path"
 CANONICAL_PENDING_KEY = "canonical_write_pending"
 
 
-def staged_canonical_document(snapshot: JsonObject) -> str:
-    """The non-green placeholder ``write_report`` stages the per-run copy as.
+def staged_report_snapshot(snapshot: JsonObject) -> JsonObject:
+    """The non-green pending form of a run snapshot.
 
     Byte-distinct from the green document on exactly the fields that decide
     success: ``audit_ok`` is turned off and a ``canonical_write_pending`` marker
-    is added, so the file the trusted archive holds *before* the transaction
-    commits reads as unfinished rather than as the success it will only become
-    once the mirror and the report state have both landed and it is promoted in
-    place. Staging non-green is what makes the fail-safe unconditional: the green
-    document is written last of all, so no failure after it, and no failure of a
+    is added, so a trusted record holding this *before* the transaction commits
+    reads as unfinished rather than as the success it will only become once every
+    other required write has landed and it is promoted in place. Both trusted
+    records use it -- the per-run copy on disk and the ``report-state.json``
+    readback -- so neither can read green until the green document is promoted as
+    the very last write, and no failure before that, nor any failure of a
     best-effort cleanup, can leave a success the returned result rejected."""
     marker = {
         "error_type": "canonical_write_pending",
         "summary": "This per-run report copy was staged but not yet committed as a success.",
     }
-    pending = {**snapshot, "audit_ok": False, CANONICAL_PENDING_KEY: True, "audit_error": marker, "audit_errors": [marker]}
-    return json.dumps(pending, indent=2) + "\n"
+    return {**snapshot, "audit_ok": False, CANONICAL_PENDING_KEY: True, "audit_error": marker, "audit_errors": [marker]}
+
+
+def staged_canonical_document(snapshot: JsonObject) -> str:
+    """The staged per-run copy as bytes on disk. See ``staged_report_snapshot``."""
+    return json.dumps(staged_report_snapshot(snapshot), indent=2) + "\n"
 
 
 def canonical_run_report(config: AgenticHILConfig, report: JsonObject) -> Path | None:
@@ -422,39 +427,59 @@ def write_report(config: AgenticHILConfig, report: JsonObject) -> JsonObject:
                     enriched = mark_audit_failure(enriched, error)
                 else:
                     enriched = snapshot
-            state["last_report"] = enriched
-            if is_failure_report(enriched):
-                state["last_failure"] = enriched
+            # The trusted readback (`report-state.json`) and the per-run copy move
+            # in lockstep. Whenever a per-run copy has been staged for promotion,
+            # the readback is written non-green too, so a promotion that fails
+            # together with its corrective rewrite cannot leave `read_last_report`
+            # green for a call that returned `audit_ok: false` (review round 0,
+            # finding 1). The readback is turned green only once the green document
+            # is promoted, and that promotion is the last write.
+            promoting = committed_canonical is not None and enriched.get("audit_ok") is not False
+            readback = staged_report_snapshot(enriched) if promoting else enriched
+            state["last_report"] = readback
+            if is_failure_report(readback):
+                state["last_failure"] = readback
             write_report_state(config, state)
-            if committed_canonical is not None and enriched.get("audit_ok") is not False:
-                # Promote the staged placeholder now that the mirror and the
-                # report state have both committed. This is the last required
-                # write.
-                #
-                # `atomic_write_bytes` renames the finished document into place
-                # and only then fsyncs the parent directory, so a failure raised
-                # here may already have committed the green document: the rename
-                # landed and the later durability fsync did not. It is not safe to
-                # assume the failed write left the placeholder in place, so the
-                # trusted copy is read back and what is on disk decides the
-                # result. If the green document is there the promotion committed
-                # and only durability was lost, so the result stays green and
-                # consistent with the committed file. If it is not, the
-                # placeholder never became green, so the result is marked
-                # audit-failed like any other required write and the leftover is
-                # reconciled below. Either way a returned audit failure can never
-                # coexist with a green trusted record.
+            if promoting:
+                # `atomic_write_bytes` renames the finished document into place and
+                # only then fsyncs the parent directory, so a failure raised here
+                # may already have committed the green document: the rename landed
+                # and the later durability fsync did not. It is not safe to assume
+                # the failed write left the placeholder in place, so the trusted
+                # copy is read back and what is on disk decides.
+                canonical_committed = True
                 try:
                     atomic_write_text(committed_canonical, document)
                 except (ConfigError, OSError, ValueError) as error:
                     if _canonical_on_disk(committed_canonical) != document:
+                        # The placeholder never became green. Mark the result
+                        # audit-failed as for any required write; the readback was
+                        # staged non-green above, so even a failed corrective
+                        # rewrite below leaves it non-green, never a false green.
+                        canonical_committed = False
                         enriched = mark_audit_failure(enriched, error)
                         enriched.pop("report_path", None)
                         enriched.pop(CANONICAL_REPORT_KEY, None)
-                        state["last_report"] = enriched
-                        if is_failure_report(enriched):
-                            state["last_failure"] = enriched
-                        write_report_state(config, state)
+                if canonical_committed:
+                    enriched = snapshot
+                # Reconcile the readback to the resolved verdict. It can only ever
+                # *become* green when the green per-run copy already exists on disk,
+                # so this write can never expose a green readback the result would
+                # reject. When the copy committed green the run is the success that
+                # trusted per-run copy records, so a failure to refresh the readback
+                # here only leaves it showing the staged placeholder -- a safe
+                # under-report -- and must not turn the returned result
+                # audit-failed. When the copy did not commit green the readback is
+                # non-green either way, so a failure is raised to the outer handler
+                # like any other required write.
+                state["last_report"] = enriched
+                if is_failure_report(enriched):
+                    state["last_failure"] = enriched
+                try:
+                    write_report_state(config, state)
+                except (ConfigError, OSError, ValueError):
+                    if not canonical_committed:
+                        raise
     except (ConfigError, OSError, ValueError) as error:
         failed = mark_audit_failure(enriched, error)
         # report_path can't be trusted after a failed commit: strip it so the

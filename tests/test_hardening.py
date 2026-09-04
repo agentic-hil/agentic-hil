@@ -749,15 +749,18 @@ class AnswersDuringTheWriteSerialHandle:
 
     This is the ordering a reactor plan produces at every send-then-match step,
     and it is the one the session log used to record backwards. The reader is
-    parked on empty reads until `write` puts the answer there, and `write` then
-    waits until the reader has taken it and is at the log with it before
-    returning, so the answer is provably in the reader's hands while the write
-    is still in flight instead of whenever the scheduler got round to it.
+    parked on empty reads until `write` puts the answer there; `read` then hands
+    it over and records that the reader is now holding an answer that arrived
+    while the write is still in flight. `write` waits for that before it returns,
+    so the answer is provably in the reader's hands mid-write rather than whenever
+    the scheduler got round to it.
 
-    The pause before returning is what leaves the ordering to the fix rather
-    than to the machine: with nothing serialising the log, the reader's line is
-    in the file long before the write path has built its own, whichever thread
-    the interpreter happens to be running.
+    The pause before returning is what leaves the ordering to the fix rather than
+    to the machine. The receive is now serialised against the writer, so the
+    reader cannot commit that answer to the log until the write has appended its
+    `tx` and released the audit lock: the `tx` entry is in the file first however
+    the two threads are scheduled, and a build that broke that serialisation would
+    let the reader's line reach the file during the pause and land first.
     """
 
     is_open = True
@@ -768,19 +771,23 @@ class AnswersDuringTheWriteSerialHandle:
         self.answered = False
         self.writes: list[bytes] = []
         self.answer_on_the_line = threading.Event()
-        self.reader_at_the_log = threading.Event()
+        self.reader_took_answer = threading.Event()
         self.reader_arrived = False
 
     def read(self, size: int) -> bytes:
         if self.answered or not self.answer_on_the_line.wait(POLL_INTERVAL_S):
             return b""
         self.answered = True
+        # Announced here, off the line and before the reader reaches the audit
+        # lock: the reader is holding an answer that arrived while the write is
+        # still in flight, which is exactly the ordering being pinned.
+        self.reader_took_answer.set()
         return self.answer
 
     def write(self, data: bytes) -> int:
         self.writes.append(bytes(data))
         self.answer_on_the_line.set()
-        self.reader_arrived = self.reader_at_the_log.wait(WAIT_TIMEOUT_S)
+        self.reader_arrived = self.reader_took_answer.wait(WAIT_TIMEOUT_S)
         time.sleep(0.05)
         return len(data)
 
@@ -821,19 +828,6 @@ def test_com_write_logs_the_command_before_the_answer_it_provoked(tmp_path: Path
     session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), start_reader=False)
     service.sessions["dut"] = session
 
-    session_append = session.append_audit
-
-    def announce_the_reader(event, event_config=None):
-        # Announced before the append, not after: what decides the order of the
-        # file is which line reaches it, so the write is released while the
-        # reader still has its line to write rather than once it has written
-        # it. Announcing afterwards would ask the fix to let the reader finish
-        # first, which is the ordering being refused.
-        if event.get("direction") == "rx":
-            handle.reader_at_the_log.set()
-        return session_append(event, event_config)
-
-    session.append_audit = announce_the_reader  # type: ignore[method-assign]
     session.start_reader()
     reader = session.reader
     assert reader is not None
@@ -854,6 +848,106 @@ def test_com_write_logs_the_command_before_the_answer_it_provoked(tmp_path: Path
     assert entries[1]["text"] == "ready\n"
     # The line order is the timestamp order, so a reader who follows the lines
     # and one who sorts by `time` read the same session.
+    assert [entry["time"] for entry in entries] == sorted(entry["time"] for entry in entries), entries
+
+
+class SpontaneousBootSerialHandle:
+    """A target that puts one line on the wire on its own, then goes quiet.
+
+    No write provoked it: the message is unsolicited feedback (a board that
+    reset and printed its banner), which the reader picks up before any command
+    is sent. It is the input this session's write path must not be logged ahead
+    of."""
+
+    is_open = True
+    in_waiting = 0
+
+    def __init__(self, message: bytes = b"boot\n") -> None:
+        self.message = message
+        self.sent = False
+        self.writes: list[bytes] = []
+
+    def read(self, size: int) -> bytes:
+        if self.sent:
+            return b""
+        self.sent = True
+        return self.message
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(bytes(data))
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+def test_com_input_read_before_a_concurrent_write_is_logged_before_it(tmp_path: Path) -> None:
+    """Review round 0, finding 3: the inverse of the case above. Input the reader
+    has already pulled off the line and buffered must be on the log ahead of a
+    command sent afterwards, not behind it.
+
+    The reader used to buffer received bytes under `io_lock`, drop that lock, and
+    only then reach for `audit_lock` at its append. A `write` starting in that gap
+    could take `audit_lock`, transmit a later command and append its `tx` first,
+    so the log showed the command ahead of input that had already arrived. Here a
+    spontaneous `boot` is read and, while the reader is at the log with it, a
+    later `version` command is sent: the reader now holds `audit_lock` from before
+    it buffers until after its `rx` entry, so the write waits and `boot` is logged
+    first however the two threads are scheduled."""
+    config = load_test_config(tmp_path, com_ports_yaml=COM_PORT_YAML)
+    service = ComPortService(config)
+    log_path = tmp_path / ".agentic-hil" / "logs" / "test-com-log-inverse.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = SpontaneousBootSerialHandle()
+    session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), start_reader=False)
+    service.sessions["dut"] = session
+
+    reader_at_rx = threading.Event()
+    write_done = threading.Event()
+    session_append = session.append_audit
+
+    def announce_rx(event, event_config=None):
+        if event.get("direction") == "rx":
+            # The reader has `boot` off the line and is at the log with it. Release
+            # the later command and give it a moment to reach the audit lock: on a
+            # build that does not serialise the reader's receive against the writer,
+            # the command takes the lock here and its `tx` lands ahead of this `rx`.
+            # On the serialised build the reader already holds the lock, so the
+            # write waits and this bounded pause simply expires.
+            reader_at_rx.set()
+            write_done.wait(0.2)
+        return session_append(event, event_config)
+
+    session.append_audit = announce_rx  # type: ignore[method-assign]
+
+    def send_later_command() -> None:
+        reader_at_rx.wait(WAIT_TIMEOUT_S)
+        service.write_bytes("dut", b"version\n")
+        write_done.set()
+
+    writer = threading.Thread(target=send_later_command)
+    writer.start()
+    session.start_reader()
+    reader = session.reader
+    assert reader is not None
+    try:
+        assert wait_until(lambda: log_path.exists() and len(log_entries(log_path)) == 2), log_path.exists() and log_entries(log_path)
+    finally:
+        write_done.set()
+        session.active = False
+        reader.join(WAIT_TIMEOUT_S)
+        writer.join(WAIT_TIMEOUT_S)
+    assert not reader.is_alive(), "reader thread never finished"
+
+    entries = log_entries(log_path)
+    # The input that was already received is first, the later command second.
+    assert [entry.get("direction") for entry in entries] == ["rx", "tx"], entries
+    assert entries[0]["text"] == "boot\n"
+    assert entries[1]["text"] == "version\n"
+    # And the line order is the timestamp order, as for the provoked case above.
     assert [entry["time"] for entry in entries] == sorted(entry["time"] for entry in entries), entries
 
 
@@ -3095,6 +3189,69 @@ def test_canonical_report_promotion_failing_before_its_replace_stays_non_green(t
     recorded = json.loads(canonical.read_text(encoding="utf-8"))
     assert recorded.get("audit_ok") is False
     assert recorded.get("canonical_write_pending") is True
+
+
+def test_the_readback_is_never_green_when_promotion_and_its_corrective_state_write_both_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 0, finding 1: the trusted readback must never be green for a
+    call that returned ``audit_ok: false``.
+
+    The hole was a state write that persisted the green snapshot *before* the
+    per-run copy was promoted: if the promotion then failed before its replace and
+    the corrective state rewrite failed too, the returned result was audit-failed
+    while ``read_last_report`` still answered green from that first write. The fix
+    stages the readback non-green in lockstep with the per-run copy, turning it
+    green only once the green document is promoted. Here the promotion fails before
+    its replace and every state write after the first is denied, so the returned
+    result is audit-failed and the readback still on disk is the staged,
+    non-green one -- never the green success the call rejected."""
+    from agentic_hil import report as report_module
+
+    config = load_test_config(tmp_path)
+    canonical = canonical_run_report_path(config, "run-both-writes-fail")
+
+    original_atomic = report_module.atomic_write_text
+    canonical_writes = {"count": 0}
+
+    def flaky_atomic(path, text, **kwargs):
+        # The staged per-run copy lands; the promotion (its second write) and any
+        # corrective rewrite fail before their replace, so the placeholder stands.
+        if Path(path) == canonical:
+            canonical_writes["count"] += 1
+            if canonical_writes["count"] >= 2:
+                raise OSError("canonical write denied")
+        return original_atomic(path, text, **kwargs)
+
+    original_state = report_module.write_report_state
+
+    def flaky_state(cfg, state):
+        # The staged, non-green readback (its `last_report` carries the pending
+        # marker) lands, as does the initial state file. Only the corrective
+        # rewrite -- the audit-failed record with no pending marker, written after
+        # the promotion fails -- is denied, standing in for a disk that has gone
+        # read-only mid-transaction.
+        last = state.get("last_report")
+        if isinstance(last, dict) and last.get("audit_ok") is False and not last.get("canonical_write_pending"):
+            raise OSError("state denied")
+        return original_state(cfg, state)
+
+    monkeypatch.setattr(report_module, "atomic_write_text", flaky_atomic)
+    monkeypatch.setattr(report_module, "write_report_state", flaky_state)
+
+    result = write_report(config, {"ok": True, "tool": "probe_target", "run": "run-both-writes-fail"})
+
+    # The returned result is audit-failed...
+    assert result["audit_ok"] is False
+    assert "report_path" not in result
+
+    # ...and the trusted readback is not green. It is the staged, non-green record
+    # the first write left, so a caller that reads it back can never mistake this
+    # rejected call for a success.
+    monkeypatch.setattr(report_module, "write_report_state", original_state)
+    monkeypatch.setattr(report_module, "atomic_write_text", original_atomic)
+    readback = read_last_report(config)
+    assert readback.get("audit_ok") is False
+    assert not (readback.get("ok") is True and readback.get("audit_ok") is not False)
+    assert readback.get("canonical_write_pending") is True
 
 
 def test_path_lock_registry_does_not_keep_short_lived_paths(tmp_path: Path) -> None:

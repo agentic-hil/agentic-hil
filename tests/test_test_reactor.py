@@ -274,6 +274,31 @@ def test_test_config_accepts_json_and_rejects_unknown_actions(tmp_path: Path) ->
     assert excinfo.value.details["value"] == "shell"
 
 
+def test_load_test_config_records_the_digest_of_the_bytes_it_read(tmp_path: Path) -> None:
+    """Review round 0, finding 4: the plan's provenance is captured at load, from
+    the exact bytes parsed, so evidence never has to re-hash a file that may have
+    changed since. The digest is the SHA-256 of the file on disk, and it is the
+    one the run report carries."""
+    import hashlib
+
+    from agentic_hil.test_reactor import TEST_CONFIG_SHA256_KEY
+
+    text = "version: 2\nsteps:\n  - {port_id: dut_uart, action: uart_open}\n"
+    path = write_test_config(tmp_path, text)
+    expected = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    loaded = load_test_config(str(path), str(tmp_path))
+    assert loaded.sha256 == expected
+
+    service, _com_ports = reactor_service(tmp_path)
+    try:
+        result = TestReactor(service.config, service).run(load_test_config(str(path), str(tmp_path)))
+    finally:
+        service.close()
+    # The report carries the load-time digest, and it is the file's own bytes.
+    assert result[TEST_CONFIG_SHA256_KEY] == expected
+
+
 def test_test_config_rejects_duplicate_keys_with_location(tmp_path: Path) -> None:
     path = write_test_config(
         tmp_path,

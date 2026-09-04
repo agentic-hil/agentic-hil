@@ -235,8 +235,22 @@ debugger's `debugger_info` result, which is what `agentic-hil doctor` produces
 and a plain run report does not. `bench.runner` comes from `RUNNER_NAME` and
 `RUNNER_LABELS`. `bench.devices` is read from the plan in the workspace, which
 is why a refused run still names its devices: the run recorded no steps, so the
-names exist only in the plan that never ran. And `bench.target` is the report's
-own, absent for a report that names none.
+names exist only in the plan that never ran. That re-read is trusted only while
+the file still matches the digest the run recorded (see `plan.sha256` below); a
+plan edited after the run contributes no device names, because it is no longer
+the plan that ran. And `bench.target` is the report's own, absent for a report
+that names none.
+
+`plan.sha256` is the digest the run recorded when it read the plan, carried in
+the report and published verbatim. The file on disk is not re-hashed into the
+summary: it can be edited between the run loading it and evidence collection, and
+a re-hash would pair the old run's name and step results with a new file's
+digest and device list, a plan that was never executed. When the file is still
+present and its bytes have diverged from the recorded digest, `plan.sha256_mismatch`
+is set to `true` beside the recorded `plan.sha256` rather than the current
+digest silently taking its place. A report that predates the recorded digest
+(or names a plan outside the workspace) has no digest to publish and falls back
+to the file only when there is nothing better.
 
 ### The JUnit mapping
 
