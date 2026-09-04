@@ -22,6 +22,7 @@ distribution for the reason it excludes the other two.
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from collections.abc import Iterable
@@ -30,9 +31,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agentic_hil.cli import build_parser
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from check_version_consistency import locations, release_version  # noqa: E402
+from check_version_consistency import anticipated_release, locations  # noqa: E402
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 GITHUB_EXAMPLE = REPOSITORY_ROOT / "examples" / "ci" / "github-actions.yml"
@@ -115,6 +118,34 @@ def unpinned_actions(workflow: dict) -> list[str]:
     return found
 
 
+# A call to the tool: the program name, whitespace, and a subcommand that starts
+# with a letter. A `--flag` after the name (`agentic-hil --version`) is not a
+# subcommand and does not match, and `.agentic-hil/reports/` is a path, not a
+# call, because nothing follows the name but a slash.
+INVOKED_SUBCOMMAND = re.compile(r"\bagentic-hil\s+([a-z][a-z-]*)")
+
+
+def cli_subcommands() -> set[str]:
+    """Every subcommand `build_parser` defines, read off the parser it builds."""
+    parser = build_parser()
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return set(action.choices)
+    raise AssertionError("build_parser defines no subparsers")
+
+
+def invoked_subcommands(commands: Iterable[str]) -> set[str]:
+    """Every `agentic-hil <subcommand>` a set of shell command lines invokes."""
+    found: set[str] = set()
+    for command in commands:
+        for line in command.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            found.update(INVOKED_SUBCOMMAND.findall(stripped))
+    return found
+
+
 def first_command_index(commands: list[str], needle: str) -> int | None:
     for index, command in enumerate(commands):
         if needle in command:
@@ -151,35 +182,41 @@ def test_both_examples_parse_into_the_jobs_they_promise() -> None:
     assert GITLAB["stages"] == ["simulate", "hardware"]
 
 
-def test_the_pinned_version_is_the_release_the_gate_holds() -> None:
-    """One number, in three files, equal to what a reader can actually install.
+def test_the_pinned_version_is_the_release_the_examples_are_written_for() -> None:
+    """One number, in three files, equal to the release this tree builds toward.
 
-    A range or a `latest` here would mean the hosted job and the bench were
-    checking different code, and a stale exact pin would send a stranger to a
-    release the documentation no longer describes.
+    Not the previous release: the examples invoke `check-plan` and `run-evidence`,
+    which this tree adds, so a pin to the last release would name a distribution
+    that rejects both commands at argument parsing. The anticipated release is the
+    one that first exposes them and the code the examples were tested against, and
+    on a release commit it is that release itself. A range or a `latest` here
+    would mean the hosted job and the bench were checking different code.
     """
-    release = release_version(REPOSITORY_ROOT)
+    anticipated = anticipated_release(REPOSITORY_ROOT)
 
-    assert GITHUB["env"]["AGENTIC_HIL_VERSION"] == release
-    assert GITLAB["variables"]["AGENTIC_HIL_VERSION"] == release
+    assert GITHUB["env"]["AGENTIC_HIL_VERSION"] == anticipated
+    assert GITLAB["variables"]["AGENTIC_HIL_VERSION"] == anticipated
     # The page prints the same line a reader copies, so the two cannot drift
     # apart while both still look right on their own.
-    assert f'AGENTIC_HIL_VERSION: "{release}"' in PAGE.read_text(encoding="utf-8")
+    assert f'AGENTIC_HIL_VERSION: "{anticipated}"' in PAGE.read_text(encoding="utf-8")
 
 
 def test_a_release_stamps_the_examples_along_with_everything_else() -> None:
     """The pin follows the release because the version gate carries it.
 
     Without an entry here the examples would be the one place the release moves
-    past, and `uncovered_files` would only say so until somebody excused it.
+    past, and `uncovered_files` would only say so until somebody excused it. The
+    three files track the anticipated release rather than the last one, so on a
+    release commit -- where the anticipated release is the release being cut --
+    they are stamped along with every other position.
     """
-    release = release_version(REPOSITORY_ROOT)
+    anticipated = anticipated_release(REPOSITORY_ROOT)
     covered = {location.path: location for location in locations(REPOSITORY_ROOT)}
 
     for relative in ("examples/ci/github-actions.yml", "examples/ci/gitlab-ci.yml", "docs/ci-examples.md"):
         assert relative in covered, relative
         assert covered[relative].versions, relative
-        assert set(covered[relative].versions) == {release}, covered[relative]
+        assert set(covered[relative].versions) == {anticipated}, covered[relative]
 
 
 def test_the_github_hardware_job_refuses_a_hosted_runner() -> None:
@@ -347,6 +384,68 @@ def test_the_simulator_job_is_the_hosted_path_and_touches_no_bench() -> None:
     gitlab_simulator = " ".join(gitlab_commands(GITLAB, "simulator"))
     assert "agentic-hil check-plan" in gitlab_simulator
     assert "agentic-hil test-reactor" not in gitlab_simulator
+
+
+def test_every_command_the_examples_invoke_is_one_the_pinned_distribution_exposes() -> None:
+    """No example invokes an `agentic-hil` subcommand its pinned release lacks.
+
+    The gap a check against the development checkout alone would miss is a command
+    present here but absent from the distribution the examples pin: the examples
+    added `check-plan` and `run-evidence` while the pin still named the release
+    before the one that introduced them, so an isolated install of that release
+    rejected both at argument parsing. The pin is what closes the gap. It names
+    the anticipated release, the version this tree builds and will publish, so the
+    CLI this checkout defines is the CLI that distribution exposes, and a
+    subcommand the examples invoke that this `build_parser` does not define is one
+    the pinned distribution would reject. On a release commit the anticipated
+    release is the release being cut, and this checkout is exactly it.
+    """
+    available = cli_subcommands()
+    invoked = invoked_subcommands(
+        [
+            *github_commands(GITHUB, "hardware"),
+            *github_commands(GITHUB, "simulator"),
+            *gitlab_commands(GITLAB, "hardware"),
+            *gitlab_commands(GITLAB, "simulator"),
+        ]
+    )
+
+    # The evidence flow the examples exist to show; a check that stopped finding
+    # these would be finding nothing.
+    assert {"doctor", "test-reactor", "check-plan", "run-evidence"} <= invoked
+    unknown = invoked - available
+    assert not unknown, f"the examples invoke commands this build does not define: {sorted(unknown)}"
+    # The pin equal to the anticipated release is what makes `available`, the
+    # commands of this checkout, the commands of the pinned distribution.
+    assert GITHUB["env"]["AGENTIC_HIL_VERSION"] == anticipated_release(REPOSITORY_ROOT)
+    assert GITLAB["variables"]["AGENTIC_HIL_VERSION"] == anticipated_release(REPOSITORY_ROOT)
+
+
+def test_an_invented_subcommand_would_be_caught() -> None:
+    """The predicate has to be able to fail, or the test above proves nothing."""
+    available = cli_subcommands()
+    invoked = invoked_subcommands(["agentic-hil doctor", "agentic-hil not-a-real-command"])
+
+    assert {"doctor", "not-a-real-command"} <= invoked
+    assert invoked - available == {"not-a-real-command"}
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("agentic-hil doctor", {"doctor"}),
+        ("agentic-hil test-reactor --test-config plan.yaml --json > report", {"test-reactor"}),
+        ('agentic-hil run-evidence --report "$report" --out out', {"run-evidence"}),
+        # A flag after the name is not a subcommand.
+        ('installed="$(agentic-hil --version)"', set()),
+        # A path is not a call: nothing follows the name but a slash.
+        ("ls .agentic-hil/reports/", set()),
+        # A commented line runs nothing.
+        ("# agentic-hil doctor, in a comment", set()),
+    ],
+)
+def test_the_subcommand_extractor_reads_calls_and_not_flags_or_paths(command: str, expected: set[str]) -> None:
+    assert invoked_subcommands([command]) == expected
 
 
 def test_no_step_in_either_example_downloads_something_unpinned() -> None:

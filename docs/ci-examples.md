@@ -66,18 +66,22 @@ the bench.
 
 ## The version pin
 
-Both files carry one variable, `AGENTIC_HIL_VERSION`, set to the exact release:
+Both files carry one variable, `AGENTIC_HIL_VERSION`, set to the exact release
+these examples are written for:
 
 ```yaml
-AGENTIC_HIL_VERSION: "0.21.1"
+AGENTIC_HIL_VERSION: "0.21.2"
 ```
 
 An exact version, never a range, never `latest`, and never a git reference. A
 version a resolver picked is a version nobody reviewed, and it would mean the
 hosted job and the bench were checking different code. This repository's own
-release gate holds that string to the released version, so the examples cannot
-drift behind it: `python tools/check_version_consistency.py --list` prints them
-among the positions a release stamps.
+version gate holds that string to the release this source tree builds toward,
+which is the release that first exposes the `check-plan` and `run-evidence`
+commands these examples invoke rather than the release before it, so the pin
+names the distribution the examples were tested against and cannot drift off it:
+`python tools/check_version_consistency.py --list` prints all three files among
+the positions a release stamps.
 
 The same rule reaches everything else the jobs fetch. Actions are pinned by
 commit SHA with the tag they stood for in a trailing comment, not by tag. No

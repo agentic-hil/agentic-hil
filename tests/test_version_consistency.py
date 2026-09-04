@@ -17,7 +17,9 @@ from check_version_consistency import (  # noqa: E402
     REGISTRY_DESCRIPTION_LIMIT,
     RELEASE,
     UNTRACKED_MENTIONS,
+    anticipated_release,
     contract_problems,
+    expected_for,
     is_development,
     is_newer,
     locations,
@@ -100,9 +102,10 @@ def test_the_release_carries_its_version_where_the_release_that_exposed_this_car
 def test_every_stated_position_actually_carries_a_version() -> None:
     distribution = package_version(REPOSITORY_ROOT)
     release = release_version(REPOSITORY_ROOT)
+    anticipated = anticipated_release(REPOSITORY_ROOT)
     for location in locations(REPOSITORY_ROOT):
         assert location.versions, f"{location.path} states no version"
-        expected = distribution if location.tracks == DISTRIBUTION else release
+        expected = expected_for(location, distribution, release, anticipated)
         assert set(location.versions) == {expected}, location
 
 
@@ -174,7 +177,16 @@ def tree(tmp_path: Path) -> Path:
 
 
 def _set_distribution_version(root: Path, version: str) -> None:
-    """Move the two positions that identify the built artifact, and only those."""
+    """Move the built artifact's version, and the positions derived from it.
+
+    The two positions that identify the artifact are pyproject.toml and
+    __init__.py. The CI examples are derived from it a step removed: they track
+    the anticipated release, which is the distribution version without its
+    development suffix, so moving the distribution version moves what they must
+    state too. A synthesized release or development tree that left them behind
+    would disagree with itself the moment the anticipated release stopped being
+    the one the real files were stamped for.
+    """
     pyproject = root / "pyproject.toml"
     pyproject.write_text(
         re.sub(
@@ -197,6 +209,17 @@ def _set_distribution_version(root: Path, version: str) -> None:
         ),
         encoding="utf-8",
     )
+    anticipated = anticipated_release(root)
+    for relative in ("examples/ci/github-actions.yml", "examples/ci/gitlab-ci.yml", "docs/ci-examples.md"):
+        path = root / relative
+        path.write_text(
+            re.sub(
+                r'AGENTIC_HIL_VERSION: "\d+\.\d+\.\d+"',
+                f'AGENTIC_HIL_VERSION: "{anticipated}"',
+                path.read_text(encoding="utf-8"),
+            ),
+            encoding="utf-8",
+        )
 
 
 @pytest.fixture
@@ -632,12 +655,13 @@ def test_the_tree_after_a_release_states_two_versions_and_passes(development_tre
     """
     distribution = package_version(development_tree)
     release = release_version(development_tree)
+    anticipated = anticipated_release(development_tree)
 
     assert is_development(distribution)
     assert distribution != release
     assert problems(development_tree) == []
     for location in locations(development_tree):
-        expected = distribution if location.tracks == DISTRIBUTION else release
+        expected = expected_for(location, distribution, release, anticipated)
         assert set(location.versions) == {expected}, location
 
 

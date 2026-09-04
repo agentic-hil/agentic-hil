@@ -220,12 +220,21 @@ UNTRACKED_MENTIONS: dict[str, str] = {
 }
 
 
-# Which of the two versions a position states. RELEASE is the release users can
-# install: a floor, an install pin, a manifest a registry serves, the version an
-# eval installs from the index. DISTRIBUTION is what a build of *this tree*
-# calls itself, which between releases is ahead of the release and says so.
+# Which version a position states. RELEASE is the release users can install: a
+# floor, an install pin, a manifest a registry serves, the version an eval
+# installs from the index. DISTRIBUTION is what a build of *this tree* calls
+# itself, which between releases is ahead of the release and says so. ANTICIPATED
+# is the release this tree builds toward -- the distribution version without its
+# development suffix. It is the release these positions are written for rather
+# than the last one published, which matters for a position that demonstrates a
+# command this tree adds: pinning it to the previous release names a distribution
+# that does not yet expose the command, so a CI example that invokes `check-plan`
+# or `run-evidence` names the release those commands first ship in, not the one
+# before it. On a release commit ANTICIPATED equals RELEASE, so nothing about a
+# release changes.
 RELEASE = "release"
 DISTRIBUTION = "distribution"
+ANTICIPATED = "anticipated"
 
 
 @dataclass(frozen=True)
@@ -392,6 +401,34 @@ def release_version(root: Path) -> str:
     return _changelog_release(root)
 
 
+def anticipated_release(root: Path) -> str:
+    """The release this tree builds toward: the distribution version, without suffix.
+
+    On a release commit that is the release itself, and equal to `release_version`
+    there, so a release stamps an anticipated position exactly as it stamps a
+    release one. Between releases it is the `X.Y.Z` the `X.Y.Z.devN` anticipates:
+    the release the features this tree adds -- and the CI examples that demonstrate
+    them -- will first ship in. A CI example pinned to `release_version` between
+    releases would name the previous release, which does not expose a command this
+    tree only just added; pinned to the anticipated release it names the one that
+    does, and matches the code the example was written and tested against.
+    """
+    version = package_version(root)
+    development = DEVELOPMENT_VERSION.match(version)
+    if development is not None:
+        return development.group("release")
+    return version
+
+
+def expected_for(location: Location, distribution: str, release: str, anticipated: str) -> str:
+    """The version a position is supposed to state, given which of the three it tracks."""
+    if location.tracks == DISTRIBUTION:
+        return distribution
+    if location.tracks == ANTICIPATED:
+        return anticipated
+    return release
+
+
 def _json_document(root: Path, relative: str) -> dict:
     return json.loads(_read(root, relative))
 
@@ -495,16 +532,19 @@ def locations(root: Path) -> list[Location]:
             "examples/ci/github-actions.yml",
             "AGENTIC_HIL_VERSION and every other version the shipped GitHub Actions example states",
             _ci_example_versions(root, "examples/ci/github-actions.yml"),
+            tracks=ANTICIPATED,
         ),
         Location(
             "examples/ci/gitlab-ci.yml",
             "AGENTIC_HIL_VERSION and every other version the shipped GitLab CI example states",
             _ci_example_versions(root, "examples/ci/gitlab-ci.yml"),
+            tracks=ANTICIPATED,
         ),
         Location(
             "docs/ci-examples.md",
             "the release the CI examples page tells a runner operator to pin and install",
             _ci_example_versions(root, "docs/ci-examples.md"),
+            tracks=ANTICIPATED,
         ),
     ]
 
@@ -519,6 +559,7 @@ def version_problems(root: Path, release_tag: str | None = None) -> list[str]:
     """
     distribution = package_version(root)
     release = release_version(root)
+    anticipated = anticipated_release(root)
     found = []
     if is_development(distribution) and not is_newer(distribution, release):
         found.append(
@@ -526,11 +567,16 @@ def version_problems(root: Path, release_tag: str | None = None) -> list[str]:
             f"{distribution}, which does not follow it"
         )
     for location in locations(root):
-        expected = distribution if location.tracks == DISTRIBUTION else release
+        expected = expected_for(location, distribution, release, anticipated)
         if not location.versions:
             found.append(f"{location.path} carries no version, but {location.carries} was expected")
             continue
-        subject = "this tree builds" if location.tracks == DISTRIBUTION else "this release is"
+        if location.tracks == DISTRIBUTION:
+            subject = "this tree builds"
+        elif location.tracks == ANTICIPATED:
+            subject = "the release this tree builds toward is"
+        else:
+            subject = "this release is"
         for stated in location.versions:
             if stated != expected:
                 found.append(f"{location.path} states {stated}, but {subject} {expected} ({location.carries})")
@@ -892,6 +938,8 @@ def render_list(root: Path) -> str:
             marks.append(f"{count} occurrences")
         if location.tracks == DISTRIBUTION:
             marks.append("the distribution version")
+        elif location.tracks == ANTICIPATED:
+            marks.append("the release this tree builds toward")
         suffix = f"  [{', '.join(marks)}]" if marks else ""
         lines.append(f"  {location.path}{suffix}")
         lines.append(f"      {location.carries}")
