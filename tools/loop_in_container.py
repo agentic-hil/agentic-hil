@@ -26,6 +26,17 @@ this machine keeps the stale one. So health is decided here, refreshing happens
 here, and the container receives individual login files as read-only bind
 mounts -- never a profile directory.
 
+The CLI, not the file, is the authority on whether a login works. When the
+pre-flight starts one to refresh a stale login and that run exits 0 and answers,
+the login has reached the provider and the run goes ahead: the file is re-read
+for a few seconds first, and a file that still carries the old expiry afterwards
+is reported in one line and proceeded past, because the container gets the file
+that exists here and carries back whatever it refreshes to. "Sign in again" is
+said only when the CLI itself reported a spent refresh token or an
+authentication failure, and every refusal on this path prints the CLI's exit
+code, the tail of its output (redacted against the stored login) and the file's
+expiry before and after the run.
+
 A rotated token is not merely stale, though, which is what issue #391 cost an
 operator: a refresh token is single use, so once the copy inside the container
 has spent it, this machine holds a value the provider has already replaced and
@@ -113,6 +124,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
@@ -142,7 +154,10 @@ from evals.install.credentials import (  # noqa: E402
     authentication_failure,
     credential_health,
     spent_refresh_token,
+    stored_expiry,
+    stored_secrets,
 )
+from evals.install.redaction import redact  # noqa: E402
 from evals.install.refresh_login import apply_refreshed_login  # noqa: E402
 from evals.install.runner import (  # noqa: E402
     docker_mount,
@@ -280,6 +295,21 @@ HOST_REFRESH = {
     "claude-auth": ("claude", "Claude Code", ["-p", "--output-format", "text", "reply with: ok"]),
     "codex-auth": ("codex", "Codex", ["exec", *CODEX_SESSION, "reply with: ok"]),
 }
+# What both sessions above ask for, and the only thing that makes an exit status
+# of 0 mean anything: a CLI that printed nothing answered nothing, and a run that
+# answered reached the provider, which is the whole question being asked here.
+EXPECTED_REPLY = "ok"
+# How long a stored login keeps being re-read after the CLI that refreshed it has
+# exited, and how often. A CLI writes its refreshed file around the answer rather
+# than before it, so a single read taken at the instant of exit is a race -- and
+# losing that race is what made this pre-flight demand a fresh sign-in from an
+# operator whose login had just authenticated (#438).
+REFRESH_SETTLE_SECONDS = 10.0
+REFRESH_SETTLE_INTERVAL = 1.0
+# How much of each captured stream goes into the evidence. Enough for a stack
+# trace or a provider's paragraph, bounded so a chatty CLI cannot bury the
+# sentence that says what to do.
+OUTPUT_TAIL_CHARS = 2000
 # Forwarded by name only when set on this machine, so a container never receives
 # an empty variable that looks like a configured credential.
 CREDENTIAL_ENVIRONMENT = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY")
@@ -518,7 +548,61 @@ def git_identity(repo: Path) -> tuple[str, str]:
     return match.group("name"), match.group("email")
 
 
-def refresh_stale_login(kind: str, detail: str) -> None:
+def output_tail(text: str, secrets: list[str]) -> str:
+    """The end of a captured stream, safe to print in a terminal.
+
+    Through the redactor the evaluation puts captured agent output through,
+    against the secrets the stored login itself carries: a refresh failure is
+    exactly the moment a CLI is likeliest to quote the credential back, and this
+    text is on its way to a refusal an operator will paste somewhere.
+    """
+    trimmed = text.strip()
+    if not trimmed:
+        return "(nothing)"
+    if len(trimmed) > OUTPUT_TAIL_CHARS:
+        trimmed = f"...{trimmed[-OUTPUT_TAIL_CHARS:]}"
+    return redact(trimmed, secrets)
+
+
+def refresh_evidence(
+    name: str,
+    completed: subprocess.CompletedProcess[str],
+    secrets: list[str],
+    before: str,
+    after: str,
+) -> str:
+    """What the CLI actually did, in the words it used, for every refusal on this path.
+
+    Without it a refusal here states a conclusion and nothing that could be
+    checked against it, and an operator cannot tell a dead refresh token from a
+    wrapper that misjudged the file. That was half of #438: the answer was
+    "sign in again" every night, and every night the sign-in was unnecessary.
+    """
+    return (
+        f"{name} exited {completed.returncode}.\n"
+        f"stdout tail: {output_tail(completed.stdout, secrets)}\n"
+        f"stderr tail: {output_tail(completed.stderr, secrets)}\n"
+        f"the stored file's access token expiry was {before} before the run and {after} after it."
+    )
+
+
+def settled_health(kind: str, path: Path) -> tuple[str, str]:
+    """Re-read a login for a short while after the CLI that refreshed it exited.
+
+    A CLI writes its refreshed credentials around the answer rather than before
+    it, and on a busy machine that write can land after the process has gone. One
+    read taken at the instant of exit is therefore a race that the wrapper loses
+    quietly, and reports as a login that has to be signed into again.
+    """
+    deadline = time.monotonic() + REFRESH_SETTLE_SECONDS
+    while True:
+        state, detail = credential_health(kind, path)
+        if state == "ok" or time.monotonic() >= deadline:
+            return state, detail
+        time.sleep(REFRESH_SETTLE_INTERVAL)
+
+
+def refresh_stale_login(kind: str, detail: str, path: Path) -> tuple[str, str]:
     """Refresh a login on this machine, where a rotated token survives the run.
 
     Starting the CLI is what refreshes it. Neither CLI has a command that only
@@ -528,6 +612,17 @@ def refresh_stale_login(kind: str, detail: str) -> None:
     So this spends one very small session per login to have the refresh happen
     here, where the rotated value survives the run, and to find out here rather
     than three quarters of an hour into a review whether it can happen at all.
+
+    The CLI is the authority on whether the login works, not the file. A run that
+    exited 0 and answered has reached the provider, and that is proof however the
+    file reads at that instant: the file is re-read for a few seconds afterwards,
+    and a file that never moves is reported in one line and then proceeded past,
+    because the container gets the file that exists here and carries back
+    whatever it refreshes to. `Sign in again` is said only when the CLI itself
+    reported a spent refresh token or failed to authenticate.
+
+    Returns the state and detail the login is proceeding under; raises `Refused`
+    when it is not, always with the CLI's exit code and the tail of its output.
     """
     started = HOST_REFRESH.get(kind)
     if started is None:
@@ -543,6 +638,8 @@ def refresh_stale_login(kind: str, detail: str) -> None:
             "Refreshing it inside the container can rotate the token and leave this machine's "
             f"copy rejected. Start {product} once on this machine, then rerun."
         )
+    secrets = stored_secrets(path)
+    before = stored_expiry(kind, path)
     print(f"{kind}: {detail}; starting {product} here once so the refreshed token stays on this machine", flush=True)
     try:
         completed = subprocess.run(
@@ -564,8 +661,10 @@ def refresh_stale_login(kind: str, detail: str) -> None:
             f"the {kind} refresh attempt could not start {executable}: {error}. The login was not refreshed "
             f"({detail}). Start {product} once on this machine, then rerun."
         ) from error
+    captured = f"{completed.stdout}\n{completed.stderr}"
+    evidence = refresh_evidence(name, completed, secrets, before, stored_expiry(kind, path))
     if completed.returncode != 0:
-        spent = spent_refresh_token(f"{completed.stdout}\n{completed.stderr}")
+        spent = spent_refresh_token(captured)
         if spent is not None:
             # The state a run of this loop leaves behind when it has refreshed
             # inside the container and thrown the container away, and the reason
@@ -575,10 +674,45 @@ def refresh_stale_login(kind: str, detail: str) -> None:
             # line is the only place the answer was ever stated.
             raise Refused(
                 f"the {kind} refresh token stored here has already been used, so no round could authenticate "
-                f"and nothing on this machine can refresh it. {name} said: {spent}. Sign in again with "
-                f"{product}, then rerun."
+                f"and nothing on this machine can refresh it. {name} said: {redact(spent, secrets)}. Sign in "
+                f"again with {product}, then rerun.\n{evidence}"
             )
-        raise Refused(f"the {kind} refresh attempt failed: {completed.stderr.strip() or completed.stdout.strip()}")
+        failed_to_authenticate = authentication_failure(captured)
+        if failed_to_authenticate is not None:
+            raise Refused(
+                f"the {kind} refresh attempt could not authenticate: {name} said "
+                f"{redact(failed_to_authenticate, secrets)!r}. Sign in again with {product}, then rerun.\n"
+                f"{evidence}"
+            )
+        # Everything else the CLI can fail at is not a credential: an
+        # unavailable model, a network it could not reach, a flag it did not
+        # like. None of those is answered by signing in again, and saying so
+        # sent an operator to a login screen that fixed nothing.
+        raise Refused(
+            f"the {kind} refresh attempt failed, and the CLI did not report an authentication problem, so "
+            f"the stored login is not what to replace.\n{evidence}"
+        )
+    if EXPECTED_REPLY not in captured.lower():
+        raise Refused(
+            f"the {kind} refresh attempt exited 0 without the reply it asked for ({EXPECTED_REPLY!r}), so "
+            f"nothing here shows {product} reached the provider.\n{evidence}"
+        )
+    state, settled = settled_health(kind, path)
+    after = stored_expiry(kind, path)
+    if state == "ok":
+        return state, settled
+    # Proceeding, and saying exactly what is odd about it. The run just watched
+    # this login authenticate, so demanding a new sign-in over the file's opinion
+    # of itself refuses a login that works; and whatever the container refreshes
+    # to comes back here through the ordinary write-back.
+    moved = "the stored file still carries the old expiry" if before == after else "the stored file moved"
+    print(
+        f"{kind}: {product} authenticated here and answered, so this login works; {moved} and still reports "
+        f"{state} ({settled}); expiry {before} before the run, {after} after it. Proceeding with the file as "
+        "it stands, and whatever the container refreshes to is written back here.",
+        flush=True,
+    )
+    return state, settled
 
 
 def mounted_files() -> list[tuple[str, Path]]:
@@ -609,6 +743,11 @@ def check_logins(files: list[tuple[str, Path]]) -> None:
     A login that cannot be used fails every round the same way, and refreshing
     one inside the container can rotate the token and leave this machine holding
     the value the provider has already replaced.
+
+    `expired` is the one verdict the file alone can settle: nothing is left in
+    there to refresh with, so no CLI run could help and none is started. Every
+    other refusal on this path comes back out of `refresh_stale_login`, which
+    watched the CLI and can say what it did.
     """
     for kind, path in files:
         if kind not in HEALTH_CHECKED:
@@ -617,13 +756,7 @@ def check_logins(files: list[tuple[str, Path]]) -> None:
         if state == "expired":
             raise Refused(f"the {kind} login is unusable: {detail}. Sign in again, then rerun.")
         if state == "stale":
-            refresh_stale_login(kind, detail)
-            state, detail = credential_health(kind, path)
-            if state != "ok":
-                raise Refused(
-                    f"the {kind} login is still {state} after refreshing here: {detail}. "
-                    "Sign in again, then rerun."
-                )
+            state, detail = refresh_stale_login(kind, detail, path)
         print(f"{kind}: {state} ({detail})", flush=True)
 
 
