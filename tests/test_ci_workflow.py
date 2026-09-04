@@ -245,7 +245,7 @@ def test_the_bench_job_selects_its_runner_by_label_alone() -> None:
     it runs one job at a time, and the STM32 starter's hardware workflow selects
     the same runner by the same labels, so a run from either repository waits in
     that one runner's queue while the other holds the board. The concurrency
-    group cannot do this — it is scoped to one repository.
+    group cannot do this, it is scoped to one repository.
     """
     job = bench_job()
 
@@ -269,8 +269,8 @@ def test_the_bench_serialises_its_own_runs_and_is_never_cancelled_mid_plan() -> 
     half way through it.
 
     A GitHub concurrency group only coordinates runs within one repository, so
-    this group serialises this workflow's own runs — a manual dispatch that lands
-    while the nightly is on the board — and not the STM32 starter's; the single
+    this group serialises this workflow's own runs, a manual dispatch that lands
+    while the nightly is on the board, and not the STM32 starter's; the single
     self-hosted runner selected by BENCH_LABELS is what serialises the two
     repositories on one board (see that test). Cancelling in progress is how a
     board is left half flashed, so the group never does.

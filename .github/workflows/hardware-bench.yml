@@ -51,8 +51,8 @@ permissions:
 # on the probe.
 #
 # This group's job is narrower, and real: it keeps this repository's own runs
-# from piling up on that queue — a manual dispatch started while the nightly is
-# still on the board, or two dispatches in a row — by letting the newer run wait
+# from piling up on that queue, a manual dispatch started while the nightly is
+# still on the board, or two dispatches in a row, by letting the newer run wait
 # for the older instead of both queuing. Never `cancel-in-progress: true`:
 # cancelling a run in the middle of a plan is how a board is left half flashed.
 concurrency:
