@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -59,6 +60,21 @@ from agentic_hil.types import (
     fold_device_path,
     fold_hardware_id,
 )
+
+
+def _identity_module(name: str) -> Any:
+    """The POSIX ``pwd``/``grp`` database module, or None where there is none."""
+    with suppress(ImportError):
+        return importlib.import_module(name)
+    return None
+
+
+# The passwd and group databases, resolved once and held as module attributes so
+# the answer stays the same for a whole process and so a test can put a fake
+# database in front of the rule below on any host, Windows included, where the
+# real modules do not exist and the walk that reads them never runs.
+grp = _identity_module("grp")
+pwd = _identity_module("pwd")
 
 CONFIG_ENV = "AGENTIC_HIL_CONFIG"
 CONFIG_DIGEST_ALGORITHM = "sha256"
@@ -1959,6 +1975,105 @@ def write_generated_config(target_path: Path, workspace: Path, text: str) -> Non
     secure_atomic_write_text(target_path, text)
 
 
+def owner_display_name(uid: int) -> str:
+    """The owning account's name, or its numeric id where nothing knows it.
+
+    A refusal that says "owned by another user" tells a person that something is
+    wrong and not which account to go and look at. Where the passwd database can
+    name the owner it is named; where it cannot (no such module, no such entry,
+    a database that errors) the number is still worth more than the phrase it
+    replaces.
+    """
+    if pwd is not None:
+        with suppress(KeyError, OSError, TypeError, ValueError):
+            return str(pwd.getpwuid(uid).pw_name)
+    return f"uid {uid}"
+
+
+def group_display_name(gid: int) -> str:
+    """The owning group's name, or its numeric id where nothing knows it."""
+    if grp is not None:
+        with suppress(KeyError, OSError, TypeError, ValueError):
+            return str(grp.getgrgid(gid).gr_name)
+    return f"gid {gid}"
+
+
+def is_user_private_group(uid: int, gid: int) -> bool:
+    """Whether ``gid`` is the private group of the user who owns ``uid``.
+
+    Debian and Ubuntu give every account a group of its own: same name as the
+    account, the account's primary gid, and no other member. They also ship
+    ``umask 0002``, so everything such a user writes is group-writable by that
+    group, which is the default state of a home directory, of ``~/.local/bin``,
+    and of the console script ``uv tool install`` or ``pipx install`` puts there.
+    Write access through a group whose only member is the file's own owner is
+    write access for exactly one principal, the owner, so it admits nobody the
+    owner's own write bit did not already admit, and reading it as a second
+    writer refused the installation this project's own installer produces.
+
+    All three conditions have to hold, because each one alone is satisfiable by
+    a group that really does hold other people: the group carries the owner's
+    name, it is the owner's primary group, and it lists no member but the owner.
+    A group merely named after somebody, the owner's primary group with a second
+    account added to it, and any other group stay foreign, and group write
+    through them stays refused.
+
+    False wherever the passwd and group databases are unavailable (Windows,
+    which never reaches this) or cannot answer for these ids: an identity
+    nothing could confirm leaves the old refusal standing rather than widening
+    it on a guess.
+    """
+    if pwd is None or grp is None:
+        return False
+    try:
+        owner = pwd.getpwuid(uid)
+        group = grp.getgrgid(gid)
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+    if group.gr_name != owner.pw_name or group.gr_gid != owner.pw_gid:
+        return False
+    return not [member for member in (group.gr_mem or []) if member != owner.pw_name]
+
+
+def untrusted_write_access(info: os.stat_result) -> str | None:
+    """Who other than the owner may write this object, named, or None.
+
+    One rule, stated once, for every path element whose mode this file reads, so
+    the executable and any other element cannot drift into two answers. World
+    write is somebody else by definition and is refused whatever the group says.
+    Group write is refused only where the group is not the owner's own private
+    group, which is the whole of the Debian and Ubuntu relaxation.
+    """
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & stat.S_IWOTH:
+        return "world-writable"
+    if mode & stat.S_IWGRP and not is_user_private_group(info.st_uid, info.st_gid):
+        return f"group-writable by group {group_display_name(info.st_gid)}, which is not your private group"
+    return None
+
+
+def untrusted_launcher_file(info: os.stat_result, *, trusted_uids: frozenset[int]) -> str | None:
+    """Why a POSIX MCP launcher's executable cannot be trusted, or None.
+
+    Three refusals and one requirement, each named separately, because a caller
+    told only that the file is untrusted has to go and stat it to find out which
+    of them to fix: owned by an account that is neither root nor this user,
+    writable by the world, writable by a group that is not the owner's private
+    group, and, last, not executable at all.
+
+    ``info`` is a stat of an already-opened file and ``trusted_uids`` is supplied
+    by the caller, so this stays answerable on hosts with no ``os.geteuid``.
+    """
+    if info.st_uid not in trusted_uids:
+        return f"owned by {owner_display_name(info.st_uid)}"
+    reason = untrusted_write_access(info)
+    if reason is not None:
+        return reason
+    if not stat.S_IMODE(info.st_mode) & 0o111:
+        return "not executable"
+    return None
+
+
 def untrusted_launcher_directory(info: os.stat_result, *, final: bool, trusted_uids: frozenset[int]) -> str | None:
     """Why a POSIX MCP launcher's ancestor directory cannot be trusted, or None.
 
@@ -1981,9 +2096,16 @@ def untrusted_launcher_directory(info: os.stat_result, *, final: bool, trusted_u
     ``info`` is a stat of an already-opened directory descriptor, and
     ``trusted_uids`` is supplied by the caller so this stays answerable on hosts
     that have no ``os.geteuid``.
+
+    No ancestor mode is read here, so the private-group rule that
+    ``untrusted_write_access`` applies to the executable has nothing to relax on
+    a directory: a group-writable ``~`` or ``~/.local/bin``, private group or
+    not, is already accepted. The one answer this gives names the account that
+    owns the component, because "another user" tells a person that something is
+    wrong and not whose directory to go and look at.
     """
     if final and info.st_uid not in trusted_uids:
-        return "owned by another user"
+        return f"owned by {owner_display_name(info.st_uid)}"
     return None
 
 
@@ -2075,15 +2197,18 @@ def trusted_persistent_executable(
             with safe_open_binary(candidate) as handle:
                 opened = os.fstat(handle.fileno())
                 mode = stat.S_IMODE(opened.st_mode)
-                if opened.st_uid not in {0, os.geteuid()} or mode & 0o022 or not mode & 0o111:
-                    # The mode and the owner travel with the refusal for the same
-                    # reason the directory's do: this is the last thing between an
-                    # operator and a registration, and a caller told only that the
-                    # file is untrusted has to go and stat it to learn why.
+                reason = untrusted_launcher_file(opened, trusted_uids=frozenset({0, os.geteuid()}))
+                if reason is not None:
+                    # The failing condition, the path it failed on, and the mode,
+                    # owner and group behind it all travel with the refusal for
+                    # the same reason the directory's do: this is the last thing
+                    # between an operator and a registration, and one sentence
+                    # covering four different faults sent people to stat the file
+                    # themselves to find out which one they had.
                     raise ConfigError(
                         "mcp_command_untrusted",
-                        "The MCP server executable must be trusted, executable, and not writable by other users.",
-                        {"path": str(candidate), "mode": f"{mode:04o}", "uid": opened.st_uid},
+                        f"The MCP server executable at {candidate} is {reason}. It must be trusted, executable, and writable by nobody but its owner.",
+                        {"path": str(candidate), "mode": f"{mode:04o}", "uid": opened.st_uid, "gid": opened.st_gid, "untrusted_because": reason},
                     )
         finally:
             for descriptor in reversed(target_descriptors):

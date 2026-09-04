@@ -3713,6 +3713,8 @@ User scope is per user, per machine: all of it under the invoking user's home, i
 
 Each half owns its rollback set. A project step that fails leaves the installed skill and the MCP registration standing, and `agentic-hil init` alone is what re-runs.
 
+The executable that check accepts is one owned by you or by root, executable, and writable by nobody else, and it reads group write as another writer only when the group is not your own user-private group (its name is your account's, its gid is your primary gid, and it has no other member), so the group-writable console script a default Debian or Ubuntu `umask 0002` produces registers as it stands, while world write, a foreign group, and ownership by another account are refused with the failing condition and the path element it failed on named under `rejected_candidates` in `agentic-hil doctor`.
+
 ## Where things go
 
 | Item | Windows | POSIX |
