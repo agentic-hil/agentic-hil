@@ -324,6 +324,21 @@ find_python() {
     return 1
 }
 
+# Can this interpreter run pip at all, asked before an install is attempted with
+# it rather than read out of the wreckage afterwards. Debian and Ubuntu ship
+# python3 with no pip module unless python3-pip is installed, and so do most
+# minimal container images, which makes a pip-less Python the default state of
+# the most common Linux rather than a broken machine. There, `-m pip install`
+# answers "No module named pip" and exits 1, which carries none of the words the
+# PEP 668 branch reads, so before this question was asked the most ordinary
+# Linux of all stopped at step 2 with "pip could not install" while the script
+# already knew how to fetch uv. A pip that answers here and then fails at the
+# install is a real pip failure and still fails: this decides only whether there
+# is a pip to try.
+python_has_pip() {
+    "$1" -m pip --version >/dev/null 2>&1
+}
+
 package_spec() {
     spec="agentic-hil"
     if [ "$WITH_CAN" -eq 1 ]; then
@@ -762,6 +777,21 @@ install_with_pip() {
     esac
 }
 
+# The one uv takeover, for the two ways a discovered Python turns out not to be a
+# route to an installation: it has no pip module at all, and it has one the
+# distribution forbids pip to use (PEP 668). Both answers are the same, and both
+# were arrived at after find_python had already succeeded, so the machine may
+# have no uv either and this fetches it. The caller records PACKAGE_MANAGER, so
+# step 3 asks uv rather than the interpreter where the executable landed.
+uv_takes_over_from_pip() {
+    if ! have uv; then
+        fetch_uv || fail "package: no uv here and no way to fetch it; install uv or pipx by hand, then run this again"
+        user_bin_on_path
+    fi
+    have uv || fail "package: uv installed but does not resolve yet; open a new shell and run this again"
+    install_with_uv
+}
+
 # Which manager step 2 installed with, so step 3 can ask that manager where it
 # actually put the executable rather than guess.
 PACKAGE_MANAGER=""
@@ -935,22 +965,23 @@ elif have uv; then
     install_with_uv
     PACKAGE_MANAGER="uv"
 elif DISCOVERED_PYTHON=$(find_python); then
-    step 2 "package: installing $(package_spec) user-local with $DISCOVERED_PYTHON -m pip install --user"
-    pip_status=0
-    install_with_pip "$DISCOVERED_PYTHON" || pip_status=$?
-    if [ "$pip_status" -eq 3 ]; then
-        say "package: this Python is externally managed (PEP 668), so pip cannot own it; falling back to uv"
-        if ! have uv; then
-            fetch_uv || fail "package: no uv here and no way to fetch it; install uv or pipx by hand, then run this again"
-            user_bin_on_path
-        fi
-        have uv || fail "package: uv installed but does not resolve yet; open a new shell and run this again"
-        install_with_uv
+    if ! python_has_pip "$DISCOVERED_PYTHON"; then
+        step 2 "package: $DISCOVERED_PYTHON has no pip module, so pip cannot install with it; falling back to uv"
+        uv_takes_over_from_pip
         PACKAGE_MANAGER="uv"
-    elif [ "$pip_status" -ne 0 ]; then
-        fail "package: pip could not install $(package_spec); TROUBLESHOOTING.md section 1 has the fallbacks"
     else
-        PACKAGE_MANAGER="pip"
+        step 2 "package: installing $(package_spec) user-local with $DISCOVERED_PYTHON -m pip install --user"
+        pip_status=0
+        install_with_pip "$DISCOVERED_PYTHON" || pip_status=$?
+        if [ "$pip_status" -eq 3 ]; then
+            say "package: this Python is externally managed (PEP 668), so pip cannot own it; falling back to uv"
+            uv_takes_over_from_pip
+            PACKAGE_MANAGER="uv"
+        elif [ "$pip_status" -ne 0 ]; then
+            fail "package: pip could not install $(package_spec); TROUBLESHOOTING.md section 1 has the fallbacks"
+        else
+            PACKAGE_MANAGER="pip"
+        fi
     fi
 else
     step 2 "package: no uv and no Python 3.10 or newer here, fetching Astral's uv installer first"

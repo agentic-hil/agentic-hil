@@ -36,9 +36,10 @@ what it serves is byte for byte what is here. The section below takes the
 canonical copy straight from the repository and checks it.
 
 The script installs the package user-local (`uv tool install` where `uv` exists,
-`python -m pip install --user` otherwise, and it fetches one pinned release of
-Astral's uv installer where there is neither `uv` nor a Python 3.10 or newer) and
-then runs
+`python -m pip install --user` where instead there is a Python 3.10 or newer that
+can run pip, and it fetches one pinned release of Astral's uv installer where
+there is neither, which includes the pip-less `python3` a Debian or Ubuntu server
+ships) and then runs
 `agentic-hil agent-install` for every agent CLI it finds on `PATH`. That is the
 machine half and nothing else: it writes no project configuration, edits no
 shell profile, and asks for no admin rights. After one restart of your agent,
