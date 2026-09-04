@@ -545,6 +545,30 @@ def test_a_new_home_for_the_development_version_cannot_appear_either(development
     assert package_version(development_tree) in found[0]
 
 
+def test_a_new_home_for_the_anticipated_release_cannot_appear_either(development_tree: Path) -> None:
+    """The sweep learned the third version, or the CI examples' own pin would be unwatched.
+
+    The anticipated release is the exact `X.Y.Z` the shipped CI examples pin, and
+    between releases it is neither the last release nor this tree's development
+    version. A document that starts carrying that exact pin is the CI examples'
+    mistake happening somewhere no entry claims yet, so the sweep has to recognise
+    it as well, not just the two versions it already knew.
+    """
+    anticipated = anticipated_release(development_tree)
+    assert anticipated != release_version(development_tree)
+    assert anticipated != package_version(development_tree)
+    (development_tree / "docs").mkdir(parents=True, exist_ok=True)
+    (development_tree / "docs" / "installation.md").write_text(
+        f'pip install "agentic-hil=={anticipated}"\n', encoding="utf-8"
+    )
+
+    found = uncovered_files(development_tree)
+
+    assert found
+    assert "docs/installation.md" in found[0]
+    assert anticipated in found[0]
+
+
 def test_a_deliberate_mention_is_declared_rather_than_forgotten(tree: Path) -> None:
     """`AI_AGENT_QUICKSTART.md` states a capability floor, not this release.
 

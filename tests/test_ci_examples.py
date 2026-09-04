@@ -386,19 +386,26 @@ def test_the_simulator_job_is_the_hosted_path_and_touches_no_bench() -> None:
     assert "agentic-hil test-reactor" not in gitlab_simulator
 
 
-def test_every_command_the_examples_invoke_is_one_the_pinned_distribution_exposes() -> None:
-    """No example invokes an `agentic-hil` subcommand its pinned release lacks.
+def test_every_command_the_examples_invoke_is_one_this_build_defines() -> None:
+    """No example invokes an `agentic-hil` subcommand this checkout's parser lacks.
 
-    The gap a check against the development checkout alone would miss is a command
-    present here but absent from the distribution the examples pin: the examples
-    added `check-plan` and `run-evidence` while the pin still named the release
-    before the one that introduced them, so an isolated install of that release
-    rejected both at argument parsing. The pin is what closes the gap. It names
-    the anticipated release, the version this tree builds and will publish, so the
-    CLI this checkout defines is the CLI that distribution exposes, and a
-    subcommand the examples invoke that this `build_parser` does not define is one
-    the pinned distribution would reject. On a release commit the anticipated
-    release is the release being cut, and this checkout is exactly it.
+    What this test inspects is `build_parser` in this source tree, not an
+    installed distribution: reaching for the pinned artifact would need the
+    network and a published release, and this pin names one that does not exist
+    on the index until the release is cut. So the guarantee is stated in two
+    parts. Directly, it catches an example that invokes a subcommand this build
+    does not define, a typo or a command that was renamed or removed. By
+    extension it stands in for the pinned distribution, and only because the pin
+    is the anticipated release: the examples ship in the release they pin, so a
+    reader who has that release has this tree's CLI, and on a release commit the
+    anticipated release is the release being cut and this checkout is exactly it.
+    The bug this guards against was real: the examples added `check-plan` and
+    `run-evidence` while the pin still named the release before the one that
+    introduced them, so an isolated install of that release rejected both at
+    argument parsing. Verifying the published artifact's own CLI is a
+    release-time step, done by the hardware job's `agentic-hil --version` gate
+    and the simulator job's install of the exact pin, not something a hermetic
+    unit test can do.
     """
     available = cli_subcommands()
     invoked = invoked_subcommands(
@@ -415,8 +422,9 @@ def test_every_command_the_examples_invoke_is_one_the_pinned_distribution_expose
     assert {"doctor", "test-reactor", "check-plan", "run-evidence"} <= invoked
     unknown = invoked - available
     assert not unknown, f"the examples invoke commands this build does not define: {sorted(unknown)}"
-    # The pin equal to the anticipated release is what makes `available`, the
-    # commands of this checkout, the commands of the pinned distribution.
+    # The pin equal to the anticipated release is what lets `available`, the
+    # commands of this checkout, stand in for the commands the pinned
+    # distribution will expose once the release it names is published.
     assert GITHUB["env"]["AGENTIC_HIL_VERSION"] == anticipated_release(REPOSITORY_ROOT)
     assert GITLAB["variables"]["AGENTIC_HIL_VERSION"] == anticipated_release(REPOSITORY_ROOT)
 

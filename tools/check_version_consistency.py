@@ -653,13 +653,22 @@ def _swept_files(root: Path) -> list[Path]:
 
 
 def uncovered_files(root: Path, version: str | None = None) -> list[str]:
-    """Files that carry the release version and no entry in `locations` claims.
+    """Files that carry a tracked version and no entry in `locations` claims.
 
     This is what makes the list underivable from memory: adding a thirteenth
-    home for the version without adding it here turns the build red, and the
-    message says where.
+    home for a version without adding it here turns the build red, and the
+    message says where. The default sweep is every version the gate manages,
+    deduplicated: the release, this tree's development version, and the
+    anticipated release the CI examples pin. That third one is the exact pin
+    `agentic-hil==X.Y.Z` the examples carry between releases; leaving it out of
+    the sweep let a new, uncovered home for that pin pass unnoticed, which is
+    the very drift this function exists to catch.
     """
-    swept = (version,) if version else tuple(dict.fromkeys((release_version(root), package_version(root))))
+    swept = (
+        (version,)
+        if version
+        else tuple(dict.fromkeys((release_version(root), package_version(root), anticipated_release(root))))
+    )
     carries = [(one, re.compile(rf"(?<![\w.])v?{re.escape(one)}(?![\w.])")) for one in swept]
     covered = {location.path for location in locations(root)}
     found = []
