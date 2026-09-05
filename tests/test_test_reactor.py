@@ -589,6 +589,57 @@ def test_com_fill_on_a_debugger_free_bench_does_not_promise_adoption() -> None:
     assert "agentic-hil com-ports" in guidance
 
 
+def test_the_debugger_free_com_repair_names_a_version_3_bench_s_identity(tmp_path: Path) -> None:
+    """The only repair a UART-only version-3 bench has must load (round 0, finding 5).
+
+    Generated configurations are version 3, where a `com_ports` entry with a bare
+    `device` -- a `COM7` or a `/dev/ttyACM0` with no `serial_number`,
+    `resource_id`, `/dev/serial/by-id/...` name or `identity_source` -- is refused
+    on the next load. On a debugger-free bench adoption cannot run, so the manual
+    path is the whole repair, and telling the operator to set only `.device` there
+    left the configuration invalid, on Windows in particular. The guidance now
+    names the identity a bind needs, and following it produces a file that loads.
+    """
+    config_path = write_config(
+        tmp_path / "bench",
+        config_version=3,
+        com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n",
+    )
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(re.sub(r"(?ms)^debuggers:\n(?:  .*\n)+", "debuggers: {}\n", text), encoding="utf-8")
+    config = load_config(str(config_path))
+    assert config.config_version == 3
+    assert config.debuggers == {}
+
+    guidance = UartRunner.entry_fill_step(config, "dut_uart")
+    # No debugger, so adoption cannot run and no COM adoption command is advertised.
+    assert re.search(r"`agentic-hil adopt-hardware[^`]*--com-port", guidance) is None
+    # The repair names the device AND the identity a bare version-3 device lacks,
+    # not only `.device` as it did before (round 0, finding 5).
+    assert "com_ports.dut_uart.device" in guidance
+    assert "agentic-hil com-ports" in guidance
+    assert "serial_number" in guidance
+    assert "identity_source" in guidance
+
+    # The repair, followed: a version-3 bound device with no identity is refused,
+    # and the same device carrying the serial the guidance names loads. Following
+    # the old "set only `.device`" advice is the first of these.
+    bare = write_config(
+        tmp_path / "bare",
+        config_version=3,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n    baudrate: 115200\n',
+    )
+    with pytest.raises(ConfigError) as refused:
+        load_config(str(bare))
+    assert "identified" in str(refused.value)
+    identified = write_config(
+        tmp_path / "identified",
+        config_version=3,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n    serial_number: "066AFF303435"\n    baudrate: 115200\n',
+    )
+    assert load_config(str(identified)).com_ports["dut_uart"].device == "COM7"
+
+
 def test_com_fill_on_a_multi_debugger_bench_asks_which_debugger() -> None:
     """Several debuggers, and none can be picked for the operator (round 2, finding 2).
 

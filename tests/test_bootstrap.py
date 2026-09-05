@@ -1757,6 +1757,13 @@ def test_an_stlink_is_enumerated_from_the_usb_inventory_without_the_cube_cli(mon
     }
     # And the port that carries the same serial, by its replug-proof name.
     assert result["com_port"]["stable_device"] == NUCLEO_VCP["stable_device"]
+    # The board was chosen without the caller naming it, off an inventory that is
+    # not an authoritative count, so the choice is disclosed rather than silent: a
+    # VCP-less ST-Link could sit beside the one that was seen, and the answer says
+    # so and names the confirmation path (round 0, finding 1).
+    assert result["probe_inventory_complete"] is False
+    assert "not an authoritative count" in result["summary"]
+    assert "name its serial as probe_id" in result["summary"]
 
 
 def test_only_the_stlink_usb_products_are_read_as_probe_serials() -> None:
@@ -1810,6 +1817,75 @@ def test_two_attached_stlinks_are_still_ambiguous_on_the_usb_path(monkeypatch: p
     selected = discover_attached_hardware(probe_id="0669ff495451", profile=STARTER_PROFILE)
     assert selected["ok"] is True, selected
     assert selected["probe_id"] == "0669FF495451"
+
+
+def test_naming_the_probe_reads_it_as_the_operators_own_explicit_choice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit probe_id is a selection nothing had to infer (round 0, finding 1).
+
+    The USB inventory is not an authoritative count, so a board discovery *chose*
+    off it carries the blind-spot caveat. But a caller that named the serial has
+    made the choice itself: the inventory's incompleteness cannot have picked the
+    wrong board, so the answer is exact and adds no caveat."""
+    _linux_openocd_host(monkeypatch)
+
+    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile=STARTER_PROFILE)
+
+    assert result["ok"] is True, result
+    assert result["probe_id"] == "066AFF303435554157113106"
+    assert "probe_inventory_complete" not in result
+    assert "not an authoritative count" not in result["summary"]
+
+
+def test_a_vcp_less_probe_beside_the_visible_one_is_disclosed_not_silently_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mixed bench the USB path cannot see whole (round 0, finding 1).
+
+    A standalone ST-LINK/V2 (or any probe with no virtual COM port) publishes no
+    VCP, so the USB serial inventory never lists it: a host with that probe *and*
+    a VCP-backed Nucleo shows exactly one probe, the same reading a host with only
+    the Nucleo shows. Discovery cannot tell the two apart, so choosing the sole
+    visible probe is a choice made off an inventory that could not rule out the
+    second board. The answer discloses that rather than presenting the one it saw
+    as the only one attached."""
+    # The inventory the host can take: only the VCP-backed probe. The VCP-less
+    # ST-LINK/V2 attached beside it contributes no serial-bus entry at all.
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
+
+    result = discover_attached_hardware(profile=STARTER_PROFILE)
+
+    assert result["ok"] is True, result
+    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["probe_inventory_complete"] is False
+    assert "standalone ST-LINK/V2" in result["summary"]
+
+
+def test_the_no_config_probe_listing_is_not_a_clean_pass_off_a_partial_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`debugger-probes` before the first setup must not exit 0 over a partial read.
+
+    With no STM32CubeProgrammer the bootstrap listing enumerates from the host's
+    USB serial inventory, which reaches an ST-Link only through the VCP it
+    publishes. A single visible probe is a real finding, but not an authoritative
+    count, and an empty reading is not proof no probe is attached. So the listing
+    carries `complete: false` and fails `conclusive_success`, which is the verdict
+    the CLI exit code is taken from (round 0, finding 1)."""
+    # One visible probe: a nonempty but non-authoritative reading.
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
+    listing = bootstrap_probe_listing()
+    assert listing["ok"] is True
+    assert listing["source"] == "bootstrap"
+    assert listing["backend"] == "openocd"
+    assert [entry["probe_id"] for entry in listing["probes"]] == ["066AFF303435554157113106"]
+    assert listing["complete"] is False
+    assert agentic_hil.cli.result_succeeded(listing) is False
+    assert "not an authoritative count" in listing["summary"]
+
+    # And the empty reading is the same verdict: "nothing on the serial bus" is
+    # not "no probe attached", because a VCP-less probe never enters this listing.
+    _linux_openocd_host(monkeypatch, ports=[])
+    empty = bootstrap_probe_listing()
+    assert empty["ok"] is True
+    assert empty["probes"] == []
+    assert empty["complete"] is False
+    assert agentic_hil.cli.result_succeeded(empty) is False
 
 
 def test_discovery_refuses_naming_both_toolchains_when_the_host_has_neither(monkeypatch: pytest.MonkeyPatch) -> None:

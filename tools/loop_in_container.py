@@ -298,6 +298,10 @@ HOST_REFRESH = {
 # What both sessions above ask for, and the only thing that makes an exit status
 # of 0 mean anything: a CLI that printed nothing answered nothing, and a run that
 # answered reached the provider, which is the whole question being asked here.
+# Matched by `reply_confirmed` as a whole line on stdout -- the response-bearing
+# stream -- rather than as a substring of both streams, so an incidental `ok`
+# (`not ok`, `token cache initialized`, an `ok` on stderr) is not read as the
+# reply.
 EXPECTED_REPLY = "ok"
 # How long a stored login keeps being re-read after the CLI that refreshed it has
 # exited, and how often. A CLI writes its refreshed file around the answer rather
@@ -548,6 +552,26 @@ def git_identity(repo: Path) -> tuple[str, str]:
     return match.group("name"), match.group("email")
 
 
+def reply_confirmed(stdout: str, expected: str) -> bool:
+    """Whether the response-bearing stream carries the exact reply that was asked for.
+
+    The proof a refresh reached the provider is the model's reply, and that reply
+    is on stdout: a CLI's own diagnostics -- a token-cache line, a `not ok`, a
+    Codex log that happens to contain the word `token` -- go to stderr. Matching
+    the two characters `ok` as a substring across both streams let any of those
+    stand in for a reply the model never gave, so an exit-0 process that never
+    reached the provider passed (round 0, finding 3).
+
+    So this reads stdout alone, and requires a whole line to *be* the reply rather
+    than to contain it: `not ok` is not `ok`, `token` is not `ok`, and an `ok`
+    printed only on stderr is not read at all. Whitespace is trimmed and case is
+    folded, because that is the difference between one CLI's `ok\\n` and another's
+    ` OK `, not the difference between a reply and none.
+    """
+    wanted = expected.strip().casefold()
+    return any(line.strip().casefold() == wanted for line in stdout.splitlines())
+
+
 def output_tail(text: str, secrets: list[str]) -> str:
     """The end of a captured stream, safe to print in a terminal.
 
@@ -555,13 +579,20 @@ def output_tail(text: str, secrets: list[str]) -> str:
     against the secrets the stored login itself carries: a refresh failure is
     exactly the moment a CLI is likeliest to quote the credential back, and this
     text is on its way to a refusal an operator will paste somewhere.
+
+    Redacted *before* the tail is taken, never after. Truncating first can cut a
+    token in half, and the literal redactor matches whole values: a suffix left
+    by a boundary that fell inside a secret would no longer match and would be
+    printed. So the whole stream is redacted, and only the redacted text --
+    where every secret is already `[REDACTED]` -- is trimmed to its tail (round
+    0, finding 2).
     """
-    trimmed = text.strip()
-    if not trimmed:
+    redacted = redact(text, secrets).strip()
+    if not redacted:
         return "(nothing)"
-    if len(trimmed) > OUTPUT_TAIL_CHARS:
-        trimmed = f"...{trimmed[-OUTPUT_TAIL_CHARS:]}"
-    return redact(trimmed, secrets)
+    if len(redacted) > OUTPUT_TAIL_CHARS:
+        redacted = f"...{redacted[-OUTPUT_TAIL_CHARS:]}"
+    return redacted
 
 
 def refresh_evidence(
@@ -662,6 +693,14 @@ def refresh_stale_login(kind: str, detail: str, path: Path) -> tuple[str, str]:
             f"({detail}). Start {product} once on this machine, then rerun."
         ) from error
     captured = f"{completed.stdout}\n{completed.stderr}"
+    # The CLI refreshes by rotating the login: it can write a *new* access and
+    # refresh token to the file and then fail (an unavailable model, a network it
+    # could not reach) while quoting that freshly written value in its output. The
+    # secrets read before the run do not include it, so evidence redacted against
+    # them alone could print the new token. Re-read the login now and redact
+    # against both sets -- the values that were there and the ones the run may
+    # have just written (round 0, finding 2).
+    secrets = list(dict.fromkeys([*secrets, *stored_secrets(path)]))
     evidence = refresh_evidence(name, completed, secrets, before, stored_expiry(kind, path))
     if completed.returncode != 0:
         spent = spent_refresh_token(captured)
@@ -692,10 +731,10 @@ def refresh_stale_login(kind: str, detail: str, path: Path) -> tuple[str, str]:
             f"the {kind} refresh attempt failed, and the CLI did not report an authentication problem, so "
             f"the stored login is not what to replace.\n{evidence}"
         )
-    if EXPECTED_REPLY not in captured.lower():
+    if not reply_confirmed(completed.stdout, EXPECTED_REPLY):
         raise Refused(
-            f"the {kind} refresh attempt exited 0 without the reply it asked for ({EXPECTED_REPLY!r}), so "
-            f"nothing here shows {product} reached the provider.\n{evidence}"
+            f"the {kind} refresh attempt exited 0 without the reply it asked for ({EXPECTED_REPLY!r}) on its own "
+            f"output, so nothing here shows {product} reached the provider.\n{evidence}"
         )
     state, settled = settled_health(kind, path)
     after = stored_expiry(kind, path)

@@ -180,13 +180,27 @@ def _usb_enumeration(available: JsonObject, timeout_s: float) -> JsonObject:
         "tools_searched": tools,
         "probes": [{"probe_id": found} for found in probe_ids],
         "stlink_ports": usb_stlink_ports(available),
+        # Not an authoritative count, exactly as the configured OpenOCD backend's
+        # own listing says of the same reading (`openocd.debugger_probes_list`).
+        # The USB serial inventory reaches an ST-Link only through the virtual COM
+        # port a V2-1 or a V3 publishes, so a standalone ST-LINK/V2 -- or any probe
+        # OpenOCD drives that exposes no VCP -- can be attached and never appear
+        # here: an empty reading is not proof no probe is connected, and a nonempty
+        # one is not proof it lists every probe attached. Carried so the no-config
+        # `debugger-probes` listing this feeds fails `conclusive_success` rather
+        # than exiting 0 over a partial inventory (round 0, finding 1).
+        "complete": False,
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "cleanup_required": False,
         "summary": (
-            f"{len(probe_ids)} connected debugger probe(s) detected from this host's USB serial inventory; "
-            "STM32CubeProgrammer is not installed, so nothing was said to a board to find them."
+            f"{len(probe_ids)} connected debugger probe(s) read from this host's USB serial inventory; "
+            "STM32CubeProgrammer is not installed, so nothing was said to a board to find them. That inventory "
+            "reaches an ST-Link only through the virtual COM port a V2-1 or a V3 publishes, so a standalone "
+            "ST-LINK/V2 -- or any probe with no VCP -- would not appear here even if attached: this is not "
+            "necessarily every probe connected. Read the ids off the probes or the adapter vendor's own tool for "
+            "an authoritative count."
         ),
     }
 
@@ -470,6 +484,16 @@ def discover_attached_hardware(
         **({"stlink_ports": listed["stlink_ports"]} if "stlink_ports" in listed else {}),
     }
     probe_ids = [str(found["probe_id"]) for found in listed["probes"]]
+    # Whether the enumeration that produced these ids is an authoritative count.
+    # STM32CubeProgrammer's own listing is; the USB serial inventory the OpenOCD
+    # fallback reads is not (`complete: false`), because it reaches an ST-Link
+    # only through the virtual COM port a V2-1 or a V3 publishes and a VCP-less
+    # ST-LINK/V2 can be attached beside the ones it saw. Captured before the
+    # caller's `probe_id` is folded into the enumerated spelling below, so the
+    # answer can say whether a board it chose was chosen off an inventory that
+    # could not rule out a second one (round 0, finding 1).
+    inventory_authoritative = listed.get("complete") is not False
+    caller_named_probe = probe_id is not None
     if not probe_ids:
         return _discovery_failure("adapter_not_found", "No ST-Link probe is attached.", executable=executable, com_ports=com_ports, **found_by)
     if probe_id is not None:
@@ -531,6 +555,27 @@ def discover_attached_hardware(
             )
         )
 
+    # A board this call chose without the caller naming it, off an inventory that
+    # is not an authoritative count, is a disclosed choice rather than a silent
+    # one: the answer carries `probe_inventory_complete: false` and the summary
+    # says a VCP-less ST-Link could be attached beside it and how to name the
+    # intended board, so a reader of the generated configuration or the `init`
+    # report is told the selection was made from a partial reading rather than
+    # confirmed to be the only board (round 0, finding 1). When the caller named
+    # the probe, or the enumeration was STM32CubeProgrammer's own authoritative
+    # listing, the selection is exact and no caveat is added.
+    disclose_partial_inventory = not caller_named_probe and not inventory_authoritative
+    caveat: JsonObject = {}
+    if disclose_partial_inventory:
+        caveat = {"probe_inventory_complete": False}
+        summary = (
+            f"{summary} This ST-Link was the only one visible in this host's USB serial inventory, which is not an "
+            "authoritative count: it reaches an ST-Link only through the virtual COM port a V2-1 or a V3 publishes, so a "
+            "standalone ST-LINK/V2 -- or any probe with no VCP -- could be attached beside it and would not appear. If "
+            "more than one probe may be connected, confirm this is the intended board and name its serial as probe_id; "
+            "`agentic-hil debugger-probes` and `agentic-hil com-ports` show what this host can see."
+        )
+
     matched_port = correlate_com_port(probe_id, com_ports)
     return {
         "ok": True,
@@ -546,6 +591,7 @@ def discover_attached_hardware(
         "target_discovery": target_discovery,
         "com_port": matched_port,
         "available_com_ports": com_ports,
+        **caveat,
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",

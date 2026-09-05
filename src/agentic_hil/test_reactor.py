@@ -47,7 +47,13 @@ from agentic_hil.tools import (
     configured_sessionless_debug_reads,
     sessionless_capable_debug_tools,
 )
-from agentic_hil.types import AgenticHILConfig, DebuggerConfig, JsonObject, com_port_is_unbound
+from agentic_hil.types import (
+    IDENTIFIED_COM_PORT_CONFIG_VERSION,
+    AgenticHILConfig,
+    DebuggerConfig,
+    JsonObject,
+    com_port_is_unbound,
+)
 
 # The default plan path, the packaged schema and the marker its version gate
 # reads are re-exported from `knowledge`, which is where the reference document
@@ -1017,10 +1023,33 @@ def _com_adopt_instruction(config: AgenticHILConfig, name: str) -> str:
     does not silently start refusing a bare invocation. Several are named and one
     is asked for, because choosing here is how a serial lands on the wrong board.
     None means adoption has no entry to select and cannot run, so the reader is
-    sent to the manual path rather than to a command that refuses. Naming the
-    device by hand always works, so it is offered in every case."""
+    sent to the manual path rather than to a command that refuses.
+
+    The manual path is offered in every case, and it names what a bind actually
+    needs rather than only the device. A generated configuration is version 3,
+    where a `com_ports` entry carrying a bare `device` -- a `COM7` or a
+    `/dev/ttyACM0` with no `serial_number`, `resource_id`, `/dev/serial/by-id/...`
+    name or `identity_source` -- is refused on the next load, so setting only
+    `.device` there is a repair that leaves the file invalid, on Windows in
+    particular (round 0, finding 5). So under that version the manual path names
+    the identity keys `agentic-hil com-ports` reports alongside the device, and
+    the deliberate `identity_source: device` for an adapter that publishes none.
+    Under the earlier version a bare device still loads, so the shorter form
+    stays."""
     key = f"com_ports.{name}.device"
-    manual = f"name `{key}` yourself; `agentic-hil com-ports` lists what this host has."
+    # `getattr` rather than attribute access so a caller passing a lightweight
+    # config stand-in still gets a truthful (version-1) answer instead of an
+    # AttributeError; every real `AgenticHILConfig` carries `config_version`.
+    if getattr(config, "config_version", 1) >= IDENTIFIED_COM_PORT_CONFIG_VERSION:
+        manual = (
+            f"set `{key}` yourself together with the identity `agentic-hil com-ports` reports for it -- its "
+            f"`serial_number`, or its `vid` and `pid` -- because under version {IDENTIFIED_COM_PORT_CONFIG_VERSION} a "
+            "bare device with no `serial_number`, `resource_id`, `/dev/serial/by-id/...` name or `identity_source` is "
+            f"refused on the next load; if the adapter publishes none of those, set `com_ports.{name}.identity_source: "
+            "device` to state deliberately that the kernel name is all it has."
+        )
+    else:
+        manual = f"name `{key}` yourself; `agentic-hil com-ports` lists what this host has."
     debuggers = sorted(config.debuggers)
     if len(debuggers) == 1:
         command = f"{ADOPT_HARDWARE_COMMAND} --debugger {debuggers[0]} --com-port {name}"

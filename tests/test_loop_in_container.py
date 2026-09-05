@@ -696,6 +696,126 @@ def test_a_token_the_cli_printed_never_reaches_the_refusal(
     assert "POST /refresh rejected" in reason
 
 
+def test_a_token_split_by_the_output_boundary_is_still_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tail is cut from redacted text, not redacted after it is cut (round 0, finding 2).
+
+    The evidence prints only the last `OUTPUT_TAIL_CHARS` of a chatty stream. When
+    that boundary fell inside a token the old order truncated first, leaving a
+    suffix the literal redactor -- which matches whole values -- could no longer
+    recognise, and it printed that suffix. Here a token straddles the boundary so
+    only its tail lands in the window; redacting the whole stream before trimming
+    is what keeps that tail out of the refusal.
+    """
+    tail_chars = loop_in_container.OUTPUT_TAIL_CHARS
+    marker = "LEAKMARKER0123456789ABCDEF0123456789ABCDEF0123456789ABCD"
+    token = ("P" * 40) + marker
+    path = tmp_path / ".credentials.json"
+    path.write_text(_claude_login(timedelta(minutes=1), refresh_token=token), encoding="utf-8")
+    # The token sits so the last `tail_chars` begin partway through it: its prefix
+    # is beyond the window, its suffix (the marker) inside it.
+    stderr = ("x" * (tail_chars + 100)) + token + ("y" * (tail_chars - 30))
+    _host_refresh_probe(monkeypatch, tmp_path, stdout="", stderr=stderr, exit_code=3)
+
+    with pytest.raises(loop_in_container.Refused) as refusal:
+        loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    reason = str(refusal.value)
+    # The suffix that the truncate-first order would have printed is gone.
+    assert marker not in reason
+    assert marker[-30:] not in reason
+    assert token not in reason
+    assert "[REDACTED]" in reason
+
+
+def test_a_token_the_cli_rotates_before_it_fails_is_redacted_against_the_new_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Evidence is redacted against the login as it stands after the run (round 0, finding 2).
+
+    A refresh rotates the login: the CLI can write a new access and refresh token
+    to the file and then fail while quoting that just-written value. The secrets
+    read before the run do not include it, so evidence redacted against them alone
+    would print the new token. Re-reading the login after the run and merging the
+    two sets is what covers the value the run itself wrote.
+    """
+    old_token = "old-refresh-token-that-was-there-before-the-run-000000"
+    new_token = "rotated-refresh-token-the-cli-just-wrote-1234567890ABCDEF"
+    path = tmp_path / ".credentials.json"
+    path.write_text(_claude_login(timedelta(minutes=1), refresh_token=old_token), encoding="utf-8")
+    _host_refresh_probe(
+        monkeypatch,
+        tmp_path,
+        stdout="",
+        stderr=f"error: model gpt-9 is not available; refreshed to {new_token}\n",
+        exit_code=3,
+        writes=(path, _claude_login(timedelta(days=1), refresh_token=new_token)),
+    )
+
+    with pytest.raises(loop_in_container.Refused) as refusal:
+        loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    reason = str(refusal.value)
+    # Neither the value that was there nor the one the run wrote reaches the terminal.
+    assert new_token not in reason
+    assert old_token not in reason
+    assert "[REDACTED]" in reason
+    # And the non-secret diagnostic is still readable.
+    assert "model gpt-9 is not available" in reason
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [
+        # `token` contains the two characters `ok`; a Codex diagnostic that names
+        # it is not the model reply.
+        ("initializing token cache\n", ""),
+        # A negative answer contains the positive one as a substring.
+        ("not ok\n", ""),
+        # The reply asked for, but on the stream reserved for diagnostics.
+        ("", "ok\n"),
+    ],
+)
+def test_incidental_ok_is_not_read_as_the_requested_reply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str, stderr: str
+) -> None:
+    """Exit 0 is proof only when the model's own reply is on the stream it answers on (round 0, finding 3).
+
+    The proof used to be `"ok" in (stdout + stderr).lower()`, so `token`, `not ok`
+    or an `ok` printed to stderr all passed for a reply the model never gave. The
+    check now requires a whole line of stdout to be the reply, so none of these
+    stand in for it."""
+    path = _stale_login(tmp_path)
+    _host_refresh_probe(monkeypatch, tmp_path, stdout=stdout, stderr=stderr, exit_code=0)
+
+    with pytest.raises(loop_in_container.Refused) as refusal:
+        loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    reason = str(refusal.value)
+    assert "without the reply it asked for" in reason
+    assert "sign in again" not in reason.lower()
+
+
+def test_the_reply_is_read_as_one_line_among_a_cli_s_other_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CLI that logs to stdout and then answers has answered (round 0, finding 3).
+
+    The whole-line rule must not demand that `ok` be the only thing on stdout: a
+    CLI may print its own progress there before the model's reply. One line that
+    is exactly the reply, wherever it sits, is the proof."""
+    path = _stale_login(tmp_path)
+    _host_refresh_probe(
+        monkeypatch, tmp_path, stdout="loaded config\nreaching provider...\nOK\n", stderr="warming token cache\n"
+    )
+    monkeypatch.setattr(loop_in_container, "REFRESH_SETTLE_SECONDS", 0.0)
+
+    state, _detail = loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    assert state == "stale"
+
+
 def test_the_pre_flight_no_longer_stops_a_run_over_a_file_the_cli_did_not_rewrite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

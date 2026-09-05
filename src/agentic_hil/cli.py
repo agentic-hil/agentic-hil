@@ -97,7 +97,13 @@ from agentic_hil.report import conclusive_success, overall_success
 from agentic_hil.runevidence import write_run_evidence
 from agentic_hil.runlifecycle import request_run_stop, run_status
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, flatten_steps, load_test_config
+from agentic_hil.test_reactor import (
+    DEFAULT_TEST_CONFIG_PATH,
+    DebuggerRunner,
+    UartRunner,
+    flatten_steps,
+    load_test_config,
+)
 from agentic_hil.tools import (
     AgenticHILToolService,
     UnprovisionedToolService,
@@ -4622,6 +4628,82 @@ def _doctor_state_root(config: AgenticHILConfig) -> JsonObject:
     return {"ok": True, "field": "state_root", "path": str(root), "summary": "The configured state root accepts the writes every hardware action is recorded by."}
 
 
+def _adopt_reads_board_instruction(config: AgenticHILConfig) -> str:
+    """The debugger-aware `adopt-hardware` that reads the board to fill identity keys.
+
+    For the state where no device is unbound but the file still carries a
+    placeholder somebody fills by reading the board -- `target.controller` is the
+    one the verdict does not fail on. Adoption reads it through a debugger, so the
+    command names one the same way the reactor's COM fill does: the sole probe,
+    one chosen from several, or -- with no debugger to read through -- the manual
+    path, because a bare `adopt-hardware` refuses when it cannot select a probe
+    (round 0, finding 4)."""
+    debuggers = sorted(config.debuggers)
+    if len(debuggers) == 1:
+        return (
+            f"With the board attached, `{ADOPT_HARDWARE_COMMAND} --debugger {debuggers[0]}` reads it and fills the "
+            "identity keys still unset in the declared entries -- `target.controller` among them -- from the attached "
+            "hardware, and leaves everything a person has set alone."
+        )
+    if debuggers:
+        return (
+            f"With the board attached, name which configured probe it is and run `{ADOPT_HARDWARE_COMMAND} --debugger "
+            f"<name>` (this project declares several: {', '.join(debuggers)}); it reads the board and fills the identity "
+            "keys still unset in the declared entries, `target.controller` among them, and leaves everything a person "
+            "has set alone."
+        )
+    return (
+        "This project declares no debugger, so `adopt-hardware` cannot read the board to fill `target.controller`; set "
+        "it by hand to the part the board actually is."
+    )
+
+
+def _bench_binding_next_step(config: AgenticHILConfig, unbound: list[JsonObject], placeholders: list[JsonObject]) -> str:
+    """The repair for each device this file declares but has not bound, per bench.
+
+    Built from the actual unbound entries and this bench's debugger count, not a
+    single fixed `agentic-hil adopt-hardware`. That bare command is what the
+    headline used to name, and it could not perform the fill it promised on two of
+    the benches this project now supports: a debugger-free UART bench, where
+    adoption refuses before it reaches the port because there is no debugger to
+    select, and a partly bound multi-debugger bench, where it refuses an unnamed
+    debugger (round 0, finding 4). So each unbound entry gets the same
+    debugger-aware step a refused plan would reach -- the reactor's own
+    `entry_fill_step`, which names the sole debugger, asks the operator to choose
+    among several, and gives the complete manual path when there is none -- and
+    `doctor` and a plan refusal name one command.
+
+    A debugger placeholder is filled by `--debugger <name>`; a `com_ports` entry
+    by the COM path, which runs through adoption's debugger-first selection. The
+    fields carry the names `_doctor_bench_binding` already collected.
+
+    A file with no unbound device but a `target.controller` placeholder still gets
+    the board read: adoption fills that key too, and the per-device steps already
+    do so when there is one, so the standalone board-read instruction is added
+    only when nothing unbound would have carried it.
+    """
+    runners = {"debuggers": DebuggerRunner, "com_ports": UartRunner}
+    steps: list[str] = []
+    for entry in unbound:
+        runner = runners.get(str(entry.get("field")))
+        if runner is None:
+            continue
+        for name in entry.get("entries", []):
+            steps.append(runner.entry_fill_step(config, str(name)))
+    if not unbound and placeholders:
+        steps.append(_adopt_reads_board_instruction(config))
+    # And the other way back, for a file that predates the project's own profile:
+    # `init --force` rewrites the whole file -- every narrowed permission included
+    # -- from the profile and the hardware it finds, which is a bigger hammer than
+    # filling the unset identity keys and is named as exactly that.
+    steps.append(
+        f"Where the file was written before the project had a profile at all, `{CONFIG_REOPEN_COMMAND}` writes it again "
+        "from the project profile and the hardware it finds; that one replaces the whole file, every narrowed "
+        "permission included."
+    )
+    return " ".join(steps)
+
+
 def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
     """Whether this configuration names hardware yet, asked before a plan does.
 
@@ -4733,13 +4815,7 @@ def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
         "unbound": unbound,
         "placeholders": placeholders,
         "summary": lead + " ".join(stated),
-        "next_step": (
-            f"Attach the board and run `{ADOPT_HARDWARE_COMMAND}`, which fills the identity keys that are still unset "
-            "in the declared entries from the attached hardware and leaves everything a person has set alone. Where the "
-            "file was written before the project had a profile at all, `agentic-hil init --force` writes it again from "
-            "the project profile and the hardware it finds; that one replaces the whole file, every narrowed permission "
-            "included."
-        ),
+        "next_step": _bench_binding_next_step(config, unbound, placeholders),
     }
 
 
@@ -5014,10 +5090,27 @@ def bootstrap_probe_listing() -> JsonObject:
         **{key: value for key, value in listed.items() if key not in {"ok", "tool", "backend"}},
     }
     if listed["ok"]:
+        # An enumeration that disclaims its own completeness (`complete: false`,
+        # which the OpenOCD/USB-inventory fallback sets) must not read as a
+        # finished count: it reaches an ST-Link only through the virtual COM port
+        # a V2-1 or a V3 publishes, so a VCP-less probe can sit beside the ones it
+        # saw. The verdict (`conclusive_success`) already exits non-zero over it;
+        # the summary says why, so the exit code is not a silent one (round 0,
+        # finding 1).
+        incomplete = result.get("complete") is False
         result["summary"] = (
-            f"{len(listed['probes'])} connected debugger probe(s) detected by bootstrap discovery. This project has no "
-            "authoritative configuration yet, so the fixed read-only setup commands answered and no configured "
-            "debugger backend was involved."
+            f"{len(listed['probes'])} connected debugger probe(s) read by bootstrap discovery from this host's USB "
+            "serial inventory, which is not an authoritative count: it sees an ST-Link only through the virtual COM "
+            "port a V2-1 or a V3 publishes, so a standalone ST-LINK/V2 -- or any probe with no VCP -- would not appear "
+            "even if attached. This project has no authoritative configuration yet, so the fixed read-only setup "
+            "commands answered and no configured debugger backend was involved. Read the ids off the probes or the "
+            "adapter vendor's own tool for an authoritative count."
+            if incomplete
+            else (
+                f"{len(listed['probes'])} connected debugger probe(s) detected by bootstrap discovery. This project has no "
+                "authoritative configuration yet, so the fixed read-only setup commands answered and no configured "
+                "debugger backend was involved."
+            )
         )
     result["next_step"] = (
         "Write this project's configuration with `agentic-hil setup --agent <agent>` from its root. After that this "

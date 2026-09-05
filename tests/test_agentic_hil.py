@@ -3567,6 +3567,77 @@ def test_doctor_stays_green_on_a_debugger_free_uart_bench(tmp_path: Path, monkey
     assert "no test plan can run" not in report["summary"]
 
 
+def test_doctor_remediation_for_an_unbound_port_on_a_debugger_free_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The headline names the repair that works, not the one that refuses (round 0, finding 4).
+
+    A debugger-free UART bench has an unbound port and no debugger, so
+    `adopt-hardware` refuses before it reaches the port -- there is no debugger to
+    select. The doctor headline used to send this operator to a bare
+    `adopt-hardware` anyway. It now gives the manual path the reactor gives, which
+    on a version-3 file names the identity a bare device lacks and advertises no
+    COM adoption command that could not run.
+    """
+    workspace = tmp_path / "workspace"
+    config_path = write_authoritative_config(
+        workspace,
+        monkeypatch,
+        config_version=3,
+        com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n",
+    )
+    document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    document["debuggers"] = {}
+    config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert report["ok"] is False, report
+    binding = report["bench_binding"]
+    assert [entry["field"] for entry in binding["unbound"]] == ["com_ports"]
+    next_step = binding["next_step"]
+    # No debugger, so adoption cannot fill the port and no `--com-port` command is advertised.
+    assert re.search(r"`agentic-hil adopt-hardware[^`]*--com-port", next_step) is None
+    # The manual path names the device AND the version-3 identity, not only `.device`.
+    assert "com_ports.dut_uart.device" in next_step
+    assert "serial_number" in next_step
+    assert "identity_source" in next_step
+    assert "init --force" in next_step
+
+
+def test_doctor_remediation_for_an_unbound_port_on_a_multi_debugger_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A partial multi-debugger bench names the debugger the COM fill needs (round 0, finding 4).
+
+    With several debuggers, `adopt-hardware` refuses an unnamed one before it
+    reaches the port, so the bare command could not fill the unbound COM entry.
+    The remediation names `--debugger` and the emitted command parses on the real
+    CLI, exactly as a refused plan's does.
+    """
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debuggers_yaml="debuggers:\n  spare:\n    type: openocd\n    executable: null\n    probe_id: null\n",
+        com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n",
+    )
+    monkeypatch.chdir(workspace)
+
+    report = doctor()
+
+    assert report["ok"] is False, report
+    binding = report["bench_binding"]
+    fields = [entry["field"] for entry in binding["unbound"]]
+    assert "com_ports" in fields
+    next_step = binding["next_step"]
+    # The COM fill names a debugger to select, because a bare command refuses here.
+    assert "--com-port dut_uart" in next_step
+    assert "--debugger" in next_step
+    assert "dut" in next_step and "spare" in next_step
+    # Every adopt-hardware command the headline names parses on the real CLI.
+    for command in re.findall(r"`agentic-hil (adopt-hardware[^`]*)`", next_step):
+        parsed = build_parser().parse_args(command.split())
+        assert parsed.command == "adopt-hardware"
+
+
 def test_doctor_names_a_placeholder_debugger_beside_a_bound_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A partly bound multi-debugger bench, per device (round 0, finding 3).
 
