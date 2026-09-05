@@ -1111,6 +1111,44 @@ def render_agent_install(result: JsonObject) -> list[str]:
     return lines
 
 
+def _installation_shape_lines(result: JsonObject) -> list[str]:
+    """What this installation is made of, and the one line that rebuilds it.
+
+    The pin note names `reinstall_command` as the line to run, says in words
+    what it carries and what running uv's own bare hint instead would cost, and
+    the rendering printed none of those fields: the only `uv tool install` on
+    the screen was uv's hint, inside the captured output, under a paragraph
+    telling the reader not to run that one. Measured on a bench, and true of
+    every field the pin work added, `newest_release` among them, which
+    TROUBLESHOOTING.md sends a reader to look at.
+
+    The refusals were never affected, because `render_refusal` prints every key
+    a result carries; this is the success side of the same outcomes.
+    """
+    body = _fields(
+        [
+            ("installed_extras", result.get("installed_extras")),
+            ("with_packages", result.get("with_packages")),
+            ("recorded_python", result.get("recorded_python")),
+            ("reinstall_command", result.get("reinstall_command")),
+        ]
+    )
+    held = _strings(result.get("held_back_by"))
+    if held:
+        body.extend(_wrap("Held where it is by what this installation's own receipt records:", indent=_INDENT))
+        body.extend(_bullets(held, indent=_INDENT * 2))
+    not_replayed = _entries(result.get("with_packages_not_replayed"))
+    if not_replayed:
+        body.extend(_wrap("Recorded beside this distribution and not carried by that line:", indent=_INDENT))
+        body.extend(
+            _bullets(
+                [f"{entry.get('requirement', 'a requirement')}, recorded under {entry.get('receipt_key', 'a member a --with cannot spell')}" for entry in not_replayed],
+                indent=_INDENT * 2,
+            )
+        )
+    return _section("This installation", body)
+
+
 def render_upgrade(result: JsonObject) -> list[str]:
     lines = _headline(result)
     lines.append("")
@@ -1122,9 +1160,13 @@ def render_upgrade(result: JsonObject) -> list[str]:
                 ("manager", result.get("manager")),
                 ("command", result.get("command")),
                 ("upgraded_on_disk", result.get("upgraded_on_disk")),
+                ("already_current", result.get("already_current")),
+                ("newest_release", result.get("newest_release")),
+                ("pinned_version", result.get("pinned_version")),
             ]
         )
     )
+    lines.extend(_installation_shape_lines(result))
     refreshed = _entries(result.get("refreshed"))
     if refreshed:
         lines.extend(_section("Agent integrations refreshed", _steps_block({str(entry.get("agent", "agent")): entry for entry in refreshed})))

@@ -979,6 +979,85 @@ def test_a_receipt_with_nothing_to_replay_leaves_the_reinstall_line_as_it_was(
     assert "[can]" in result["summary"]
 
 
+def test_the_rendered_pin_note_prints_the_line_it_tells_the_reader_to_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reported defect: the only `uv tool install` on the screen was uv's hint.
+
+    The pin note's summary names `reinstall_command` as the line to run, says
+    what it carries, and warns against the bare line uv prints beside it. The
+    renderer printed `previous_version`, `version`, `manager`, `command` and
+    `upgraded_on_disk`, and none of `reinstall_command`, `installed_extras`,
+    `with_packages`, `recorded_python`, `pinned_version`, `already_current` or
+    `newest_release` -- the last of which TROUBLESHOOTING.md sends a reader to
+    look at. So the reader met one runnable command, uv's, under a paragraph
+    telling them not to run it.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST + '\n[tool.options]\npython = "3.12"\n')
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+
+    from agentic_hil.humanize import render_result
+
+    result = upgrade_installation([])
+    flat = " ".join(render_result(result, "upgrade").split())
+
+    assert str(result["reinstall_command"]) in flat
+    assert "installed_extras can" in flat
+    assert "with_packages pytest==9.1.1" in flat
+    assert "recorded_python 3.12" in flat
+    assert f"pinned_version {__version__}" in flat
+    assert "already_current yes" in flat
+    assert f"newest_release {__version__}" in flat
+
+
+def test_the_rendered_note_prints_what_the_reinstall_line_leaves_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """And the two lists that explain the line, which a success never had printed.
+
+    A withdrawn note is `ok: true`, so it is rendered by the upgrade renderer
+    rather than by the refusal renderer that dumps every key: what holds the
+    installation where it is, and which recorded requirements the line does not
+    carry, would otherwise be readable only with `--json`.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        '[tool]\nrequirements = [{ name = "agentic-hil" }, { name = "somepkg", git = "https://example.invalid/x" }]\n'
+        '\n[tool.options]\nexclude-newer = "2026-09-01T00:00:00Z"\n',
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    from agentic_hil.humanize import render_result
+
+    result = upgrade_installation([])
+    flat = " ".join(render_result(result, "upgrade").split())
+
+    assert result["ok"] is True
+    assert "newest_release 9.9.9" in flat
+    assert "the recorded option `exclude-newer = 2026-09-01T00:00:00Z`" in flat
+    assert "somepkg, recorded under git" in flat
+
+
 def test_a_recorded_marker_is_replayed_rather_than_dropped_in_silence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
