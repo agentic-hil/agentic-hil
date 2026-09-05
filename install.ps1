@@ -29,7 +29,7 @@ $ErrorActionPreference = 'Stop'
 # Deliberately not a capability floor either: step 4 registers the skill out of
 # whatever copy step 1 left in place, so a floor left a returning user on an old
 # package and an old skill at once.
-$Release = '0.21.2'
+$Release = '0.21.3'
 $StepTotal = 5
 
 # The PATH this run was handed, recorded before anything of ours has prepended to
