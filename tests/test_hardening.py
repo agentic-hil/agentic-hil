@@ -4538,6 +4538,172 @@ def test_multi_probe_discovery_fails_when_any_probe_fails(tmp_path: Path, monkey
     assert overall_success(result) is False
 
 
+def _incomplete_probe_answer(probe: str) -> dict:
+    return {
+        "ok": True,
+        "tool": "debugger_probes_list",
+        "backend": "openocd",
+        "discovered_by": "usb_serial_inventory",
+        "probes": [{"probe_id": probe}],
+        "stlink_ports": [{"device": "/dev/ttyACM0"}],
+        "complete": False,
+    }
+
+
+def test_incomplete_single_probe_listing_is_not_a_clean_cli_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An OpenOCD listing that answered but disclaims its scope must not exit 0
+    (round 2, finding 1).
+
+    The single-debugger `debugger_probes()` returns the backend result straight
+    through, and the exit code the CLI takes from it is `conclusive_success`, not
+    `overall_success`. The read is a success -- no failure is filed and an MCP
+    call over it is no error -- but a caller reading exit 0 as "every probe found"
+    would miss a VCP-less probe this enumeration cannot see, so the CLI refuses it
+    while keeping the partial `probes`.
+    """
+    from agentic_hil import cli as cli_module
+    from agentic_hil.cli import result_succeeded
+    from agentic_hil.report import conclusive_success
+
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch)
+    monkeypatch.chdir(workspace)
+
+    class FakeService:
+        def __init__(self, config, *args, **kwargs) -> None:
+            pass
+
+        def call(self, name: str, arguments: dict | None = None) -> dict:
+            return _incomplete_probe_answer("066AFF303435554157113106")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli_module, "AgenticHILToolService", FakeService)
+
+    result = cli_module.debugger_probes()
+
+    # The partial listing is retained exactly as the backend returned it...
+    assert result["complete"] is False
+    assert result["probes"] == [{"probe_id": "066AFF303435554157113106"}]
+    # ...and it is a success for recording and the MCP surface: neither files it
+    # as the bench's last failure nor turns the tool call into an error.
+    assert result["ok"] is True
+    assert overall_success(result) is True
+    # ...but it is not a clean pass, so the CLI verdict and the exit code refuse it.
+    assert conclusive_success(result) is False
+    assert result_succeeded(result) is False
+    assert cli_module.entrypoint(["debugger-probes", "--json"]) == 1
+
+
+def test_multi_probe_discovery_propagates_incompleteness_without_failing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The aggregate carries `complete: false` up and exits nonzero, yet is not a
+    failure (round 2, finding 1).
+
+    Two OpenOCD probes each answer with a partial listing. Neither errored, so
+    `ok` stays true and no child is in `failed`; but a VCP-less probe could sit
+    beside either, so the aggregate must not read as a finished count. The prior
+    code propagated `complete` nowhere and exited 0.
+    """
+    from agentic_hil import cli as cli_module
+    from agentic_hil.cli import result_succeeded
+    from agentic_hil.report import conclusive_success
+
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_name="probe_a",
+        probe_id="PROBE-A",
+        debuggers_yaml=(
+            'debuggers:\n  probe_b:\n    type: openocd\n    probe_id: "PROBE-B"\n'
+            f'    executable: "{FAKE_OPENOCD.as_posix()}"\n'
+        ),
+    )
+    monkeypatch.chdir(workspace)
+
+    answers = {"probe_a": _incomplete_probe_answer("A1"), "probe_b": _incomplete_probe_answer("B1")}
+
+    class FakeService:
+        def __init__(self, config, *args, **kwargs) -> None:
+            self._name = config.debugger_id
+
+        def call(self, name: str, arguments: dict | None = None) -> dict:
+            return answers[self._name]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli_module, "AgenticHILToolService", FakeService)
+
+    result = cli_module.debugger_probes()
+
+    # No child errored, so the aggregate says ok and files as no failure...
+    assert result["ok"] is True
+    assert overall_success(result) is True
+    assert result["debuggers"]["probe_a"]["probes"] == [{"probe_id": "A1"}]
+    # ...but every child disclaimed completeness, so the aggregate carries it up
+    # and names which listings were not authoritative...
+    assert result["complete"] is False
+    assert "complete: false" in result["summary"]
+    assert "probe_a" in result["summary"] and "probe_b" in result["summary"]
+    # ...and the CLI verdict and exit code refuse the incomplete aggregate.
+    assert conclusive_success(result) is False
+    assert result_succeeded(result) is False
+    assert cli_module.entrypoint(["debugger-probes", "--json"]) == 1
+
+
+def test_multi_probe_discovery_is_only_as_complete_as_its_least_complete_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One authoritative child does not make the aggregate authoritative.
+
+    A caller looking only at the aggregate must not accept the visible subset as a
+    finished discovery when a sibling listing could not see every probe. `probe_a`
+    enumerates exhaustively (no `complete` field) while `probe_b` is an OpenOCD
+    USB-serial listing that cannot; the aggregate is incomplete either way.
+    """
+    from agentic_hil import cli as cli_module
+    from agentic_hil.cli import result_succeeded
+
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(
+        workspace,
+        monkeypatch,
+        debugger_name="probe_a",
+        probe_id="PROBE-A",
+        debuggers_yaml=(
+            'debuggers:\n  probe_b:\n    type: openocd\n    probe_id: "PROBE-B"\n'
+            f'    executable: "{FAKE_OPENOCD.as_posix()}"\n'
+        ),
+    )
+    monkeypatch.chdir(workspace)
+
+    answers = {
+        # An authoritative listing carries no `complete` field at all.
+        "probe_a": {"ok": True, "tool": "debugger_probes_list", "probes": [{"probe_id": "A1"}]},
+        "probe_b": _incomplete_probe_answer("B1"),
+    }
+
+    class FakeService:
+        def __init__(self, config, *args, **kwargs) -> None:
+            self._name = config.debugger_id
+
+        def call(self, name: str, arguments: dict | None = None) -> dict:
+            return answers[self._name]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli_module, "AgenticHILToolService", FakeService)
+
+    result = cli_module.debugger_probes()
+
+    assert result["ok"] is True
+    assert result["complete"] is False
+    # Only the child that disclaimed completeness is named as incomplete.
+    assert "probe_b" in result["summary"]
+    assert result_succeeded(result) is False
+
+
 def test_debug_load_refusal_names_the_permission_that_fired(tmp_path: Path) -> None:
     # Preflight is the only diagnosis on this path (the backend's per-flag
     # messages are never reached), so it must not point at a flag the operator

@@ -93,7 +93,7 @@ from agentic_hil.knowledge import (
 )
 from agentic_hil.reactorrun import run_plan, start_plan_detached
 from agentic_hil.redact import redact_sensitive
-from agentic_hil.report import overall_success
+from agentic_hil.report import conclusive_success, overall_success
 from agentic_hil.runevidence import write_run_evidence
 from agentic_hil.runlifecycle import request_run_stop, run_status
 from agentic_hil.stdio import run_stdio_server
@@ -350,7 +350,13 @@ def redaction_unavailable(command: str | None) -> JsonObject:
 
 
 def result_succeeded(result: JsonObject) -> bool:
-    return overall_success(result)
+    # `conclusive_success`, not `overall_success`: a discovery that answered but
+    # says it is not authoritative (`complete: false`, which only the OpenOCD
+    # probe listing writes) must not exit 0. Exit 0 there tells automation "every
+    # probe was found" over a reading that cannot see a VCP-less probe. It stays
+    # off `overall_success` so the same read is neither filed as a failure nor
+    # turned into an MCP error; see `conclusive_success`.
+    return conclusive_success(result)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -5067,6 +5073,12 @@ def debugger_probes() -> JsonObject:
         finally:
             service.close()
     failed = sorted(name for name, result in results.items() if not overall_success(result))
+    # A child that answered without error but says its enumeration is not
+    # authoritative (`complete: false`, which the OpenOCD USB-serial listing
+    # always sets) is not a failure, so it stays out of `failed` and off `ok`;
+    # but the aggregate must not read as a finished count either, so it carries
+    # `complete: false` up and the CLI verdict below takes it.
+    incomplete = sorted(name for name, result in results.items() if result.get("complete") is False)
     aggregate: JsonObject = {
         # `all`, not `any`: one probe answering must not report the run as
         # healthy while another failed, and the CLI exit code is derived from
@@ -5075,14 +5087,20 @@ def debugger_probes() -> JsonObject:
         "tool": "debugger_probes_list",
         "debuggers": results,
         "summary": (
-            f"Probe discovery ran for {len(results)} configured debugger(s)."
-            if not failed
-            else f"Probe discovery failed for: {', '.join(failed)}."
+            f"Probe discovery failed for: {', '.join(failed)}."
+            if failed
+            else f"Probe discovery ran for {len(results)} configured debugger(s), but at least one listing is not an "
+            f"authoritative count of attached probes (`complete: false`): {', '.join(incomplete)}."
+            if incomplete
+            else f"Probe discovery ran for {len(results)} configured debugger(s)."
         ),
     }
     # A containment marker on any probe has to reach the top level, or
-    # overall_success() reads clean over a nested quarantine.
-    for marker, unsafe in (("cleanup_required", True), ("quarantined", True), ("audit_ok", False)):
+    # overall_success() reads clean over a nested quarantine. `complete: false`
+    # rides up the same way: it is not an overall_success() marker, but it is the
+    # CLI verdict's (`conclusive_success`), so a VCP-less probe beside the ones a
+    # child saw cannot be exited 0 over.
+    for marker, unsafe in (("cleanup_required", True), ("quarantined", True), ("audit_ok", False), ("complete", False)):
         if any(result.get(marker) is unsafe for result in results.values()):
             aggregate[marker] = unsafe
     unsafe_effect = next((result.get("side_effect_status") for result in results.values() if result.get("side_effect_status") in {"unknown", "partial"}), None)

@@ -2278,7 +2278,10 @@ def test_a_plan_naming_an_unbound_port_is_refused_by_the_port_not_by_the_plan(tm
     assert validation["unbound_key"] == "com_ports.dut_uart.device"
     assert "names no device yet" in validation["summary"]
     assert "not in the authoritative config" not in validation["summary"]
-    assert "adopt-hardware" in validation["next_step"]
+    # The COM fill runs through adoption's debugger-first selection, so on this
+    # single-debugger bench the command names the debugger it will select before
+    # it reaches the port (round 2, finding 2).
+    assert "agentic-hil adopt-hardware --debugger dut --com-port dut_uart" in validation["next_step"]
 
 
 def test_every_com_tool_refuses_an_unbound_port_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1001,6 +1001,43 @@ def action_schema_errors(schema_name: str, document: JsonObject) -> list[Any]:
     return sorted(validator.iter_errors(document), key=lambda item: list(item.absolute_path))
 
 
+def _com_adopt_instruction(config: AgenticHILConfig, name: str) -> str:
+    """How `com_ports.<name>.device` gets filled, told truthfully for this bench.
+
+    `agentic-hil adopt-hardware` selects a debugger before it reads the board
+    (`_choose_debugger` runs first in `_adopt`), so a COM-only fill depends on the
+    debugger side resolving. The plain `adopt-hardware --com-port <name>` a COM
+    entry once advertised refuses before it reaches the port on the two benches
+    the reactor also supports: a UART-only one with no debugger, where adoption
+    cannot run at all, and a multi-debugger one, where it cannot pick a board for
+    the operator (round 2, finding 2).
+
+    So the debugger dependency is spelled out. One configured debugger is chosen
+    for the operator, and the command names it anyway so a second one added later
+    does not silently start refusing a bare invocation. Several are named and one
+    is asked for, because choosing here is how a serial lands on the wrong board.
+    None means adoption has no entry to select and cannot run, so the reader is
+    sent to the manual path rather than to a command that refuses. Naming the
+    device by hand always works, so it is offered in every case."""
+    key = f"com_ports.{name}.device"
+    manual = f"name `{key}` yourself; `agentic-hil com-ports` lists what this host has."
+    debuggers = sorted(config.debuggers)
+    if len(debuggers) == 1:
+        command = f"{ADOPT_HARDWARE_COMMAND} --debugger {debuggers[0]} --com-port {name}"
+        return f"Plug the board in and run `{command}`, which fills `{key}` in from the attached hardware, or {manual}"
+    if debuggers:
+        command = f"{ADOPT_HARDWARE_COMMAND} --debugger <name> --com-port {name}"
+        return (
+            f"Plug the board in. Adoption selects a debugger before it reads the board, and this project declares "
+            f"several ({', '.join(debuggers)}), so name which one the attached board is: `{command}`. It then fills "
+            f"`{key}` in from the attached hardware. Or {manual}"
+        )
+    return (
+        f"This project declares no debugger, and `{ADOPT_HARDWARE_COMMAND}` selects one before it reads the board, so "
+        f"it cannot fill this port on this bench. Instead, {manual}"
+    )
+
+
 class StepDevice:
     """One configured device, as a test plan drives it.
 
@@ -1139,7 +1176,7 @@ class StepDevice:
         return cls.unbound_refusal(reactor, location, step, name)
 
     @classmethod
-    def entry_fill_step(cls, name: str) -> str:
+    def entry_fill_step(cls, config: AgenticHILConfig, name: str) -> str:
         """How a declared-but-empty entry of this kind gets the hardware behind
         it, once the reader has decided this bench is meant to carry it.
 
@@ -1149,10 +1186,14 @@ class StepDevice:
         entry; `--debugger <name>` / `--com-port <name>` is what actually performs
         the fill this text promises.
 
-        Only the kinds `adopt-hardware` reads off the board are sent to it; a CAN
-        bus has no adoption half, so its adapter and channel are written by hand
-        rather than the reader being told a command will fill them and finding it
-        cannot."""
+        `config` is threaded so a kind that overrides this can read the bench it
+        is talking about: a COM fill runs through adoption's debugger-first
+        selection, so `UartRunner` answers with the debugger dependency accounted
+        for rather than promising a command that refuses before it reaches the
+        port (round 2, finding 2). The debugger kind names its own entry as the
+        `--debugger`, so this base answer already selects; the CAN kind has no
+        adoption half and writes its adapter and channel by hand instead of being
+        sent to a command that cannot fill them."""
         if cls.adoption_fills_entries:
             return (
                 f"With the board attached, `{ADOPT_HARDWARE_COMMAND} {cls.adopt_select_flag} {name}` then fills "
@@ -1185,7 +1226,7 @@ class StepDevice:
             return (
                 f"Correct the step to name one of the `{cls.config_section}` entries this project declares "
                 f"({', '.join(configured)}), or, where this bench is meant to carry `{cls.config_section}.{name}`, "
-                f"declare it in the authoritative configuration yourself. {cls.entry_fill_step(name)}"
+                f"declare it in the authoritative configuration yourself. {cls.entry_fill_step(config, name)}"
             )
         return (
             f"This project declares no `{cls.config_section}` at all, so there is no name to correct the step to. "
@@ -1506,7 +1547,13 @@ class UartRunner(SessionDevice):
 
         At preflight, before any step runs, because it is a fact about the
         configuration rather than about the run: a plan that cannot reach its own
-        port should not open the probe first."""
+        port should not open the probe first.
+
+        The repair it names accounts for adoption selecting a debugger before it
+        reads the board: `_com_adopt_instruction` names the debugger where one can
+        be determined, asks for it where several can, and sends the reader to the
+        manual path on a debugger-free bench rather than to a command that refuses
+        before it reaches the port (round 2, finding 2)."""
         port = reactor.config.com_ports.get(name)
         if port is None or not com_port_is_unbound(port):
             return None
@@ -1522,13 +1569,22 @@ class UartRunner(SessionDevice):
                 "error_type": COM_PORT_NOT_BOUND,
                 "port_id": name,
                 "unbound_key": f"com_ports.{name}.device",
-                "next_step": (
-                    f"Plug the board in and run `{ADOPT_HARDWARE_COMMAND} {cls.adopt_select_flag} {name}`, which fills "
-                    f"`com_ports.{name}.device` in from the attached hardware, or name the device yourself. "
-                    "`agentic-hil com-ports` lists what this host has."
-                ),
+                "next_step": _com_adopt_instruction(reactor.config, name),
             },
         )
+
+    @classmethod
+    def entry_fill_step(cls, config: AgenticHILConfig, name: str) -> str:
+        """The COM fill, told with adoption's debugger-first selection accounted for.
+
+        The base answer emits `adopt-hardware --com-port <name>`, which is enough
+        for the debugger kind -- its entry name *is* the `--debugger` to select --
+        but not here: adoption chooses a debugger before it reads the board, so a
+        COM-only fill on a debugger-free or multi-debugger bench refuses before it
+        reaches the port. `_com_adopt_instruction` is the same repair the unbound
+        refusal names, so a reader who declared the port and one who opened an
+        empty one meet one answer (round 2, finding 2)."""
+        return _com_adopt_instruction(config, name)
 
     # --- the actions this kind serves ------------------------------------
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_GDB, FAKE_OPENOCD, write_authoritative_config, write_config
@@ -511,22 +512,24 @@ def test_a_step_naming_a_debugger_this_bench_does_not_have_answers_the_same_way(
     assert service.calls == []
 
 
-def test_the_declared_entry_fill_command_selects_the_new_entry_on_a_multi_entry_bench() -> None:
-    """The emitted command performs the fill it advertises (round 1, finding 2).
+def test_the_declared_debugger_fill_command_selects_the_new_entry_on_a_multi_entry_bench() -> None:
+    """The emitted debugger command performs the fill it advertises (round 1, finding 2).
 
     `entry_fill_step` runs in the branch where the bench already declares entries
     and the operator has just declared the missing one beside them. Adoption then
-    faces several entries, so its selection refuses an unnamed debugger and
-    resolves an unnamed COM port to nothing. This parses the argv each kind emits
-    and runs adoption's own selection on the multi-entry document, to prove the
-    named flag lands on the freshly declared entry where the bare command could
-    not.
+    faces several, so its selection refuses an unnamed debugger. This parses the
+    argv the debugger kind emits and runs adoption's own selection on the
+    multi-entry document, to prove the named flag lands on the freshly declared
+    entry where the bare command could not. The COM kind's own selection, which
+    also runs through the debugger step first, is covered by the three
+    `_com_adopt_instruction` tests below.
     """
-    from agentic_hil.adopt import _choose_com_port, _choose_debugger
+    from agentic_hil.adopt import _choose_debugger
 
+    config = SimpleNamespace(debuggers={"dut": {"type": "openocd"}, "newprobe": {"type": "openocd"}})
     # A debugger that already had `dut`, with `newprobe` just declared beside it.
     debugger_doc = {"debuggers": {"dut": {"type": "openocd"}, "newprobe": {"type": "openocd"}}}
-    debugger_argv = adopt_argv(DebuggerRunner.entry_fill_step("newprobe"))
+    debugger_argv = adopt_argv(DebuggerRunner.entry_fill_step(config, "newprobe"))
     debugger_parsed = build_parser().parse_args(debugger_argv)
     assert debugger_parsed.debugger == "newprobe"
     # The flag lands adoption on exactly the declared entry...
@@ -535,14 +538,112 @@ def test_the_declared_entry_fill_command_selects_the_new_entry_on_a_multi_entry_
     bare_debugger = _choose_debugger(debugger_doc, None)
     assert isinstance(bare_debugger, dict) and bare_debugger["ok"] is False
 
-    # The same for a COM port declared beside `console`.
-    com_doc = {"com_ports": {"console": {"device": "COM7"}, "new_uart": {}}}
-    com_argv = adopt_argv(UartRunner.entry_fill_step("new_uart"))
-    com_parsed = build_parser().parse_args(com_argv)
-    assert com_parsed.com_port == "new_uart"
-    assert _choose_com_port(com_doc, com_parsed.com_port, ()) == ("new_uart", com_doc["com_ports"]["new_uart"])
-    # The bare command with several ports and no name resolves to nothing to fill.
-    assert _choose_com_port(com_doc, None, ()) == (None, None)
+
+def test_com_fill_command_names_the_only_debugger_so_adoption_selects_it() -> None:
+    """A COM fill runs through adoption's debugger-first selection (round 2, finding 2).
+
+    `_adopt` calls `_choose_debugger` before `_choose_com_port`, so the COM-only
+    fill the guidance advertises has to survive the debugger step. With one
+    debugger configured the command names it -- so a second one added later does
+    not silently start refusing it -- and this parses the emitted argv and runs
+    adoption's two selections in order, proving the command lands on both the
+    debugger and the freshly declared port.
+    """
+    from agentic_hil.adopt import _choose_com_port, _choose_debugger
+
+    config = SimpleNamespace(debuggers={"dut": {"type": "openocd"}})
+    document = {"debuggers": {"dut": {"type": "openocd"}}, "com_ports": {"console": {"device": "COM7"}, "new_uart": {}}}
+
+    argv = adopt_argv(UartRunner.entry_fill_step(config, "new_uart"))
+    parsed = build_parser().parse_args(argv)
+    assert parsed.command == "adopt-hardware"
+    assert parsed.debugger == "dut"
+    assert parsed.com_port == "new_uart"
+    assert "--apply" not in " ".join(argv)
+    # Adoption's real order: the debugger first, then the port it can now reach.
+    assert _choose_debugger(document, parsed.debugger) == ("dut", document["debuggers"]["dut"])
+    assert _choose_com_port(document, parsed.com_port, ()) == ("new_uart", document["com_ports"]["new_uart"])
+
+
+def test_com_fill_on_a_debugger_free_bench_does_not_promise_adoption() -> None:
+    """A UART-only bench has no debugger, so adoption cannot run there (round 2, finding 2).
+
+    `_choose_debugger` refuses a configuration with no debugger before any port is
+    reached, so the previous `adopt-hardware --com-port <name>` sent the reader to
+    a command that could never fill the port. The guidance names the manual path
+    instead and advertises no COM adoption command.
+    """
+    from agentic_hil.adopt import _choose_debugger
+
+    config = SimpleNamespace(debuggers={})
+    document = {"debuggers": {}, "com_ports": {"new_uart": {}}}
+
+    guidance = UartRunner.entry_fill_step(config, "new_uart")
+    # Adoption really cannot select an entry here...
+    refusal = _choose_debugger(document, None)
+    assert isinstance(refusal, dict) and refusal["ok"] is False
+    # ...so no `adopt-hardware ... --com-port` command is advertised...
+    assert re.search(r"`agentic-hil adopt-hardware[^`]*--com-port", guidance) is None
+    # ...and the reader is told to fill the device by hand.
+    assert "com_ports.new_uart.device" in guidance
+    assert "agentic-hil com-ports" in guidance
+
+
+def test_com_fill_on_a_multi_debugger_bench_asks_which_debugger() -> None:
+    """Several debuggers, and none can be picked for the operator (round 2, finding 2).
+
+    Adoption would refuse an unnamed debugger before it reached the port, so the
+    guidance names every debugger and asks for `--debugger` rather than
+    advertising the bare command that refuses. Once the operator names one, the
+    two selections run in order and land on the debugger and then the port.
+    """
+    from agentic_hil.adopt import _choose_com_port, _choose_debugger
+
+    config = SimpleNamespace(debuggers={"dut": {"type": "openocd"}, "spare": {"type": "openocd"}})
+    document = {"debuggers": {"dut": {"type": "openocd"}, "spare": {"type": "openocd"}}, "com_ports": {"new_uart": {}}}
+
+    guidance = UartRunner.entry_fill_step(config, "new_uart")
+    # Both debuggers are named and the operator is asked to choose one.
+    assert "dut" in guidance and "spare" in guidance
+    assert "--debugger" in guidance
+    assert "--com-port new_uart" in guidance
+    # The bare command (no --debugger) is exactly what adoption refuses here, which
+    # is why the guidance cannot advertise it.
+    bare = _choose_debugger(document, None)
+    assert isinstance(bare, dict) and bare["ok"] is False
+    # Once the operator names one, the two selections run in order and land.
+    assert _choose_debugger(document, "spare") == ("spare", document["debuggers"]["spare"])
+    assert _choose_com_port(document, "new_uart", ()) == ("new_uart", document["com_ports"]["new_uart"])
+
+
+def test_unbound_com_refusal_names_the_debugger_dependency_end_to_end(tmp_path: Path) -> None:
+    """The cited path (`UartRunner.unbound_refusal`) emits the same debugger-aware
+    guidance a real plan reaches (round 2, finding 2).
+
+    A plan opening a declared-but-unbound port on a single-debugger bench is
+    refused `com_port_not_bound`, and the `next_step` now carries the `--debugger`
+    the COM-only fill needs, parseable on the real CLI and selecting through
+    adoption's own order.
+    """
+    from agentic_hil.adopt import _choose_com_port, _choose_debugger
+
+    config_path = write_config(tmp_path, com_ports_yaml="com_ports:\n  dut_uart:\n    device: null\n")
+    config = load_config(str(config_path))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {action: uart_open, port_id: dut_uart}\n")
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["error_type"] == "com_port_not_bound"
+    next_step = result["validation_error"]["next_step"]
+    argv = adopt_argv(next_step)
+    parsed = build_parser().parse_args(argv)
+    assert parsed.debugger == "dut"
+    assert parsed.com_port == "dut_uart"
+    document = {"debuggers": {"dut": {"type": "openocd"}}, "com_ports": {"dut_uart": {"device": ""}}}
+    assert _choose_debugger(document, parsed.debugger) == ("dut", document["debuggers"]["dut"])
+    assert _choose_com_port(document, parsed.com_port, ()) == ("dut_uart", document["com_ports"]["dut_uart"])
+    assert service.calls == []
 
 
 def test_troubleshooting_has_a_section_for_the_refusal_a_first_plan_hits() -> None:
