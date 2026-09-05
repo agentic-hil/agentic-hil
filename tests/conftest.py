@@ -18,6 +18,11 @@ pytest_plugins = ["pytester"]
 
 from support import remove_trusted_launcher, sweep_stale_launchers  # noqa: E402
 
+# The real index reader, bound before the autouse fixture below replaces the
+# name it lives under. A test about the reader itself calls this one, and every
+# other test gets the stub.
+from agentic_hil.upgrade import _newest_released_version as read_the_release_index  # noqa: E402,F401
+
 # Where every test's isolated HOME, config, state and temporary storage go.
 # Resolved once, here, out of the system temp root and before any test has
 # redirected anything.
@@ -285,6 +290,23 @@ def _no_host_stm32_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
     developer, which is what this fixture exists to prevent."""
     monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: None)
     monkeypatch.setattr("agentic_hil.bootstrap.find_openocd", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_release_index_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test asks the index what the newest release is.
+
+    `agentic-hil upgrade` reads the index before it may call an installation
+    current, and a suite that let that request out would be slow behind a slow
+    link and would answer differently on a machine with no network at all: the
+    same assertions answering differently per developer, which is what the
+    fixtures around this one exist to prevent. The default answer is the version
+    under test, which is what every upgrade test written before the check was
+    added assumed. A test about the check itself patches this name again, and
+    that patch runs after this one."""
+    from agentic_hil import __version__
+
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: __version__)
 
 
 @pytest.fixture(autouse=True)

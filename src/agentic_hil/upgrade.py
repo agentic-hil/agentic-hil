@@ -69,8 +69,10 @@ import subprocess
 import sys
 import sysconfig
 from contextlib import suppress
+from http.client import HTTPException
 from pathlib import Path
 from typing import NamedTuple
+from urllib.request import Request, urlopen
 
 from agentic_hil import __version__
 from agentic_hil.config import ConfigError
@@ -205,12 +207,15 @@ class _RecordedInstall(NamedTuple):
     `with_requirements` are the recorded requirements other than this
     distribution, each already spelled as the PEP 508 string a `--with` takes.
     `python` is the interpreter the install recorded, empty when it recorded
-    none. `options` is `[tool.options]` whole, because which of its keys matter
-    is the reader's question and not this one's.
+    none. `pin` is the version specifier recorded on this distribution itself,
+    empty when the requirement was recorded unpinned. `options` is
+    `[tool.options]` whole, because which of its keys matter is the reader's
+    question and not this one's.
     """
 
     with_requirements: tuple[str, ...]
     python: str
+    pin: str
     options: JsonObject
 
 
@@ -298,7 +303,14 @@ def _recorded_install() -> _RecordedInstall:
     section = _receipt_section(receipt, "options")
     options: JsonObject = {str(key): value for key, value in section.items()} if isinstance(section, dict) else {}
     python = options.get("python")
-    return _RecordedInstall(beside, python.strip() if isinstance(python, str) else "", options)
+    pins = [
+        specifier.strip()
+        for entry in entries
+        if _canonical_requirement_name(str(entry.get("name") or "")) == "agentic-hil"
+        and isinstance(specifier := entry.get("specifier"), str)
+        and specifier.strip()
+    ]
+    return _RecordedInstall(beside, python.strip() if isinstance(python, str) else "", pins[0] if pins else "", options)
 
 
 def _named_series(items: list[str]) -> str:
@@ -306,6 +318,34 @@ def _named_series(items: list[str]) -> str:
     if len(items) < 2:
         return items[0] if items else ""
     return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _installation_shape() -> tuple[tuple[str, ...], _RecordedInstall, JsonObject]:
+    """What this installation is made of, and the fields that name it on a result.
+
+    One reader for the two outcomes that hand an operator a reinstall line they
+    are meant to run as it stands: the exact-pin refusal, and the one where uv's
+    receipt records an option no uv command clears. Both have to name the same
+    installation, so both read it here.
+    """
+    installed_extras = _installed_extras()
+    recorded = _recorded_install()
+    fields: JsonObject = {"installed_extras": list(installed_extras)}
+    if recorded.with_requirements:
+        fields["with_packages"] = list(recorded.with_requirements)
+    if recorded.python:
+        fields["recorded_python"] = recorded.python
+    return installed_extras, recorded, fields
+
+
+def _carried_by_the_reinstall(recorded: _RecordedInstall) -> str:
+    """The clause that says which fields the reinstall line rebuilds from."""
+    carried = ["the extras in `installed_extras`"]
+    if recorded.with_requirements:
+        carried.append("the packages in `with_packages` that uv's receipt records beside it")
+    if recorded.python:
+        carried.append("the interpreter in `recorded_python`")
+    return _named_series(carried)
 
 
 # `uv tool upgrade` exits 0 when there was nothing it could do, and an exact
@@ -1621,6 +1661,176 @@ def _installed_release_is_current(manager: str, command: list[str]) -> tuple[boo
     return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower(), resolution, certificates
 
 
+# ---------------------------------------------------------------------------
+# Whether "nothing to install" also means "there is nothing newer".
+#
+# The managers answer the first question and neither of them answers the
+# second. `uv tool upgrade` resolves the requirement it recorded, under the
+# options it recorded, and prints `Nothing to upgrade` when that resolution
+# moves nothing: a receipt carrying `exclude-newer` makes it print exactly that
+# sentence two hours after a release, and every day after. Reading it as
+# `already_current` put that claim on a bench that was a release behind, with a
+# follow-up sentence pointing at the recorded *requirement*, which was unpinned;
+# the recorded option was what held it. uv offers no command that clears such an
+# option, so the operator was left with a wrong claim and no next step.
+#
+# The index is the only thing that knows what the newest release is, so it is
+# asked, once, over HTTPS, with a short timeout, and an index that cannot be
+# reached takes the claim away instead of making it. Nothing here refuses an
+# upgrade or changes what a manager was told to do: the answer decides only what
+# the result is allowed to say about it.
+
+_RELEASE_INDEX_URL = "https://pypi.org/pypi/agentic-hil/json"
+# Short, because this runs after the work is done and its answer only shapes a
+# sentence: a bench on a slow link gets the unchecked wording rather than a
+# command that hangs.
+_RELEASE_INDEX_TIMEOUT_S = 5.0
+# A payload larger than this is not an answer this reads; it is truncated and
+# fails to parse, which lands on the same "could not be checked" wording.
+_RELEASE_INDEX_MAX_BYTES = 8_000_000
+# The recorded options that make a resolution pass over a release that exists.
+# `exclude-newer` is recorded whether it was given as a flag or through the
+# environment, and both spellings uv writes are read.
+_RESOLUTION_HOLDING_OPTIONS = ("exclude-newer", "exclude_newer", "exclude-newer-package", "exclude_newer_package")
+# The two shapes this project publishes: `X.Y.Z` and the `X.Y.Z.devN` that
+# anticipates it.
+_RELEASE_NUMBER = re.compile(r"^(?P<release>\d+\.\d+\.\d+)(?:\.dev(?P<serial>\d+))?$")
+
+
+def _newest_released_version() -> str | None:
+    """What the index publishes as the newest release, or None when it did not answer.
+
+    One request, and every failure is the same answer: a bench behind a proxy,
+    an air-gapped machine and an index whose payload changed shape all mean that
+    this result may not say what the newest release is. The seam a test replaces
+    is this function, so no test of the upgrade reaches the network.
+    """
+    request = Request(_RELEASE_INDEX_URL, headers={"Accept": "application/json", "User-Agent": f"agentic-hil/{__version__}"})
+    try:
+        with urlopen(request, timeout=_RELEASE_INDEX_TIMEOUT_S) as response:
+            payload = json.loads(response.read(_RELEASE_INDEX_MAX_BYTES).decode("utf-8"))
+    except (OSError, ValueError, HTTPException):
+        return None
+    info = payload.get("info") if isinstance(payload, dict) else None
+    newest = info.get("version") if isinstance(info, dict) else None
+    return newest.strip() if isinstance(newest, str) and newest.strip() else None
+
+
+def _release_ordering_key(version: str) -> tuple[int, int, int, int, int] | None:
+    """PEP 440 ordering for the two shapes this project publishes, or None for any other.
+
+    `1.2.3 < 1.2.4.dev0 < 1.2.4`, which is the ordering every resolver reads and
+    the one `tools/check_version_consistency.py` sorts this project's own
+    versions by. A number in any other shape is not ordered at all, and that
+    lands on the unchecked wording: a claim about which of two releases is newer
+    is worth nothing if it was guessed.
+    """
+    match = _RELEASE_NUMBER.match(version.strip())
+    if match is None:
+        return None
+    major, minor, patch = (int(part) for part in match.group("release").split("."))
+    serial = match.group("serial")
+    return (major, minor, patch, 0, int(serial)) if serial is not None else (major, minor, patch, 1, 0)
+
+
+class _NewestRelease(NamedTuple):
+    """What the index publishes, and what this installation's receipt says about it.
+
+    `version` is empty when the index could not be read or answered something
+    this cannot order, and that is the one state where `already_current` may not
+    be claimed in either direction. `behind` says the index publishes a release
+    newer than the one installed. `holds` names what the receipt records that
+    keeps a resolution here, and `clearing_command` is the line that records the
+    installation again without it, both empty when nothing recorded explains it.
+    """
+
+    version: str
+    behind: bool
+    holds: tuple[str, ...]
+    clearing_command: str
+
+
+def _resolution_holds(recorded: _RecordedInstall) -> tuple[str, ...]:
+    """What this installation's own receipt records that keeps a resolution where it is.
+
+    Read off the receipt rather than out of a manager's prose, which is what
+    catches the option uv mentions nowhere: a recorded `exclude-newer` makes
+    every later resolution ignore anything published since, and there is no
+    `uv tool` command that clears it. The only line that does is a fresh
+    `uv tool install`, which records the installation again from what it is
+    given.
+    """
+    holds = [f"the recorded requirement `agentic-hil{recorded.pin}`"] if recorded.pin else []
+    holds.extend(f"the recorded option `{key} = {recorded.options[key]}`" for key in _RESOLUTION_HOLDING_OPTIONS if recorded.options.get(key) not in (None, False))
+    return tuple(holds)
+
+
+def _newest_release(manager: str, command: list[str], current_version: str) -> _NewestRelease:
+    """The index's answer about this distribution, and what a receipt makes of it."""
+    newest = _newest_released_version()
+    installed_key = _release_ordering_key(current_version)
+    newest_key = _release_ordering_key(newest) if newest is not None else None
+    if newest is None or newest_key is None or installed_key is None:
+        return _NewestRelease("", False, (), "")
+    if newest_key <= installed_key:
+        return _NewestRelease(newest, False, (), "")
+    holds = _resolution_holds(_recorded_install())
+    clearing = (_unpinned_reinstall_command(manager, command) or "") if holds else ""
+    return _NewestRelease(newest, True, holds, clearing)
+
+
+def _judged_against_the_index(outcome: JsonObject, check: _NewestRelease, manager: str, current_version: str) -> JsonObject:
+    """The already-current claim, kept, withdrawn or answered, by what the index said.
+
+    Four ends, and `already_current` survives exactly one of them. The claim is
+    a statement about the whole index and the manager only ever spoke about this
+    installation's own recorded resolution, so it is made here or not at all.
+    Nothing on any of these paths refuses anything: the manager has already run
+    or has already been asked, and every one of these is a report.
+    """
+    summary = str(outcome.get("summary", "")).rstrip()
+    if not check.version:
+        return {
+            **{key: value for key, value in outcome.items() if key != "already_current"},
+            "summary": (
+                f"{summary} The newest release could not be checked: the index did not answer, so whether "
+                f"{current_version} is the newest release is not something this result can say."
+            ),
+        }
+    if not check.behind:
+        return {**outcome, "newest_release": check.version, "summary": f"{summary} {check.version} is the newest release the index publishes, and this installation is on it."}
+    installed_extras, recorded, shape = _installation_shape()
+    if not check.holds:
+        return {
+            **{key: value for key, value in outcome.items() if key != "already_current"},
+            "newest_release": check.version,
+            **shape,
+            "summary": (
+                f"{summary} The index publishes {check.version}, which is newer, and {manager} still resolves nothing "
+                f"for this installation, so this is not the newest release. What a resolution reaches is the "
+                f"installation's own: the index it is pointed at, and whether {check.version} accepts this interpreter."
+            ),
+        }
+    named = _named_series(list(check.holds))
+    return {
+        **{key: value for key, value in outcome.items() if key != "already_current"},
+        "ok": False,
+        "error_type": "upgrade_blocked_by_recorded_option",
+        "newest_release": check.version,
+        "held_back_by": list(check.holds),
+        **shape,
+        "reinstall_command": check.clearing_command,
+        "summary": (
+            f"{summary} The index publishes {check.version}, and this installation stays at {current_version} because "
+            f"its own receipt records {named}. {manager} reports that as nothing to do and offers no command that "
+            f"clears it. `reinstall_command` is the line that records this installation again without it, with "
+            f"{_carried_by_the_reinstall(recorded)}; running it is the operator's decision. "
+            f"{_plain_line_would_remove(installed_extras, recorded)}"
+        ).rstrip(),
+        **remediation_fields("upgrade_blocked_by_recorded_option"),
+    }
+
+
 def _nothing_to_install(
     tool: str,
     manager: str,
@@ -1628,30 +1838,40 @@ def _nothing_to_install(
     current_version: str,
     resolution: JsonObject | None,
 ) -> JsonObject:
-    """Already current, answered before the installation could be put at risk.
+    """Nothing to install, answered before the installation could be put at risk.
 
     The same `already_current` a manager that ran and moved nothing produces, so
     a caller reads one field for one fact, plus `install_skipped` for the part
     that is new: no command capable of replacing this installation was run. Its
     absence on the other outcomes is the signal that one was.
+
+    What the manager answered is about this installation's own recorded
+    resolution and nothing more, so the claim that this is the newest release
+    there is goes through `_judged_against_the_index`, which is the only thing
+    here that has asked.
     """
-    return {
-        "ok": True,
-        "tool": tool,
-        "already_current": True,
-        "summary": (
-            f"Agentic HIL is already at {current_version}, which is the newest release {manager} resolves for this "
-            f"installation, so nothing was installed and no command that could replace it was run. No restart is needed."
-        ),
-        "manager": manager,
-        "command": command,
-        "install_skipped": True,
-        "python": sys.executable,
-        "previous_version": current_version,
-        "version": current_version,
-        **({"resolution": resolution} if resolution is not None else {}),
-        "restart_required": False,
-    }
+    return _judged_against_the_index(
+        {
+            "ok": True,
+            "tool": tool,
+            "already_current": True,
+            "summary": (
+                f"Agentic HIL is at {current_version} and {manager} resolves nothing to install for this installation, "
+                f"so nothing was installed and no command that could replace it was run. No restart is needed."
+            ),
+            "manager": manager,
+            "command": command,
+            "install_skipped": True,
+            "python": sys.executable,
+            "previous_version": current_version,
+            "version": current_version,
+            **({"resolution": resolution} if resolution is not None else {}),
+            "restart_required": False,
+        },
+        _newest_release(manager, command, current_version),
+        manager,
+        current_version,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1873,18 +2093,17 @@ def _upgrade_changed_nothing(
         # what "whole" covers. A refusal that named only the extras is what sent an
         # operator to uv's bare hint and cost them their `--with` packages, and the
         # note branch prints the identical line for the identical purpose.
-        installed_extras = _installed_extras()
-        recorded = _recorded_install()
-        carried = ["the extras in `installed_extras`"]
-        if recorded.with_requirements:
-            carried.append("the packages in `with_packages` that uv's receipt records beside it")
-        if recorded.python:
-            carried.append("the interpreter in `recorded_python`")
+        installed_extras, recorded, shape = _installation_shape()
         loss = _plain_line_would_remove(installed_extras, recorded)
-        recorded_fields: JsonObject = {
-            **({"with_packages": list(recorded.with_requirements)} if recorded.with_requirements else {}),
-            **({"recorded_python": recorded.python} if recorded.python else {}),
-        }
+        # The index is asked on the pinned path too, and it decides nothing here.
+        # Whether the pin holds a release back is settled by the unpinned
+        # `--dry-run` resolution above, which put the question to the index this
+        # installation is actually pointed at, through the environment the pin
+        # holds; this query reads one public index over HTTPS. So the release it
+        # names rides along as `newest_release`, and the one thing it can do on
+        # its own is take a currency claim away, never make one.
+        check = _newest_release(manager, command, current_version)
+        newest_release: JsonObject = {"newest_release": check.version} if check.version else {}
         if not holds_nothing_back:
             return _with_certificate_note(
                 {
@@ -1893,14 +2112,14 @@ def _upgrade_changed_nothing(
                     "summary": (
                         f"Agentic HIL was not upgraded: {manager} holds this installation at an exact version pin, so it is "
                         f"still {current_version}. Nothing was changed. `reinstall_command` is the line that clears the pin "
-                        f"and rebuilds this installation as it stands, with {_named_series(carried)}. "
+                        f"and rebuilds this installation as it stands, with {_carried_by_the_reinstall(recorded)}. "
                         + (f"{loss} " if loss else "")
                         + "Running it is the operator's decision."
                     ),
                     "pinned_version": _pinned_version(install_result) or current_version,
-                    "installed_extras": list(installed_extras),
-                    **recorded_fields,
+                    **shape,
                     "reinstall_command": reinstall_command,
+                    **newest_release,
                     **currency_fields,
                     **remediation_fields("upgrade_blocked_by_pin"),
                 },
@@ -1911,41 +2130,51 @@ def _upgrade_changed_nothing(
         # wants the next release picked up automatically still has to run that
         # line; what is not carried is the error type and the exit code, which
         # would say a wanted release was withheld when none was.
-        return _with_certificate_note(
-            {
-                **base,
-                "ok": True,
-                "summary": (
-                    f"Agentic HIL is already at {current_version}, which is the version this installation is pinned to, "
-                    f"and {manager} resolved nothing newer to install. The pin holds no release back while it names the "
-                    f"one that is installed, so it is reported here as a note rather than as a refusal. No restart is "
-                    f"needed. `reinstall_command` is the line that clears the pin and rebuilds this installation as it "
-                    f"stands, with {_named_series(carried)}, for whenever later releases are to be picked up without it. "
-                    + (f"{loss} " if loss else "")
-                    + "Running it is the operator's decision."
-                ),
-                "already_current": True,
-                # What the manager's hint named, which the guard above has just
-                # established is this version. Read off the hint rather than copied
-                # from `version`, so a wording this stops being able to read shows up
-                # as the refusal it falls to and never as a number invented here.
-                "pinned_version": _pinned_version(install_result),
-                "installed_extras": list(installed_extras),
-                **recorded_fields,
-                "reinstall_command": reinstall_command,
-                **currency_fields,
-            },
-            currency_note,
-        )
-    return {
-        **base,
-        "ok": True,
-        "summary": (
-            f"Agentic HIL is already at {current_version}; {manager} had nothing to replace. No restart is needed. "
-            f"If a newer release was expected, the installation's recorded requirement is what holds it here."
-        ),
-        "already_current": True,
-    }
+        note: JsonObject = {
+            **base,
+            "ok": True,
+            "summary": (
+                f"Agentic HIL is already at {current_version}, which is the version this installation is pinned to, "
+                f"and {manager} resolved nothing newer to install. The pin holds no release back while it names the "
+                f"one that is installed, so it is reported here as a note rather than as a refusal. No restart is "
+                f"needed. `reinstall_command` is the line that clears the pin and rebuilds this installation as it "
+                f"stands, with {_carried_by_the_reinstall(recorded)}, for whenever later releases are to be picked up "
+                f"without it. "
+                + (f"{loss} " if loss else "")
+                + "Running it is the operator's decision."
+            ),
+            "already_current": True,
+            # What the manager's hint named, which the guard above has just
+            # established is this version. Read off the hint rather than copied
+            # from `version`, so a wording this stops being able to read shows up
+            # as the refusal it falls to and never as a number invented here.
+            "pinned_version": _pinned_version(install_result),
+            **shape,
+            "reinstall_command": reinstall_command,
+            **currency_fields,
+        }
+        if check.behind:
+            # The two answers disagree: the unpinned resolution moved nothing in
+            # this environment and the index publishes a release above the one
+            # installed. Whatever explains it -- a recorded `exclude-newer`, an
+            # index of the installation's own that has not got the release yet --
+            # this is not the newest release there is, so the note keeps its exit
+            # code and loses the claim, and `held_back_by` names what the receipt
+            # records. An installation is never called current while either check
+            # says otherwise.
+            return _with_certificate_note(_judged_against_the_index(note, check, manager, current_version), currency_note)
+        return _with_certificate_note({**note, **newest_release}, currency_note)
+    return _judged_against_the_index(
+        {
+            **base,
+            "ok": True,
+            "summary": f"Agentic HIL is at {current_version}; {manager} had nothing to replace. No restart is needed.",
+            "already_current": True,
+        },
+        _newest_release(manager, command, current_version),
+        manager,
+        current_version,
+    )
 
 
 def _still_running_the_previous_version(holders: list[JsonObject], previous_version: str) -> JsonObject:

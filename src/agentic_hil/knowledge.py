@@ -771,6 +771,42 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "bigger surprise than the one being reported here.",
         ),
     ),
+    "upgrade_blocked_by_recorded_option": ErrorRemedy(
+        meaning=(
+            "The package manager resolved nothing to install and the index publishes a newer release than the one "
+            "installed, so the two disagree, and this installation's own receipt says why: `held_back_by` names what "
+            "was recorded for it. A `uv tool install --exclude-newer <date>` writes that date into the receipt, and "
+            "every later `uv tool upgrade` resolves as of it and prints `Nothing to upgrade` however many releases "
+            "have appeared since; `uv` records the option whether it was given as a flag or through the environment, "
+            "and offers no command that clears it. A recorded exact requirement does the same thing when the manager "
+            "does not say so in words. Nothing was changed and nothing was refused: `version` is what is installed, "
+            "`newest_release` is what the index publishes, and the difference between them is the whole of this "
+            "result."
+        ),
+        remediation=(
+            "Run the command in `reinstall_command` on this result. It records this installation again from what it "
+            "is given, without the recorded option, and it carries what the installation already has: the extras in "
+            "`installed_extras`, the packages in `with_packages` that the receipt records beside it, and the "
+            "interpreter in `recorded_python` where one was recorded.",
+            "Run it with the agent host closed on Windows, where a file mapped as a running image cannot be replaced. "
+            "Elsewhere a running server keeps the files it has and answers with its own release until its host "
+            "restarts, so the reinstall itself is safe while one is up.",
+            "Then run `agentic-hil --version` to confirm the number moved, and restart the agent hosts, which is what "
+            "loads the new server. Nothing was restarted or reloaded by this attempt.",
+            "If the option was deliberate, this result is the confirmation that it is still in force and what it now "
+            "costs: `newest_release` is the release it is holding out. Leaving it is a decision, not a fault.",
+        ),
+        do_not=(
+            "Do not report this as an installation that is already current. The manager said it had nothing to "
+            "install; the index says there is a newer release, and reading the first as the second is exactly what "
+            "left a bench a release behind believing it was on the newest one.",
+            "Do not run `uv tool upgrade` again, with or without `--reinstall`, to make it take. It resolves through "
+            "the recorded option every time, and it is the option rather than the resolution that has to change.",
+            "Do not have Agentic HIL rewrite the installation on the operator's behalf. A recorded option can be "
+            "deliberate policy about which releases this machine takes, and which release a bench runs is the "
+            "operator's decision.",
+        ),
+    ),
     "permission_denied:allow_upgrade": ErrorRemedy(
         meaning=(
             "`permissions.allow_upgrade` is false in the authoritative configuration, so this server may not replace "
