@@ -2419,7 +2419,13 @@ def test_reset_step_is_refused_without_the_reset_permission(tmp_path: Path) -> N
     result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
 
     assert result["ok"] is False
-    assert result["error_type"] == "test_config_invalid"
+    # #444: the plan is valid and the configuration denies the step, so this is
+    # the bench saying no rather than the plan being wrong. It was
+    # `test_config_invalid`, which sent the reader to correct a plan that had
+    # nothing wrong with it.
+    assert result["error_type"] == "permission_denied"
+    assert result["step_error_type"] == "permission_denied"
+    assert result["validation_error"]["error_type"] == "permission_denied"
     assert result["validation_error"]["field"] == "steps[1].action"
     # Named, so the operator is sent to the grant and not to the bench.
     assert result["validation_error"]["summary"] == (
@@ -2460,6 +2466,74 @@ def test_a_denied_permission_is_named_at_the_top_level_and_in_the_advice(tmp_pat
     # Named as the operator's own command, at the operator's own shell: an agent
     # reading this must not take it as a route it may run itself.
     assert "The operator opens exactly that key at their own shell" in next_step
+
+
+def test_a_denied_permission_is_a_permission_refusal_and_not_an_invalid_plan(tmp_path: Path) -> None:
+    """#444: the plan is valid; the configuration says no.
+
+    The reactor answered `test_config_invalid` for a step a permission denied,
+    which is the classification that says the plan is at fault, and it sent the
+    reader to correct a document that had nothing wrong with it. Over MCP the
+    same situation was already `permission_denied`, the error type this
+    project's own agent instructions key on, so the two routes named one refusal
+    two things.
+    """
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: reset}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["error_type"] == "permission_denied"
+    assert result["step_error_type"] == "permission_denied"
+    assert result["validation_error"]["error_type"] == "permission_denied"
+    # The plan itself is still reported as the valid document it is: the step,
+    # the field and the failed step all stand, so nothing about where the
+    # refusal happened is lost by naming the right cause for it.
+    assert result["failed_step"] == 1
+    assert result["validation_error"]["field"] == "steps[0].action"
+
+
+def test_a_denied_permission_is_never_answered_with_a_regeneration(tmp_path: Path) -> None:
+    """#444: `init --force` was offered as a way past a narrowed permission.
+
+    That command replaces the whole file, every narrowed permission included, by
+    its own text. Offering it to somebody whose bench just refused a step
+    because a permission was narrowed on purpose is the one command they must
+    not run, and it stood in the advice the refusal carried.
+    """
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: reset}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    offered = " ".join(result["remediation"])
+    assert "agentic-hil grant debuggers.dut.permissions.allow_reset" in offered
+    # Not among the things to do, and named among the things not to do: a
+    # reader who reaches for it anyway is told what it costs.
+    assert "agentic-hil init --force" not in offered
+    assert any("agentic-hil init --force" in item for item in result["do_not"])
+
+
+def test_the_invalid_plan_entry_still_offers_the_regeneration_for_a_missing_entry() -> None:
+    """The other half of the split: the case regeneration is actually for.
+
+    `init --force` is the answer to a section `agentic-hil init` left empty
+    because no bench was attached, and taking it out of the entry altogether
+    would cost that reader their one route. It stays, saying which case it is
+    for and what it costs.
+    """
+    from agentic_hil.knowledge import catalogue_entry, remediation_fields
+
+    entry = remediation_fields("test_config_invalid")
+    regeneration = next(step for step in entry["remediation"] if "agentic-hil init --force" in step)
+
+    assert "Only where the section is empty" in regeneration
+    assert "never the way past a permission" in regeneration
+    # And the entry says which refusals it is about where a reader decides
+    # whether it is about theirs at all.
+    served = catalogue_entry("test_config_invalid")
+    assert served is not None
+    assert "It is never about a permission." in served["meaning"]
 
 
 def test_a_permission_that_blocks_by_being_granted_is_not_answered_with_a_grant(tmp_path: Path) -> None:
@@ -5198,7 +5272,8 @@ steps:
     )
 
     assert result["ok"] is False
-    assert result["error_type"] == "test_config_invalid"
+    # The configuration denies the read; the plan is valid (#444).
+    assert result["error_type"] == "permission_denied"
     assert result["failed_step"] == 2
     refusal = result["validation_error"]
     assert refusal["field"] == "steps[1].action"

@@ -216,6 +216,15 @@ def recovery_operator_command(quarantine_id: str | None) -> str:
     return f"agentic-hil recover --confirm-safe-state --quarantine-id {quarantine_id or '<id>'}"
 
 
+# What a refusal one permission caused is called, wherever it is raised. Named
+# rather than spelled out at each site because the classification is load
+# bearing: it is the error_type this project's own agent instructions key on
+# (stop, report it, let the operator decide), so a surface answering a denied
+# permission with anything else sends the reader down another path. The test
+# reactor answered `test_config_invalid`, which says the plan is at fault, for a
+# plan that was valid and a configuration that said no (#444).
+PERMISSION_DENIED_ERROR = "permission_denied"
+
 # The dotted path one permission is named by, everywhere a refusal is about one.
 # `agentic-hil grant` and `agentic-hil revoke` take exactly this spelling, and
 # `project_config_describe` reports it, so a refusal that carries it hands the
@@ -971,8 +980,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Report the refusal and name `{permission}`, the key it is about. That is the whole of what this surface "
             "can do about it, and it is what makes the refusal actionable for whoever owns the bench.",
             "The operator opens exactly that key from their own shell with `{grant_command} {permission}`. It leaves "
-            "every other key in the file alone, which is what separates it from `{reopen_command}`, and it is "
-            "reachable from no tool on this server.",
+            "every other key in the file alone, and it is reachable from no tool on this server.",
             "`project_config_describe` says which permissions this entry does grant right now, so the part of the "
             "task that is possible is not abandoned along with the part that is not.",
         ),
@@ -1365,19 +1373,25 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "not have. `validation_error` says which. `field` there is the dotted path into the plan "
             "(`steps[2].port_id`), `step` the step number the report repeats as `failed_step`, and `next_step` the "
             "one move that fixes this case. A refusal about a name also carries what the configuration does declare, "
-            "under `configured_com_ports`, `configured_can_buses` or `configured_debuggers`."
+            "under `configured_com_ports`, `configured_can_buses` or `configured_debuggers`.\n\n"
+            "It is never about a permission. A step the configuration's permissions deny is a valid plan and a bench "
+            "that says no, and it is refused as `permission_denied` with the key it is about, on this surface exactly "
+            "as over MCP. Nothing here applies to one, and the regeneration named below least of all."
         ),
         remediation=(
             "Read `next_step` inside `validation_error` first. It names the key that is wrong and the command or the "
             "configuration field that fixes it; the steps below are the general form of the same three answers.",
             "A step naming a device the configuration does not declare is corrected in the plan: `device:` has to be "
             "one of the names the refusal lists under the `configured_*` key for that kind.",
-            "A bench that genuinely has no such entry is filled in rather than argued with. With the board attached, "
-            "`agentic-hil adopt-hardware` fills a declared debugger or COM-port entry's hardware in; adoption "
-            "has no CAN half, so a `can_buses` entry's adapter and channel are written by hand. Where the section is "
-            "empty because `agentic-hil init` ran with no bench attached, `agentic-hil init --force` from the project "
-            "root writes the file again from the project profile and the hardware it finds. `--force` replaces the "
-            "whole file, every narrowed permission included, so it is a reset rather than a repair.",
+            "A declared entry with no hardware behind it is filled in rather than argued with. With the board "
+            "attached, `agentic-hil adopt-hardware` fills a declared debugger or COM-port entry's hardware in; "
+            "adoption has no CAN half, so a `can_buses` entry's adapter and channel are written by hand.",
+            "Only where the section is empty because `agentic-hil init` ran with no bench attached does the file need "
+            "writing again: `agentic-hil init --force` from the project root writes it from the project profile and "
+            "the hardware it finds. That is the missing-entry case and no other. `--force` replaces the whole file, "
+            "every narrowed permission included, so it is a reset rather than a repair, and it is never the way past "
+            "a permission: a refusal that names one is `permission_denied` and `{grant_command} <key>` moves that one "
+            "key and leaves the rest of the file standing.",
             "A `field` naming a plan key rather than a device is a plan the schema rejects. "
             "`{test_plan_reference}` is what it was validated against; it reads the shipped schema rather than "
             "describing it, so the version that admits a step is in the same table as the step.",
@@ -1391,6 +1405,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not raise the plan's `version:` to reach a step it refuses. The version is what the plan was written "
             "against, and a step that is too new for it is refused by name here rather than failing on an older "
             "install for no stated reason.",
+            "Do not reach for `{reopen_command}` because a step was refused. It is the answer to an empty section and "
+            "to nothing else: it rewrites the file from hardware discovery, so every narrowed permission, the "
+            "baudrate, the `resource_id`, the `state_root` and the artifact roots go with it. A bench somebody "
+            "narrowed on purpose is exactly the bench where that costs the most.",
         ),
     ),
     "run_already_active": ErrorRemedy(

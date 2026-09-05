@@ -41,6 +41,7 @@ from agentic_hil.knowledge import (
     ALLOW_ALL_SYMBOLS_PERMISSION,
     EXCLUSIVE_PERMISSION_SCOPE,
     LISTEN_ONLY_MODE_ERROR,
+    PERMISSION_DENIED_ERROR,
     exclusive_permission_fields,
     permission_denied_fields,
     permission_denied_summary,
@@ -3061,6 +3062,11 @@ class TestReactor:
             # the result carried the fault and nothing to do about it: every
             # other refusing surface in this package merges these fields, and
             # this one, which is where a plan author lands, did not.
+            # `test_config_invalid` is the default and no longer the only answer:
+            # a step the configuration's permissions deny is a valid plan and a
+            # bench that says no, which is `permission_denied` at every level of
+            # this result. The plan is not the fault and must not be reported as
+            # one, because the two send a reader to different documents (#444).
             refused_as = str(validation_error.get("error_type") or "test_config_invalid")
             # A permission refusal names its key at the top level too, not only
             # inside `validation_error`: a caller reading the result's own fields
@@ -3089,6 +3095,14 @@ class TestReactor:
             }
             if "step" in validation_error:
                 result["failed_step"] = validation_error["step"]
+            if validation_error.get("error_type"):
+                # A refusal that named its own type says the same thing under
+                # `step_error_type` as it does at the top level. That field is
+                # what a report reader and the JUnit writer take the failure's
+                # kind from, and leaving it unset on the one path that refuses
+                # by step made a denied permission indistinguishable from a
+                # plan the schema rejected (#444).
+                result["step_error_type"] = refused_as
             return result
 
         completed: list[JsonObject] = []
@@ -3417,7 +3431,7 @@ def permission_preflight_error(
         step,
         field,
         permission_denied_summary(summary, permission),
-        {**permission_denied_fields(permission), **(details or {})},
+        {"error_type": PERMISSION_DENIED_ERROR, **permission_denied_fields(permission), **(details or {})},
     )
 
 
@@ -3443,7 +3457,12 @@ def exclusive_permission_preflight_error(
         step,
         field,
         permission_granted_summary(summary, permission),
-        {"permission": permission, "permission_granted": True, "next_step": fields["next_step"]},
+        {
+            "error_type": PERMISSION_DENIED_ERROR,
+            "permission": permission,
+            "permission_granted": True,
+            "next_step": fields["next_step"],
+        },
     )
 
 
