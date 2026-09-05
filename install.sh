@@ -954,9 +954,18 @@ DISCOVERED_PYTHON=""
 # satisfies the request unless it is told to, and a current-but-broken copy is
 # exactly the one the anchor exists to repair. `pin` is `refresh` with the
 # operator's own release named, which sets the requirement outright.
+#
+# FIRST_INSTALL is the closing line's question and not step 2's, which is why it
+# is not read off INSTALL_MODE: the development branch below installs nothing at
+# all and is still a machine that already has this tool. The closing sentence
+# about creating this project's configuration is written for somebody meeting
+# the tool for the first time, and on a host that already has project
+# configurations of its own, it was the wrong thing to end on.
 NEEDS_PACKAGE=1
 INSTALL_MODE="fresh"
+FIRST_INSTALL=0
 if ! have agentic-hil; then
+    FIRST_INSTALL=1
     step 1 "probe: no agentic-hil on this PATH, installing it user-local"
 elif ! installed=$(agentic-hil --version 2>/dev/null); then
     INSTALL_MODE="refresh"
@@ -1133,5 +1142,19 @@ elif [ "$RUNNING_COUNT" -gt 1 ]; then
     printf '\n'
 else
     step 5 "restart: no agent CLI of yours is running, so there is nothing to restart"
+fi
+
+# The last thing on the screen, and it is a different sentence for the two runs
+# this script makes. A first install ends on what happens next, because nothing
+# has happened yet. A refresh ends on what changed and what has not caught up
+# with it: the installation on disk is the new one, and every agentic-hil server
+# already running goes on answering with the release it started with until the
+# agent CLI that started it is restarted. The first-install sentence was printed
+# on both, and on a host with project configurations already on it, "the first
+# hardware question creates this project's configuration" is an answer to a
+# question that machine settled long ago.
+if [ "$FIRST_INSTALL" -eq 1 ]; then
     say "The next start of your agent has everything, and the first hardware question creates this project's configuration."
+else
+    say "This installation was refreshed in place, and your project configurations were not touched. Any agentic-hil MCP server still running keeps answering with the release it started with, so restart the agent CLIs that started one to pick this installation up."
 fi

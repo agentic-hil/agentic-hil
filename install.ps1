@@ -656,6 +656,13 @@ $needsPackage = $true
 # an already-current version unless told to; `pin` is `refresh` with the
 # operator's own release named, which sets the requirement outright.
 $InstallMode = 'fresh'
+# FirstInstall is the closing line's question and not step 2's, which is why it
+# is not read off InstallMode: the development branch below installs nothing at
+# all and is still a machine that already has this tool. The closing sentence
+# about creating this project's configuration is written for somebody meeting
+# the tool for the first time, and on a host with project configurations already
+# on it, it was the wrong thing to end on.
+$FirstInstall = $false
 if (Test-Executable 'agentic-hil') {
     $probe = Invoke-Captured -File 'agentic-hil' -Arguments @('--version')
     $installed = $probe.Output.Trim()
@@ -676,6 +683,7 @@ if (Test-Executable 'agentic-hil') {
         Write-Step 1 "probe: agentic-hil $installed is older than $Release, upgrading it"
     }
 } else {
+    $FirstInstall = $true
     Write-Step 1 'probe: no agentic-hil on this PATH, installing it user-local'
 }
 
@@ -920,5 +928,19 @@ if ($running.Count -eq 1) {
     Write-Host ''
 } else {
     Write-Step 5 'restart: no agent CLI of yours is running, so there is nothing to restart'
+}
+
+# The last thing on the screen, and it is a different sentence for the two runs
+# this script makes. A first install ends on what happens next, because nothing
+# has happened yet. A refresh ends on what changed and what has not caught up
+# with it: the installation on disk is the new one, and every agentic-hil server
+# already running goes on answering with the release it started with until the
+# agent CLI that started it is restarted. The first-install sentence was printed
+# on both, and on a host with project configurations already on it, "the first
+# hardware question creates this project's configuration" is an answer to a
+# question that machine settled long ago.
+if ($FirstInstall) {
     Write-Say "The next start of your agent has everything, and the first hardware question creates this project's configuration."
+} else {
+    Write-Say "This installation was refreshed in place, and your project configurations were not touched. Any agentic-hil MCP server still running keeps answering with the release it started with, so restart the agent CLIs that started one to pick this installation up."
 }
