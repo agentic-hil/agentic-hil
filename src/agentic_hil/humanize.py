@@ -327,7 +327,7 @@ def _member_lines(key: str, value: object, indent: str) -> list[str]:
     if isinstance(value, Mapping) and value:
         body = _nested_mapping(value, indent + _INDENT)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and value and not _renderable_scalar(value):
-        body = _nested_sequence(value, indent + _INDENT)
+        body = _sequence_lines(key, value, indent + _INDENT)
     else:
         return []
     return [f"{indent}{key}", *body] if body else []
@@ -739,7 +739,7 @@ def render_generic(result: JsonObject) -> list[str]:
         elif isinstance(value, Mapping):
             blocks.extend(_section(key, _nested_mapping(value)))
         elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and value:
-            blocks.extend(_section(key, _nested_sequence(value)))
+            blocks.extend(_section(key, _sequence_lines(key, value, _INDENT)))
     if scalars:
         lines.append("")
         lines.extend(_fields(scalars))
@@ -763,6 +763,68 @@ def _nested_mapping(value: Mapping[str, object], indent: str = _INDENT) -> list[
     for key, item in bodies:
         lines.extend(_member_lines(key, item, indent))
     return lines
+
+
+# What makes one entry of a host's serial-port inventory a port somebody
+# plugged in. A USB serial device publishes a vendor id, a product id and, on
+# the adapters this project cares about, a serial number; a chipset UART
+# publishes none of them and is declared by the kernel whether or not anything
+# is attached to it. A Linux host lists 32 of those as a matter of course.
+_USB_IDENTITY_KEYS = ("vid", "pid", "serial_number")
+# The key a host inventory is carried under, wherever it stands: on its own as
+# `agentic-hil com-ports`, and nested under `available_com_ports` in every
+# refusal that says what the host does have.
+_PORT_INVENTORY_KEY = "ports"
+
+
+def _sequence_lines(key: str, value: Sequence[object], indent: str) -> list[str]:
+    """A list, rendered by whatever this key means, and unfolded when it means nothing."""
+    inventory = _host_port_inventory(key, value)
+    return _port_inventory_lines(inventory, indent) if inventory else _nested_sequence(value, indent)
+
+
+def _host_port_inventory(key: str, value: Sequence[object]) -> list[JsonObject]:
+    """``value`` as a host serial-port inventory, or [] when it is not one.
+
+    Keyed on the name *and* checked against the shape, because `ports` is also
+    what `com_ports_list` calls the configured entries, which is a mapping and
+    not this, and because a caller may put anything under any name. Every entry
+    naming a device is the shape this renderer knows how to shorten; one entry
+    that does not is enough to render the whole list the ordinary way.
+    """
+    if key != _PORT_INVENTORY_KEY:
+        return []
+    entries = _entries(value)
+    return entries if len(entries) == len(value) and all(str(entry.get("device") or "") for entry in entries) else []
+
+
+def _port_inventory_lines(entries: Sequence[JsonObject], indent: str) -> list[str]:
+    """The ports that can be identified, then a count of the ones that cannot.
+
+    A refusal about an unknown probe serial on a Linux host was 196 lines, 130
+    of them `/dev/ttyS*` entries reading `description n/a`, printed before the
+    one ST-Link the reader was looking for. Nothing is hidden: the collapsed
+    line says how many there were and which names they ran between, and `--json`
+    is untouched, so the document a caller parses still carries every port.
+
+    The order the host gave is kept inside each group. It is the order the
+    inventory was read in, and the collapsed line describes a stretch of that
+    list rather than a claim about numbering.
+    """
+    identified = [entry for entry in entries if any(entry.get(name) not in (None, "") for name in _USB_IDENTITY_KEYS)]
+    plain = [entry for entry in entries if entry not in identified]
+    lines = _nested_sequence(identified, indent) if identified else []
+    if plain:
+        lines.extend(_wrap(_collapsed_ports(plain), indent=f"{indent}- ", hanging=f"{indent}  "))
+    return lines
+
+
+def _collapsed_ports(entries: Sequence[JsonObject]) -> str:
+    """The one line that stands for every port with no USB identity on it."""
+    devices = [_flat(entry.get("device")) for entry in entries]
+    if len(devices) == 1:
+        return f"1 legacy serial port without a USB identity ({devices[0]}) not listed"
+    return f"{len(devices)} legacy serial ports without a USB identity ({devices[0]} to {devices[-1]}) not listed"
 
 
 def _nested_sequence(value: Sequence[object], indent: str = _INDENT) -> list[str]:

@@ -821,6 +821,133 @@ def test_a_tool_name_inside_a_longer_word_is_not_rewritten() -> None:
     assert "Call `agentic-hil debugger-probes`." in out
 
 
+# ---------------------------------------------------------------------------
+# The host's serial ports, of which a Linux host has three dozen.
+
+
+def _linux_inventory() -> list[dict]:
+    """What `list_ports.comports()` answers on an ordinary Linux host.
+
+    One board, and the 32 chipset UARTs the kernel declares whether or not
+    anything is attached to them. The probe is not first in the list, because
+    nothing says it will be."""
+    ports: list[dict] = [{"device": f"/dev/ttyS{index}", "name": f"ttyS{index}", "description": "n/a", "hwid": "n/a"} for index in range(32)]
+    ports.insert(
+        9,
+        {
+            "device": "/dev/ttyACM0",
+            "name": "ttyACM0",
+            "description": "STM32 STLink",
+            "hwid": "USB VID:PID=0483:374B",
+            "manufacturer": "STMicroelectronics",
+            "serial_number": "0669FF574951",
+            "vid": 0x0483,
+            "pid": 0x374B,
+            "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink-if02",
+        },
+    )
+    return ports
+
+
+def test_com_ports_lists_the_board_and_counts_the_rest() -> None:
+    """#454: 33 ports printed in full, and the substance was three lines.
+
+    The one port with a USB identity is the one the reader is looking for. The
+    others are declared by the kernel and say nothing: `description n/a`,
+    `hwid n/a`, and no vendor, product or serial to check a board against."""
+    document = {"ok": True, "tool": "com_ports_available", "ports": _linux_inventory(), "summary": "33 available COM port(s)."}
+
+    out = _rendered(document, "com-ports")
+
+    assert "/dev/ttyACM0" in out
+    assert "0669FF574951" in out
+    assert "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink-if02" in out
+    assert "32 legacy serial ports without a USB identity (/dev/ttyS0 to /dev/ttyS31) not listed" in _reflowed(out)
+    # Not one of them by name, and the whole answer fits on a screen.
+    assert "/dev/ttyS17" not in out
+    assert len(out.splitlines()) < 20
+
+
+def test_a_refusal_that_embeds_the_inventory_is_shortened_the_same_way() -> None:
+    """The refusal is where a reader actually meets this list.
+
+    `adopt-hardware` with a serial the host does not have answers with what the
+    host does have, and 130 of its 196 lines were `/dev/ttyS*`."""
+    refusal = {
+        "ok": False,
+        "tool": "project_config_adopt_hardware",
+        "error_type": "probe_not_found",
+        "summary": "No attached probe carries that unique ID.",
+        "available_com_ports": {"ok": True, "tool": "com_ports_available", "ports": _linux_inventory(), "summary": "33 available COM port(s)."},
+    }
+
+    out = _rendered(refusal, "adopt-hardware")
+
+    assert "/dev/ttyACM0" in out
+    assert "32 legacy serial ports without a USB identity" in _reflowed(out)
+    assert "/dev/ttyS17" not in out
+
+
+def test_the_document_still_carries_every_port() -> None:
+    """This is a rendering and nothing else: `--json` is what a caller parses,
+    and the identity check a caller makes needs the whole inventory."""
+    document = {"ok": True, "tool": "com_ports_available", "ports": _linux_inventory(), "summary": "33 available COM port(s)."}
+
+    printed = json.dumps(document)
+
+    assert printed.count("/dev/ttyS") == 32
+    assert "/dev/ttyS17" in printed
+
+
+def test_an_inventory_of_ports_that_can_all_be_identified_collapses_nothing() -> None:
+    """Two boards on a Windows host, and nothing to shorten."""
+    document = {
+        "ok": True,
+        "tool": "com_ports_available",
+        "ports": [
+            {"device": "COM3", "description": "STLink Virtual COM Port", "serial_number": "0669FF574951", "vid": 0x0483, "pid": 0x374B},
+            {"device": "COM7", "description": "USB Serial Device", "vid": 0x10C4, "pid": 0xEA60},
+        ],
+        "summary": "2 available COM port(s).",
+    }
+
+    out = _rendered(document, "com-ports")
+
+    assert "COM3" in out
+    assert "COM7" in out
+    assert "not listed" not in out
+
+
+def test_one_port_with_no_usb_identity_is_named_rather_than_counted_off() -> None:
+    """A single collapsed entry says which one it is."""
+    document = {"ok": True, "tool": "com_ports_available", "ports": [{"device": "/dev/ttyS0", "description": "n/a"}], "summary": "1 available COM port(s)."}
+
+    out = _reflowed(_rendered(document, "com-ports"))
+
+    assert "1 legacy serial port without a USB identity (/dev/ttyS0) not listed" in out
+
+
+def test_a_list_under_another_name_is_not_read_as_an_inventory() -> None:
+    """`ports` is the host inventory and nothing else is, whatever it looks like.
+
+    `com_ports_list` calls the configured entries `ports` too, and that is a
+    mapping keyed by the name the project gave each one, so it never reaches
+    this pass. A list of objects under any other key is unfolded as it always
+    was, entry by entry."""
+    document = {
+        "ok": True,
+        "tool": "com_ports_available",
+        "summary": "Checked.",
+        "candidates": [{"device": "/dev/ttyS0", "description": "n/a"}, {"device": "/dev/ttyS1", "description": "n/a"}],
+    }
+
+    out = _rendered(document, "com-ports")
+
+    assert "/dev/ttyS0" in out
+    assert "/dev/ttyS1" in out
+    assert "not listed" not in out
+
+
 def test_a_refusal_shows_the_failing_tools_own_words_and_not_only_the_facts_around_them() -> None:
     """Issue #314: the one field that says why was the one field that was dropped.
 
