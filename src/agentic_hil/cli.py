@@ -23,6 +23,7 @@ from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
     apply_discovery_to_template,
     apply_profile_to_placeholder,
+    bound_off_incomplete_inventory,
     enumerate_attached_probes,
     load_project_profile,
 )
@@ -2306,37 +2307,25 @@ def _placeholder_next_step(discovery: JsonObject) -> str:
             f"`hardware_discovery.probes`. Adoption then fills in {_ADOPT_FILLS}."
         )
     elif error_type == "probe_inventory_incomplete":
-        if discovery.get("probes"):
-            remedy = (
-                "STM32CubeProgrammer is not installed, so probes are read from this host's USB serial inventory, which "
-                "reaches an ST-Link only through its virtual COM port and so cannot rule out a VCP-less ST-LINK/V2 "
-                "attached beside what it saw; discovery will not choose a board off it. Name the one this project is "
-                "about with `agentic-hil adopt-hardware --probe-id <serial>` -- the serials this host can see are under "
-                "`hardware_discovery.probes` and from `agentic-hil debugger-probes` -- or install STM32CubeProgrammer "
-                f"for an authoritative count. Adoption then fills in {_ADOPT_FILLS}."
-            )
-        else:
-            # Nothing was visible to name here, so `--probe-id <serial>` has no
-            # serial to take yet; the empty reading still is not an absent bench,
-            # because the inventory cannot see a VCP-less ST-LINK/V2. So this does
-            # not say "attach the bench" either (round 2, finding 3). But it also
-            # cannot send the operator to bare `adopt-hardware` once a probe is
-            # attached: on this OpenOCD-only host the newly visible probe is a
-            # single reading off a count still `complete: false`, so bare adoption
-            # would refuse it `probe_inventory_incomplete` exactly as this run did.
-            # The way across is the serial it then publishes, named with
-            # `--probe-id`, or an authoritative STM32CubeProgrammer count under
-            # which bare adoption binds (round 3, finding 2).
-            remedy = (
-                "STM32CubeProgrammer is not installed, so probes are read from this host's USB serial inventory, which "
-                "reaches an ST-Link only through its virtual COM port and saw none here; that does not rule out a "
-                "VCP-less ST-LINK/V2 attached right now, so no absent bench is reported. Install STM32CubeProgrammer for "
-                "an authoritative count and then `agentic-hil adopt-hardware` binds the board on its own; or attach a "
-                "probe that publishes a virtual COM port, read the serial it then shows under `hardware_discovery.probes` "
-                "(and from `agentic-hil debugger-probes`), and name it with `agentic-hil adopt-hardware --probe-id <serial>`, "
-                "because a lone probe off this inventory is still not a complete count and bare adoption would refuse it the "
-                f"same way this run did. Either fills in {_ADOPT_FILLS}."
-            )
+        # The inventory saw no ST-Link at all, which is the only reading that
+        # reaches here: a sole visible probe is bound with its caveat and two are
+        # `ambiguous_hardware`. Nothing was visible to name, so `--probe-id
+        # <serial>` has no serial to take yet, and the empty reading still is not
+        # an absent bench, because the inventory cannot see a VCP-less ST-LINK/V2.
+        # So this does not say "attach the bench" either (round 2, finding 3).
+        # Once a probe that publishes a virtual COM port is attached, bare
+        # `adopt-hardware` binds the one this inventory then shows; `--probe-id`
+        # is for the bench where a second probe without a VCP is attached beside
+        # it, which this inventory would not list.
+        remedy = (
+            "STM32CubeProgrammer is not installed, so probes are read from this host's USB serial inventory, which "
+            "reaches an ST-Link only through its virtual COM port and saw none here; that does not rule out a "
+            "VCP-less ST-LINK/V2 attached right now, so no absent bench is reported. Attach a probe that publishes a "
+            "virtual COM port and run `agentic-hil adopt-hardware`, which binds the one this host then shows; name "
+            "the board with `agentic-hil adopt-hardware --probe-id <serial>` instead if a second probe without a "
+            "virtual COM port is attached beside it, or install STM32CubeProgrammer for an authoritative count. "
+            f"Either fills in {_ADOPT_FILLS}."
+        )
     elif error_type == "target_not_detected":
         remedy = (
             "The ST-Link answered but named no target, so check the board is powered and wired to the probe, "
@@ -2357,18 +2346,16 @@ def _placeholder_next_step(discovery: JsonObject) -> str:
             # the visible-but-serial-less zero-ID case the empty-inventory finding
             # left, told apart the same way `_placeholder_reason` and
             # `_discovery_account` tell it apart, on the presence of a port with no
-            # serial off it (round 3, finding 3). Once STM32CubeProgrammer reads the
-            # serial off the probe directly its count is authoritative and bare
-            # adoption binds; on OpenOCD alone the serial that then appears is still
-            # one reading off a `complete: false` count, so it is named with
-            # `--probe-id`, exactly as the empty-inventory branch above says.
+            # serial off it (round 3, finding 3). Once a serial can be read off the
+            # port, bare adoption binds the probe it names, on either enumeration;
+            # `--probe-id` is for the bench that has a second probe the inventory
+            # cannot see, exactly as the empty-inventory branch above says.
             remedy = (
                 "This host is showing an ST-Link serial port but no probe serial could be read off it to bind, so check the "
                 "probe is a genuine ST unit with its driver installed, or install STM32CubeProgrammer, which reads the serial "
-                "off the probe itself. Then, if STM32CubeProgrammer supplied an authoritative count, `agentic-hil "
-                "adopt-hardware` binds the board on its own; on OpenOCD alone the serial that then appears under "
-                "`hardware_discovery.probes` (and from `agentic-hil debugger-probes`) is still not a complete count, so name it "
-                f"with `agentic-hil adopt-hardware --probe-id <serial>`. Either fills in {_ADOPT_FILLS}."
+                "off the probe itself. Then `agentic-hil adopt-hardware` binds the board on its own; name it with "
+                "`agentic-hil adopt-hardware --probe-id <serial>` instead if a second probe without a virtual COM port is "
+                f"attached beside it. Either fills in {_ADOPT_FILLS}."
             )
         else:
             remedy = f"Attach the bench and run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
@@ -2949,6 +2936,17 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     account = _discovery_account(discovery)
     if account is not None:
         next_steps.insert(1 if not discovered else 0, account)
+    # A bench bound off the USB serial inventory says so first. The file it wrote
+    # carries the same three fields on the debugger entry, so the operator reading
+    # this report and the operator reading the configuration a month later are told
+    # the same thing about how the board was chosen (#423).
+    inventory_caveat = bound_off_incomplete_inventory(discovery)
+    if inventory_caveat is not None:
+        next_steps.insert(
+            0,
+            f"{inventory_caveat} The same is recorded in the file under `debuggers.dut.probe_inventory` and "
+            "`debuggers.dut.discovered_by`.",
+        )
     # First, and before anything about COM ports or OpenOCD scripts: a bench that
     # was narrowed and is open again is the one thing here that changes what this
     # machine may be told to do.
@@ -2979,6 +2977,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
                 if discovered
                 else f"{_placeholder_reason(discovery)}, so the placeholder Agentic HIL project configuration was written, {granted_clause}."
             )
+            + (f" {inventory_caveat}" if inventory_caveat is not None else "")
             + (
                 f" The file it replaced had {len(discarded)} {'permission' if len(discarded) == 1 else 'permissions'} "
                 f"set to false that this one grants, so {'it is' if len(discarded) == 1 else 'they are'} open again: "

@@ -221,6 +221,26 @@
             "pattern": "^[A-Za-z0-9_.:-]+$",
             "default": null
           },
+          "discovered_by": {
+            "type": "string",
+            "enum": [
+              "stm32cubeprogrammer_cli",
+              "usb_serial_inventory"
+            ],
+            "description": "Which enumeration named the probe_id above, when bootstrap discovery wrote this entry. Informational only: nothing reads it as policy. stm32cubeprogrammer_cli read the serial off the probe itself; usb_serial_inventory read it out of the USB descriptor of the virtual COM port the probe publishes to this host."
+          },
+          "probe_inventory": {
+            "type": "string",
+            "enum": [
+              "complete",
+              "incomplete"
+            ],
+            "description": "Whether the enumeration that chose this probe_id was an authoritative count of what is attached. Written incomplete when discovery bound the one ST-Link this host's USB serial inventory showed: that inventory reaches an ST-Link only through the virtual COM port a V2-1 or a V3 publishes, so a probe without one can be attached beside it and never appear. Informational only, and there for a person deciding whether this is the intended board."
+          },
+          "probe_inventory_note": {
+            "type": "string",
+            "description": "The sentence that goes with probe_inventory: which serial was bound, what the enumeration behind it cannot see, and how to name a different board (agentic-hil adopt-hardware --probe-id <serial>) or get an authoritative count."
+          },
           "target_type": {
             "type": [
               "string",

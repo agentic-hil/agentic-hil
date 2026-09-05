@@ -1837,37 +1837,37 @@ def test_naming_the_probe_reads_it_as_the_operators_own_explicit_choice(monkeypa
     assert "not an authoritative count" not in result["summary"]
 
 
-def test_a_vcp_less_probe_beside_the_visible_one_is_not_bound_without_a_named_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The mixed bench the USB path cannot see whole (round 0, finding 1; round 1, finding 1).
+def test_the_sole_visible_probe_is_bound_and_carries_the_blind_spot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one probe the USB inventory shows is bound, with the caveat on the answer (#423).
 
     A standalone ST-LINK/V2 (or any probe with no virtual COM port) publishes no
-    VCP, so the USB serial inventory never lists it: a host with that probe *and*
-    a VCP-backed Nucleo shows exactly one probe, the same reading a host with only
-    the Nucleo shows. Discovery cannot tell the two apart, so binding the sole
-    visible probe would be a silent choice of a board a later flash or reset
-    trusts. A caveat on a successful answer does not travel into the configuration
-    the choice is written to, so instead of disclosing the guess discovery refuses
-    to bind it: the answer is a failure carrying the serial it did see and how to
-    name a board, and `init` writes an unbound placeholder from it rather than a
-    bound probe."""
-    # The inventory the host can take: only the VCP-backed probe. The VCP-less
-    # ST-LINK/V2 attached beside it contributes no serial-bus entry at all.
+    VCP, so the USB serial inventory never lists it: a host with that probe *and* a
+    VCP-backed Nucleo shows exactly one probe, the same reading a host with only the
+    Nucleo shows. Refusing to bind on that ambiguity took the whole of the ordinary
+    OpenOCD-only bench with it, where nothing else is attached and `agentic-hil init`
+    from the project root has to reach a working configuration on its own. So the
+    visible probe is bound and the blind spot travels as data: `discovered_by`,
+    `probe_inventory: incomplete` and a sentence naming what this enumeration cannot
+    see, with `--probe-id` for the bench that does have a second, invisible probe."""
+    # The inventory the host can take: only the VCP-backed probe. A VCP-less
+    # ST-LINK/V2 attached beside it would contribute no serial-bus entry at all.
     _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
 
     result = discover_attached_hardware(profile=STARTER_PROFILE)
 
-    assert result["ok"] is False, result
-    assert overall_success(result) is False
-    assert result["error_type"] == "probe_inventory_incomplete"
-    # No board was chosen: the visible serial is offered for selection, not bound.
-    assert result.get("probe_id") is None
-    assert [entry["probe_id"] for entry in result["probes"]] == ["066AFF303435554157113106"]
-    assert result["probe_inventory_complete"] is False
-    assert "standalone ST-LINK/V2" in result["summary"]
-    assert "066AFF303435554157113106" in result["summary"]
-    # The way to bind is to name the board, and the answer says so.
-    assert "probe_id" in result["next_step"]
-    assert "adopt-hardware --probe-id" in result["next_step"]
+    assert result["ok"] is True, result
+    assert overall_success(result) is True
+    # The board is chosen, and it is the one the inventory showed.
+    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["backend"] == "openocd"
+    # The caveat rides the answer rather than blocking it.
+    assert result["discovered_by"] == DISCOVERED_BY_USB_INVENTORY
+    assert result["probe_inventory"] == "incomplete"
+    assert "066AFF303435554157113106" in result["probe_inventory_note"]
+    assert "no VCP" in result["probe_inventory_note"]
+    assert "adopt-hardware --probe-id" in result["probe_inventory_note"]
+    # And the summary a person reads carries the same sentence.
+    assert result["probe_inventory_note"] in result["summary"]
 
 
 def test_the_no_config_probe_listing_is_not_a_clean_pass_off_a_partial_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2145,17 +2145,17 @@ def test_a_discovery_that_found_the_cube_cli_still_writes_an_stlink_entry() -> N
     assert "interface_cfg" not in configured["debuggers"]["dut"]
 
 
-def test_init_on_a_linux_openocd_host_leaves_the_probe_unbound_until_it_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`init` on the USB path does not bind a probe off an unconfirmed count (round 1, finding 1).
+def test_init_on_a_linux_openocd_host_binds_the_one_visible_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`init` binds the bench the USB path shows, and says what that reading cannot see (#423).
 
-    `init` reads the board through the same USB serial inventory as
-    `debugger-probes`, which reaches an ST-Link only through the VCP it publishes,
-    so a VCP-less ST-LINK/V2 could sit beside the one it saw. Binding the sole
-    visible probe would write a possibly-wrong board into the file a later flash
-    trusts, so `init` writes the profile's unbound placeholder and its report
-    carries the visible serial and how to name it. The bench is bound by
-    `agentic-hil adopt-hardware --probe-id <serial>`, the operator's own
-    confirmation, or by an authoritative STM32CubeProgrammer count."""
+    This is the whole of the newcomer path: OpenOCD from a package manager, no
+    STM32CubeProgrammer, one Nucleo plugged in, and `agentic-hil init` from the
+    project root. It has to come back with a bench nobody retyped a 24-character
+    serial into. So the one probe the USB serial inventory shows is bound, and the
+    thing that inventory cannot do -- see a probe that publishes no virtual COM port
+    -- is written into the file beside the `probe_id` it qualifies and said in the
+    report, rather than being turned into a refusal that costs every newcomer the
+    bench to guard a bench almost nobody has."""
     workspace = tmp_path / "starter"
     workspace.mkdir()
     (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
@@ -2165,21 +2165,26 @@ def test_init_on_a_linux_openocd_host_leaves_the_probe_unbound_until_it_is_named
     result = init_config()
 
     assert result["ok"] is True, result
-    # The debugger is a placeholder: no probe was bound off the incomplete count.
+    # The bench is bound, off the inventory alone.
     written = load_authoritative_config(workspace)
-    assert written.debuggers["dut"].probe_id is None
-    assert com_port_is_unbound(written.com_ports["dut_uart"]) is True
-    # The profile's own names are still carried, so nothing the project stated is
-    # lost while the bench waits to be bound.
+    assert written.debuggers["dut"].probe_id == "066AFF303435554157113106"
+    assert written.debuggers["dut"].type == "openocd"
+    assert com_port_is_unbound(written.com_ports["dut_uart"]) is False
     assert written.target.controller == "stm32f446ret6"
     assert sorted(written.com_ports) == ["dut_uart"]
-    # The reason names the incomplete inventory and the confirmation command,
-    # rather than an absent bench.
-    assert result["hardware_discovery"]["error_type"] == "probe_inventory_incomplete"
-    assert "No attached bench was found" not in result["summary"]
-    assert any("adopt-hardware --probe-id" in step for step in result["next_steps"])
-    # The account still names the serial the operator has to confirm, which is
-    # what "No attached bench was found" left them no way to check.
+    # The caveat is in the file, where a later flash reads the board from.
+    entry = yaml.safe_load(Path(str(result["path"])).read_text(encoding="utf-8"))["debuggers"]["dut"]
+    assert entry["discovered_by"] == "usb_serial_inventory"
+    assert entry["probe_inventory"] == "incomplete"
+    assert "066AFF303435554157113106" in entry["probe_inventory_note"]
+    # And in the report: one sentence saying the visible probe was bound and how to
+    # name another one if a VCP-less probe is attached beside it.
+    assert result["hardware_discovery"]["probe_inventory"] == "incomplete"
+    assert "no VCP" in result["summary"]
+    assert "adopt-hardware --probe-id" in result["summary"]
+    assert "no VCP" in result["next_steps"][0]
+    assert "adopt-hardware --probe-id" in result["next_steps"][0]
+    # The account still names what was looked for and what the host is showing.
     assert result["next_steps"][1] == (
         "Discovery looked for STM32_Programmer_CLI (STM32CubeProgrammer): not on this host; "
         f"openocd (OpenOCD): found at {FAKE_OPENOCD_PATH}. ST-Link serial port(s) on this host: "
@@ -2187,44 +2192,64 @@ def test_init_on_a_linux_openocd_host_leaves_the_probe_unbound_until_it_is_named
     )
 
 
-def test_project_config_create_refuses_to_bind_a_probe_off_an_incomplete_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """MCP generation writes no bound probe off the USB inventory (round 1, finding 1).
+def test_project_config_create_binds_the_visible_probe_and_carries_the_caveat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP generation binds the same board `init` does, with the same fields (#423).
 
-    `project_config_create` is the agent's own path to a configuration, and it
-    reads the board through the same USB serial inventory `init` does. That
-    inventory is not an authoritative count, so a sole visible probe could have a
-    VCP-less ST-LINK/V2 beside it. Where `init` falls back to an unbound
-    placeholder, the MCP path has no placeholder to write -- a file naming no probe
-    is worse than the `config_file_not_found` it started from -- so it refuses
-    outright rather than committing a possibly-wrong board an agent would then
-    flash. The refusal names the visible serial and how to confirm it, and no
-    configuration is written."""
+    `project_config_create` is the agent's own path to a configuration and reads
+    the board through the same USB serial inventory. Refusing there left an agent
+    on an OpenOCD-only host with no way to a configuration at all: the tool it is
+    told to call wrote nothing, and the file it needed had to come from a human at
+    a shell. So it binds the one visible probe exactly as `init` does, and the
+    incomplete count travels the same way: on the discovery result, in the
+    generated entry, and in a next step the agent reports."""
     workspace = tmp_path / "server"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
-    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
+
+    def openocd_reads_the_target(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand(OPENOCD_TARGETS_OUTPUT, "", 0, False, False)
+
+    # No workspace profile over MCP, so the part is read off the board the one
+    # read-only way this path has: OpenOCD's own `targets` table.
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP], spawn=openocd_reads_the_target)
 
     result = project_config_create(workspace, None)
 
-    assert result["ok"] is False, result
-    assert result["error_type"] == "probe_inventory_incomplete"
-    # The refusal hands back the visible serial and the confirmation path.
-    assert [entry["probe_id"] for entry in result["probes"]] == ["066AFF303435554157113106"]
-    assert "adopt-hardware --probe-id" in result["next_step"]
-    # The catalogued fix rides the public MCP refusal itself, not only a standalone
-    # `remediation_fields` lookup: its `remediation` and `do_not` are present and
-    # equal the served catalogue entry's, so the refusal carries the inline content
-    # the contract promises rather than a next step with nothing behind it
-    # (round 3, finding 1).
-    served = read_resource(f"{ERRORS_URI}/probe_inventory_incomplete")
-    assert served is not None
-    entry = json.loads(str(served["text"]))
-    assert result["remediation"] == entry["remediation"]
-    assert result["do_not"] == entry["do_not"]
-    # No file was written: nothing bound a board off the incomplete count.
-    with pytest.raises(ConfigError) as unwritten:
-        load_authoritative_config(workspace)
-    assert unwritten.value.error_type == "config_file_not_found"
+    assert result["ok"] is True, result
+    written = load_authoritative_config(workspace)
+    assert written.debuggers["dut"].probe_id == "066AFF303435554157113106"
+    # The same three fields the CLI path writes, in the file the agent will drive.
+    entry = yaml.safe_load(Path(written.config_path).read_text(encoding="utf-8"))["debuggers"]["dut"]
+    assert entry["discovered_by"] == "usb_serial_inventory"
+    assert entry["probe_inventory"] == "incomplete"
+    assert "no VCP" in entry["probe_inventory_note"]
+    assert result["hardware_discovery"]["probe_inventory"] == "incomplete"
+    # And the agent is told to report it, first.
+    assert "no VCP" in result["next_steps"][0]
+    assert "adopt-hardware --probe-id" in result["next_steps"][0]
+
+
+def test_naming_a_serial_this_host_cannot_see_is_still_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Binding the visible probe did not turn `probe_id` into a value discovery accepts (#423).
+
+    Selection chooses among what is attached and never adds to it, and that rule is
+    what keeps the caveat honest: `--probe-id` is the way to name a board the
+    inventory cannot see *once it can be seen*, not a way to write a serial nobody
+    read off a bus. A serial that is not in the enumeration is `adapter_not_found`,
+    naming the ones that are, on the same host where a bare call binds."""
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
+
+    # The bare call binds the visible probe on this very host.
+    assert discover_attached_hardware(profile=STARTER_PROFILE)["probe_id"] == "066AFF303435554157113106"
+
+    refused = discover_attached_hardware(probe_id="0669FF495451", profile=STARTER_PROFILE)
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "adapter_not_found"
+    assert refused.get("probe_id") is None
+    assert refused["requested_probe_id"] == "0669FF495451"
+    assert [found["probe_id"] for found in refused["probes"]] == ["066AFF303435554157113106"]
+    assert "does not add one" in refused["summary"]
 
 
 def test_project_config_create_regenerates_an_already_bound_openocd_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2268,29 +2293,27 @@ def test_project_config_create_regenerates_an_already_bound_openocd_config(tmp_p
 def test_the_unprovisioned_create_refusal_points_past_the_adopt_that_would_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The way out of an unprovisioned OpenOCD bootstrap has to be one that can run (round 2, finding 2).
 
-    A first `project_config_create` on a Linux/OpenOCD host refuses
-    `probe_inventory_incomplete` and writes no file. Pointing that refusal straight
-    at `agentic-hil adopt-hardware --probe-id` is a dead end: adoption loads the
-    authoritative configuration first, and an unprovisioned workspace has none, so
-    it answers `config_file_not_found` and, over MCP, redirects back to this same
-    tool. So the unprovisioned refusal names the sequence that reaches a bound
-    bench: write the placeholder with `agentic-hil init`, then adopt into it."""
+    A first `project_config_create` on a Linux/OpenOCD host whose USB serial
+    inventory saw no ST-Link refuses `probe_inventory_incomplete` and writes no
+    file. Pointing that refusal at `agentic-hil adopt-hardware` is a dead end:
+    adoption loads the authoritative configuration first, and an unprovisioned
+    workspace has none, so it answers `config_file_not_found` and, over MCP,
+    redirects back to this same tool. So the refusal names what can actually run
+    from here: attach a probe this host can see, which this call then binds on its
+    own, or install the vendor CLI for an authoritative count."""
     workspace = tmp_path / "server"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
-    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
+    _linux_openocd_host(monkeypatch, ports=[])
 
     result = project_config_create(workspace, None)
 
     assert result["ok"] is False, result
     assert result["error_type"] == "probe_inventory_incomplete"
-    # The sequence names `init` before `adopt-hardware`, so the operator is not
-    # sent to a command that cannot run without a file first.
-    assert "agentic-hil init" in result["next_step"]
-    assert "adopt-hardware --probe-id" in result["next_step"]
-    # `init` (which writes the file) comes before the `adopt-hardware --probe-id`
-    # that fills it, so the two steps run in an order that resolves the loop.
-    assert result["next_step"].index("agentic-hil init") < result["next_step"].index("adopt-hardware --probe-id")
+    # Nothing in the way out is a command that cannot run without a file first.
+    assert "adopt-hardware" not in result["next_step"]
+    assert "call this tool again" in result["next_step"]
+    assert "STM32CubeProgrammer" in result["next_step"]
     # Nothing was written.
     with pytest.raises(ConfigError) as unwritten:
         load_authoritative_config(workspace)
@@ -2343,44 +2366,35 @@ def test_an_empty_usb_inventory_is_a_blind_spot_not_an_absent_bench(tmp_path: Pa
 def test_the_empty_inventory_next_step_reaches_a_bound_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The empty-inventory placeholder's first next step has to reach a bound bench (round 3, finding 2).
 
-    On an OpenOCD-only host that saw no probe, `init` writes a placeholder whose
-    first next step used to say attach a VCP-publishing probe and run bare
-    `agentic-hil adopt-hardware`. But a probe attached after that is a single
-    reading off a USB inventory that is still `complete: false`, so bare adoption
-    refuses it `probe_inventory_incomplete` exactly as the empty read did: the
-    advertised command did not do what the result said. The step now names the
-    serial with `--probe-id`, and this follows it through: the placeholder, then
-    the refusing bare call, then the succeeding named one."""
+    On an OpenOCD-only host that saw no probe, `init` writes a placeholder, and its
+    first next step has to be a command that does what it says. It says: attach a
+    probe that publishes a virtual COM port and run `agentic-hil adopt-hardware`,
+    which binds the one this host then shows. This follows it through: the
+    placeholder, the probe, the bare call, and the bound bench."""
     workspace = tmp_path / "starter"
     workspace.mkdir()
     (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
     monkeypatch.chdir(workspace)
 
-    # Nothing visible: the placeholder, and its first next step names `--probe-id`
-    # rather than a bare adopt that would refuse.
+    # Nothing visible: the placeholder, whose first next step is neither "attach the
+    # bench" (the inventory cannot prove none is attached) nor a command that would
+    # refuse when followed.
     _linux_openocd_host(monkeypatch, ports=[])
     placeholder = init_config()
     assert placeholder["ok"] is True, placeholder
     assert placeholder["hardware_discovery"]["error_type"] == "probe_inventory_incomplete"
-    assert "adopt-hardware --probe-id" in placeholder["next_steps"][0]
+    assert "Attach the bench" not in placeholder["next_steps"][0]
+    assert "run `agentic-hil adopt-hardware`" in placeholder["next_steps"][0]
     assert load_authoritative_config(workspace).debuggers["dut"].probe_id is None
 
     def openocd_reads_the_target(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
         return CompletedCommand(OPENOCD_TARGETS_OUTPUT, "", 0, False, False)
 
-    # A VCP-publishing probe is attached, exactly as the step described. It is now
-    # visible, but a lone reading off this inventory is still not a complete count,
-    # so the bare adoption the old wording sent the operator to refuses it and
-    # binds nothing.
+    # A VCP-publishing probe is attached, exactly as the step described, and the
+    # bare adoption the step names binds it.
     _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP], spawn=openocd_reads_the_target)
     bare = adopt_hardware(com_port_id="dut_uart")
-    assert bare["ok"] is False, bare
-    assert bare["error_type"] == "probe_inventory_incomplete"
-    assert load_authoritative_config(workspace).debuggers["dut"].probe_id is None
-
-    # Naming the now-visible serial is what binds it, which is what the step says.
-    named = adopt_hardware(com_port_id="dut_uart", probe_id="066AFF303435554157113106")
-    assert named["ok"] is True, named
+    assert bare["ok"] is True, bare
     assert load_authoritative_config(workspace).debuggers["dut"].probe_id == "066AFF303435554157113106"
 
 
@@ -2392,8 +2406,11 @@ def test_the_incomplete_inventory_error_is_in_the_reference_contract() -> None:
     catalogue entry: a meaning, an ordered fix and the wrong fix, served as its own
     reference resource. That the public refusal merges those same fields inline,
     rather than carrying a bare `next_step`, is asserted against this entry where
-    the `project_config_create` refusal and the empty-inventory discovery are
-    produced (round 3, finding 1)."""
+    the empty-inventory discovery is produced (round 3, finding 1). The entry
+    describes the reading it is actually raised for -- an inventory that saw no
+    ST-Link -- and says in as many words that a sole visible probe is bound rather
+    than refused, so an agent does not take this refusal for a rule about one probe
+    (#423)."""
     fields = remediation_fields("probe_inventory_incomplete")
     assert fields["remediation"], fields
     assert fields["do_not"], fields
@@ -2403,26 +2420,42 @@ def test_the_incomplete_inventory_error_is_in_the_reference_contract() -> None:
     entry = json.loads(str(served["text"]))
     assert entry["error_type"] == "probe_inventory_incomplete"
     assert entry["meaning"].strip()
+    # The empty and the ambiguous readings, not the sole-probe one.
+    assert "showed no ST-Link at all" in entry["meaning"]
+    assert "one visible ST-Link is bound" in entry["meaning"]
+    assert "ambiguous_hardware" in entry["meaning"]
     fix = " ".join(entry["remediation"])
     assert "adopt-hardware --probe-id" in fix
     assert "STM32CubeProgrammer" in fix
     assert any("adapter_not_found" in step or "absent bench" in step for step in entry["do_not"])
+    assert any("a rule against binding a single probe" in step for step in entry["do_not"])
 
 
-def test_the_bootstrap_discovery_reference_states_the_explicit_selection_rule() -> None:
-    """The reference an agent consults has to describe the refusal it will meet (round 2, finding 4).
+def test_the_bootstrap_discovery_reference_states_the_sole_probe_rule() -> None:
+    """The reference an agent consults has to describe what it will actually meet (round 2, finding 4; #423).
 
-    The USB serial inventory path produces an OpenOCD entry only on an explicit
-    selection, never off the incomplete count alone. An agent that reads this
-    resource before it reads a generated file has to find that stated, rather than
-    meeting `probe_inventory_incomplete` at the tool with nothing to explain it."""
+    An agent that reads this resource before it reads a generated file has to find
+    all four halves of the USB path stated: the one visible probe is bound, the
+    blind spot is named on the result and in the file rather than swallowed,
+    `probe_id` is for the bench carrying a probe this enumeration cannot reach, and
+    STM32CubeProgrammer is what supplies an authoritative count. Otherwise a
+    `probe_inventory: incomplete` in a configuration, or a
+    `probe_inventory_incomplete` at the tool, arrives with nothing to explain it."""
     served = read_resource(DEBUGGER_BACKENDS_URI)
     assert served is not None
     rule = json.loads(str(served["text"]))["bootstrap_discovery"]
     incomplete = rule["usb_serial_inventory_is_not_a_complete_count"]
-    assert "probe_inventory_incomplete" in incomplete
+    # One visible probe binds, and the reading it binds off is still `complete: false`.
+    assert "Exactly one visible ST-Link is bound" in incomplete
     assert "complete: false" in incomplete
+    # The blind spot is named on the result and in the generated entry.
+    assert "probe_inventory: incomplete" in incomplete
+    assert "discovered_by: usb_serial_inventory" in incomplete
+    # The two ways past it, and the one reading that still refuses.
     assert "probe_id" in incomplete
+    assert "STM32CubeProgrammer" in incomplete
+    assert "probe_inventory_incomplete" in incomplete
+    assert "ambiguous_hardware" in incomplete
 
 
 def test_an_enumerated_stlink_is_never_reported_as_an_absent_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

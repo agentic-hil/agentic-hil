@@ -1423,21 +1423,23 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     ),
     "probe_inventory_incomplete": ErrorRemedy(
         meaning=(
-            "Bootstrap discovery would not bind a probe off a count it cannot prove complete. STM32CubeProgrammer is "
-            "not installed, so probes are enumerated from this host's USB serial inventory, which reaches an ST-Link "
-            "only through the virtual COM port a V2-1 or a V3 publishes. A standalone ST-LINK/V2, or any probe that "
-            "exposes no VCP, can be attached and never appear, so an empty reading is not proof no probe is connected "
-            "and a sole visible one is not proof it is the only one. Selecting a board off that reading would be a "
-            "silent choice a later flash or reset trusts, and the caveat rides the discovery answer rather than the "
-            "configuration the choice is written into, so `project_config_create` refuses and `agentic-hil init` writes "
-            "an unbound placeholder instead of binding one."
+            "Bootstrap discovery found no probe to bind and cannot say the bench is empty. STM32CubeProgrammer is not "
+            "installed, so probes are enumerated from this host's USB serial inventory, which reaches an ST-Link only "
+            "through the virtual COM port a V2-1 or a V3 publishes, and that inventory showed no ST-Link at all. A "
+            "standalone ST-LINK/V2, or any probe that exposes no VCP, can be attached and never appear there, so this "
+            "reading is a blind spot rather than proof that nothing is connected: `adapter_not_found` would be a claim "
+            "about hardware this enumeration cannot see. `project_config_create` writes nothing and `agentic-hil init` "
+            "writes an unbound placeholder. It is only ever the empty reading: one visible ST-Link is bound and carries "
+            "`probe_inventory: incomplete` into the result and the generated file, and two or more are "
+            "`ambiguous_hardware`."
         ),
         remediation=(
-            "Name the intended board's serial as probe_id: `agentic-hil adopt-hardware --probe-id <serial>` binds it, "
-            "and the serials this host can see are under `probes` (and from `agentic-hil debugger-probes`). Over MCP on "
-            "a workspace with no configuration yet, ask the operator to run `agentic-hil init` first, which writes the "
-            "unbound placeholder that adoption then fills, because `agentic-hil adopt-hardware` loads an existing "
-            "configuration and there is none to load.",
+            "Attach a probe that publishes a virtual COM port and run the discovery again: the one ST-Link this "
+            "inventory then shows is bound on its own, with the incomplete count recorded on the entry it writes. "
+            "`agentic-hil debugger-probes` and `agentic-hil com-ports` show what this host can currently see.",
+            "Where the bench has a probe this inventory cannot reach, name the intended board's serial instead: "
+            "`agentic-hil adopt-hardware --probe-id <serial>` binds it, on a workspace that already has a "
+            "configuration for adoption to fill.",
             "Or install STM32CubeProgrammer for an authoritative count: its own listing reads the serial off the probe "
             "directly rather than through a virtual COM port, so it sees a VCP-less ST-LINK/V2 the inventory cannot, "
             "then run the generation again.",
@@ -1446,9 +1448,9 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not read this as `adapter_not_found` or an absent bench. An empty inventory here is a blind spot, not a "
             "proof that no probe is attached: a VCP-less ST-LINK/V2 could be plugged in right now, so reseating or "
             "re-attaching hardware that is already there is the wrong move.",
-            "Do not bind the sole visible serial as though the count were complete. A VCP-less probe beside the one the "
-            "inventory saw would be the board a later flash or reset silently reaches, which is exactly the choice this "
-            "refusal exists to keep an operator, not the tool, from making.",
+            "Do not read it as a rule against binding a single probe. One visible ST-Link is bound off this same "
+            "inventory and the incomplete count travels with it; this refusal is about a reading with nothing in it to "
+            "bind, and a second probe with no virtual COM port is what `--probe-id` is for.",
         ),
     ),
     "debugger_command_rejected:openocd": ErrorRemedy(
@@ -2719,12 +2721,18 @@ BOOTSTRAP_DISCOVERY_RULE = {
     "usb_serial_inventory_is_not_a_complete_count": (
         "This inventory reaches an ST-Link only through the virtual COM port a V2-1 or a V3 publishes, so a standalone "
         "ST-LINK/V2 -- or any probe with no VCP -- can be attached and never appear: `complete: false`, an empty "
-        "reading is not proof no probe is connected, and a sole visible one is not proof it is the only one. So the "
-        "generated OpenOCD entry is bound only on an explicit selection, never inferred from this count alone: name the "
-        "serial as probe_id (which `select_probe_id` still checks against the inventory), or install STM32CubeProgrammer "
-        "for an authoritative count. Without one of those, discovery refuses `probe_inventory_incomplete`: "
-        "`project_config_create` writes nothing and `agentic-hil init` writes an unbound placeholder rather than "
-        "committing a board a later flash or reset would trust."
+        "reading is not proof no probe is connected, and a sole visible one is not proof it is the only one. Exactly "
+        "one visible ST-Link is bound anyway, because that is the ordinary OpenOCD-only bench and it has to reach a "
+        "working configuration from `agentic-hil init` alone; what the incomplete count buys is a caveat rather than a "
+        "refusal. The discovery result and the generated entry carry `discovered_by: usb_serial_inventory`, "
+        "`probe_inventory: incomplete` and the sentence naming what this enumeration cannot see, and the `init` and "
+        "`project_config_create` reports say it in a step of their own. Where a probe this inventory cannot reach is "
+        "attached beside the visible one, name the intended board as probe_id (which `select_probe_id` still checks "
+        "against the inventory, so a serial this host cannot see is refused `adapter_not_found` rather than added); "
+        "where an authoritative count is what matters, install STM32CubeProgrammer, whose listing reads the serial off "
+        "the probe itself. Two or more visible probes stay `ambiguous_hardware`. Only a reading that saw no ST-Link at "
+        "all refuses `probe_inventory_incomplete`, because it has nothing to bind and cannot report an absent bench "
+        "either: `project_config_create` writes nothing and `agentic-hil init` writes an unbound placeholder."
     ),
     "target_identity_without_the_cli": (
         "The workspace profile's `target.controller` when it names one, which is exact and says nothing to the board; "

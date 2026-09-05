@@ -21,7 +21,12 @@ from agentic_hil.adopt import (
 )
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.bench import BenchMutex, DeviceBusyError, validated_wait
-from agentic_hil.bootstrap import DEFAULT_PROJECT_PROFILE, apply_discovery_to_template, discover_attached_hardware
+from agentic_hil.bootstrap import (
+    DEFAULT_PROJECT_PROFILE,
+    apply_discovery_to_template,
+    bound_off_incomplete_inventory,
+    discover_attached_hardware,
+)
 from agentic_hil.can import CanBusService
 from agentic_hil.comports import ComPortService
 from agentic_hil.config import (
@@ -2643,32 +2648,23 @@ def _create_discovery_next_step(discovery: JsonObject, current: AgenticHILConfig
 
     Discovery's own `next_step` is right wherever it points at a command that can
     run from here. The one place it does not is `probe_inventory_incomplete` on a
-    workspace with no configuration yet: that refusal offers `agentic-hil
-    adopt-hardware --probe-id <serial>`, but `adopt-hardware` begins by loading the
-    authoritative configuration, and an unprovisioned workspace has none, so
-    following it lands on `config_file_not_found` and, over MCP, redirects straight
-    back to this tool -- a loop rather than a step (review round 2, finding 2). A
-    workspace that already has a file (a placeholder an earlier `init` wrote) can
-    adopt into it, so its refusal's own next step stands. Only the unprovisioned
-    case is rewritten to the operator sequence that actually reaches a bound bench:
-    write the placeholder with `agentic-hil init`, then bind the intended board into
-    it, or install the vendor CLI for an authoritative count.
+    workspace with no configuration yet: that refusal is written for an operator at
+    a shell, and it says "run this again", which over MCP means this tool and not a
+    command. It is also the one refusal that must never send this caller to
+    `agentic-hil adopt-hardware`, which begins by loading the authoritative
+    configuration: an unprovisioned workspace has none, so following it would land
+    on `config_file_not_found` and redirect straight back to this tool -- a loop
+    rather than a step (review round 2, finding 2). So the unprovisioned case is
+    rewritten to what actually reaches a bound bench from here: attach a probe this
+    host's inventory can see, which this call then binds on its own, or install the
+    vendor CLI for an authoritative count.
     """
     if current is None and discovery.get("error_type") == "probe_inventory_incomplete":
-        if discovery.get("probes"):
-            return (
-                "This workspace has no configuration yet, so `agentic-hil adopt-hardware` has nothing to adopt into and "
-                "would report `config_file_not_found`. Ask the operator to run `agentic-hil init`, which writes an "
-                "unbound placeholder from this same read, and then `agentic-hil adopt-hardware --probe-id <serial>` to "
-                "bind the board this project is about -- the serials this host can see are under `probes` and from "
-                "`agentic-hil debugger-probes`. Or ask them to install STM32CubeProgrammer for an authoritative probe "
-                "count and call this tool again. Nothing was written."
-            )
         return (
-            "This workspace has no configuration yet, and this host's USB serial inventory saw no ST-Link to name, so "
-            "there is no serial to bind. Ask the operator to install STM32CubeProgrammer for an authoritative probe "
-            "count, or to attach a probe that publishes a virtual COM port, then call this tool again. Nothing was "
-            "written."
+            "This workspace has no configuration yet, and this host's USB serial inventory saw no ST-Link at all, so "
+            "there is no serial to bind. Ask the operator to attach a probe that publishes a virtual COM port, which "
+            "this call then binds on its own, or to install STM32CubeProgrammer for an authoritative probe count, then "
+            "call this tool again. Nothing was written."
         )
     return str(discovery.get("next_step") or "Attach exactly one supported probe and target, then call this tool again. Nothing was written.")
 
@@ -2826,7 +2822,7 @@ def _project_config_create(
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "cleanup_required": False,
-        "next_steps": _generated_next_steps(written, created=created, narrowed=narrowed),
+        "next_steps": _generated_next_steps(written, created=created, narrowed=narrowed, discovery=discovery),
         **_unaudited_read_note(unaudited),
     }
     return result if status is None else with_config_status(result, status)
@@ -3344,7 +3340,7 @@ def _generated_document(workspace: Path, state_root: Path, discovery: JsonObject
     }
 
 
-def _generated_next_steps(config: AgenticHILConfig, *, created: bool, narrowed: list[str]) -> list[str]:
+def _generated_next_steps(config: AgenticHILConfig, *, created: bool, narrowed: list[str], discovery: JsonObject) -> list[str]:
     granted = (
         "that every permission in it is granted except the two that are false so that flashing works"
         if not narrowed
@@ -3379,6 +3375,18 @@ def _generated_next_steps(config: AgenticHILConfig, *, created: bool, narrowed: 
             "MCP server before relying on anything this rewrite changed, and note that the permissions just written "
             "came from that same loaded state, so any permission narrowed with `project_config_set` since this server "
             "started is granted again in the file now on disk."
+        )
+    # A board bound off this host's USB serial inventory says so, first, and in the
+    # same words `agentic-hil init` uses for the same read. The file carries the
+    # matching `probe_inventory` and `discovered_by` on the entry, so an agent
+    # reporting this and a person reading the configuration later are told the same
+    # thing about how the probe was chosen (#423).
+    inventory_caveat = bound_off_incomplete_inventory(discovery)
+    if inventory_caveat is not None:
+        steps.insert(
+            0,
+            f"Report this to the operator: {inventory_caveat} The same is recorded in the file under "
+            f"`debuggers.{config.debugger_id or '<name>'}.probe_inventory` and `.discovered_by`.",
         )
     return steps
 

@@ -87,7 +87,7 @@ agentic-hil setup --agent claude-code                  # or: codex / opencode
 agentic-hil doctor
 ```
 
-`doctor` checks the configuration against the attached bench and names what it finds (a missing toolchain, an unreachable probe, a target type this host cannot resolve) before anything is flashed. If the board arrived after `setup` ran, `agentic-hil adopt-hardware` fills in the probe serial, the backend executable and the COM device it left unset (`--dry-run` shows the plan first). On an OpenOCD-only host that USB serial inventory is not a complete count, so name the visible serial with `agentic-hil adopt-hardware --probe-id <serial>`; a bare `adopt-hardware` there refuses `probe_inventory_incomplete` rather than binding off it, and STM32CubeProgrammer's authoritative count is what lets the sole board bind on its own.
+`doctor` checks the configuration against the attached bench and names what it finds (a missing toolchain, an unreachable probe, a target type this host cannot resolve) before anything is flashed. If the board arrived after `setup` ran, `agentic-hil adopt-hardware` fills in the probe serial, the backend executable and the COM device it left unset (`--dry-run` shows the plan first). On a host with OpenOCD and no STM32CubeProgrammer the probe is read from the host's own USB serial inventory, so a lone attached ST-Link binds without anybody retyping its serial; `--probe-id <serial>` names the board where a second probe that publishes no virtual COM port is attached beside it.
 
 With the MCP host started from that directory, the agent drives four calls:
 
