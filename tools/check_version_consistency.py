@@ -179,12 +179,17 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     # `setup`. It is a capability floor and must not follow the release: raising
     # it would reject installations that are new enough.
     "AI_AGENT_QUICKSTART.md": "capability floor, deliberately not the current release",
-    # These two name, in prose, the release a defect shipped in, so a reader can
+    # These name, in prose, the release a defect shipped in, so a reader can
     # tell which behaviour the test pins and why it exists. Naming that release
     # is the point; following the current one would erase the history the
-    # comment records. Neither file pins a version anything installs against.
+    # comment records. None of them pins a version anything installs against.
     "tests/fixtures/fake_openocd.py": "prose reference to the release a defect shipped in",
     "tests/test_agentic_hil.py": "prose reference to the release a defect shipped in",
+    # The configuration skew tests name the release that added the three
+    # debugger keys and the older one that met them, which is the whole subject
+    # of the refusal they pin. Moving either to the current release would leave
+    # a test about version skew with no skew in it.
+    "tests/test_config_skew.py": "prose reference to the release a configuration field arrived in",
     # The container proof's comment names the release from which agent-install
     # accepts a home-directory cwd (#235), so a reader knows why the line is
     # typed in $HOME rather than a made-up subdirectory. Prose about a behaviour,

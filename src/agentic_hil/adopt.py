@@ -85,6 +85,7 @@ from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
     CONFIG_NAMED_SECTIONS,
     CONFIG_SHAPE_URI,
+    permission_key,
     remediation_fields,
 )
 from agentic_hil.report import (
@@ -276,7 +277,40 @@ def _choose_com_port(document: JsonObject, requested: str | None, port_names: tu
 # The plan.
 
 
-def _propose(carried: list[JsonObject], already: list[JsonObject], kept: list[JsonObject], *, key: str, section: str, field: str, current: Any, value: Any) -> None:
+_KEPT_REASON = (
+    "This key holds a value that is neither empty nor the placeholder the skeleton writes, so somebody set it. "
+    "Adoption does not replace it."
+)
+
+# Why the configured controller wins over a discovered one, said where the
+# comparison is made rather than left for the reader to work out.
+# `target.controller` names the part this project drives; a read of the board
+# through OpenOCD names the target script that answered, which is a family
+# covering every part in it (`stm32f4x` for an `stm32f446ret6`). So a discovered
+# controller that differs from the configured one is the ordinary case on such a
+# bench and not a disagreement about which board is attached, and the general
+# "somebody set it" left an operator comparing two spellings with nothing saying
+# which of them is the more specific (#442).
+_KEPT_CONTROLLER_REASON = (
+    "`target.controller` names the part this project drives, and what a read of the board reports is the target "
+    "script that answered, which is a family rather than a part. The configured value is the more specific of the "
+    "two and was written by somebody holding the board, so adoption keeps it and a family name beside it is not a "
+    "disagreement about which board this is."
+)
+
+
+def _propose(
+    carried: list[JsonObject],
+    already: list[JsonObject],
+    kept: list[JsonObject],
+    *,
+    key: str,
+    section: str,
+    field: str,
+    current: Any,
+    value: Any,
+    kept_reason: str = _KEPT_REASON,
+) -> None:
     """Sort one field into carried, already current, or left alone."""
     if value is None or (isinstance(value, str) and not value.strip()):  # pragma: no cover - callers filter empty discoveries
         return
@@ -290,7 +324,7 @@ def _propose(carried: list[JsonObject], already: list[JsonObject], kept: list[Js
                 "key": key,
                 "configured_value": current,
                 "discovered_value": value,
-                "reason": "This key holds a value that is neither empty nor the placeholder the skeleton writes, so somebody set it. Adoption does not replace it.",
+                "reason": kept_reason,
             }
         )
 
@@ -552,7 +586,17 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
                 }
             )
     elif controller:
-        _propose(carried, already, kept, key="target.controller", section="target", field="controller", current=_mapping(document, "target").get("controller"), value=controller)
+        _propose(
+            carried,
+            already,
+            kept,
+            key="target.controller",
+            section="target",
+            field="controller",
+            current=_mapping(document, "target").get("controller"),
+            value=controller,
+            kept_reason=_KEPT_CONTROLLER_REASON,
+        )
 
     matched_port = discovery.get("com_port") if isinstance(discovery.get("com_port"), dict) else None
     device = port_device_name(matched_port) if matched_port and matched_port.get("device") else None
@@ -948,19 +992,23 @@ def _read_denied(existing: AgenticHILConfig, debugger_id: str, target_path: Path
             f"Reading debugger '{debugger_id}' is disabled by allow_probe in this version {existing.config_version} "
             "configuration, and carrying hardware in means reading it. Nothing was read and nothing was written."
         ),
-        "permission": "allow_probe",
-        "permission_key": f"debuggers.{debugger_id}.permissions.allow_probe",
+        # One key, under the name every permission refusal on this surface uses.
+        # `permission_key` is the older spelling of the same fact and is kept
+        # beside it rather than moved, because it is already published.
+        "permission": permission_key("debuggers", debugger_id, "allow_probe"),
+        "permission_key": permission_key("debuggers", debugger_id, "allow_probe"),
         "debugger_id": debugger_id,
         "config_version": existing.config_version,
         "path": str(target_path),
         "workspace_root": existing.workspace_root,
         "next_step": (
-            "This refusal is the answer to the request. Report it and name the permission that is denied, then stop. "
-            "You must not enable it, and you must not read the probe another way. Migrating this file to version 2 "
-            "(where reading needs no grant) is the operator's edit."
+            "This refusal is the answer to the request. Report it and name the permission that is denied, "
+            f"`{permission_key('debuggers', debugger_id, 'allow_probe')}`, then stop. You must not enable it, and you "
+            "must not read the probe another way. Migrating this file to version 2 (where reading needs no grant) is "
+            "the operator's edit."
         ),
         "reference": CONFIG_SHAPE_URI,
-        **remediation_fields("permission_denied"),
+        **remediation_fields("permission_denied", permission=permission_key("debuggers", debugger_id, "allow_probe")),
         **NOT_STARTED,
         "retry_safe": False,
     }

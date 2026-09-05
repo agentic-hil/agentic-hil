@@ -21,11 +21,16 @@ comes back as something readable rather than as a wall of braces.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import textwrap
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
-from agentic_hil.knowledge import command_line_remediation, remediation_fields
+from agentic_hil.knowledge import (
+    READ_VALIDATION_NEXT_STEP,
+    command_line_remediation,
+    remediation_fields,
+)
 from agentic_hil.report import conclusive_success
 from agentic_hil.types import JsonObject
 
@@ -61,6 +66,11 @@ _HANDLED_EVERYWHERE = frozenset({"ok", "tool", "summary", "next_step", "next_ste
 # it into a key/value row turns a stack of `error:` lines into one unreadable
 # strip, which is the same as not printing it.
 _PROCESS_OUTPUT_KEYS = frozenset({"stdout", "stderr"})
+# What a refusal prints above its Details rather than among them. A sentence
+# saying whose words the captured block is has to come before the block, and a
+# key/value row of prose in the middle of the fields is neither before it nor
+# readable.
+_RENDERED_BEFORE_DETAILS = frozenset({"manager_hint_note"})
 # How much captured output a report prints before it says it is cutting. A
 # manager that fails writes a handful of lines and a build that fails writes
 # thousands, and the line that names the cause sits at either end of them, so
@@ -99,6 +109,7 @@ def write_rendered(stream: object, text: str) -> None:
 
 def _render_lines(result: JsonObject, command: str | None) -> list[str]:
     result = _audit_errors_where_they_happened(result)
+    result = _one_error_type_answered_once(result)
     if _error_type(result):
         # A refusal is rendered the same way for every command: the error type
         # names it, the summary says what happened, and the catalogue says what
@@ -273,6 +284,31 @@ def _audit_errors_where_they_happened(result: JsonObject) -> JsonObject:
     return elsewhere if all(_holds(elsewhere, error) for error in errors) else result
 
 
+def _one_error_type_answered_once(result: JsonObject) -> JsonObject:
+    """Drop a nested finding's error type where it is the enclosing refusal's own.
+
+    A refused test plan carries the reason twice by design: `error_type` at the
+    top and the finding's own `error_type` inside `validation_error`, so a
+    caller reading either field gets one answer. Both derive their advice from
+    the same catalogue entry, so a rendering that asked twice printed the
+    identical numbered list and the identical `do_not` block one under the
+    other, which is the #387 defect in a second place.
+
+    Only a copy is dropped, and only the one furthest from what explains it: the
+    headline already names the type, `step_error_type` repeats it in the rows,
+    and a nested finding whose type differs from the enclosing refusal's is a
+    second fact and keeps its own advice. Nothing is taken out of the document,
+    which is rendered from a copy.
+    """
+    error_type = _error_type(result)
+    nested = result.get("validation_error")
+    if not error_type or not isinstance(nested, Mapping) or nested.get("error_type") != error_type:
+        return result
+    if _strings(nested.get("remediation")) or _strings(nested.get("do_not")):
+        return result
+    return {**result, "validation_error": {key: value for key, value in nested.items() if key != "error_type"}}
+
+
 def _holds(node: object, needle: JsonObject) -> bool:
     """Whether ``needle`` already stands somewhere inside ``node``, by value."""
     if isinstance(node, Mapping):
@@ -296,7 +332,7 @@ def _member_lines(key: str, value: object, indent: str) -> list[str]:
     if isinstance(value, Mapping) and value:
         body = _nested_mapping(value, indent + _INDENT)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and value and not _renderable_scalar(value):
-        body = _nested_sequence(value, indent + _INDENT)
+        body = _sequence_lines(key, value, indent + _INDENT)
     else:
         return []
     return [f"{indent}{key}", *body] if body else []
@@ -342,6 +378,17 @@ def _entries(value: object) -> list[JsonObject]:
     return [dict(item) for item in value if isinstance(item, Mapping)] if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) else []
 
 
+def _named(entry: Mapping[str, object], *names: str) -> object:
+    """The first of these keys the entry actually carries, or None.
+
+    For a rendering that has to read a producer's field under more than one
+    spelling. `in` rather than a chain of `get` defaults, because a key that is
+    present and holds `None` is the absent value it says it is rather than a
+    reason to fall through to the next name.
+    """
+    return next((entry[name] for name in names if name in entry), None)
+
+
 def _strings(value: object) -> list[str]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [_flat(item) for item in value if isinstance(item, (str, int, float))]
@@ -365,20 +412,21 @@ def _verdict(result: Mapping[str, object]) -> str:
 
 # The markers that make the exit-code verdict false over a result whose own `ok`
 # is true: a call that reached the hardware and could not say what it left
-# behind, or a discovery that answered but disclaims its own completeness
-# (`complete: false`, which the exit code takes through `conclusive_success`).
-_CONTAINMENT_MARKERS = ("cleanup_required", "quarantined", "quarantine_id", "audit_ok", "target_ok", "cleanup_ok", "side_effect_status", "hardware_state", "lease_state", "complete")
+# behind. `complete` is not one of them and was: an enumeration that states how
+# far it reaches says something about the enumeration rather than about this run
+# of it, the summary already says it in words, and scoring it here put "did not
+# come back clean" over a discovery that worked (#445).
+_CONTAINMENT_MARKERS = ("cleanup_required", "quarantined", "quarantine_id", "audit_ok", "target_ok", "cleanup_ok", "side_effect_status", "hardware_state", "lease_state")
 
 
 def _containment(result: JsonObject) -> list[str]:
     """Name a result that says `ok` and is not clean, because the exit code will.
 
     `conclusive_success` is the verdict the exit code is taken from, and it is not
-    `ok` alone: a quarantine, an audit that could not be written, an effect this
-    bench cannot account for, or an enumeration that reports itself incomplete. A
-    rendering that printed only the summary would show a person a calm sentence
-    beside an exit code of 1, which is the one disagreement this layer must never
-    introduce.
+    `ok` alone: a quarantine, an audit that could not be written, or an effect
+    this bench cannot account for. A rendering that printed only the summary
+    would show a person a calm sentence beside an exit code of 1, which is the
+    one disagreement this layer must never introduce.
     """
     if result.get("ok") is not True or conclusive_success(dict(result)):
         return []
@@ -419,6 +467,92 @@ def _tail(result: JsonObject) -> list[str]:
 # to ask about the same entry or they answer out of two.
 _REMEDY_SCOPE_KEYS = ("field", "backend", "adapter", "permission", "tool")
 
+# What a person at a shell types to do what a tool does. One catalogue serves
+# both surfaces, so a step reading "call debugger_probes_list" is right for the
+# agent and names something that does not exist in an operator's shell. The
+# document is untouched: this is the rendering saying the same move in the
+# reader's own vocabulary, and only where the two are the same move with the
+# same inputs. A command with arguments the tool does not take, or a tool with
+# arguments the command does not take, is not an entry here.
+_CLI_COMMANDS = {
+    "debugger_probes_list": "agentic-hil debugger-probes",
+    "project_config_adopt_hardware": "agentic-hil adopt-hardware",
+    "server_upgrade": "agentic-hil upgrade",
+    "test_reactor_run": "agentic-hil test-reactor",
+    "test_reactor_status": "agentic-hil test-reactor-status",
+    "test_reactor_stop": "agentic-hil test-reactor-stop",
+}
+
+# Every other tool this project's remediation names, and none of them is
+# rewritten. Three reasons, and each name here has one of them:
+#
+# * the hardware and session tools, the report readers and `bench_run_*`: an
+#   agent's vocabulary with no command line behind it at all. A step naming one
+#   is telling an agent what to do next, and there is nothing else to call it.
+# * `project_config_set`, `project_config_describe` and
+#   `project_config_reload_description`: the command line has `grant`, `revoke`
+#   and `config-reload`, and not one of them is the same move. `grant` writes
+#   one named permission, `config-reload` reports what a running server would
+#   take from the file and reloads nothing.
+# * `project_config_create` and `hardware_recover`: a command exists
+#   (`agentic-hil init`, `agentic-hil recover`) and the catalogue already names
+#   it where it means it. `config_file_not_found` carries one ordering per
+#   reader and the shell reader's opens with `agentic-hil init`;
+#   `unsafe_configured_path` names both spellings in one sentence on purpose;
+#   and the `hardware_recover` step is about `operator_statement`, which is a
+#   tool argument the command does not have.
+#
+# The guard over this file reads both collections together: a tool the catalogue
+# starts recommending has to be put in one of them, so nobody has to notice.
+_TOOLS_KEEPING_THEIR_NAME = frozenset({
+    "bench_run_start",
+    "bench_run_status",
+    "bench_run_stop",
+    "can_buses_list",
+    "can_read",
+    "can_send",
+    "can_session_stop",
+    "classify_last_error",
+    "com_session_stop",
+    "debug_continue",
+    "debug_dump_symbol_ihex",
+    "debug_get_stop_reason",
+    "debug_stop_session",
+    "debug_symbol_info",
+    "debug_symbol_value",
+    "debugger_info",
+    "flash_firmware",
+    "get_last_report",
+    "hardware_recover",
+    "probe_target",
+    "project_config_create",
+    "project_config_describe",
+    "project_config_reload_description",
+    "project_config_set",
+    "reset_target",
+})
+
+# The tool name as it is written in prose, with or without the backticks the
+# catalogue puts around it, and never as part of a longer identifier.
+_TOOL_MENTION = re.compile(r"`?\b(" + "|".join(sorted(_CLI_COMMANDS)) + r")\b`?")
+
+
+def _in_the_readers_words(step: str) -> str:
+    """One remediation step, with every tool name it recommends spelled as the
+    command that does it.
+
+    A step that names the MCP surface is left exactly as it is. Those steps are
+    not advice a reader translates: they say which surface the move is on, and
+    `config_file_not_found` carries one for each reader in the same entry, so
+    rewriting the agent's step into the operator's command would leave a
+    sentence that says "over MCP" about a shell command.
+    """
+    return step if "MCP" in step else _TOOL_MENTION.sub(lambda match: f"`{_CLI_COMMANDS[match.group(1)]}`", step)
+
+
+def _for_the_reader(steps: Sequence[str], command_line: bool) -> list[str]:
+    return [_in_the_readers_words(step) for step in steps] if command_line else list(steps)
+
 
 def _command_line_order(result: JsonObject, steps: Sequence[str]) -> list[str]:
     """The catalogue's ordering for a person at a shell, where it has one.
@@ -445,27 +579,73 @@ def _remediation(result: JsonObject, *, command_line: bool = False) -> tuple[lis
     `permission_denied` from a tool surface, say -- carries neither, and the
     catalogue still knows the answer, so it is looked up rather than left out.
 
-    `command_line` says a person typed a command to get here, which for a
-    refusal whose readers have different first moves decides which of the
-    catalogue's two orderings is printed. It changes no step and drops none:
-    `command_line_remediation` reorders the entry's own steps or declines.
+    `command_line` says a person typed a command to get here, and it decides two
+    things: which of the catalogue's two orderings is printed, for a refusal
+    whose readers have different first moves, and whether a tool this project
+    also ships a command for is named as that command. It changes no step and
+    drops none: `command_line_remediation` reorders the entry's own steps or
+    declines, and the rewriting is one name for another name for one move.
+
+    The rewriting is last, after the ordering, because the ordering is the
+    catalogue's own and is matched against the catalogue's own text: a step
+    already translated would no longer be one of the entry's, and
+    `command_line_remediation` would decline to order a list it could not
+    recognise.
     """
     steps = _strings(result.get("remediation"))
     avoid = _strings(result.get("do_not"))
     if steps or avoid:
-        return (_command_line_order(result, steps) if command_line else steps), avoid
+        ordered = _command_line_order(result, steps) if command_line else steps
+        return _for_the_reader(ordered, command_line), _for_the_reader(avoid, command_line)
     error_type = _error_type(result) or None
+    # The one substitution the catalogue cannot make for itself: which permission
+    # a refusal is about is a fact about this refusal. Passed in so the advice
+    # names the key the reader has to move rather than the generic shape of one
+    # (#443), and so an entry written around that key declines to answer for a
+    # `permission_denied` that names none.
+    permission = result.get("permission")
     for key in _REMEDY_SCOPE_KEYS:
         scope = result.get(key)
-        catalogue = remediation_fields(error_type, scope if isinstance(scope, str) else None)
+        catalogue = remediation_fields(
+            error_type,
+            scope if isinstance(scope, str) else None,
+            permission=permission if isinstance(permission, str) and permission else None,
+        )
         if catalogue:
             found = _strings(catalogue.get("remediation"))
-            return (_command_line_order(result, found) if command_line else found), _strings(catalogue.get("do_not"))
+            ordered = _command_line_order(result, found) if command_line else found
+            return _for_the_reader(ordered, command_line), _for_the_reader(_strings(catalogue.get("do_not")), command_line)
     return [], []
 
 
 # ---------------------------------------------------------------------------
 # The refusal, and the generic fallback every command gets for free.
+
+
+def _work_was_done(result: Mapping[str, object]) -> bool:
+    """Whether this document is about a call that actually ran something.
+
+    A refusal is a statement that nothing happened: no step ran, nothing on the
+    bench moved, and the fix is the caller's before there is anything to read
+    about the hardware. A plan that flashed the board, opened the port, reset it,
+    read it and then did not meet its comparator is the opposite of that, and it
+    arrives here through the same door because it is `ok: false` and carries an
+    `error_type`. Heading it `Refused:` puts the word that means "your setup is
+    wrong" over the deliberate red run a starter project ships.
+
+    Two fields answer it, and both are about what the run did rather than about
+    what it concluded: a non-empty `steps` list, which the reactor writes one
+    record into per executed step and leaves empty for every plan refused at
+    preflight, and `side_effect_committed`, which a single call sets when it has
+    left something behind. `failed_step` is deliberately not one of them: a plan
+    refused at preflight carries it too, naming the step whose *text* is wrong,
+    so reading it as evidence of execution would call every schema error a failed
+    test run.
+    """
+    if result.get("side_effect_committed") is True:
+        return True
+    steps = result.get("steps")
+    return isinstance(steps, Sequence) and not isinstance(steps, (str, bytes)) and bool(steps)
 
 
 def render_refusal(result: JsonObject, command: str | None = None) -> list[str]:
@@ -476,20 +656,66 @@ def render_refusal(result: JsonObject, command: str | None = None) -> list[str]:
     nothing about the refusal itself; the only thing it reaches is which of the
     catalogue's orderings the steps are printed in, for the refusals that carry
     one for each reader.
+
+    The heading is the run's own outcome word where the run had one. Everything
+    under it is identical either way: the same summary, the same details, the
+    same remediation, in the same order. Only the first word moves, because it
+    is the one a reader takes the whole document's meaning from.
     """
     error_type = _error_type(result)
-    lines = [f"Refused: {error_type}", ""]
+    lines = [f"{'Failed' if _work_was_done(result) else 'Refused'}: {error_type}", ""]
     lines.extend(_wrap(_summary(result) or "The command was refused.", indent=_INDENT))
     meaning = result.get("meaning")
     if isinstance(meaning, str) and meaning.strip():
         lines.append("")
         lines.extend(_wrap(meaning, indent=_INDENT))
+    lines.extend(_relayed_manager_text(result))
     lines.extend(_section("Details", _refusal_details(result)))
     steps, avoid = _remediation(result, command_line=command is not None)
+    steps = _without_absent_pointers(result, steps)
     lines.extend(_section("What to do", _numbered(steps)))
     lines.extend(_section("Do not", _bullets(avoid)))
     lines.extend(_tail(result))
     return lines
+
+
+def _without_absent_pointers(result: JsonObject, steps: Sequence[str]) -> list[str]:
+    """Drop advice that points at a field this refusal does not carry.
+
+    One step, exactly: `test_config_invalid` opens by sending the reader to
+    `validation_error.next_step`, which is the right first move for the refusal
+    that has one and an instruction to read nothing for the refusal that has
+    not. A plan refused for a session it never opened carries no such field, and
+    the line printed all the same.
+
+    This is the one thing a renderer may take out of a refusal, and it is not a
+    change to what the refusal says: the step is a pointer at a field, and the
+    field is not there. Everything else the catalogue writes is printed as
+    written, which is why the sentence is matched against the catalogue's own
+    constant rather than against a copy kept here.
+    """
+    validation_error = result.get("validation_error")
+    pointed_at = validation_error.get("next_step") if isinstance(validation_error, Mapping) else None
+    if isinstance(pointed_at, str) and pointed_at.strip():
+        return list(steps)
+    return [step for step in steps if step != READ_VALIDATION_NEXT_STEP]
+
+
+def _relayed_manager_text(result: JsonObject) -> list[str]:
+    """Whose words the captured output below is, printed before the operator reads it.
+
+    A refusal prints the manager's own output as the manager wrote it, and that
+    is right: the operator reads their own machine's words. What it printed
+    unlabelled was uv's hint to reinstall from the bare distribution, sitting in
+    `install.stderr` among this program's own fields and contradicted by a
+    Do-not bullet several lines further down. The document says whose text it is
+    in `manager_hint_note`, and this puts that sentence above the block rather
+    than after it.
+    """
+    note = result.get("manager_hint_note")
+    if not isinstance(note, str) or not note.strip():
+        return []
+    return ["", *_wrap(note, indent=_INDENT)]
 
 
 def _refusal_details(result: JsonObject) -> list[str]:
@@ -504,7 +730,7 @@ def _refusal_details(result: JsonObject) -> list[str]:
     captured streams are printed as the process wrote them. It stays a report:
     rows first, then the objects that need a body, and never a dump of braces.
     """
-    rows, bodies = _members({key: value for key, value in result.items() if key not in _HANDLED_EVERYWHERE})
+    rows, bodies = _members({key: value for key, value in result.items() if key not in _HANDLED_EVERYWHERE and key not in _RENDERED_BEFORE_DETAILS})
     lines = _fields(rows)
     for key, value in bodies:
         lines.extend(_member_lines(key, value, _INDENT))
@@ -536,7 +762,7 @@ def render_generic(result: JsonObject) -> list[str]:
         elif isinstance(value, Mapping):
             blocks.extend(_section(key, _nested_mapping(value)))
         elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and value:
-            blocks.extend(_section(key, _nested_sequence(value)))
+            blocks.extend(_section(key, _sequence_lines(key, value, _INDENT)))
     if scalars:
         lines.append("")
         lines.extend(_fields(scalars))
@@ -560,6 +786,68 @@ def _nested_mapping(value: Mapping[str, object], indent: str = _INDENT) -> list[
     for key, item in bodies:
         lines.extend(_member_lines(key, item, indent))
     return lines
+
+
+# What makes one entry of a host's serial-port inventory a port somebody
+# plugged in. A USB serial device publishes a vendor id, a product id and, on
+# the adapters this project cares about, a serial number; a chipset UART
+# publishes none of them and is declared by the kernel whether or not anything
+# is attached to it. A Linux host lists 32 of those as a matter of course.
+_USB_IDENTITY_KEYS = ("vid", "pid", "serial_number")
+# The key a host inventory is carried under, wherever it stands: on its own as
+# `agentic-hil com-ports`, and nested under `available_com_ports` in every
+# refusal that says what the host does have.
+_PORT_INVENTORY_KEY = "ports"
+
+
+def _sequence_lines(key: str, value: Sequence[object], indent: str) -> list[str]:
+    """A list, rendered by whatever this key means, and unfolded when it means nothing."""
+    inventory = _host_port_inventory(key, value)
+    return _port_inventory_lines(inventory, indent) if inventory else _nested_sequence(value, indent)
+
+
+def _host_port_inventory(key: str, value: Sequence[object]) -> list[JsonObject]:
+    """``value`` as a host serial-port inventory, or [] when it is not one.
+
+    Keyed on the name *and* checked against the shape, because `ports` is also
+    what `com_ports_list` calls the configured entries, which is a mapping and
+    not this, and because a caller may put anything under any name. Every entry
+    naming a device is the shape this renderer knows how to shorten; one entry
+    that does not is enough to render the whole list the ordinary way.
+    """
+    if key != _PORT_INVENTORY_KEY:
+        return []
+    entries = _entries(value)
+    return entries if len(entries) == len(value) and all(str(entry.get("device") or "") for entry in entries) else []
+
+
+def _port_inventory_lines(entries: Sequence[JsonObject], indent: str) -> list[str]:
+    """The ports that can be identified, then a count of the ones that cannot.
+
+    A refusal about an unknown probe serial on a Linux host was 196 lines, 130
+    of them `/dev/ttyS*` entries reading `description n/a`, printed before the
+    one ST-Link the reader was looking for. Nothing is hidden: the collapsed
+    line says how many there were and which names they ran between, and `--json`
+    is untouched, so the document a caller parses still carries every port.
+
+    The order the host gave is kept inside each group. It is the order the
+    inventory was read in, and the collapsed line describes a stretch of that
+    list rather than a claim about numbering.
+    """
+    identified = [entry for entry in entries if any(entry.get(name) not in (None, "") for name in _USB_IDENTITY_KEYS)]
+    plain = [entry for entry in entries if entry not in identified]
+    lines = _nested_sequence(identified, indent) if identified else []
+    if plain:
+        lines.extend(_wrap(_collapsed_ports(plain), indent=f"{indent}- ", hanging=f"{indent}  "))
+    return lines
+
+
+def _collapsed_ports(entries: Sequence[JsonObject]) -> str:
+    """The one line that stands for every port with no USB identity on it."""
+    devices = [_flat(entry.get("device")) for entry in entries]
+    if len(devices) == 1:
+        return f"1 legacy serial port without a USB identity ({devices[0]}) not listed"
+    return f"{len(devices)} legacy serial ports without a USB identity ({devices[0]} to {devices[-1]}) not listed"
 
 
 def _nested_sequence(value: Sequence[object], indent: str = _INDENT) -> list[str]:
@@ -620,13 +908,25 @@ def _result_lines(value: Mapping[str, object], indent: str = _INDENT) -> list[st
 
 
 def _result_body(value: Mapping[str, object], indent: str) -> list[str]:
-    """Everything a nested result carries under its own opening sentence."""
+    """Everything a nested result carries under its own opening sentence.
+
+    Its `next_step` included, which is where the specific answer lives. A plan
+    refused for naming a COM port this bench does not have carries the exact
+    `agentic-hil adopt-hardware` line under `validation_error.next_step`, and
+    the rendering printed every other field of that object and dropped that one,
+    while the advice above it opened by telling the reader to go and read it
+    (#446). `_tail` prints the same field at the top level; this is the same
+    rule one level in, and it stands under the facts for the same reason.
+    """
     error_type = _error_type(value)
     lines = _fields([("error_type", error_type)], indent=indent) if error_type else []
     rows, bodies = _members({key: item for key, item in value.items() if key not in _HANDLED_EVERYWHERE})
     lines.extend(_fields(rows, indent=indent))
     for key, item in bodies:
         lines.extend(_member_lines(key, item, indent))
+    next_step = value.get("next_step")
+    if isinstance(next_step, str) and next_step.strip():
+        lines.extend(_wrap(next_step, indent=indent))
     if error_type:
         steps, avoid = _remediation(dict(value))
         lines.extend(_numbered(steps, indent=indent + _INDENT))
@@ -811,6 +1111,44 @@ def render_agent_install(result: JsonObject) -> list[str]:
     return lines
 
 
+def _installation_shape_lines(result: JsonObject) -> list[str]:
+    """What this installation is made of, and the one line that rebuilds it.
+
+    The pin note names `reinstall_command` as the line to run, says in words
+    what it carries and what running uv's own bare hint instead would cost, and
+    the rendering printed none of those fields: the only `uv tool install` on
+    the screen was uv's hint, inside the captured output, under a paragraph
+    telling the reader not to run that one. Measured on a bench, and true of
+    every field the pin work added, `newest_release` among them, which
+    TROUBLESHOOTING.md sends a reader to look at.
+
+    The refusals were never affected, because `render_refusal` prints every key
+    a result carries; this is the success side of the same outcomes.
+    """
+    body = _fields(
+        [
+            ("installed_extras", result.get("installed_extras")),
+            ("with_packages", result.get("with_packages")),
+            ("recorded_python", result.get("recorded_python")),
+            ("reinstall_command", result.get("reinstall_command")),
+        ]
+    )
+    held = _strings(result.get("held_back_by"))
+    if held:
+        body.extend(_wrap("Held where it is by what this installation's own receipt records:", indent=_INDENT))
+        body.extend(_bullets(held, indent=_INDENT * 2))
+    not_replayed = _entries(result.get("with_packages_not_replayed"))
+    if not_replayed:
+        body.extend(_wrap("Recorded beside this distribution and not carried by that line:", indent=_INDENT))
+        body.extend(
+            _bullets(
+                [f"{entry.get('requirement', 'a requirement')}, recorded under {entry.get('receipt_key', 'a member a --with cannot spell')}" for entry in not_replayed],
+                indent=_INDENT * 2,
+            )
+        )
+    return _section("This installation", body)
+
+
 def render_upgrade(result: JsonObject) -> list[str]:
     lines = _headline(result)
     lines.append("")
@@ -822,9 +1160,13 @@ def render_upgrade(result: JsonObject) -> list[str]:
                 ("manager", result.get("manager")),
                 ("command", result.get("command")),
                 ("upgraded_on_disk", result.get("upgraded_on_disk")),
+                ("already_current", result.get("already_current")),
+                ("newest_release", result.get("newest_release")),
+                ("pinned_version", result.get("pinned_version")),
             ]
         )
     )
+    lines.extend(_installation_shape_lines(result))
     refreshed = _entries(result.get("refreshed"))
     if refreshed:
         lines.extend(_section("Agent integrations refreshed", _steps_block({str(entry.get("agent", "agent")): entry for entry in refreshed})))
@@ -1137,9 +1479,26 @@ def render_adopt_hardware(result: JsonObject) -> list[str]:
         lines.extend(_section("Already match the attached hardware", _bullets([str(item.get("key", "key")) for item in already])))
     kept = _entries(result.get("kept"))
     if kept:
+        # The names `adopt.py` writes are `configured_value` and
+        # `discovered_value`, and this read them under two spellings it never
+        # writes: every comparison a person came here to see rendered as
+        # "configured not set, attached not set" while the same plan's JSON
+        # carried both values, which told an operator a key was empty while it
+        # held the value that decided the comparison (#442). The older spellings
+        # stay in the lookup so a document written by another producer still
+        # renders its values rather than the same two blanks.
+        #
+        # The verdict is on the row as well as in the heading above it. "Left
+        # alone" says a decision was taken; which of the two values survives it
+        # is the thing the operator has to act on, and the entry's own `reason`
+        # says why that one, so it is printed rather than dropped.
         body: list[str] = []
         for item in kept:
-            body.extend(_fields([(str(item.get("key", "key")), f"configured {_scalar(item.get('configured', item.get('value')))}, attached {_scalar(item.get('discovered', item.get('attached')))}")]))
+            configured = _scalar(_named(item, "configured_value", "configured", "value"))
+            discovered = _scalar(_named(item, "discovered_value", "discovered", "attached"))
+            body.extend(_fields([(str(item.get("key", "key")), f"configured {configured}, attached {discovered}, adoption keeps {configured}")]))
+            body.extend(_wrap(item.get("reason", ""), indent=_INDENT * 2))
+            body.extend(_wrap(item.get("next_step", ""), indent=_INDENT * 2))
         lines.extend(_section("Left alone, because somebody set them", body))
     unavailable = _entries(result.get("unavailable"))
     if unavailable:
@@ -1162,10 +1521,17 @@ def render_debugger_probes(result: JsonObject) -> list[str]:
     # enumeration that produced these ids is this host's USB serial inventory
     # rather than anything OpenOCD ran. A reader deciding whether a serial was
     # read off the probe or off the descriptor it published needs that on screen.
+    #
+    # `complete` with them, as one more thing this listing says about itself. It
+    # used to reach a person only through the containment block, which printed it
+    # under "this did not come back clean" beside an exit code of 1; the exit code
+    # no longer says that and the field still has to be on screen, because how far
+    # an enumeration reaches is exactly what a reader counting probes needs (#445).
     header = _fields([
         ("source", result.get("source")),
         ("backend", result.get("backend")),
         ("discovered_by", result.get("discovered_by")),
+        ("complete", result.get("complete")),
         ("quarantine_id", result.get("quarantine_id")),
     ])
     if header:

@@ -28,12 +28,24 @@ class ProcessImage:
     where the platform did not report one. It exists so a parent link can be
     checked: a pid is reused once its process exits, and a "parent" younger
     than its child is a different process that inherited the number.
+
+    ``launch_arguments`` are the first two arguments the process was started
+    with, and ``virtual_env`` is the ``VIRTUAL_ENV`` its environment carries.
+    Both exist because ``image`` alone cannot say which installation a process
+    on a POSIX host belongs to: a virtual environment's ``bin/python`` is a
+    symlink to the system interpreter, so ``/proc/<pid>/exe`` resolves outside
+    the environment for every process that environment starts. Only the first
+    two arguments are kept, because those are the two an interpreter can be
+    named by, and a whole command line is somebody's private argument list this
+    has no reason to hold. Both are empty on a host that does not publish them.
     """
 
     pid: int
     parent_pid: int
     image: str
     created_ns: int = 0
+    launch_arguments: tuple[str, ...] = ()
+    virtual_env: str = ""
 
 
 @dataclass
@@ -610,23 +622,236 @@ def _close_windows_handle(handle: int) -> None:
 def snapshot_process_images() -> tuple[ProcessImage, ...] | None:
     """Every running process this user can query, with its executable image.
 
-    ``None`` means "this platform has no answer here", which is every platform
-    but Windows. That is not a gap: the caller is asking in order to find out
-    whether replacing an installed file would fail, and only Windows refuses to
-    delete a file that is mapped as a running image. Elsewhere the old file is
-    unlinked while the process that runs it keeps its own copy alive.
+    ``None`` means "this platform has no answer here", and it is not the same
+    as an empty tuple: the caller distinguishes "nothing is running out of that
+    installation" from "this host cannot say".
+
+    Two different callers ask, and the second is why this is no longer a
+    Windows-only answer. One asks in order to find out whether replacing an
+    installed file would fail, which is a Windows question: only there is a file
+    mapped as a running image undeletable, and elsewhere the old file is
+    unlinked while the process that runs it keeps its own copy alive. The other
+    asks in order to *name* the processes that keep that old copy, and that is a
+    question on every platform, because a server running out of an installation
+    goes on answering with the release it imported wherever it runs. Linux
+    answers it out of ``/proc``; a POSIX host without ``/proc`` still answers
+    ``None``, and there a result simply carries no list.
 
     Processes that cannot be opened are left out rather than guessed at. They
     belong to another user or are protected by the system, so they cannot be
     running out of this user's local installation.
     """
-    if os.name != "nt":
+    if os.name == "nt":
+        try:
+            return _windows_process_images()
+        except OSError:
+            # A snapshot that could not be taken must not read as "nothing holds
+            # this". The caller distinguishes None from an empty tuple.
+            return None
+    if not os.path.isdir(_PROC):
         return None
     try:
-        return _windows_process_images()
+        return _proc_process_images()
     except OSError:
-        # A snapshot that could not be taken must not read as "nothing holds
-        # this". The caller distinguishes None from an empty tuple.
+        return None
+
+
+# Where a Linux host publishes its process table. Named once, because the three
+# readers below all reach into it and a test that points them somewhere else
+# points them all at the same place.
+_PROC = "/proc"
+# 1601-01-01 to 1970-01-01 in seconds. ``ProcessImage.created_ns`` is Windows
+# FILETIME ticks because that is the unit the platform that has this problem
+# hands out, so the POSIX reader converts into it rather than each caller
+# learning two units.
+_FILETIME_EPOCH_OFFSET_S = 11644473600
+_FILETIME_TICKS_PER_SECOND = 10_000_000
+
+
+def filetime_epoch_seconds(created_ns: int) -> float | None:
+    """``created_ns`` as ordinary Unix seconds, or None when it is not a start time.
+
+    Zero is what both readers write when the platform did not answer with a
+    creation time, and anything at or below the Unix epoch is the same kind of
+    value: no process running right now started before 1970, so a tick count
+    that converts to a moment before it came from somewhere other than a clock.
+    Both answer None rather than a date, because a field an operator reads as a
+    fact about their machine has to have come from their machine. The floor is
+    not a nicety: on Windows such a value raises out of ``fromtimestamp`` and is
+    dropped by accident, and on Linux the same value converts happily and gets
+    printed, which is a difference between two hosts in what a result claims.
+    """
+    if created_ns <= _FILETIME_EPOCH_OFFSET_S * _FILETIME_TICKS_PER_SECOND:
+        return None
+    return created_ns / _FILETIME_TICKS_PER_SECOND - _FILETIME_EPOCH_OFFSET_S
+
+
+def _proc_process_images() -> tuple[ProcessImage, ...]:
+    """The process table as Linux publishes it, for the processes this user owns.
+
+    ``/proc/<pid>/exe`` is the executable, and reading it is also the permission
+    check: a process belonging to another user answers ``PermissionError``, which
+    is the same "cannot be opened, so it is not ours" the Windows reader applies.
+    The start time comes out of ``/proc/<pid>/stat`` and ``/proc/stat``, never
+    out of the process directory's own timestamps: procfs stamps those inode
+    times when the entry is first looked up, so a server up for hours reported
+    itself as having started at the moment ``agentic-hil upgrade`` stat'ed it,
+    inside the very sentence that tells the operator whether that server predates
+    the last upgrade. Measured: a ``sleep 120`` started 6.26 seconds earlier
+    answered "created 0.0 s ago".
+    """
+    boot_time = _boot_time_epoch_seconds()
+    images: list[ProcessImage] = []
+    for name in os.listdir(_PROC):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        try:
+            image = os.readlink(f"{_PROC}/{pid}/exe")
+        except OSError:
+            continue
+        started = _proc_started_epoch_seconds(pid, boot_time)
+        images.append(
+            ProcessImage(
+                pid=pid,
+                parent_pid=_proc_parent_pid(pid),
+                image=image,
+                # Zero where the real start could not be read, which
+                # ``filetime_epoch_seconds`` drops rather than rendering: a
+                # start time an operator reads as a fact about their machine has
+                # to have come from their machine.
+                created_ns=int((started + _FILETIME_EPOCH_OFFSET_S) * _FILETIME_TICKS_PER_SECOND) if started is not None else 0,
+                launch_arguments=_proc_launch_arguments(pid),
+                virtual_env=_proc_virtual_env(pid),
+            )
+        )
+    return tuple(images)
+
+
+# How much of ``cmdline`` and ``environ`` is read. Both are NUL-separated lists
+# and only their beginning is wanted, so this bounds the work per process
+# without changing what can be found: an argument list longer than this has its
+# first two arguments well inside it, and an environment block longer than this
+# is one where ``VIRTUAL_ENV`` may fall outside and simply is not found, which
+# is the same answer as a host that does not publish it.
+_PROC_READ_LIMIT = 65536
+
+
+def _proc_launch_arguments(pid: int) -> tuple[str, ...]:
+    """The first two arguments this process was started with, or none of them.
+
+    ``/proc/<pid>/cmdline`` is NUL-separated, and the same ``OSError`` tolerance
+    the ``exe`` read gets applies: a process this user may not look into is a
+    process with nothing to say here, not a failure.
+    """
+    try:
+        with open(f"{_PROC}/{pid}/cmdline", "rb") as handle:
+            raw = handle.read(_PROC_READ_LIMIT)
+    except OSError:
+        return ()
+    return tuple(part.decode("utf-8", "replace") for part in raw.split(b"\0") if part)[:2]
+
+
+def _proc_virtual_env(pid: int) -> str:
+    """The ``VIRTUAL_ENV`` this process carries, or empty where it carries none.
+
+    The environment block is NUL-separated like ``cmdline`` and is readable only
+    for this user's own processes, which is exactly the set a local
+    installation's servers are in; anything else answers ``PermissionError`` and
+    is left alone.
+    """
+    try:
+        with open(f"{_PROC}/{pid}/environ", "rb") as handle:
+            raw = handle.read(_PROC_READ_LIMIT)
+    except OSError:
+        return ""
+    for item in raw.split(b"\0"):
+        if item.startswith(b"VIRTUAL_ENV="):
+            return item[len(b"VIRTUAL_ENV=") :].decode("utf-8", "replace")
+    return ""
+
+
+def _boot_time_epoch_seconds() -> float | None:
+    """When this host booted, in Unix seconds, or None where that cannot be read.
+
+    ``/proc/stat``'s ``btime`` line, read once per snapshot rather than once per
+    process: every ``starttime`` below is an offset from it, so a table of two
+    hundred processes reads one file instead of two hundred.
+    """
+    try:
+        with open(f"{_PROC}/stat", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("btime "):
+                    return float(line.split(None, 1)[1].strip())
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _proc_started_epoch_seconds(pid: int, boot_time: float | None) -> float | None:
+    """When one process started, in Unix seconds, or None where that is unreadable.
+
+    Field 22 of ``/proc/<pid>/stat`` is ``starttime``, the clock ticks since boot
+    at which the process began, so boot time plus that is the moment it started
+    and it does not move for the life of the process.
+
+    Split on the last ``)`` rather than on whitespace, because field 2 is the
+    command name in parentheses and a program is free to have spaces and
+    parentheses in its own: a reader that splits the whole line gets the wrong
+    field for exactly the processes whose names are worth reading carefully,
+    which is the same rule ``_proc_parent_pid`` follows. After that split the
+    remaining fields begin at field 3, so ``starttime`` is index 19.
+    """
+    if boot_time is None:
+        return None
+    try:
+        with open(f"{_PROC}/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+            fields = handle.read().rsplit(")", 1)[1].split()
+        ticks = float(fields[19])
+        clock_ticks_per_second = os.sysconf("SC_CLK_TCK")
+    except (AttributeError, IndexError, OSError, ValueError):
+        return None
+    if clock_ticks_per_second <= 0:
+        return None
+    return boot_time + ticks / clock_ticks_per_second
+
+
+def _proc_parent_pid(pid: int) -> int:
+    """The parent this process claims, or 0 where it could not be read.
+
+    Out of ``status`` rather than ``stat``: the fourth field of ``stat`` is the
+    parent, but the second is a command name that may itself contain spaces and
+    parentheses, and a reader that splits on whitespace gets the wrong field for
+    exactly the processes whose names are worth reading carefully.
+    """
+    try:
+        with open(f"{_PROC}/{pid}/status", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("PPid:"):
+                    return int(line.split(":", 1)[1].strip() or 0)
+    except (OSError, ValueError):
+        return 0
+    return 0
+
+
+def process_working_directory(pid: int) -> str | None:
+    """Where one process is running, or None where that cannot be read.
+
+    Asked only about the few processes a caller has already decided are its own,
+    never about the whole table: it is one syscall per process on Linux and it is
+    unanswerable on Windows without opening the process and walking its address
+    space, which is not something a report about an upgrade should be doing.
+
+    It is what makes a list of pids usable. Two Agentic HIL servers on one
+    machine are told apart by the project each of them was started for, and the
+    working directory is that project's directory for every host that starts an
+    MCP server the documented way.
+    """
+    if os.name == "nt":
+        return None
+    try:
+        return os.readlink(f"{_PROC}/{pid}/cwd")
+    except OSError:
         return None
 
 

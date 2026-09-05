@@ -146,9 +146,10 @@
           "type": "string",
           "enum": [
             "agent",
-            "human"
+            "human",
+            "cli"
           ],
-          "description": "Who made the most recent field-wise change. Written by project_config_set: \"agent\" when the change came over MCP, \"human\" when a person ran a command such as agentic-hil adopt-hardware. Editing this file by hand leaves it as it was, which is itself the signal that the recorded change is not the newest one."
+          "description": "Who made the most recent field-wise change, as far as the write could tell. Written by project_config_set: \"agent\" when the change came over MCP, \"human\" when a command such as agentic-hil grant or agentic-hil adopt-hardware ran with a person at an interactive terminal, and \"cli\" for the same commands run with no terminal, which is a shell script, a CI step or a provisioning tool and is not a claim about a person. last_modified_via names the command either way. Editing this file by hand leaves it as it was, which is itself the signal that the recorded change is not the newest one."
         },
         "last_modified_via": {
           "type": "string",

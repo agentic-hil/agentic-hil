@@ -19,7 +19,13 @@ from agentic_hil.coordination import (
     HardwareLease,
 )
 from agentic_hil.devices import VOLATILE_SERIAL_DEVICE_WARNING, uart_device
-from agentic_hil.knowledge import COM_PORT_BUSY_ERROR, remediation_fields
+from agentic_hil.knowledge import (
+    COM_PORT_BUSY_ERROR,
+    permission_denied_fields,
+    permission_denied_summary,
+    permission_key,
+    remediation_fields,
+)
 from agentic_hil.provisional import (
     cleanup_provisional_handles,
     discharge_provisional_handle,
@@ -902,7 +908,7 @@ class ComPortService:
         # made allow_write without allow_read a grant that could never be used.
         port_permissions = port["port_config"].permissions
         if not self.config.com_read_allowed(port["port_config"]) and not port_permissions.allow_write:
-            return self._write_report(self._permission_denied("com_session_start", "Reading and writing this COM port are disabled by the authoritative config.", port_id))
+            return self._write_report(self._permission_denied("com_session_start", "Reading and writing this COM port are disabled by the authoritative config.", port_id, "allow_read"))
         if clear_buffer and not self.config.com_read_allowed(port["port_config"]):
             # Clearing drains the receive buffer, which is a read.
             clear_buffer = False
@@ -1060,7 +1066,7 @@ class ComPortService:
         if not port["ok"]:
             return port
         if not port["port_config"].permissions.allow_write:
-            return self._permission_denied(tool, "Writing to this COM port is disabled by the authoritative config.", port_id)
+            return self._permission_denied(tool, "Writing to this COM port is disabled by the authoritative config.", port_id, "allow_write")
         session_result = self._active_session(port_id, tool)
         if not session_result["ok"]:
             return session_result
@@ -1145,7 +1151,7 @@ class ComPortService:
         if not port["ok"]:
             return port
         if not self.config.com_read_allowed(port["port_config"]):
-            return self._permission_denied(tool, "Reading this COM port is disabled by the authoritative config.", port_id)
+            return self._permission_denied(tool, "Reading this COM port is disabled by the authoritative config.", port_id, "allow_read")
         session_result = self._active_session(port_id, tool)
         if session_result["ok"]:
             session = session_result["session"]
@@ -1543,10 +1549,21 @@ class ComPortService:
             return write_report(self.config, {**written, **lease.status(), "ok": False, "cleanup_required": True, "summary": "COM lease release remained unconfirmed."})
         return recommit_report_with_status(self.config, written, lease.status())
 
-    def _permission_denied(self, tool: str, summary: str, port_id: str | None = None) -> JsonObject:
+    def _permission_denied(self, tool: str, summary: str, port_id: str | None = None, permission: str | None = None) -> JsonObject:
+        """A refusal one permission caused, carrying which one and what to do.
+
+        `permission` is the dotted key the file uses and `agentic-hil grant`
+        takes, built off the entry's own name. It is named in the summary as
+        well as carried as a field, because an agent asked to report the
+        permission it was denied reads the summary out (#443)."""
         result: JsonObject = {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
         if port_id:
             result["port_id"] = port_id
+        if permission:
+            key = permission_key("com_ports", port_id, permission)
+            result["summary"] = permission_denied_summary(summary, key)
+            result.update(permission_denied_fields(key))
+            result.update(remediation_fields("permission_denied", permission=key))
         return result
 
 

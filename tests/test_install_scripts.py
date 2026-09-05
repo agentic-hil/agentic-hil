@@ -64,6 +64,35 @@ CALM_LINE = (
     "The next start of your agent has everything, and the first hardware question "
     "creates this project's configuration."
 )
+# The other closing sentence, for the run that replaced an installation instead
+# of creating one. The calm line above is written for somebody meeting this tool
+# for the first time, and it was printed unchanged after a refresh from one
+# release to the next, on a host that already had four project configurations.
+REFRESH_LINE = (
+    "This installation was refreshed in place, and your project configurations were not touched. Any agentic-hil "
+    "MCP server still running keeps answering with the release it started with, so restart the agent CLIs that "
+    "started one to pick this installation up."
+)
+# And the third and fourth, for the two runs that kept what was already here. The
+# refresh sentence was printed on both: a run that had just said "nothing to
+# install, the development installation stays as it is" closed on having
+# refreshed this installation in place, and so did a run that met `Nothing to
+# upgrade`. Measured on a bench.
+KEPT_DEVELOPMENT_LINE = (
+    "The development installation already on this PATH was kept and nothing was installed over it, and your "
+    "project configurations were not touched. Nothing moved to a newer release, so no agentic-hil MCP server is "
+    "behind this installation and none of them needs restarting on account of this run."
+)
+# The version this one names comes out of the run, so the shared text is the rest
+# of the sentence. It covers the anchor run too, where the same release is written
+# again over a copy that had stopped working: the files moved, the release did
+# not, and what a running server is or is not behind is the question this
+# sentence answers.
+KEPT_CURRENT_TAIL = (
+    "the release it was already on, and your project configurations were not touched. Nothing moved to a newer "
+    "release, so no agentic-hil MCP server is behind this installation and none of them needs restarting on "
+    "account of this run."
+)
 # The plural form of the restart block. Step 5 names every running agent CLI
 # rather than the first one found: a warning that names one is read as clearing
 # the others, and the operator who had two open restarted only one.
@@ -376,6 +405,139 @@ def test_both_scripts_name_every_running_agent_cli_not_the_first() -> None:
 def test_both_scripts_carry_the_same_calm_closing_sentence() -> None:
     for name, source in _both_sources().items():
         assert CALM_LINE in source, name
+
+
+def test_both_scripts_carry_the_same_closing_sentence_for_a_refresh() -> None:
+    """Four closing sentences, one per outcome, identical in both scripts.
+
+    The calm line is an answer about what happens next, and after a refresh
+    there is a different thing to say: the installation on disk moved, and every
+    server already running has not. Each script decides between them on the same
+    facts, and the first-install flag is its own rather than the install mode's,
+    because the development branch installs nothing at all and is still a machine
+    that already has this tool.
+
+    A run that kept what was here says so, and says which kind of keeping it was.
+    The refresh sentence stood for every run that was not a first install, so a
+    run that had just printed "nothing to install, the development installation
+    stays as it is" closed on having refreshed this installation in place.
+    """
+    for name, source in _both_sources().items():
+        assert REFRESH_LINE in source, name
+        assert KEPT_DEVELOPMENT_LINE in source, name
+        assert KEPT_CURRENT_TAIL in source, name
+    shell = SHELL_SCRIPT.read_text(encoding="utf-8")
+    powershell = POWERSHELL_SCRIPT.read_text(encoding="utf-8")
+    assert 'FIRST_INSTALL=1\n    step 1 "probe: no agentic-hil on this PATH' in shell
+    assert 'if [ "$FIRST_INSTALL" -eq 1 ]; then' in shell
+    assert 'elif [ "$NEEDS_PACKAGE" -eq 0 ]; then' in shell
+    assert 'elif [ -n "$RESOLVED_VERSION" ] && [ "$RESOLVED_VERSION" = "${installed:-}" ]; then' in shell
+    assert 'RESOLVED_VERSION=$("$AGENTIC_HIL_CMD" --version 2>/dev/null) || RESOLVED_VERSION=""' in shell
+    assert "$FirstInstall = $true\n    Write-Step 1 'probe: no agentic-hil on this PATH" in powershell
+    assert "if ($FirstInstall) {" in powershell
+    assert "} elseif (-not $needsPackage) {" in powershell
+    assert "} elseif ($ResolvedVersion -and $ResolvedVersion -eq $installed) {" in powershell
+
+
+def _closing_sentence_run(tmp_path: Path, *, installed_version: str, manager_version: str | None) -> str:
+    """One shell run over a machine that already has `installed_version`.
+
+    `manager_version` is what the fresh copy in the manager's own bin answers, or
+    None for a run where step 2 installs nothing at all, which is the development
+    branch. Everything else is the ordinary stub bench the other flow tests use.
+    """
+    shell = _posix_shell()
+    home = tmp_path / "home"
+    project = home / "project"
+    user_bin = home / ".local" / "bin"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, user_bin, uv_bin, tools):
+        directory.mkdir(parents=True)
+
+    answer = 'case "$1" in\n  --version) echo "%s" ;;\n  agent-install) printf \'{\\n  "ok": true\\n}\\n\' ;;\nesac\nexit 0\n'
+    _stub_executable(user_bin / "agentic-hil", answer % installed_version)
+    _stub_executable(tools / "claude", "exit 0\n")
+    # The heredoc is unquoted, so every `$` the stub body carries has to reach
+    # the written file escaped or the outer shell expands it while writing.
+    escaped = (answer % manager_version).replace("$", "\\$") if manager_version is not None else ""
+    writes = (
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        f"{escaped}"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        if manager_version is not None
+        else ""
+    )
+    _stub_executable(
+        tools / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n  echo "$UV_TOOL_BIN_DIR"\n  exit 0\nfi\n' + writes + "exit 0\n",
+    )
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-can"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={"HOME": str(home), "PATH": f"{tools}:{user_bin}:/usr/bin:/bin", "UV_TOOL_BIN_DIR": str(uv_bin)},
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    return transcript
+
+
+def test_a_run_that_kept_a_development_installation_does_not_claim_a_refresh(tmp_path: Path) -> None:
+    """Measured on a bench: two sentences that contradict each other, in one run.
+
+    `sh install.sh` with a development installation on this PATH printed
+    "package: nothing to install, the development installation stays as it is"
+    and closed on "This installation was refreshed in place". The closing
+    sentence follows what step 2 did.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    transcript = _closing_sentence_run(tmp_path, installed_version="0.99.0.dev3", manager_version=None)
+
+    assert "nothing to install, the development installation stays as it is" in transcript, transcript
+    assert KEPT_DEVELOPMENT_LINE in transcript, transcript
+    assert REFRESH_LINE not in transcript, transcript
+    assert CALM_LINE not in transcript, transcript
+
+
+def test_a_run_that_moved_nothing_says_the_installation_was_kept_at_its_version(tmp_path: Path) -> None:
+    """The same on the other keeping run: the manager had nothing to upgrade.
+
+    Step 2 asked the manager to reinstall and the version did not move, so
+    nothing on disk is a release ahead of what any running server imported. The
+    closing sentence said the installation had been refreshed in place.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    transcript = _closing_sentence_run(tmp_path, installed_version="99.0.0", manager_version="99.0.0")
+
+    assert f"This installation stayed at 99.0.0, {KEPT_CURRENT_TAIL}" in transcript, transcript
+    assert REFRESH_LINE not in transcript, transcript
+
+
+def test_a_run_that_moved_the_version_still_closes_on_the_refresh_sentence(tmp_path: Path) -> None:
+    """The neighbouring behaviour: a version that moved is a refresh and says so."""
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    transcript = _closing_sentence_run(tmp_path, installed_version="0.11.0", manager_version="99.0.0")
+
+    assert REFRESH_LINE in transcript, transcript
+    assert KEPT_DEVELOPMENT_LINE not in transcript, transcript
+    assert KEPT_CURRENT_TAIL not in transcript, transcript
 
 
 def test_the_shell_script_parses_in_a_posix_shell() -> None:
@@ -1854,6 +2016,92 @@ def _run_uv_refresh(
     )
     invocations = uv_log.read_text(encoding="utf-8") if uv_log.is_file() else ""
     return result, invocations, receipt, pycan_marker, marker
+
+
+def test_a_first_install_still_closes_on_the_sentence_written_for_one(tmp_path: Path) -> None:
+    """The neighbouring run, unchanged: nothing here yet, so nothing to say about a restart.
+
+    Somebody on this machine has never used this tool, has no project
+    configuration and has no server running out of anything, and the calm line
+    is exactly right for them. It is the run the refresh sentence must not
+    reach."""
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, uv_bin, tools):
+        directory.mkdir(parents=True)
+
+    _stub_executable(
+        tools / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  echo "$UV_TOOL_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "99.0.0" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-can", "--no-agent-install"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin", "UV_TOOL_BIN_DIR": str(uv_bin)},
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "no agentic-hil on this PATH" in transcript, transcript
+    assert CALM_LINE in transcript, transcript
+    assert REFRESH_LINE not in transcript, transcript
+
+
+def test_a_refresh_closes_on_the_installation_it_replaced_and_not_on_a_first_install(tmp_path: Path) -> None:
+    """The reported defect, on the run that produced it: an installation already here.
+
+    `install.sh` closed a refresh from one release to the next with "The next
+    start of your agent has everything, and the first hardware question creates
+    this project's configuration", on a host with four project configurations on
+    it. That sentence is an answer for somebody meeting the tool for the first
+    time, and no run over an installation that is already here may reach it.
+
+    This one is the anchor run: a copy already at the release, reinstalled in
+    place because it had stopped working. The files moved and the release did
+    not, so what it closes on is the sentence about staying where it is, not the
+    one asking for a restart to pick a new release up.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, _invocations, _receipt, _pycan, _marker = _run_uv_refresh(
+        tmp_path,
+        'requirements = [{ name = "agentic-hil" }]\n',
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "refreshing this current installation" in transcript, transcript
+    assert f"This installation stayed at {_release()}, {KEPT_CURRENT_TAIL}" in transcript, transcript
+    assert REFRESH_LINE not in transcript, transcript
+    assert CALM_LINE not in transcript, transcript
 
 
 def test_refreshing_a_uv_tool_keeps_the_extras_it_was_installed_with(tmp_path: Path) -> None:

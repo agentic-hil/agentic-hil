@@ -44,6 +44,7 @@ from agentic_hil.knowledge import (
     LEASE_LIFECYCLE_URI,
     MCP_RESOURCE_TEMPLATES,
     MCP_RESOURCES,
+    PERMISSION_KEY_PLACEHOLDER,
     PLAN_COMPARATOR_EXAMPLE,
     PLAN_FEATURE_VERSION_KEY,
     PLAN_MINIMAL_EXAMPLE,
@@ -552,7 +553,12 @@ def test_the_missing_configuration_entry_answers_both_of_its_readers() -> None:
 
 
 def test_an_error_nobody_wrote_a_fix_for_grows_no_invented_advice() -> None:
-    refusal = ConfigError("config_invalid", "state_root and workspace_root must not overlap.", {"field": "state_root"}).to_dict()
+    # `config_schema_invalid` rather than `config_invalid`, which this stood on
+    # until #460 gave it an entry: the bundled schema failing its own
+    # meta-validation is a defect in a release rather than something the caller
+    # of the moment can act on, so it is one of the error types nobody has
+    # written a fix for, and the rule this pins is that such a type grows none.
+    refusal = ConfigError("config_schema_invalid", "Bundled Agentic HIL configuration schema is invalid.", {"field": "state_root"}).to_dict()
 
     assert "remediation" not in refusal
     assert "do_not" not in refusal
@@ -835,7 +841,10 @@ def test_the_remediation_in_a_result_is_the_remediation_the_reference_serves(
     for key in ERROR_CATALOGUE:
         error_type, _, scope = key.partition(":")
         served = by_key[(error_type, scope or None)]
-        inline = remediation_fields(error_type, scope or None)
+        # The one entry whose steps are written around a key the catalogue
+        # cannot know supplies it here as the generic shape, which is exactly
+        # what the reference serves a reader who has met no refusal yet (#443).
+        inline = remediation_fields(error_type, scope or None, permission=PERMISSION_KEY_PLACEHOLDER)
 
         assert served["remediation"] == inline["remediation"], key
         assert served.get("do_not") == inline.get("do_not"), key

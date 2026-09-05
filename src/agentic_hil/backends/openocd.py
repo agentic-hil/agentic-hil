@@ -28,7 +28,14 @@ from agentic_hil.comports import (
     usb_stlink_probe_ids,
 )
 from agentic_hil.config import ConfigError, display_path, resolve_work_path, safe_write_text
-from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
+from agentic_hil.knowledge import (
+    exclusive_permission_fields,
+    exclusive_permission_summary,
+    permission_denied_fields,
+    permission_denied_summary,
+    permission_key,
+    remediation_fields,
+)
 from agentic_hil.report import (
     classify_failure_report,
     logs_directory,
@@ -257,7 +264,7 @@ class OpenOCDBackend:
         says nothing to a board."""
         tool = "debugger_probes_list"
         if not self.config.probe_allowed():
-            return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.")
+            return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.", self._permission_key("allow_probe"))
         interface_cfg = self.config.debugger.interface_cfg
         if not openocd_interface_enumerates_by_usb(interface_cfg):
             return {
@@ -355,7 +362,7 @@ class OpenOCDBackend:
 
     def probe_target(self) -> JsonObject:
         if not self.config.probe_allowed():
-            return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
+            return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.", self._permission_key("allow_probe"))
         marker = OPENOCD_SUCCESS_MARKERS["probe_target"]
         result = self._run_openocd("probe_target", f'{OPENOCD_INIT_PREFIX}targets; echo "{marker}"; shutdown', marker)
         if result.get("ok"):
@@ -365,11 +372,11 @@ class OpenOCDBackend:
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
         if not self.config.debugger.permissions.allow_flash:
-            return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.")
+            return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.", self._permission_key("allow_flash"))
         if self.config.debugger.permissions.allow_raw_debugger_commands:
-            return self._permission_denied("flash_firmware", exclusive_permission_summary("Flashing", "allow_raw_debugger_commands", self.config.debugger_id))
+            return self._exclusive_permission_denied("flash_firmware", "Flashing", "allow_raw_debugger_commands")
         if self.config.debugger.permissions.allow_mass_erase:
-            return self._permission_denied("flash_firmware", exclusive_permission_summary("Flashing", "allow_mass_erase", self.config.debugger_id))
+            return self._exclusive_permission_denied("flash_firmware", "Flashing", "allow_mass_erase")
 
         command_path = escape_tcl_double_quoted_word(openocd_path_for_command(str(artifact["resolved_path"])))
         marker = OPENOCD_SUCCESS_MARKERS["flash_firmware"]
@@ -722,8 +729,38 @@ class OpenOCDBackend:
     def _finish_log_audit(self, result: JsonObject, error: Exception | None) -> JsonObject:
         return mark_audit_failure(result, error) if error is not None else result
 
-    def _permission_denied(self, tool: str, summary: str) -> JsonObject:
-        return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
+    def _permission_denied(self, tool: str, summary: str, permission: str | None = None) -> JsonObject:
+        """A refusal one permission caused, carrying which one and what to do.
+
+        `permission` is the dotted key the file uses and `agentic-hil grant`
+        takes, built off the bound entry's own name. Named in the summary as
+        well as carried as a field: an agent asked to report the permission it
+        was denied reads the summary out (#443)."""
+        result: JsonObject = {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
+        if permission:
+            result["summary"] = permission_denied_summary(summary, permission)
+            result.update(permission_denied_fields(permission))
+            result.update(remediation_fields("permission_denied", permission=permission))
+        return result
+
+    def _permission_key(self, key: str) -> str:
+        return permission_key("debuggers", self.config.debugger_id, key)
+
+    def _exclusive_permission_denied(self, tool: str, action: str, blocking: str) -> JsonObject:
+        """The other direction: a permission that is granted and blocks this.
+
+        Its own helper because the advice is the opposite one. The unscoped
+        `permission_denied` entry says the operator opens the key; here the key
+        is already open and opening it is what an operator must not be sent to
+        do, so the scoped entry travels on the result rather than being looked
+        up later off an `error_type` the two cases share."""
+        return {
+            "ok": False,
+            "tool": tool,
+            "error_type": "permission_denied",
+            "summary": exclusive_permission_summary(action, blocking, self.config.debugger_id),
+            **exclusive_permission_fields(blocking, self.config.debugger_id),
+        }
 
     def _probe_selection_commands(self) -> list[str]:
         return [] if self.config.debugger.probe_id is None else ["-c", f"adapter serial {self.config.debugger.probe_id}"]

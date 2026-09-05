@@ -682,12 +682,30 @@ def _steps_section(report: JsonObject, text: Callable[[object], str]) -> list[st
     lines = ["| # | Route | Action | Result | Elapsed (ms) |", "| --- | --- | --- | --- | --- |"]
     for record in records:
         result = record.get("result") if isinstance(record.get("result"), dict) else {}
-        elapsed = result.get("elapsed_ms")
         lines.append(
             f"| {record.get('index', '')} | {text(record.get('route') or '-')} | {text(record.get('action') or '-')} | "
-            f"{'fail' if result_failed(result) else 'pass'} | {elapsed if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) else ''} |"
+            f"{'fail' if result_failed(result) else 'pass'} | {_step_elapsed_ms(record, result)} |"
         )
     return [*lines, ""]
+
+
+def _step_elapsed_ms(record: JsonObject, result: JsonObject) -> str:
+    """How long this step took, as the report recorded it.
+
+    The step's own measurement first. The reactor times every step it runs, so
+    that is the one number every row can have: reading the *tool's* duration
+    instead gave a figure for `flash` and `reset`, which the debugger backends
+    report, and an empty cell for a serial line, a bus and a repeat block, which
+    do not.
+
+    The tool's own is still read, for a report written before the reactor timed
+    its steps. This command exists to be pointed at a report file, and a file
+    written by an earlier version is exactly what it will be pointed at.
+    """
+    for elapsed in (record.get("elapsed_ms"), result.get("elapsed_ms")):
+        if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+            return str(elapsed)
+    return ""
 
 
 def _failure_section(report: JsonObject, text: Callable[[object], str]) -> list[str]:
@@ -717,14 +735,32 @@ def _failure_section(report: JsonObject, text: Callable[[object], str]) -> list[
     ]
 
 
+def _config_digest(bench: Mapping[str, object]) -> str:
+    """The configuration digest as one algorithm-prefixed string, spelled once.
+
+    `config_in_force.digest` is the spelling `config_status` publishes, which
+    already carries its own algorithm (`sha256:4cdb...`), and this row joined
+    `digest_algorithm` onto it as though it were bare hex. Both fields are right
+    on their own; the join was not, and it published `sha256sha256:4cdb...` in
+    the one artifact a reviewer compares against the configuration (#466). A
+    digest that is bare hex, which is what a report carries when its producer
+    keeps the algorithm in the neighbouring field, still gets the prefix it is
+    missing, so one row serves both spellings and doubles neither.
+    """
+    digest = str(bench.get("config_digest") or "").strip()
+    algorithm = str(bench.get("digest_algorithm") or "").strip()
+    if not algorithm or digest.startswith(f"{algorithm}:"):
+        return digest
+    return f"{algorithm}:{digest}"
+
+
 def _bench_section(summary: JsonObject, text: Callable[[object], str]) -> list[str]:
     bench = summary.get("bench") if isinstance(summary.get("bench"), dict) else {}
     tools = summary.get("tools") if isinstance(summary.get("tools"), dict) else {}
     firmware = summary.get("firmware") if isinstance(summary.get("firmware"), dict) else {}
     rows: list[tuple[str, str]] = []
     if bench.get("config_digest"):
-        digest = f"{bench.get('digest_algorithm') or ''}{bench['config_digest']}".strip()
-        rows.append(("Configuration digest", f"`{text(digest)}`"))
+        rows.append(("Configuration digest", f"`{text(_config_digest(bench))}`"))
         rows.append(("Diverged from the file on disk", "yes" if bench.get("diverged_from_file") else "no"))
     target = bench.get("target") if isinstance(bench.get("target"), dict) else {}
     if target.get("name"):

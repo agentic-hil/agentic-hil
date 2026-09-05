@@ -82,6 +82,9 @@ from agentic_hil.devices import DeviceError, can_device, resolve_devices, uart_d
 from agentic_hil.knowledge import (
     RECOVERY_PHYSICAL_CHECK_ERROR,
     attach_quarantine_guidance,
+    permission_denied_next_step,
+    permission_denied_summary,
+    permission_key,
     recovery_operator_command,
     remediation_fields,
 )
@@ -216,6 +219,14 @@ class AgenticHILToolService:
         off a probe that was never selected."""
         return self.config.debugger.permissions if self.config.debugger is not None else DebuggerPermissions()
 
+    def debugger_permission_key(self, key: str) -> str:
+        """The bound probe's grant, in the spelling the file and `grant` use.
+
+        Built from the bound entry's own name rather than from a template, so a
+        multi-probe bench names the entry the refusal is actually about (#443).
+        """
+        return permission_key("debuggers", self.config.debugger_id, key)
+
     def debugger_info(self) -> JsonObject:
         """Which debugger backend this server drives, and which file said so.
 
@@ -233,7 +244,7 @@ class AgenticHILToolService:
         if self.config.debugger is None:
             result = unbound_debugger_error("debugger_info", self.config)
         elif not self.config.probe_allowed():
-            result = tool_error("debugger_info", "permission_denied", "Debugger execution is disabled by the authoritative config.")
+            result = tool_error("debugger_info", "permission_denied", "Debugger execution is disabled by the authoritative config.", self.debugger_permission_key("allow_probe"))
         else:
             result = self.backend.info()
         return with_config_status(result, config_status(self.config), prominent=True)
@@ -242,7 +253,7 @@ class AgenticHILToolService:
         if self._dispatch_depth == 0:
             return self.call("debugger_probes_list")
         if not self.config.probe_allowed():
-            return tool_error("debugger_probes_list", "permission_denied", "Debugger probe discovery is disabled by the authoritative config.")
+            return tool_error("debugger_probes_list", "permission_denied", "Debugger probe discovery is disabled by the authoritative config.", self.debugger_permission_key("allow_probe"))
         result = self.backend.list_probes()
         if result.get("cleanup_required") is not True and result.get("side_effect_status") not in {"unknown", "partial"}:
             result = {**result, "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
@@ -258,7 +269,7 @@ class AgenticHILToolService:
             return self.call("flash_firmware", payload)
         payload = payload or {}
         if not self.debugger_permissions.allow_flash:
-            return tool_error("flash_firmware", "permission_denied", "Flashing is disabled by the authoritative config.")
+            return tool_error("flash_firmware", "permission_denied", "Flashing is disabled by the authoritative config.", self.debugger_permission_key("allow_flash"))
         image_path = payload.get("image_path")
         artifact_id = payload.get("artifact_id")
         if bool(image_path) == bool(artifact_id):
@@ -267,7 +278,7 @@ class AgenticHILToolService:
         if not isinstance(reset_after_flash, bool):
             return tool_error("flash_firmware", "invalid_argument", "reset_after_flash must be a boolean.")
         if reset_after_flash and not self.debugger_permissions.allow_reset:
-            return tool_error("flash_firmware", "permission_denied", "Post-flash reset is disabled by the authoritative config.")
+            return tool_error("flash_firmware", "permission_denied", "Post-flash reset is disabled by the authoritative config.", self.debugger_permission_key("allow_reset"))
         validation = self.artifacts.validate_local_path(str(image_path)) if image_path else self.artifacts.resolve_artifact_id(str(artifact_id))
         if not validation["ok"]:
             return validation
@@ -326,7 +337,7 @@ class AgenticHILToolService:
         if self._dispatch_depth == 0:
             return self.call("reset_target", {"mode": mode})
         if not self.debugger_permissions.allow_reset:
-            return tool_error("reset_target", "permission_denied", "Target reset is disabled by the authoritative config.")
+            return tool_error("reset_target", "permission_denied", "Target reset is disabled by the authoritative config.", self.debugger_permission_key("allow_reset"))
         return self.backend.reset_target(mode)
 
     def debug_start_session(self, payload: JsonObject | None = None) -> JsonObject:
@@ -2134,23 +2145,31 @@ def number_argument(value: object) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-def tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
+def tool_error(tool: str, error_type: str, summary: str, permission: str | None = None) -> JsonObject:
+    """One refusal, and for a permission refusal the key it is about.
+
+    `permission` is the dotted `<section>.<name>.permissions.<key>` the file
+    uses and `agentic-hil grant` takes. It goes into the summary as well as into
+    its own field: an agent instructed to name the permission it was denied
+    reads the summary out, and a summary saying only that something is "disabled
+    by the authoritative config" left it with nothing to name and the operator
+    with nothing to paste (#443).
+    """
     result = {"ok": False, "tool": tool, "error_type": error_type, "summary": summary}
     if error_type == "permission_denied":
+        if permission:
+            result["summary"] = permission_denied_summary(summary, permission)
+            result["permission"] = permission
         # A refusal that only states a fact reads to a caller like a closed door
         # to walk around. One weak model called this tool first, was refused,
         # diagnosed correctly through the other tools, and then flashed the board
         # with st-flash. The instruction belongs where the caller is looking.
         # Deliberately no verb phrase a caller could act on. An earlier wording
         # said "ask the operator to change the authoritative config" and a small
-        # model rewrote the config itself to grant allow_flash.
-        result["next_step"] = (
-            "This refusal is the answer to the request. Report it and name the permission that is "
-            "denied, then stop. You must not enable it: the authoritative configuration belongs to the "
-            "operator and only the operator may edit it. You must not carry out the action another way "
-            "either: a debugger, serial device or CAN adapter driven outside Agentic HIL defeats the "
-            "policy this refusal enforces."
-        )
+        # model rewrote the config itself to grant allow_flash. The key travels
+        # with it, and the command that opens it is named as the operator's, at
+        # the operator's own shell, and reachable from no tool here.
+        result["next_step"] = permission_denied_next_step(permission)
     return result
 
 
@@ -3415,15 +3434,21 @@ def _generated_next_steps(config: AgenticHILConfig, *, created: bool, narrowed: 
 
 
 def _config_write_denied(existing: AgenticHILConfig, target_path: Path) -> JsonObject:
+    # The canonical dotted key goes straight into `tool_error`, which is the one
+    # place the summary and the next step are built for a permission refusal: the
+    # summary names the key, and the next step is the exact `agentic-hil grant`
+    # line. The short `allow_config_write` that `resolve_permission_key` rejects
+    # never reaches the `permission` field, so this refusal advertises the key a
+    # caller can act on like every other one does (round 1, finding 3).
     result = tool_error(
         PROJECT_CONFIG_CREATE,
         "permission_denied",
-        "Writing this project's configuration is denied by permissions.allow_config_write in the configuration itself. "
+        "Writing this project's configuration is denied by the authoritative configuration itself. "
         "This server may read it and not change it, and only a person editing that file can change that.",
+        "permissions.allow_config_write",
     )
     return {
         **result,
-        "permission": "allow_config_write",
         "reason": "config_write_denied",
         "workspace_root": existing.workspace_root,
         "path": str(target_path),

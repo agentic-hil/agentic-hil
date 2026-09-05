@@ -45,7 +45,7 @@ from agentic_hil.config import (
     user_state_root,
 )
 from agentic_hil.configreload import PROJECT_CONFIG_RELOAD
-from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET
+from agentic_hil.configwrite import PROJECT_CONFIG_DESCRIBE, PROJECT_CONFIG_SET, resolve_permission_key
 from agentic_hil.contracts import MCP_TOOL_NAMES, MCP_TOOLS, TOOL_SCHEMAS
 from agentic_hil.coordination import HardwareLease
 from agentic_hil.knowledge import CONFIG_SHAPE_URI, EXCLUSIVE_FLASH_PERMISSIONS, read_resource, safe_user_root
@@ -621,9 +621,14 @@ def test_a_configured_server_refuses_to_write_a_configuration_that_took_the_gran
         service.close()
 
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == "allow_config_write"
+    # The dotted key `agentic-hil grant` and `resolve_permission_key` take, not
+    # the bare `allow_config_write` the latter rejects, and the grant line the
+    # canonical key lets the next step spell out (round 1, finding 3).
+    assert refused["permission"] == "permissions.allow_config_write"
+    assert resolve_permission_key(refused["permission"])[0] is not None
     assert refused["retry_safe"] is False
     assert "only the operator may edit it" in refused["next_step"]
+    assert "agentic-hil grant permissions.allow_config_write" in refused["next_step"]
     assert written_document(created)["provenance"]["created_by"] == "agent"
 
 
@@ -966,7 +971,7 @@ def test_a_narrowed_configuration_cannot_be_reopened_by_an_agent(tmp_path: Path,
             for value in (True, False):
                 refused = after.call(PROJECT_CONFIG_SET, {"changes": [{"key": "debuggers.dut.permissions.allow_reset", "value": value}]})
                 assert refused["error_type"] == "permission_denied", (value, refused)
-                assert refused["permission"] == "allow_config_permissions_write"
+                assert refused["permission"] == "permissions.allow_config_permissions_write"
         finally:
             after.close()
     finally:

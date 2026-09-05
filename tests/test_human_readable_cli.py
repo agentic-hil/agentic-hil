@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -83,6 +84,50 @@ REFUSAL = {
     "field": "workspace_root",
     "remediation": ["Run `agentic-hil setup --agent <agent>` from this project root.", "Or point AGENTIC_HIL_CONFIG at its absolute path."],
     "do_not": ["Do not write the configuration into the repository."],
+}
+
+# The two documents `agentic-hil test-reactor` answers with when it does not
+# pass, field for field as `TestReactor.run` builds them. They differ in the one
+# way a reader cares about: the first ran its plan on the board and did not meet
+# its claim, the second never started.
+PLAN_FAILED = {
+    "ok": False,
+    "tool": "test_reactor",
+    "name": "blinky-smoke",
+    "test_config_path": "/home/op/work/blinky/tests/smoke.yaml",
+    "steps": [
+        {"index": 1, "route": "dut", "action": "flash", "result": {"ok": True, "tool": "flash_firmware", "summary": "Firmware flashed and verified.", "elapsed_ms": 1624}},
+        {"index": 2, "route": "dut_uart", "action": "uart_open", "result": {"ok": True, "tool": "com_session_start", "summary": "COM session started."}},
+        {
+            "index": 3,
+            "route": "dut_uart",
+            "action": "uart_read",
+            "result": {"ok": False, "tool": "test_reactor", "error_type": "comparator_unmet", "summary": "The comparator was not met before the step's timeout.", "port_id": "dut_uart"},
+        },
+    ],
+    "cleanup": [],
+    "cleanup_ok": True,
+    "cleanup_errors": [],
+    "failed_step": 3,
+    "step_error_type": "comparator_unmet",
+    "error_type": "comparator_unmet",
+    "summary": "Test reactor sequence failed.",
+}
+
+PLAN_REFUSED = {
+    "ok": False,
+    "tool": "test_reactor",
+    "name": "blinky-smoke",
+    "test_config_path": "/home/op/work/blinky/tests/smoke.yaml",
+    "error_type": "test_config_invalid",
+    "validation_error": {"step": 3, "field": "steps[2].port_id", "summary": "This step names a COM port the authoritative config does not declare."},
+    "steps": [],
+    "cleanup": [],
+    "cleanup_ok": True,
+    # A plan refused at preflight names the step whose text is wrong, so this
+    # field says nothing about whether anything ran.
+    "failed_step": 3,
+    "summary": "Test reactor configuration failed semantic validation; no steps were executed.",
 }
 
 DOCTOR = {
@@ -443,12 +488,491 @@ def test_a_refusal_carrying_a_list_of_its_own_is_printed_in_the_order_it_carries
     assert "project_config_create" not in out
 
 
+def _plan_refusal(validation_error: dict) -> dict:
+    """A plan refusal shaped the way the reactor builds one."""
+    from agentic_hil.knowledge import remediation_fields
+
+    return {
+        "ok": False,
+        "tool": "test_reactor",
+        "name": "nominal",
+        "error_type": "test_config_invalid",
+        "summary": "Test reactor configuration failed semantic validation; no steps were executed.",
+        "validation_error": validation_error,
+        "failed_step": validation_error.get("step"),
+        "steps": [],
+        **remediation_fields("test_config_invalid"),
+    }
+
+
+def test_the_specific_next_step_a_plan_refusal_carries_is_printed() -> None:
+    """#446: the advice said to read a field the rendering never printed.
+
+    Every reactor refusal opened with "Read next_step inside validation_error
+    first", and the rendering printed every other member of that object and
+    dropped that one. The one line naming the command that fixes this exact
+    plan was in the document and nowhere on the screen.
+    """
+    specific = "Add the port with `agentic-hil adopt-hardware --debugger dut --com-port dut_uart2`."
+    out = _reflowed(_rendered(
+        _plan_refusal({
+            "step": 3,
+            "field": "steps[2].port_id",
+            "summary": "Test step references a COM port that is not configured.",
+            "configured_com_ports": ["dut_uart"],
+            "next_step": specific,
+        }),
+        "test-reactor",
+    ))
+
+    assert specific in out
+    # And the pointer above it still stands, because the field it points at is
+    # there to be read.
+    assert "Read `next_step` inside `validation_error` first." in out
+
+
+def test_the_pointer_is_silent_when_there_is_no_field_to_point_at() -> None:
+    """#446, the other half: advice to read a field that does not exist.
+
+    A plan refused for a session it never opened carries no
+    `validation_error.next_step`, and the line telling the reader to read it
+    first printed all the same, as instruction number one.
+    """
+    out = _reflowed(_rendered(
+        _plan_refusal({
+            "step": 2,
+            "field": "steps[1].action",
+            "summary": "COM port session must be opened before this action.",
+        }),
+        "test-reactor",
+    ))
+
+    assert "Read `next_step` inside `validation_error` first." not in out
+    # Nothing else moves: the rest of the entry is printed as the catalogue
+    # writes it, and the numbering starts at the first step that is left.
+    assert "1. A step naming a device the configuration does not declare" in out
+    assert "COM port session must be opened before this action." in out
+
+
+def test_the_advice_a_plan_refusal_derives_twice_is_printed_once() -> None:
+    """#387's rule, in the second place a document names one reason twice.
+
+    A refused plan carries `error_type` at the top and the finding's own
+    `error_type` inside `validation_error`, so a caller reading either field
+    gets one answer. Both resolve to the same catalogue entry, and printing both
+    put the identical numbered list and the identical do_not block one under the
+    other. The nested facts still print; only the second copy of the advice goes.
+    """
+    refusal = _plan_refusal({
+        "step": 1,
+        "field": "steps[0].action",
+        "action": "reset",
+        "summary": "Target reset is disabled for this debugger by the authoritative config.",
+        "error_type": "test_config_invalid",
+    })
+
+    out = _rendered(refusal, "test-reactor")
+
+    first = _reflowed(out).count("A step naming a device the configuration does not declare")
+    assert first == 1, out
+    assert out.count("Do not raise the plan's `version:` to reach a step it refuses.") == 1, out
+    # The finding's own facts are untouched.
+    assert "steps[0].action" in out
+    assert "Target reset is disabled for this debugger by the authoritative config." in out
+
+
+def test_a_nested_finding_with_a_reason_of_its_own_keeps_its_own_advice() -> None:
+    """The other side: a second error type is a second fact, not a copy.
+
+    Only the duplicate goes. A finding whose type differs from the enclosing
+    refusal's explains something the headline does not, and dropping its advice
+    would lose the answer to it.
+    """
+    refusal = _plan_refusal({
+        "step": 1,
+        "field": "steps[0].wait_timeout_s",
+        "summary": "Name one of the two deadlines.",
+        "error_type": "invalid_argument",
+    })
+
+    out = _reflowed(_rendered(refusal, "test-reactor"))
+
+    assert "invalid_argument" in out
+    # Both entries reach the screen: the plan refusal's and the finding's.
+    assert "A step naming a device the configuration does not declare" in out
+    assert "Read `field` and `validator` together" in out
+
+
+def test_a_permission_refusal_prints_the_key_and_the_line_that_opens_it() -> None:
+    """#443: a refusal an operator can act on without opening the file.
+
+    The rendering is where the operator meets this, and it showed a sentence
+    about "the authoritative config" with no key in it and no command under it.
+    The key is in the summary, in the Details rows and inside the advice, and
+    the advice is the one that opens that key rather than the one that rewrites
+    the whole file.
+    """
+    key = "debuggers.dut.permissions.allow_reset"
+    refusal = {
+        "ok": False,
+        "tool": "reset_target",
+        "error_type": "permission_denied",
+        "summary": f"Target reset is disabled by the authoritative config. The permission is `{key}` and it is false.",
+        "permission": key,
+    }
+
+    out = _reflowed(_rendered(refusal, "test-reactor"))
+
+    assert "Refused: permission_denied" in out
+    assert f"permission {key}" in out
+    assert f"agentic-hil grant {key}" in out
+    # The generic shape must never reach a reader who has an actual key.
+    assert "<section>.<name>.permissions.<key>" not in out
+    # And the whole-file reset is named only as the thing this is not.
+    assert "agentic-hil grant" in out
+
+
+def test_a_permission_refusal_that_names_no_key_grows_no_advice_about_one() -> None:
+    """The other half of #443's rule: no key, no keyed advice.
+
+    `permission_denied` is one error_type over two unlike refusals. A dump over
+    `debug.max_dump_size_bytes` carries it and is not about a permission key at
+    all, and handing that reader "the operator opens exactly that key" with a
+    placeholder in it would be advice they cannot follow about a key that does
+    not exist.
+    """
+    out = _reflowed(_rendered(
+        {"ok": False, "tool": "debug_dump_symbol_ihex", "error_type": "permission_denied", "summary": "Symbol dump exceeds debug.max_dump_size_bytes."},
+        "test-reactor",
+    ))
+
+    assert "Refused: permission_denied" in out
+    assert "What to do" not in out
+    assert "<section>.<name>.permissions.<key>" not in out
+
+
 def test_a_refusal_the_catalogue_does_not_cover_invents_no_advice() -> None:
     bare = {"ok": False, "error_type": "no_such_error_anybody_wrote", "summary": "Something went wrong."}
     out = _rendered(bare, "doctor")
     assert out.startswith("Refused: no_such_error_anybody_wrote")
     assert "What to do" not in out
     assert "Something went wrong." in out
+
+
+def test_a_plan_that_ran_and_failed_its_claim_is_headed_by_its_outcome() -> None:
+    """#447: the deliberate red run read as a setup error.
+
+    The plan flashed the board, opened the port and read it, and its comparator
+    was not met. That is the test result the bench exists to produce, and it was
+    headed with the word this rendering reserves for a call that never happened.
+    """
+    out = _rendered(PLAN_FAILED, "test-reactor")
+
+    assert out.startswith("Failed: comparator_unmet")
+    assert not out.startswith("Refused")
+    # The heading is the only thing that moved: everything a reader acts on is
+    # still where it was.
+    assert "Test reactor sequence failed." in out
+    assert "uart_read" in out
+    assert "comparator was not met" in out
+
+
+def test_a_plan_refused_before_its_first_step_is_still_headed_refused() -> None:
+    """Nothing ran, so `Refused:` is exactly what happened.
+
+    It carries `failed_step` as well, naming the step whose text is wrong, and
+    that must not be read as a step that executed."""
+    out = _rendered(PLAN_REFUSED, "test-reactor")
+
+    assert out.startswith("Refused: test_config_invalid")
+    assert "no steps were executed" in out
+
+
+def test_a_call_that_left_something_behind_is_headed_by_its_outcome_too() -> None:
+    """One call rather than a run, and the same distinction.
+
+    A write that reached the board and then could not record itself is not a
+    refusal: the bench moved. `side_effect_committed` is where such a result
+    says so, and it is the only other thing this heading reads."""
+    committed = {
+        "ok": False,
+        "tool": "debug_set_breakpoint",
+        "error_type": "audit_broken",
+        "summary": "Breakpoint was set but its audit evidence could not be persisted.",
+        "side_effect_committed": True,
+        "cleanup_required": True,
+    }
+    not_started = {**committed, "side_effect_committed": False, "summary": "The breakpoint was refused before anything was written."}
+
+    assert _rendered(committed, "test-reactor").startswith("Failed: audit_broken")
+    assert _rendered(not_started, "test-reactor").startswith("Refused: audit_broken")
+
+
+def test_the_outcome_word_does_not_depend_on_who_is_reading() -> None:
+    """The document is one document, and the heading is about the run.
+
+    `command` says a person typed something, and it decides which of the
+    catalogue's orderings the remediation is printed in. What the result *is* is
+    not a property of the reader, so the heading is the same with and without
+    it."""
+    assert render_result(PLAN_FAILED).startswith("Failed: comparator_unmet")
+    assert render_result(PLAN_REFUSED).startswith("Refused: test_config_invalid")
+
+
+# ---------------------------------------------------------------------------
+# One catalogue, two vocabularies.
+
+
+def _unknown_probe_refusal() -> dict:
+    """The refusal `agentic-hil adopt-hardware --probe-id <unknown>` produces."""
+    return {
+        "ok": False,
+        "tool": "project_config_adopt_hardware",
+        "error_type": "adapter_not_found",
+        "backend": "openocd",
+        "summary": "No debug probe with that unique ID is attached.",
+        **remediation_fields("adapter_not_found", "openocd"),
+    }
+
+
+def test_the_cli_rendering_names_the_command_the_reader_can_type() -> None:
+    """#451: the shell reader was sent to a name their shell does not have.
+
+    One catalogue serves the agent and the operator, and its step reads "call
+    debugger_probes_list". That is the right name over MCP and nothing at all in
+    a terminal, where the same read is `agentic-hil debugger-probes`."""
+    at_a_shell = _reflowed(_rendered(_unknown_probe_refusal(), "adopt-hardware"))
+
+    assert "1. Call `agentic-hil debugger-probes` to see what the host enumerates." in at_a_shell
+    assert "debugger_probes_list" not in at_a_shell
+    # The rest of the entry is the same text in the same order: this renames a
+    # move, it does not choose different advice.
+    assert "Connect the probe" in at_a_shell
+    assert "`debuggers.<name>.probe_id`" in at_a_shell
+
+
+def test_the_document_keeps_the_tool_name_the_agent_calls() -> None:
+    """No command was typed, so nobody is at a shell and the tool is the answer."""
+    as_a_document = _reflowed(render_result(_unknown_probe_refusal()))
+
+    assert "1. Call debugger_probes_list to see what the host enumerates." in as_a_document
+    assert "agentic-hil debugger-probes" not in as_a_document
+
+
+def test_a_step_about_the_mcp_surface_keeps_its_tool_name() -> None:
+    """A step that names the surface is not advice a reader translates.
+
+    Rewriting the tool in it would leave a sentence saying "over MCP" about a
+    shell command, which is a route neither reader has. The two steps below are
+    the same tool in the same document, and only the one that is not about a
+    surface is renamed."""
+    refusal = {
+        "ok": False,
+        "error_type": "adapter_not_found",
+        "summary": "No probe answered.",
+        "remediation": [
+            "Over MCP, debugger_probes_list is how an agent asks the same question.",
+            "Call debugger_probes_list to see what the host enumerates.",
+        ],
+    }
+    out = _reflowed(_rendered(refusal, "doctor"))
+
+    assert "1. Over MCP, debugger_probes_list is how an agent asks the same question." in out
+    assert "2. Call `agentic-hil debugger-probes` to see what the host enumerates." in out
+
+
+def test_the_refusal_that_answers_both_readers_still_answers_both() -> None:
+    """`config_file_not_found` carries one ordering per reader out of the same
+    steps, and the operator's own route stands first in theirs. Neither the
+    ordering nor the surface each step names is touched by the renaming."""
+    at_a_shell = _reflowed(_rendered(_missing_configuration_refusal(), "doctor"))
+
+    assert "2. Over MCP, call `project_config_create` once." in at_a_shell
+    assert "1. At a shell, run `agentic-hil init` from the project root" in at_a_shell
+
+
+def test_every_tool_the_catalogue_recommends_has_a_reading_for_both_surfaces() -> None:
+    """The guard that makes the mapping stay true.
+
+    A step that starts naming a tool is a step somebody has to have decided
+    about: either the command line runs the same move under its own name, or the
+    name stands on both surfaces because there is nothing else to call it. The
+    third state, a tool nobody classified, is the bug this closes, and it is
+    invisible at the surface: the reader is simply sent to a name that is not
+    there."""
+    from agentic_hil.contracts import MCP_TOOL_NAMES
+    from agentic_hil.humanize import _CLI_COMMANDS, _TOOLS_KEEPING_THEIR_NAME
+    from agentic_hil.knowledge import ERROR_CATALOGUE
+
+    classified = set(_CLI_COMMANDS) | _TOOLS_KEEPING_THEIR_NAME
+    assert not set(_CLI_COMMANDS) & _TOOLS_KEEPING_THEIR_NAME
+    assert classified <= set(MCP_TOOL_NAMES), classified - set(MCP_TOOL_NAMES)
+
+    recommended = {
+        name
+        for remedy in ERROR_CATALOGUE.values()
+        for text in (*remedy.remediation, *remedy.do_not, *remedy.cli_remediation)
+        for name in re.findall(r"[a-z][a-z0-9_]*", text)
+        if name in set(MCP_TOOL_NAMES)
+    }
+    assert recommended, "no catalogue step names a tool any more; this guard is not reading the catalogue"
+    assert recommended <= classified, recommended - classified
+
+
+def test_every_command_the_mapping_names_is_one_this_program_has() -> None:
+    """A spelling nobody can type is worse than the tool name it replaced."""
+    from agentic_hil.humanize import _CLI_COMMANDS
+
+    parser = cli.build_parser()
+    subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    for tool, command in _CLI_COMMANDS.items():
+        program, subcommand = command.split(" ", 1)
+        assert program == "agentic-hil", tool
+        assert subcommand in subparsers.choices, f"{tool} is spelled as `{command}`, which this program does not have"
+
+
+def test_a_tool_name_inside_a_longer_word_is_not_rewritten() -> None:
+    """The substitution is over whole names, not over substrings.
+
+    A caller's own step is printed as the caller wrote it, and a word that
+    merely contains a tool name is a word, not a recommendation."""
+    refusal = {
+        "ok": False,
+        "error_type": "adapter_not_found",
+        "summary": "No probe answered.",
+        "remediation": ["The debugger_probes_listing in the log says what was seen.", "Call debugger_probes_list."],
+    }
+    out = _reflowed(_rendered(refusal, "doctor"))
+
+    assert "The debugger_probes_listing in the log" in out
+    assert "Call `agentic-hil debugger-probes`." in out
+
+
+# ---------------------------------------------------------------------------
+# The host's serial ports, of which a Linux host has three dozen.
+
+
+def _linux_inventory() -> list[dict]:
+    """What `list_ports.comports()` answers on an ordinary Linux host.
+
+    One board, and the 32 chipset UARTs the kernel declares whether or not
+    anything is attached to them. The probe is not first in the list, because
+    nothing says it will be."""
+    ports: list[dict] = [{"device": f"/dev/ttyS{index}", "name": f"ttyS{index}", "description": "n/a", "hwid": "n/a"} for index in range(32)]
+    ports.insert(
+        9,
+        {
+            "device": "/dev/ttyACM0",
+            "name": "ttyACM0",
+            "description": "STM32 STLink",
+            "hwid": "USB VID:PID=0483:374B",
+            "manufacturer": "STMicroelectronics",
+            "serial_number": "0669FF574951",
+            "vid": 0x0483,
+            "pid": 0x374B,
+            "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink-if02",
+        },
+    )
+    return ports
+
+
+def test_com_ports_lists_the_board_and_counts_the_rest() -> None:
+    """#454: 33 ports printed in full, and the substance was three lines.
+
+    The one port with a USB identity is the one the reader is looking for. The
+    others are declared by the kernel and say nothing: `description n/a`,
+    `hwid n/a`, and no vendor, product or serial to check a board against."""
+    document = {"ok": True, "tool": "com_ports_available", "ports": _linux_inventory(), "summary": "33 available COM port(s)."}
+
+    out = _rendered(document, "com-ports")
+
+    assert "/dev/ttyACM0" in out
+    assert "0669FF574951" in out
+    assert "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink-if02" in out
+    assert "32 legacy serial ports without a USB identity (/dev/ttyS0 to /dev/ttyS31) not listed" in _reflowed(out)
+    # Not one of them by name, and the whole answer fits on a screen.
+    assert "/dev/ttyS17" not in out
+    assert len(out.splitlines()) < 20
+
+
+def test_a_refusal_that_embeds_the_inventory_is_shortened_the_same_way() -> None:
+    """The refusal is where a reader actually meets this list.
+
+    `adopt-hardware` with a serial the host does not have answers with what the
+    host does have, and 130 of its 196 lines were `/dev/ttyS*`."""
+    refusal = {
+        "ok": False,
+        "tool": "project_config_adopt_hardware",
+        "error_type": "probe_not_found",
+        "summary": "No attached probe carries that unique ID.",
+        "available_com_ports": {"ok": True, "tool": "com_ports_available", "ports": _linux_inventory(), "summary": "33 available COM port(s)."},
+    }
+
+    out = _rendered(refusal, "adopt-hardware")
+
+    assert "/dev/ttyACM0" in out
+    assert "32 legacy serial ports without a USB identity" in _reflowed(out)
+    assert "/dev/ttyS17" not in out
+
+
+def test_the_document_still_carries_every_port() -> None:
+    """This is a rendering and nothing else: `--json` is what a caller parses,
+    and the identity check a caller makes needs the whole inventory."""
+    document = {"ok": True, "tool": "com_ports_available", "ports": _linux_inventory(), "summary": "33 available COM port(s)."}
+
+    printed = json.dumps(document)
+
+    assert printed.count("/dev/ttyS") == 32
+    assert "/dev/ttyS17" in printed
+
+
+def test_an_inventory_of_ports_that_can_all_be_identified_collapses_nothing() -> None:
+    """Two boards on a Windows host, and nothing to shorten."""
+    document = {
+        "ok": True,
+        "tool": "com_ports_available",
+        "ports": [
+            {"device": "COM3", "description": "STLink Virtual COM Port", "serial_number": "0669FF574951", "vid": 0x0483, "pid": 0x374B},
+            {"device": "COM7", "description": "USB Serial Device", "vid": 0x10C4, "pid": 0xEA60},
+        ],
+        "summary": "2 available COM port(s).",
+    }
+
+    out = _rendered(document, "com-ports")
+
+    assert "COM3" in out
+    assert "COM7" in out
+    assert "not listed" not in out
+
+
+def test_one_port_with_no_usb_identity_is_named_rather_than_counted_off() -> None:
+    """A single collapsed entry says which one it is."""
+    document = {"ok": True, "tool": "com_ports_available", "ports": [{"device": "/dev/ttyS0", "description": "n/a"}], "summary": "1 available COM port(s)."}
+
+    out = _reflowed(_rendered(document, "com-ports"))
+
+    assert "1 legacy serial port without a USB identity (/dev/ttyS0) not listed" in out
+
+
+def test_a_list_under_another_name_is_not_read_as_an_inventory() -> None:
+    """`ports` is the host inventory and nothing else is, whatever it looks like.
+
+    `com_ports_list` calls the configured entries `ports` too, and that is a
+    mapping keyed by the name the project gave each one, so it never reaches
+    this pass. A list of objects under any other key is unfolded as it always
+    was, entry by entry."""
+    document = {
+        "ok": True,
+        "tool": "com_ports_available",
+        "summary": "Checked.",
+        "candidates": [{"device": "/dev/ttyS0", "description": "n/a"}, {"device": "/dev/ttyS1", "description": "n/a"}],
+    }
+
+    out = _rendered(document, "com-ports")
+
+    assert "/dev/ttyS0" in out
+    assert "/dev/ttyS1" in out
+    assert "not listed" not in out
 
 
 def test_a_refusal_shows_the_failing_tools_own_words_and_not_only_the_facts_around_them() -> None:
@@ -1118,3 +1642,140 @@ def test_a_probe_listing_refused_on_an_adapter_nothing_enumerates_says_which_scr
 
     assert "not_supported" in out
     assert "interface/jlink.cfg" in out
+
+
+# ---------------------------------------------------------------------------
+# The adoption plan a person reads before they let it write (#442).
+
+
+ADOPT_DRY_RUN = {
+    "ok": True,
+    "tool": "project_config_adopt_hardware",
+    "summary": "3 configuration key(s) would be filled in from the attached hardware.",
+    "applied": False,
+    "path": "/home/op/.config/agentic-hil/projects/blinky/config.yaml",
+    "debugger_id": "dut",
+    "com_port_id": "dut_uart",
+    "carried": [{"key": "debuggers.dut.probe_id", "value": "066AFF303435554157113106", "previous_value": None}],
+    "already_current": [{"key": "debug.gdb_executable", "value": "/usr/bin/arm-none-eabi-gdb"}],
+    "kept": [
+        {
+            "key": "target.controller",
+            "configured_value": "stm32f446ret6",
+            "discovered_value": "stm32f4x",
+            "reason": (
+                "`target.controller` names the part this project drives, and what a read of the board reports is the "
+                "target script that answered, which is a family rather than a part."
+            ),
+        }
+    ],
+}
+
+
+def test_the_plan_shows_the_two_values_it_compared_rather_than_two_blanks() -> None:
+    """Both values, the way the same plan's JSON carries them (#442).
+
+    The rendering read `configured` and `discovered`, which nothing writes: the
+    producer's names are `configured_value` and `discovered_value`. Every
+    comparison an operator came here to see therefore printed "configured not
+    set, attached not set" beside a JSON document holding both, which says a key
+    is empty while it holds the value that decided the comparison.
+    """
+    out = _reflowed(_rendered(ADOPT_DRY_RUN, "adopt-hardware"))
+
+    assert "target.controller configured stm32f446ret6, attached stm32f4x" in out
+    assert "not set" not in out
+
+
+def test_the_plan_says_which_of_the_two_values_adoption_keeps_and_why() -> None:
+    """Naming the survivor is the half an operator has to act on.
+
+    "Left alone" says a decision was taken. Which value it left standing, and on
+    what grounds, is what decides whether the operator edits the file or leaves
+    it, and both were dropped from the rendering while the JSON carried them.
+    """
+    out = _reflowed(_rendered(ADOPT_DRY_RUN, "adopt-hardware"))
+
+    assert "adoption keeps stm32f446ret6" in out
+    assert "family rather than a part" in out
+
+
+def test_the_plan_still_renders_the_boxes_the_comparison_is_not_in() -> None:
+    """The neighbouring sections are untouched by the row above them."""
+    out = _reflowed(_rendered(ADOPT_DRY_RUN, "adopt-hardware"))
+
+    assert "Would be filled in" in out
+    assert "debuggers.dut.probe_id 066AFF303435554157113106" in out
+    assert "Already match the attached hardware" in out
+    assert "debug.gdb_executable" in out
+
+
+def test_a_plan_written_under_the_older_field_names_still_shows_its_values() -> None:
+    """The two spellings the rendering used to read are still read.
+
+    They are not what this repository writes, and a document that carries them
+    must not be the one case that renders the blanks this defect was about.
+    """
+    older = {
+        **ADOPT_DRY_RUN,
+        "kept": [{"key": "target.controller", "configured": "stm32f446ret6", "discovered": "stm32f4x", "reason": "Somebody set it."}],
+    }
+
+    out = _reflowed(_rendered(older, "adopt-hardware"))
+
+    assert "target.controller configured stm32f446ret6, attached stm32f4x" in out
+    assert "not set" not in out
+
+
+def test_a_healthy_probe_listing_is_not_rendered_as_a_containment() -> None:
+    """`complete: false` is a fact about the enumeration, not about this run (#445).
+
+    An OpenOCD bench enumerates probes from the host's USB serial inventory,
+    which can never report itself complete, so the field is false on every
+    healthy read. The rendering put it under "This did not come back clean, and
+    the exit code says so", beside an exit code that has stopped saying it: a
+    discovery that worked was shown to an operator as a fault.
+    """
+    listing = {
+        "ok": True,
+        "tool": "debugger_probes_list",
+        "backend": "openocd",
+        "discovered_by": "usb_serial_inventory",
+        "probes": [{"probe_id": "066AFF303435554157113106"}],
+        "complete": False,
+        "summary": "1 connected debugger probe(s) read from this host's USB serial inventory, which is not an authoritative count.",
+    }
+
+    out = _reflowed(_rendered(listing, "debugger-probes"))
+
+    assert "did not come back clean" not in out
+    # And it is still on screen, because how far the enumeration reaches is what
+    # a reader counting probes has to know.
+    assert "complete no" in out
+    assert "not an authoritative count" in out
+
+
+def test_a_probe_listing_with_something_standing_still_says_it_did_not_come_back_clean() -> None:
+    """The neighbouring rendering, unchanged: a marker still leads the answer.
+
+    And `complete` is not one of the things standing. It decides no verdict, so
+    naming it under "what is standing" would offer it as a reason for an exit
+    code it has nothing to do with; it belongs with the other facts the listing
+    states about itself, which are printed below that block.
+    """
+    listing = {
+        "ok": True,
+        "tool": "debugger_probes_list",
+        "backend": "openocd",
+        "probes": [],
+        "complete": False,
+        "quarantined": True,
+        "quarantine_id": "q-7f3a",
+        "summary": "Probe discovery ran.",
+    }
+
+    out = _reflowed(_rendered(listing, "debugger-probes"))
+
+    assert "did not come back clean" in out
+    assert "q-7f3a" in out
+    assert out.index("complete no") > out.index("backend openocd")

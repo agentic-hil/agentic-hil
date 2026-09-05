@@ -22,6 +22,11 @@ from agentic_hil.config import (
     safe_configured_directory,
     safe_open_binary,
 )
+from agentic_hil.knowledge import (
+    ARTIFACT_UPLOAD_PERMISSION,
+    permission_denied_fields,
+    permission_denied_summary,
+)
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 
@@ -55,7 +60,8 @@ class ArtifactManager:
                 "ok": False,
                 "tool": "artifact_upload",
                 "error_type": "permission_denied",
-                "summary": "Artifact upload is disabled by the authoritative config.",
+                "summary": permission_denied_summary("Artifact upload is disabled by the authoritative config.", ARTIFACT_UPLOAD_PERMISSION),
+                **permission_denied_fields(ARTIFACT_UPLOAD_PERMISSION),
             }
 
         has_image_path = payload.get("image_path") is not None
@@ -345,8 +351,9 @@ class ArtifactManager:
                 "ok": False,
                 "tool": tool,
                 "error_type": "permission_denied",
-                "summary": "Using uploaded artifacts is disabled by the authoritative config.",
+                "summary": permission_denied_summary("Using uploaded artifacts is disabled by the authoritative config.", ARTIFACT_UPLOAD_PERMISSION),
                 "artifact_id": artifact_id,
+                **permission_denied_fields(ARTIFACT_UPLOAD_PERMISSION),
             }
         if not is_safe_artifact_id(artifact_id):
             return {

@@ -803,27 +803,32 @@ def overall_success(result: JsonObject) -> bool:
 
 
 def conclusive_success(result: JsonObject) -> bool:
-    """`overall_success`, and also that the result does not disclaim its own scope.
+    """`overall_success`, which is the whole of what a verdict may be taken from.
 
-    A discovery can answer without error yet state that its answer is not the
-    whole picture: an OpenOCD probe listing carries ``complete: false`` because it
-    reaches an ST-Link only through the virtual COM port that probe publishes, so
-    a VCP-less probe can sit beside the ones it saw. Such a read is a success --
-    it is filed as no failure and an MCP call over it is no error -- but it is not
-    a *clean* pass a caller may read as "every probe was found". The exit code and
-    the prose a person reads take this stricter verdict.
+    This used to fail a result carrying ``complete: false`` as well, so that the
+    CLI exit status and the prose beside it read an OpenOCD probe listing as "not
+    a clean pass". The reasoning was that a caller must not read exit 0 as "every
+    probe was found"; the effect was that a bench where the discovery worked
+    exactly as designed exited 1 on every run. OpenOCD has no probe listing of
+    its own, so that enumeration can never report itself complete, and the one
+    non-green field on a healthy read was the one this predicate scored against
+    (#445).
 
-    Deliberately apart from `overall_success`, which `is_failure_report` and the
-    MCP ``isError`` flag are also derived from: folding `complete` into that
-    shared predicate would file every successful-but-incomplete read as the
-    bench's `last_failure` and turn its tool call into an error, when it is
-    neither. Only the presentation boundary -- the CLI exit status and the
-    rendering -- treats "not authoritative" as "not a clean pass". `complete` is
-    written by exactly one producer (the OpenOCD USB-serial probe listing), so
-    this narrows nothing else: a result that never claims completeness is scored
-    exactly as `overall_success` scores it.
+    A verdict says whether the call did its job. ``complete`` says how far the
+    job reaches, which is a property of the enumeration and not of this run of
+    it: the listing states it in its own summary, the result carries the field
+    for a caller that acts on it, and neither is a reason to hand a shell a
+    nonzero status. A discovery that *failed* still exits nonzero, through `ok`
+    and the containment checks above, which is what the nonzero status is for.
+
+    Kept as its own name rather than folded into `overall_success` because the
+    two answer different questions to different readers: `is_failure_report` and
+    the MCP ``isError`` flag ask "may this go on", while the exit status and the
+    rendering ask "is there anything standing". They agree today, and a marker
+    that belongs to only one of them has somewhere to go that is not the shared
+    predicate.
     """
-    return overall_success(result) and result.get("complete") is not False
+    return overall_success(result)
 
 
 def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[str], list[str]]) -> JsonObject:

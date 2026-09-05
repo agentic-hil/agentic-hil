@@ -656,6 +656,13 @@ $needsPackage = $true
 # an already-current version unless told to; `pin` is `refresh` with the
 # operator's own release named, which sets the requirement outright.
 $InstallMode = 'fresh'
+# FirstInstall is the closing line's question and not step 2's, which is why it
+# is not read off InstallMode: the development branch below installs nothing at
+# all and is still a machine that already has this tool. The closing sentence
+# about creating this project's configuration is written for somebody meeting
+# the tool for the first time, and on a host with project configurations already
+# on it, it was the wrong thing to end on.
+$FirstInstall = $false
 if (Test-Executable 'agentic-hil') {
     $probe = Invoke-Captured -File 'agentic-hil' -Arguments @('--version')
     $installed = $probe.Output.Trim()
@@ -676,6 +683,7 @@ if (Test-Executable 'agentic-hil') {
         Write-Step 1 "probe: agentic-hil $installed is older than $Release, upgrading it"
     }
 } else {
+    $FirstInstall = $true
     Write-Step 1 'probe: no agentic-hil on this PATH, installing it user-local'
 }
 
@@ -737,6 +745,11 @@ if (-not $needsPackage) {
 # this run installs a copy, it becomes that copy's own path, so an older
 # agentic-hil earlier on PATH cannot answer for the install that just happened.
 $AgenticHilCmd = 'agentic-hil'
+# What the copy this run installed answers, once step 3 has found it and asked.
+# Empty where nothing was installed, or where the fresh copy could not be located
+# where the manager put it. The closing sentence reads it to say whether the
+# version actually moved, rather than claiming a refresh for every run.
+$ResolvedVersion = ''
 
 # Step 3: say where it landed, and edit nobody's profile script.
 if (-not $needsPackage) {
@@ -776,6 +789,7 @@ if (-not $needsPackage) {
                 $reported = "$($probe.Output)".Trim()
                 if ($reported -and (Test-VersionMatchesRequest -Found $reported)) {
                     $found = $directory
+                    $ResolvedVersion = $reported
                 }
             }
         }
@@ -920,5 +934,31 @@ if ($running.Count -eq 1) {
     Write-Host ''
 } else {
     Write-Step 5 'restart: no agent CLI of yours is running, so there is nothing to restart'
+}
+
+# The last thing on the screen, and it follows what step 2 actually did rather
+# than what this run was asked to do. A first install ends on what happens next,
+# because nothing has happened yet. A run that moved the version ends on what
+# changed and what has not caught up with it: the installation on disk is the
+# new one, and every agentic-hil server already running goes on answering with
+# the release it started with until the agent CLI that started it is restarted.
+# A run that kept what was here ends on that, and says which of the two kinds of
+# keeping it was.
+#
+# The first-install sentence used to be printed on every run that was not one,
+# and on a host with project configurations already on it, "the first hardware
+# question creates this project's configuration" is an answer to a question that
+# machine settled long ago. The refresh sentence then took its place on every
+# run that was not a first install, which is how a run that printed "nothing to
+# install, the development installation stays as it is" closed on having
+# refreshed this installation in place. Measured on a bench, and again after a
+# `Nothing to upgrade`.
+if ($FirstInstall) {
     Write-Say "The next start of your agent has everything, and the first hardware question creates this project's configuration."
+} elseif (-not $needsPackage) {
+    Write-Say "The development installation already on this PATH was kept and nothing was installed over it, and your project configurations were not touched. Nothing moved to a newer release, so no agentic-hil MCP server is behind this installation and none of them needs restarting on account of this run."
+} elseif ($ResolvedVersion -and $ResolvedVersion -eq $installed) {
+    Write-Say "This installation stayed at $ResolvedVersion, the release it was already on, and your project configurations were not touched. Nothing moved to a newer release, so no agentic-hil MCP server is behind this installation and none of them needs restarting on account of this run."
+} else {
+    Write-Say "This installation was refreshed in place, and your project configurations were not touched. Any agentic-hil MCP server still running keeps answering with the release it started with, so restart the agent CLIs that started one to pick this installation up."
 }

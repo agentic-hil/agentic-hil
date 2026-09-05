@@ -104,6 +104,7 @@ from agentic_hil.test_reactor import (
     UartRunner,
     flatten_steps,
     load_test_config,
+    unconfigured_devices,
 )
 from agentic_hil.tools import (
     AgenticHILToolService,
@@ -378,12 +379,14 @@ def redaction_unavailable(command: str | None) -> JsonObject:
 
 
 def result_succeeded(result: JsonObject) -> bool:
-    # `conclusive_success`, not `overall_success`: a discovery that answered but
-    # says it is not authoritative (`complete: false`, which only the OpenOCD
-    # probe listing writes) must not exit 0. Exit 0 there tells automation "every
-    # probe was found" over a reading that cannot see a VCP-less probe. It stays
-    # off `overall_success` so the same read is neither filed as a failure nor
-    # turned into an MCP error; see `conclusive_success`.
+    # The exit status says whether the command did its job, and nothing else. A
+    # discovery that answered and states how far it reaches (`complete: false`,
+    # which only the OpenOCD probe listing writes, and which it can never state
+    # otherwise because OpenOCD has no probe listing) did its job: it exits 0,
+    # carries the field, and says the limit in its own summary. Exiting 1 there
+    # broke every `set -e` script over a bench that was working and read as a
+    # fault to an agent (#445). A discovery that failed still exits nonzero,
+    # through `ok` and the containment checks `conclusive_success` folds in.
     return conclusive_success(result)
 
 
@@ -516,9 +519,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_plan_parser = subparsers.add_parser(
         "check-plan",
-        help="load each named test plan through the reactor's own loader and say whether it holds, without a configuration and without touching hardware: the same duplicate-key rejection, non-finite-number rejection and plan-version feature gates the bench would apply, so a plan this accepts is one the reactor can load. Exit is nonzero if any plan is refused. This is the loadability check a hosted simulator job runs; a schema-only reader passes plans the reactor then refuses",
+        help=(
+            "load each named test plan through the reactor's own loader and say whether it holds, without touching "
+            "hardware: the same duplicate-key rejection, non-finite-number rejection and plan-version feature gates "
+            "the bench would apply, so a plan this accepts is one the reactor can load. Where this workspace has a "
+            "configuration, it also reports which device names a plan uses that the configuration does not declare, "
+            "which is the other thing the bench refuses a plan for; where it has none, it says so and checks "
+            "loadability alone. Exit is nonzero if any plan is refused. This is the pre-flight check a hosted "
+            "simulator job runs; a schema-only reader passes plans the reactor then refuses"
+        ),
     )
     check_plan_parser.add_argument("plans", nargs="+", metavar="PLAN", help="one or more test plan paths inside this workspace")
+    check_plan_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit nonzero for a plan naming a device this workspace's configuration does not declare, instead of reporting it as a finding. For the job that means this bench: a repository holding plans for other benches has findings that are not defects",
+    )
 
     mcp_config_parser = subparsers.add_parser("mcp-config", help="print or write project .mcp.json for MCP client discovery")
     mcp_config_parser.add_argument("--output", default=None)
@@ -626,7 +642,7 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "test-schema":
         return test_schema(args.output, args.force)
     if args.command == "check-plan":
-        return check_plan(args.plans)
+        return check_plan(args.plans, strict=args.strict)
     if args.command == "mcp-config":
         return mcp_config(args.output, args.force)
     if args.command == "skill-install":
@@ -679,13 +695,37 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     extras_warning = None
     with suppress(ConfigError, OSError):
         extras_warning = missing_configured_extras(load_cli_authoritative_config(None))
-    summary = f"Agentic HIL upgraded from {previous_version} to {current_version}; restart agent hosts to load the new MCP server."
+    # Which hosts have this server registered, read off the refresh that has just
+    # looked at every one of them. A host with the registration starts a server
+    # out of the launcher this upgrade resolved, so it is the second half of the
+    # restart question; the first half is `restart_required` off the manager,
+    # which names the servers running right now. A machine with neither is asked
+    # to restart nothing, which is what the generic sentence used to do to it.
+    registered = [entry["agent"] for entry in refreshed if entry.get("registration") is True]
+    # Either half can be unknown, and their disjunction has to say so rather than
+    # answer false. `replace_installation` leaves `restart_required` off where the
+    # host could not read its process table, and a registered agent host raises the
+    # answer whatever that half says; with neither known and none registered,
+    # "false" would be an answer nobody established, printed beside a summary
+    # sentence that says the opposite.
+    restart_known = "restart_required" in result or bool(registered)
+    restart_required = bool(result.get("restart_required")) or bool(registered)
+    summary = f"Agentic HIL upgraded from {previous_version} to {current_version} on disk."
+    notice = result.get("restart_notice")
+    if isinstance(notice, str) and notice:
+        summary += f" {notice}"
+    if registered:
+        # Named rather than described. "Restart agent hosts to load the new MCP
+        # server" was printed identically on a machine where no agent host had
+        # this server registered at all, beside a `refreshed` block that said so
+        # in the same result.
+        hosts = _named_agents(registered)
+        summary += f" {hosts} {'has' if len(registered) == 1 else 'have'} this server registered, so restart {'it' if len(registered) == 1 else 'them'} to load the new release."
     if rewritten:
         # An agent host reads its MCP registration at startup, so the agent
         # whose entry moved is the one that has to be restarted before it uses
         # the launcher this upgrade resolved.
-        hosts = _named_agents(rewritten)
-        summary += f" The MCP registration was rewritten for {hosts}, so restart {hosts} to load it."
+        summary += f" The MCP registration was rewritten for {_named_agents(rewritten)}, so that restart is also what picks up the launcher this upgrade resolved."
     if failed:
         # Not a failed upgrade. The package moved; what did not is a file this
         # command maintains for somebody else's program, and each entry carries
@@ -705,6 +745,7 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     return {
         **result,
         **({"extras_warning": extras_warning} if extras_warning is not None else {}),
+        **({"restart_required": restart_required} if restart_known else {}),
         "summary": summary,
         "refreshed": refreshed,
     }
@@ -3432,7 +3473,7 @@ def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
 test_schema.__test__ = False  # type: ignore[attr-defined] - keep pytest from collecting the CLI helper
 
 
-def check_plan(plans: list[str]) -> JsonObject:
+def check_plan(plans: list[str], *, strict: bool = False) -> JsonObject:
     """Load each plan through the reactor's own loader and report whether it holds.
 
     The hosted simulator job's one job is to establish that every plan in the
@@ -3443,15 +3484,30 @@ def check_plan(plans: list[str]) -> JsonObject:
     `load_test_config`, the same function the reactor loads a plan with, which is
     the whole of that guarantee: the duplicate-key rejection, the non-finite
     number rejection, the plan-version supersession and the feature gates, in one
-    place rather than reimplemented in a workflow. It loads no configuration and
-    touches no hardware; the workspace is this working directory, which is the
-    checkout the simulator runs in and the root a plan must stay inside.
+    place rather than reimplemented in a workflow. It touches no hardware; the
+    workspace is this working directory, which is the checkout the simulator runs
+    in and the root a plan must stay inside.
+
+    Where this workspace has a configuration, the check goes one step further and
+    says which device names a plan uses that the configuration does not declare.
+    That is the other thing the bench refuses a plan for, it is the same file
+    `workspace_root` is already read from, and a plan naming `dut_uart2` where
+    the bench has `dut_uart` used to pass here and be refused as
+    `test_config_invalid` at the first step of the run. It is a finding rather
+    than a failure: a repository holds plans for benches other than the one this
+    checkout happens to sit on, and a check that failed on those would be a check
+    people stop running. `--strict` is for the job that does mean this bench.
+
+    Where there is no configuration, nothing is compared and the result says so.
+    A plan is checked for loadability exactly as before, which is what a hosted
+    simulator with no bench at all can establish.
 
     A red plan does not stop the ones after it: every plan is reported, so one
     run names all of them rather than the first to fail, and `ok` is false when
     any was refused so the command exits nonzero.
     """
     work_dir = str(Path.cwd())
+    config, configuration = _plan_check_configuration(work_dir)
     checked: list[JsonObject] = []
     for plan in plans:
         try:
@@ -3460,15 +3516,123 @@ def check_plan(plans: list[str]) -> JsonObject:
             detail = error.to_dict()
             checked.append({"plan": plan, "ok": False, "error_type": detail.get("error_type"), "summary": detail.get("summary")})
         else:
-            checked.append({"plan": plan, "ok": True, "name": loaded.name, "steps": sum(1 for _ in flatten_steps(loaded.steps))})
+            entry: JsonObject = {"plan": plan, "ok": True, "name": loaded.name, "steps": sum(1 for _ in flatten_steps(loaded.steps))}
+            missing = [] if config is None else unconfigured_devices(config, loaded)
+            if missing:
+                entry["unconfigured_devices"] = missing
+                # The row says what was found on this plan, in its own sentence.
+                # A rendering takes a nested result's opening line from its
+                # summary and falls back to "ok" when it has none, so the plan
+                # the whole run failed on was introduced by the word `ok` with
+                # the finding filed underneath it as one more field (#467). The
+                # sentence is the same in both modes, because the finding is a
+                # fact about the plan and only the verdict is about `--strict`.
+                entry["summary"] = f"Loads, and names {len(missing)} device(s) this workspace's configuration does not declare: {', '.join(missing)}."
+            checked.append(entry)
     refused = [entry["plan"] for entry in checked if not entry["ok"]]
-    ok = not refused
-    summary = (
-        f"All {len(checked)} test plan(s) load through the reactor's loader."
-        if ok
-        else f"{len(refused)} of {len(checked)} test plan(s) would be refused by the reactor: {', '.join(str(name) for name in refused)}."
+    findings = [entry for entry in checked if entry.get("unconfigured_devices")]
+    # A present-but-broken configuration is not the no-configuration case. Strict
+    # mode is the preflight for this bench, and it cannot compare a plan's device
+    # names against a file it could not read: a malformed, unreadable, noncanonical
+    # or wrong-workspace configuration leaves the comparison undone, so under
+    # --strict it fails the command rather than reporting that every plan loads and
+    # exiting 0 over the check the caller asked for (round 1, finding 2).
+    config_unreadable = _configuration_unreadable(configuration)
+    ok = not refused and not (strict and findings) and not (strict and config_unreadable)
+    return {
+        "ok": ok,
+        "tool": "check_plan",
+        "summary": _check_plan_summary(checked, refused, findings, configuration, strict=strict),
+        "strict": strict,
+        "configuration": configuration,
+        "plans": checked,
+    }
+
+
+def _plan_check_configuration(work_dir: str) -> tuple[AgenticHILConfig | None, JsonObject]:
+    """This workspace's configuration and what to say about having it, or not.
+
+    Not having one is an ordinary answer here rather than a refusal: this command
+    is the check a job runs before a bench is involved, and it was specified to
+    need no configuration. So `config_file_not_found` is reported as the reason
+    the device names were not compared, and the plans are still checked.
+
+    A configuration that is present but will not load is a different fact: it is a
+    bench whose file is malformed, unreadable, noncanonical or bound to another
+    workspace, not a workspace with no bench. The comparison still cannot happen,
+    but the reason is not "there is nothing to compare against", and `check_plan`
+    treats it as a failure under --strict rather than as the tolerated
+    no-configuration case (round 1, finding 2).
+    """
+    try:
+        config = load_authoritative_config(Path(work_dir))
+    except ConfigError as error:
+        if error.error_type == "config_file_not_found":
+            return None, {
+                "ok": False,
+                "error_type": error.error_type,
+                "summary": f"{error.summary} No device names were compared against a configuration; the plans were checked for loadability only.",
+            }
+        return None, {
+            "ok": False,
+            "error_type": error.error_type,
+            "summary": (
+                f"{error.summary} This workspace has a configuration that could not be loaded, so no device names were "
+                "compared; the plans were checked for loadability only."
+            ),
+        }
+    return config, {
+        "ok": True,
+        "summary": "This workspace's configuration was read, so each plan's device names were compared against what it declares.",
+        "debuggers": sorted(config.debuggers),
+        "com_ports": sorted(config.com_ports),
+        "can_buses": sorted(config.can_buses),
+    }
+
+
+def _configuration_unreadable(configuration: JsonObject) -> bool:
+    """Whether a configuration is present but could not be loaded.
+
+    True for every configuration-loading failure except `config_file_not_found`,
+    which is the one this command tolerates as the hosted-simulator case with no
+    bench at all. A malformed, unreadable, noncanonical or wrong-workspace file is
+    a bench whose configuration is broken, and strict plan checking fails on it
+    (round 1, finding 2).
+    """
+    return not configuration.get("ok", False) and configuration.get("error_type") != "config_file_not_found"
+
+
+def _check_plan_summary(checked: list[JsonObject], refused: list[object], findings: list[JsonObject], configuration: JsonObject, *, strict: bool) -> str:
+    """The one sentence the run is read by, headed by its own outcome when it failed.
+
+    A strict run that exits 1 used to open `All 1 test plan(s) load through the
+    reactor's loader, ...` and put the only nonzero signal in a subordinate
+    clause at the end, so the rendering of a failed preflight read as a pass
+    (#467). Every strict failure is now headed `Failed:` and names the count it
+    failed on first; the informational run, which exits 0 and is telling the
+    reader about plans written for another bench, keeps the heading it had.
+    """
+    if refused:
+        return f"{len(refused)} of {len(checked)} test plan(s) would be refused by the reactor: {', '.join(str(name) for name in refused)}."
+    if strict and _configuration_unreadable(configuration):
+        return (
+            f"Failed: this workspace's configuration could not be loaded ({configuration.get('error_type')}), so --strict "
+            f"could not compare the device names of {len(checked)} test plan(s) against it. All {len(checked)} of them "
+            "load through the reactor's loader."
+        )
+    if not findings:
+        return f"All {len(checked)} test plan(s) load through the reactor's loader."
+    names = ", ".join(sorted({str(name) for entry in findings for name in entry["unconfigured_devices"]}))
+    if strict:
+        return (
+            f"Failed: {len(findings)} of {len(checked)} test plan(s) name device(s) this workspace's configuration does "
+            f"not declare ({names}). All {len(checked)} of them load through the reactor's loader, and --strict makes "
+            "that finding a failure."
+        )
+    return (
+        f"All {len(checked)} test plan(s) load through the reactor's loader, and {len(findings)} of them name "
+        f"device(s) this workspace's configuration does not declare ({names}), which --strict makes a failure."
     )
-    return {"ok": ok, "tool": "check_plan", "summary": summary, "plans": checked}
 
 
 check_plan.__test__ = False  # type: ignore[attr-defined] - keep pytest from collecting the CLI helper
@@ -5183,9 +5347,10 @@ def bootstrap_probe_listing() -> JsonObject:
         # which the OpenOCD/USB-inventory fallback sets) must not read as a
         # finished count: it reaches an ST-Link only through the virtual COM port
         # a V2-1 or a V3 publishes, so a VCP-less probe can sit beside the ones it
-        # saw. The verdict (`conclusive_success`) already exits non-zero over it;
-        # the summary says why, so the exit code is not a silent one (round 0,
-        # finding 1).
+        # saw. The summary carries that in words, which is where it belongs and
+        # is now the whole of how it travels to a person: the exit status no
+        # longer scores the field, because a listing this backend can never
+        # report complete is not a run that went wrong (#445).
         incomplete = result.get("complete") is False
         result["summary"] = (
             f"{len(listed['probes'])} connected debugger probe(s) read by bootstrap discovery from this host's USB "
@@ -5259,7 +5424,8 @@ def debugger_probes() -> JsonObject:
     # authoritative (`complete: false`, which the OpenOCD USB-serial listing
     # always sets) is not a failure, so it stays out of `failed` and off `ok`;
     # but the aggregate must not read as a finished count either, so it carries
-    # `complete: false` up and the CLI verdict below takes it.
+    # `complete: false` up and names which listings it came from, as information
+    # a caller reads rather than as a verdict on the run (#445).
     incomplete = sorted(name for name, result in results.items() if result.get("complete") is False)
     aggregate: JsonObject = {
         # `all`, not `any`: one probe answering must not report the run as
@@ -5279,9 +5445,9 @@ def debugger_probes() -> JsonObject:
     }
     # A containment marker on any probe has to reach the top level, or
     # overall_success() reads clean over a nested quarantine. `complete: false`
-    # rides up the same way: it is not an overall_success() marker, but it is the
-    # CLI verdict's (`conclusive_success`), so a VCP-less probe beside the ones a
-    # child saw cannot be exited 0 over.
+    # rides up the same way and for a different reason: it scores no verdict at
+    # either level, and a caller reading only the aggregate still has to be able
+    # to see that a VCP-less probe could sit beside the ones a child saw.
     for marker, unsafe in (("cleanup_required", True), ("quarantined", True), ("audit_ok", False), ("complete", False)):
         if any(result.get(marker) is unsafe for result in results.values()):
             aggregate[marker] = unsafe

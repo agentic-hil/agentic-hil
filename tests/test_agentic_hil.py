@@ -20,11 +20,13 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from conftest import (
+    DEFAULT_TEST_PERMISSIONS,
     FAKE_OPENOCD,
     FAKE_OPENOCD_NO_TARGET,
     FAKE_STLINK,
     FAKE_STLINK_HALT_UNCONFIRMED,
     FAKE_STLINK_UNCONFIRMED,
+    read_the_release_index,
     write_authoritative_config,
     write_config,
 )
@@ -605,10 +607,13 @@ def test_upgrade_uses_running_python_and_refreshes_the_agent_it_had_set_up(
 
     assert result["ok"] is True
     assert result["version"] == "9.9.9"
+    # Nothing is running out of this installation here, and the restart is asked
+    # for because the refresh found an agent host with the server registered.
     assert result["restart_required"] is True
     # The one outcome that may claim an upgrade, and it says which two numbers
     # it moved between rather than asserting movement in the abstract.
-    assert result["summary"].startswith(f"Agentic HIL upgraded from {__version__} to 9.9.9; restart agent hosts to load the new MCP server.")
+    assert result["summary"].startswith(f"Agentic HIL upgraded from {__version__} to 9.9.9 on disk.")
+    assert "restart" in result["summary"]
     assert "error_type" not in result
     # The resolution query comes first and is not a command that could replace
     # anything; only then the manager, the import check, and the refresh.
@@ -710,8 +715,16 @@ def _upgrade_reporting(
     command: list[str],
     installed: subprocess.CompletedProcess[str],
     version_after: str,
+    resolution: subprocess.CompletedProcess[str] | None = None,
 ) -> list[list[str]]:
-    """Drive one upgrade with a fixed manager outcome and a fixed resulting version."""
+    """Drive one upgrade with a fixed manager outcome and a fixed resulting version.
+
+    `resolution` answers the unpinned `--dry-run` currency query the pin branch
+    runs through `_installed_release_is_current`. Only a pin naming the installed
+    version reaches it; left None, that query gets the same `installed` outcome as
+    the upgrade, which -- carrying no `Would make no changes` -- the currency check
+    reads as 'not the newest' and the pin stays reported as a block.
+    """
     calls: list[list[str]] = []
 
     def run(invoked: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -720,6 +733,8 @@ def _upgrade_reporting(
             return subprocess.CompletedProcess(invoked, 0, f"{version_after}\n", "")
         if "skill-install" in invoked:
             return subprocess.CompletedProcess(invoked, 0, '{"ok": true}\n', "")
+        if "--dry-run" in invoked and resolution is not None:
+            return resolution
         return installed
 
     monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: (manager, command))
@@ -769,6 +784,441 @@ def test_upgrade_blocked_by_an_exact_pin_names_the_pin_and_keeps_the_extras(
     assert any("agentic-hil@latest" in step for step in result["do_not"])
 
 
+def _uv_tool_receipt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> Path:
+    """A uv tool environment whose receipt says `body`, with this process inside it.
+
+    The receipt sits inside the tool environment, so pointing `sys.prefix` at a
+    directory shaped like one is the whole of what the reader needs: nothing
+    runs `uv`, and the operator's own installation is never read.
+    """
+    environment = tmp_path / "uv" / "tools" / "agentic-hil"
+    environment.mkdir(parents=True)
+    (environment / "uv-receipt.toml").write_text(body, encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    return environment
+
+
+_RECEIPT_WITH_PYTEST = """
+[tool]
+requirements = [
+    { name = "agentic-hil", extras = ["can"] },
+    { name = "pytest", specifier = "==9.1.1" },
+]
+entrypoints = [
+    { name = "agentic-hil", install-path = "/bench/.local/bin/agentic-hil" },
+]
+"""
+
+
+def _quoted(value: str) -> str:
+    """One receipt value as the shell of the host running this suite takes it.
+
+    The same split the printed line makes: PowerShell on Windows, where a
+    single-quoted string is literal, and `shlex.quote` everywhere else, which
+    leaves a value needing no quotes bare. Written out here rather than imported
+    so that the test states the expected shape and does not agree with the code
+    by construction.
+    """
+    return "'" + value.replace("'", "''") + "'" if os.name == "nt" else shlex.quote(value)
+
+
+def test_the_pin_refusal_keeps_the_with_packages_uv_recorded_beside_this_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reported defect: the promised repair uninstalled what the operator added.
+
+    A uv installation pinned to an exact version and carrying `--with pytest`
+    was told `reinstall_command  uv tool install "agentic-hil[can]@latest"`,
+    which "clears the pin and keeps the installation's extras". Run verbatim, uv
+    answered `Uninstalled 5 packages`, pytest among them. The receipt records
+    every `--with` package, so the line carries each one back and the result
+    names them beside `installed_extras` rather than leaving the loss to be
+    discovered by the next test run.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["reinstall_command"] == f'uv tool install --with {_quoted("pytest==9.1.1")} "agentic-hil[can]@latest"'
+    assert result["with_packages"] == ["pytest==9.1.1"]
+    assert result["installed_extras"] == ["can"]
+    # In words, on the line an operator reads first: what running uv's own hint
+    # instead of this one costs them.
+    assert "pytest==9.1.1" in result["summary"]
+    assert "it removes" in result["summary"]
+    assert 'uv tool install "agentic-hil@latest"' in result["summary"]
+
+
+def test_the_pin_refusal_says_whose_words_the_relayed_block_is_before_printing_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """uv's hint was relayed unlabelled and then contradicted several lines later.
+
+    `install.stderr` carries `reinstall with uv tool install agentic-hil@latest`
+    in among this program's own fields, reading as advice from here, with the
+    Do-not bullet that answers it below the What-to-do list. The words stay,
+    because they are the operator's own machine's, and the sentence that says
+    whose they are and what following them costs is printed above the block.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    from agentic_hil.humanize import render_result
+
+    result = upgrade_installation([])
+    rendered = render_result(result, "upgrade")
+
+    # Still in the document, whole and unedited, for a caller reading --json.
+    assert result["install"]["stderr"] == _UV_EXACT_PIN_HINT
+    assert "carries uv's own output, printed as uv wrote it and not as advice from here" in result["manager_hint_note"]
+    # And on the screen the label comes first, the block after it. Read through
+    # the wrapping, which is what puts the sentence on the page in pieces.
+    flat = " ".join(rendered.split())
+    assert "printed as uv wrote it and not as advice from here" in flat
+    assert flat.index("printed as uv wrote it") < flat.index("reinstall with `uv tool install agentic-hil@latest`")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('[tool]\nrequirements = [{ name = "agentic-hil" }]\n\n[tool.options]\npython = "3.12"\n', id="recorded-under-tool-options"),
+        pytest.param('[tool]\npython = "3.12"\nrequirements = [{ name = "agentic-hil" }]\n', id="recorded-under-tool-the-way-uv-writes-it-now"),
+        pytest.param(
+            '[tool]\npython = "3.12"\nrequirements = [{ name = "agentic-hil" }]\n\n[tool.options]\npython = ""\n',
+            id="recorded-under-tool-beside-an-empty-options-entry",
+        ),
+    ],
+)
+def test_the_pin_refusal_replays_the_interpreter_the_receipt_recorded(
+    body: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A recorded `--python` is part of the installation, so the line carries it.
+
+    A reinstall without it resolves an interpreter of uv's own choosing, which is
+    a different installation wearing the same name.
+
+    Both levels are read, `[tool]` first, because uv moved it: current uv writes
+    `python` directly under `[tool]`, and a reader that looked only under
+    `[tool.options]` found nothing on such a receipt. Measured on a bench, where
+    the printed line carried no `--python` at all while the sentence beside it
+    promised to rebuild the installation as it stands.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, body)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["reinstall_command"] == f'uv tool install --python {_quoted("3.12")} "agentic-hil@latest"'
+    assert result["recorded_python"] == "3.12"
+    assert "with_packages" not in result
+    assert "the interpreter 3.12 this installation was created with" in result["summary"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('[tool]\nrequirements = [{ name = "agentic-hil" }]\n', id="nothing-recorded-beside-it"),
+        pytest.param('[tool]\nrequirements = [{ name = "agentic-hil" }, { name = "x", git = "https://x" }]\n', id="a-source-this-cannot-respell"),
+        pytest.param("this is not toml at all\n", id="a-receipt-that-does-not-parse"),
+    ],
+)
+def test_a_receipt_with_nothing_to_replay_leaves_the_reinstall_line_as_it_was(
+    body: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The neighbouring behaviour, unchanged, including where the receipt is unreadable.
+
+    A requirement recorded as a git, url or path source does not rebuild into
+    the PEP 508 string a `--with` takes, so replaying it would hand the operator
+    a line that installs something else. It is left out rather than guessed at,
+    and the line stays the one this command always printed.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, body)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert "with_packages" not in result
+    assert "recorded_python" not in result
+    assert "[can]" in result["summary"]
+
+
+@pytest.mark.parametrize(
+    ("extras", "receipt", "expected"),
+    [
+        pytest.param(
+            ("can",),
+            _RECEIPT_WITH_PYTEST,
+            "it removes the [can] extra and everything it installed and the package uv's receipt records beside it (pytest==9.1.1).",
+            id="one-extra-and-one-recorded-package",
+        ),
+        pytest.param(
+            ("can", "pyocd"),
+            '[tool]\nrequirements = [{ name = "agentic-hil" }, { name = "pytest" }, { name = "ruff" }]\n',
+            "it removes the [can], [pyocd] extras and everything they installed and the packages uv's receipt records beside it (pytest, ruff).",
+            id="two-extras-and-two-recorded-packages",
+        ),
+    ],
+)
+def test_the_sentence_about_uvs_bare_hint_reads_as_a_sentence(
+    extras: tuple[str, ...],
+    receipt: str,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Measured on a bench, on the ordinary one-extra one-package installation.
+
+    "it removes the [can] extra and everything they installed and pytest": one
+    extra with a plural pronoun pointing back at it, and a package name arriving
+    at the end of a series with nothing saying what it is. Each loss is a phrase
+    that has to read on its own, because they are joined into a series.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, receipt)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: extras)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    summary = str(upgrade_installation([])["summary"])
+
+    assert expected in summary
+    assert "everything they installed and pytest" not in summary
+
+
+def test_the_rendered_pin_note_prints_the_line_it_tells_the_reader_to_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reported defect: the only `uv tool install` on the screen was uv's hint.
+
+    The pin note's summary names `reinstall_command` as the line to run, says
+    what it carries, and warns against the bare line uv prints beside it. The
+    renderer printed `previous_version`, `version`, `manager`, `command` and
+    `upgraded_on_disk`, and none of `reinstall_command`, `installed_extras`,
+    `with_packages`, `recorded_python`, `pinned_version`, `already_current` or
+    `newest_release` -- the last of which TROUBLESHOOTING.md sends a reader to
+    look at. So the reader met one runnable command, uv's, under a paragraph
+    telling them not to run it.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST + '\n[tool.options]\npython = "3.12"\n')
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+
+    from agentic_hil.humanize import render_result
+
+    result = upgrade_installation([])
+    flat = " ".join(render_result(result, "upgrade").split())
+
+    assert str(result["reinstall_command"]) in flat
+    assert "installed_extras can" in flat
+    assert "with_packages pytest==9.1.1" in flat
+    assert "recorded_python 3.12" in flat
+    assert f"pinned_version {__version__}" in flat
+    assert "already_current yes" in flat
+    assert f"newest_release {__version__}" in flat
+
+
+def test_the_rendered_note_prints_what_the_reinstall_line_leaves_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """And the two lists that explain the line, which a success never had printed.
+
+    A withdrawn note is `ok: true`, so it is rendered by the upgrade renderer
+    rather than by the refusal renderer that dumps every key: what holds the
+    installation where it is, and which recorded requirements the line does not
+    carry, would otherwise be readable only with `--json`.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        '[tool]\nrequirements = [{ name = "agentic-hil" }, { name = "somepkg", git = "https://example.invalid/x" }]\n'
+        '\n[tool.options]\nexclude-newer = "2026-09-01T00:00:00Z"\n',
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    from agentic_hil.humanize import render_result
+
+    result = upgrade_installation([])
+    flat = " ".join(render_result(result, "upgrade").split())
+
+    assert result["ok"] is True
+    assert "newest_release 9.9.9" in flat
+    assert "the recorded option `exclude-newer = 2026-09-01T00:00:00Z`" in flat
+    assert "somepkg, recorded under git" in flat
+
+
+def test_a_recorded_marker_is_replayed_rather_than_dropped_in_silence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reported defect: `--with "pytest; python_version>='3.10'"` vanished.
+
+    uv writes a `marker` member for such a requirement, and the reader accepted
+    only `name`, `extras` and `specifier`, so the entry disappeared from
+    `reinstall_command` while the summary beside it said the line rebuilds the
+    installation as it stands. A marker is part of the requirement a `--with`
+    takes, so it is replayed, and the whole value is quoted for the shell the
+    line is pasted into rather than dropped into a double-quoted slot.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        '[tool]\nrequirements = [\n'
+        '  { name = "agentic-hil" },\n'
+        '  { name = "pytest", extras = ["testing"], specifier = ">=8,<9", marker = "python_version >= \'3.10\'" },\n'
+        "]\n",
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation([])
+
+    replayed = "pytest[testing]>=8,<9; python_version >= '3.10'"
+    assert result["with_packages"] == [replayed]
+    assert result["reinstall_command"] == f'uv tool install --with {_quoted(replayed)} "agentic-hil@latest"'
+    assert "with_packages_not_replayed" not in result
+
+
+@pytest.mark.parametrize(
+    ("entry", "requirement", "receipt_key"),
+    [
+        pytest.param('{ name = "x", git = "https://example.invalid/x" }', "x", "git", id="a-git-source"),
+        pytest.param('{ name = "x", url = "https://example.invalid/x.whl" }', "x", "url", id="a-url-source"),
+        pytest.param('{ name = "x", editable = true }', "x", "editable", id="an-editable-source"),
+        pytest.param('{ name = "pytest\\" ; echo pwned #" }', 'pytest" ; echo pwned #', "name", id="a-name-that-is-not-a-name"),
+        pytest.param('{ name = "pytest", specifier = "; echo pwned" }', "pytest", "specifier", id="a-specifier-that-is-not-one"),
+        pytest.param('{ name = "pytest", marker = "$(echo pwned)" }', "pytest", "marker", id="a-marker-that-is-not-one"),
+        # A marker and a specifier are still one to a resolver with a newline in
+        # them, and a `reinstall_command` carrying one is a pasted line that ends
+        # where the operator did not mean it to.
+        pytest.param("""{ name = "pytest", marker = "python_version >= '3.10'\\nrm -rf ." }""", "pytest", "marker", id="a-marker-carrying-a-newline"),
+        pytest.param('{ name = "pytest", specifier = "==1.0\\n" }', "pytest", "specifier", id="a-specifier-carrying-a-newline"),
+        pytest.param('{ name = "pytest", extras = ["a b"] }', "pytest", "extras", id="an-extra-that-is-not-a-name"),
+    ],
+)
+def test_a_requirement_the_line_cannot_replay_is_named_rather_than_dropped(
+    entry: str,
+    requirement: str,
+    receipt_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two defects with one answer: the silent drop, and the unquoted interpolation.
+
+    A recorded requirement that a `--with` cannot spell without installing
+    something else is still left out of the line, which is right. What was wrong
+    is that nothing said so, under a summary promising the line rebuilds this
+    installation as it stands, so the operator lost the package by following the
+    remediation. And a value that is not a requirement at all used to reach the
+    line as it stood: a recorded name of `pytest" ; echo pwned #` rendered as
+    `uv tool install --with "pytest" ; echo pwned #" "agentic-hil@latest"`.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, f'[tool]\nrequirements = [{{ name = "agentic-hil" }}, {entry}]\n')
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil@latest"'
+    assert "--with" not in result["reinstall_command"]
+    assert "echo pwned" not in result["reinstall_command"]
+    assert result["with_packages_not_replayed"] == [{"requirement": requirement, "receipt_key": receipt_key}]
+    assert "with_packages" not in result
+    assert requirement in result["summary"] and f"recorded under `{receipt_key}`" in result["summary"]
+
+
+def test_no_receipt_is_read_for_an_installation_uv_tool_does_not_own(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A pipx or pip prefix has no uv receipt, and a file that sits there is not one.
+
+    The reader is gated on the manager that owns this installation rather than
+    on the file being present, so a leftover `uv-receipt.toml` in an environment
+    uv does not manage never shapes a command for a manager that would not take
+    it.
+    """
+    from agentic_hil.upgrade import _recorded_install, _uv_receipt
+
+    environment = tmp_path / "pipx" / "venvs" / "agentic-hil"
+    environment.mkdir(parents=True)
+    (environment / "uv-receipt.toml").write_text(_RECEIPT_WITH_PYTEST, encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", str(environment))
+
+    assert _uv_receipt() is None
+    assert _recorded_install().with_requirements == ()
+
+
 def test_upgrade_that_finds_nothing_newer_succeeds_without_asking_for_a_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -805,6 +1255,890 @@ def test_upgrade_that_finds_nothing_newer_succeeds_without_asking_for_a_restart(
     assert "reinstall_command" not in result
     assert "pinned_version" not in result
     assert not any("skill-install" in call for call in calls)
+    # Claimed only because the index was asked and answered this same number.
+    assert result["newest_release"] == __version__
+
+
+# ---------------------------------------------------------------------------
+# What the manager calls "nothing to upgrade", checked against the index.
+#
+# The reported defect, measured on a bench whose receipt carried an
+# `exclude-newer`: `agentic-hil upgrade` answered `already_current: true` two
+# hours after the release it was missing, on uv's `Nothing to upgrade` alone,
+# and pointed the operator at the recorded *requirement*, which was unpinned.
+# uv resolves through the option it recorded and offers no command that clears
+# it, so the claim was wrong and the next step was missing with it.
+
+
+_RECEIPT_WITH_EXCLUDE_NEWER = """
+[tool]
+requirements = [{ name = "agentic-hil", extras = ["can"] }]
+
+[tool.options]
+exclude-newer = "2026-09-01T00:00:00Z"
+"""
+
+
+def _nothing_to_upgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `uv tool upgrade` that ran, moved nothing, and said so."""
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        version_after=__version__,
+    )
+
+
+def test_a_recorded_option_that_holds_a_release_back_is_named_and_never_called_current(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The claim is withdrawn, the option is named, and the line that clears it is given.
+
+    uv records `exclude-newer` whether it was given as a flag or through the
+    environment, resolves through it forever, and has no command that clears it.
+    So the receipt is read, the recorded option is named beside the release it
+    is holding out, and the only line that records the installation again
+    without it is on the result. Nothing is refused: the manager had already run
+    and changed nothing.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_EXCLUDE_NEWER)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert "already_current" not in result
+    assert result["error_type"] == "upgrade_blocked_by_recorded_option"
+    assert result["newest_release"] == "9.9.9"
+    assert result["held_back_by"] == ['the recorded option `exclude-newer = 2026-09-01T00:00:00Z`']
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert result["installed_extras"] == ["can"]
+    assert result["version"] == __version__
+    assert "9.9.9" in result["summary"] and "exclude-newer" in result["summary"]
+    assert any("reinstall_command" in step for step in result["remediation"])
+    assert any("already current" in step for step in result["do_not"])
+
+
+def test_a_recorded_exact_requirement_is_read_off_the_receipt_as_well(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The other half of the receipt that keeps a resolution where it is.
+
+    `uv tool upgrade` names a pin in words on some paths and says nothing at all
+    on others, so the recorded requirement is read rather than waited for.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        '[tool]\nrequirements = [{ name = "agentic-hil", specifier = "==0.21.2" }]\n',
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert result["error_type"] == "upgrade_blocked_by_recorded_option"
+    assert result["held_back_by"] == ["the recorded requirement `agentic-hil==0.21.2`"]
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil@latest"'
+    # The one path this refusal is reserved for: an exact requirement, on the
+    # unpinned route, demonstrably keeping an older release in place. It is a
+    # refusal, so it exits non-zero, and the pinned route's withdrawn note is
+    # not one and does not.
+    assert result["ok"] is False
+    assert entrypoint(["upgrade", "--json"]) == 1
+
+
+@pytest.mark.parametrize(
+    "specifier",
+    [
+        pytest.param(">=0.21", id="the-floor-the-quickstart-recommends"),
+        pytest.param("~=0.21.0", id="a-compatible-release-clause"),
+        pytest.param("<1.0", id="a-ceiling"),
+        pytest.param(">=0.21,<0.22", id="a-range"),
+        pytest.param("!=0.21.1", id="an-exclusion"),
+    ],
+)
+def test_a_recorded_floor_is_never_reported_as_holding_a_release_back(
+    specifier: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reported defect: an installation's own `>=` was named as its blocker.
+
+    `uv tool install "agentic-hil[can]>=0.21"` is the line AI_AGENT_QUICKSTART.md
+    recommends, and uv records that specifier verbatim. Reading any recorded
+    specifier as a pin refused the upgrade `upgrade_blocked_by_recorded_option`
+    with exit 1 and `held_back_by` naming that floor, on every run where the index
+    published something the local resolution did not take -- against a
+    requirement that by construction moves with the index. A floor now falls to
+    the branch that states both numbers and invents no cause, which is `ok: true`
+    and exit 0.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        f'[tool]\nrequirements = [{{ name = "agentic-hil", specifier = "{specifier}" }}]\n',
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert "held_back_by" not in result
+    assert "already_current" not in result
+    assert result["newest_release"] == "9.9.9"
+    assert specifier not in result["summary"]
+    assert entrypoint(["upgrade", "--json"]) == 0
+
+
+def test_a_recorded_option_still_holds_a_release_back_beside_a_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The neighbouring behaviour a floor must not take with it.
+
+    `exclude-newer` holds a resolution wherever the requirement is a floor, an
+    exact pin or nothing at all, so a receipt carrying both is still refused and
+    still names the option -- and only the option, because the floor is not
+    holding anything.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        '[tool]\nrequirements = [{ name = "agentic-hil", specifier = ">=0.21" }]\n\n[tool.options]\nexclude-newer = "2026-09-01T00:00:00Z"\n',
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert result["error_type"] == "upgrade_blocked_by_recorded_option"
+    assert result["held_back_by"] == ["the recorded option `exclude-newer = 2026-09-01T00:00:00Z`"]
+
+
+def test_an_installation_above_the_index_is_not_told_it_is_on_the_release_below_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same sentence on the unpinned path, where the bench actually met it.
+
+    A bench carrying the chain wheel, 0.21.4.dev0, against an index at 0.21.3
+    read "0.21.3 is the newest release the index publishes, and this
+    installation is on it". It is not on it; it is a build above it, and the
+    number in the sentence is the one release the machine is certainly not
+    running.
+    """
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "0.0.1")
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["newest_release"] == "0.0.1"
+    assert f"ahead of it at {__version__}" in result["summary"]
+    assert "this installation is on it" not in result["summary"]
+
+
+def test_an_index_that_cannot_be_reached_takes_the_claim_away_rather_than_making_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offline, air-gapped or behind a proxy: the field goes, the sentence says why.
+
+    The claim is about the whole index and the manager only ever spoke about
+    this installation's own recorded resolution. Where the index did not answer,
+    nothing here knows which release is the newest, so the result says that
+    instead of asserting one. Nothing is refused and nothing failed.
+    """
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: None)
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert "already_current" not in result
+    assert "newest_release" not in result
+    assert "error_type" not in result
+    assert "The newest release could not be checked" in result["summary"]
+    assert result["restart_required"] is False
+
+
+def test_a_newer_release_with_nothing_recorded_to_explain_it_states_both_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No receipt, no recorded option, and the index still publishes something newer.
+
+    A private index, or a release this interpreter cannot take. Nothing here
+    knows which, so nothing here says which: the claim is withdrawn, both
+    numbers are named, and no cause is invented.
+    """
+    _recording_manager(monkeypatch, answers={"resolution": PIP_WOULD_INSTALL_NOTHING})
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert "already_current" not in result
+    assert "error_type" not in result
+    assert result["newest_release"] == "9.9.9"
+    assert result["install_skipped"] is True
+    assert "9.9.9" in result["summary"] and __version__ in result["summary"]
+
+
+def test_an_upgrade_that_moved_the_installation_says_nothing_about_the_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neighbouring behaviour: the check belongs to the outcome that claims currency.
+
+    A manager with something to install has answered the question this exists to
+    ask, so the index is left alone and the result gains no field from it."""
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: pytest.fail("the index must not be asked when something is being installed"))
+
+    result = upgrade_installation([])
+
+    assert result["upgraded_on_disk"] is True
+    assert "newest_release" not in result
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        pytest.param(b'{"info": {"version": " 1.2.3 "}}', "1.2.3", id="the-version-the-index-publishes"),
+        pytest.param(b'{"info": {}}', None, id="a-payload-without-one"),
+        pytest.param(b"not json", None, id="a-payload-that-does-not-parse"),
+    ],
+)
+def test_the_index_reader_answers_only_what_the_payload_states(
+    payload: bytes,
+    expected: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One request, and anything it cannot read is None rather than a guess."""
+    monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: _FakeIndexResponse(payload))
+
+    assert read_the_release_index() == expected
+
+
+class _FakeIndexResponse:
+    """A response that hands its body out in pieces, the way a socket does.
+
+    `per_read` bytes at a time, and an empty bytes object once the body is
+    exhausted, which is how a stream says it has ended. `clock_step` is what one
+    read costs on the fake clock, so a trickling endpoint is a response with a
+    small `per_read` and a step of its own.
+    """
+
+    def __init__(self, body: bytes, *, per_read: int | None = None, clock_step: float = 0.0) -> None:
+        self._body = body
+        self._per_read = per_read
+        self._clock_step = clock_step
+        self.reads = 0
+        self.elapsed = 0.0
+
+    def read(self, limit: int) -> bytes:
+        self.reads += 1
+        self.elapsed += self._clock_step
+        taken = self._body[: min(limit, self._per_read or limit)]
+        self._body = self._body[len(taken) :]
+        return taken
+
+    def __enter__(self) -> _FakeIndexResponse:
+        return self
+
+    def __exit__(self, *_exception: object) -> None:
+        return None
+
+
+def test_an_index_that_trickles_bytes_is_read_as_silence_once_the_deadline_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`timeout=` is a socket timeout, and a byte at a time resets it forever.
+
+    `response.read(limit)` loops inside the socket until the limit or the end of
+    the stream, so an endpoint that sends one byte every few seconds held
+    `agentic-hil upgrade` and the `server_upgrade` MCP tool for as long as it
+    liked, against a comment promising a short request. The body is read in
+    bounded pieces against a monotonic clock now, and a deadline that passes is
+    the answer an unreachable index gives.
+    """
+    response = _FakeIndexResponse(b'{"info": {"version": "1.2.3"}}' + b" " * 4096, per_read=1, clock_step=1.0)
+    monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: response)
+    monkeypatch.setattr("agentic_hil.upgrade.monotonic", lambda: response.elapsed)
+
+    assert read_the_release_index() is None
+    # It kept reading while the budget lasted, and stopped on the budget rather
+    # than on the byte limit: ten one-byte reads, not the eight million the size
+    # cap allows and not the single read that would take one byte for the body.
+    assert 1 < response.reads < 100
+    assert response.elapsed >= 10.0
+
+
+def test_a_body_already_here_is_not_thrown_away_by_the_deadline_behind_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadline can land between the last chunk and the read that sees the end.
+
+    A whole answer had arrived and only the read that would have reported the end
+    of the stream was still owed, so discarding what was in hand would report an
+    index that answered as one that did not. What has arrived is parsed; a body
+    that is genuinely half here does not parse and lands on the same wording an
+    unreachable index does.
+    """
+    response = _FakeIndexResponse(b'{"info": {"version": "1.2.3"}}', clock_step=11.0)
+    monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: response)
+    monkeypatch.setattr("agentic_hil.upgrade.monotonic", lambda: response.elapsed)
+
+    assert read_the_release_index() == "1.2.3"
+    assert response.reads == 1
+
+
+def test_an_index_that_answers_in_several_pieces_is_still_read_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neighbouring direction: a chunked answer inside the budget is an answer.
+
+    A real payload arrives in more than one read, and a reader that took the
+    first piece for the whole body would report every index as unparseable.
+    """
+    response = _FakeIndexResponse(b'{"info": {"version": "1.2.3"}}', per_read=4, clock_step=0.001)
+    monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: response)
+    monkeypatch.setattr("agentic_hil.upgrade.monotonic", lambda: response.elapsed)
+
+    assert read_the_release_index() == "1.2.3"
+    assert response.reads > 1
+
+
+def test_an_index_that_does_not_answer_is_not_an_error_the_upgrade_carries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused connection, a timeout, a proxy: all of them answer None here."""
+
+    def refuse(_request: object, timeout: object = None) -> object:
+        raise OSError("no route to host")
+
+    monkeypatch.setattr("agentic_hil.upgrade.urlopen", refuse)
+
+    assert read_the_release_index() is None
+
+
+# The pair uv actually prints on an installation pinned to the release it is
+# already running: the resolution came back with nothing, and the hint names the
+# pin at the version that is installed. Both halves reach this code, and it took
+# only the second one.
+_UV_PIN_AT_CURRENT_HINT = (
+    f"hint: `agentic-hil` is pinned to `{__version__}` (installed with an exact version pin); "
+    "reinstall with `uv tool install agentic-hil@latest` to upgrade to a new version."
+)
+
+
+def test_a_pin_at_the_release_that_is_installed_is_a_note_and_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pin holding nothing back is not a blocked upgrade (#450).
+
+    The reported run: an installation pinned to the current release answered
+    `Refused: upgrade_blocked_by_pin` and exit 1, with `previous_version`,
+    `version` and `pinned_version` all the same number and uv's own `Nothing to
+    upgrade` nested inside it. The outcome was that the installation is current,
+    and a script running `agentic-hil upgrade` unconditionally read a failure.
+
+    The note is reported only once an independent, unpinned resolution confirms
+    the installed release is the newest the index offers -- here `Would make no
+    changes` -- because the manager's own pin-bound `Nothing to upgrade` is true of
+    a stale pin too (round 1, finding 1). The pin still reaches the operator,
+    because somebody who wants later releases picked up automatically has to clear
+    it: same `pinned_version`, same `reinstall_command`, same extras. What goes is
+    the error type and the exit code, which claimed a release was being withheld
+    when none was.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    calls = _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert result["already_current"] is True
+    assert result["restart_required"] is False
+    assert result["version"] == __version__
+    # The pin is carried, and named as a note rather than as a block.
+    assert result["pinned_version"] == __version__
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert result["installed_extras"] == ["can"]
+    assert "note rather than as a refusal" in result["summary"]
+    # An unpinned currency resolution was run and is what let the note stand.
+    assert any("--dry-run" in call for call in calls)
+    # Nothing was replaced, so nothing is refreshed out of it.
+    assert not any("skill-install" in call for call in calls)
+
+
+def test_the_pin_note_carries_the_with_packages_the_same_line_replays(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The note prints the same `reinstall_command`, so it owes the same account.
+
+    An installation pinned to the release it is already running is told the line
+    that clears the pin all the same, and that line replays every `--with`
+    package uv recorded. Naming those only on the refusal would leave the reader
+    of the note, who follows uv's bare hint instead, losing exactly what the
+    refusal warns about, from a result that had the receipt in front of it.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert "note rather than as a refusal" in result["summary"]
+    assert result["with_packages"] == ["pytest==9.1.1"]
+    assert result["reinstall_command"] == f'uv tool install --with {_quoted("pytest==9.1.1")} "agentic-hil[can]@latest"'
+    assert "pytest==9.1.1" in result["summary"]
+
+
+def test_the_pin_note_is_withdrawn_when_the_index_publishes_a_newer_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two checks, and an installation is current only while neither says otherwise.
+
+    The unpinned `--dry-run` resolution moved nothing, which is what tells a pin
+    at the newest release from a pin below one, and the index publishes a release
+    above the one installed. A receipt carrying `exclude-newer` is one thing that
+    produces exactly that pair: uv resolves through the recorded option and finds
+    nothing whatever the pin says. The note keeps `ok` and its exit code, because
+    nothing was withheld from a run that asked for it, and loses the currency
+    claim, because the release that is out there is newer than the one here.
+
+    What it used to do instead was route the note through the refusal that
+    answers the unpinned path: `ok: false`, a `Refused:` heading and exit 1 over
+    an outcome whose own summary said "reported here as a note rather than as a
+    refusal", with the account of `reinstall_command` and the do-not-run warning
+    printed twice apiece because the second sentence was appended to the first.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_EXCLUDE_NEWER)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert "already_current" not in result
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert entrypoint(["upgrade", "--json"]) == 0
+    assert result["newest_release"] == "9.9.9"
+    assert result["held_back_by"] == ["the recorded option `exclude-newer = 2026-09-01T00:00:00Z`"]
+    # The pin is still on the result: it is what the manager said, and it is read
+    # off the hint rather than dropped because another check spoke last.
+    assert result["pinned_version"] == __version__
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    # And the withdrawal is stated where a person reads it.
+    assert "9.9.9" in result["summary"] and "not the newest release there is" in result["summary"]
+    assert "exclude-newer" in result["summary"]
+
+
+def test_the_withdrawn_pin_note_carries_every_sentence_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The summary was two summaries, one appended to the other.
+
+    The index judgement ran over a finished sentence, so the reader of a
+    withdrawn note met two accounts of what `reinstall_command` rebuilds and two
+    copies of the warning about uv's own bare hint, on one screen. It is composed
+    from parts now: each sentence appears once, whichever way the index answered.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST + '\n[tool.options]\nexclude-newer = "2026-09-01T00:00:00Z"\n')
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    summary = str(upgrade_installation([])["summary"])
+
+    assert summary.count("Do not run the bare") == 1
+    assert summary.count("rebuilds this installation as it stands") == 1
+    assert summary.count("Running it is the operator's decision.") == 1
+    assert summary.count("`reinstall_command`") == 1
+    assert "No restart is needed." in summary
+    assert summary.count("No restart is needed.") == 1
+
+
+def test_a_withdrawn_note_does_not_name_the_pin_the_resolution_just_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two sentences of one summary would otherwise contradict each other.
+
+    A receipt recording an exact pin at the installed release, on a bench whose
+    own index is behind the public one: the unpinned resolution moved nothing, so
+    the pin demonstrably holds nothing back and the note says exactly that, and
+    naming the same pin under `held_back_by` in the next sentence would take it
+    back. A recorded option, which no resolution here has cleared, is still
+    named.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        f'[tool]\nrequirements = [{{ name = "agentic-hil", specifier = "=={__version__}" }}]\n',
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert "held_back_by" not in result
+    assert "the recorded requirement" not in result["summary"]
+    assert "The pin holds no release back" in result["summary"]
+    assert "What a resolution reaches is the installation's own" in result["summary"]
+
+
+def test_a_pin_note_above_the_index_says_it_is_ahead_and_not_that_it_is_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bench measurement: 0.21.4.dev0 installed, 0.21.3 published.
+
+    "0.21.3 is the newest release the index publishes, and this installation is
+    on it" was hard-coded in the not-behind branch and is true only where the two
+    numbers are equal. A development build is a build ahead of the index, not a
+    build on it, and every bench running the chain wheel read the wrong sentence.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "0.0.1")
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["newest_release"] == "0.0.1"
+    assert f"this installation is ahead of it at {__version__}" in result["summary"]
+    assert "this installation is on it" not in result["summary"]
+
+
+@pytest.mark.parametrize(
+    ("installed", "expected"),
+    [
+        pytest.param("0.21.4.dev0", "which is a development build of the release that follows it", id="a-development-build"),
+        pytest.param("0.22.0", "which is not a release this index publishes", id="a-release-this-index-never-had"),
+    ],
+)
+def test_the_sentence_above_the_index_names_what_the_installed_build_actually_is(
+    installed: str,
+    expected: str,
+) -> None:
+    """Above the index has two causes and neither of them is a guess."""
+    from agentic_hil.upgrade import _index_agrees_sentence, _NewestRelease
+
+    sentence = _index_agrees_sentence(_NewestRelease("0.21.3", False, True, (), ""), installed)
+
+    assert expected in sentence
+    assert "is on it" not in sentence
+
+
+def test_the_sentence_at_the_index_is_still_the_one_that_says_on_it() -> None:
+    """The third of the three, unchanged: the two numbers are the same one."""
+    from agentic_hil.upgrade import _index_agrees_sentence, _NewestRelease
+
+    assert _index_agrees_sentence(_NewestRelease("0.21.3", False, False, (), ""), "0.21.3") == (
+        "0.21.3 is the newest release the index publishes, and this installation is on it."
+    )
+
+
+def test_the_refused_pin_names_the_release_the_index_publishes_beside_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The index rides along on the refusal; the resolution is what earns it.
+
+    The unpinned resolution would install 9.9.9, so the pin is holding a release
+    back and the refusal stands on that alone. The index answering the same
+    number is reported beside it, which is the release the operator is being kept
+    off, rather than being asked and thrown away.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=subprocess.CompletedProcess([], 0, "Resolved 8 packages in 12ms\nWould install agentic-hil==9.9.9\n", ""),
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["newest_release"] == "9.9.9"
+    assert result["pinned_version"] == __version__
+
+
+def test_an_index_that_did_not_answer_leaves_the_pin_note_standing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On the pinned path the unpinned resolution is the check, and it answered.
+
+    An air-gapped bench, or one whose proxy passes `uv` and not this one request.
+    The unpinned `--dry-run` put the question to the index this installation is
+    actually pointed at and came back with nothing to change, so the note stands
+    on it: withdrawing the claim here would put a pinned, current bench back on
+    the wording #450 removed, over a request that says nothing either way. No
+    `newest_release` is invented for it.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: None)
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert "error_type" not in result
+    assert "newest_release" not in result
+
+
+def test_the_pinned_installation_that_exits_zero_exits_zero_at_the_command_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The half the reporter's script reads: the status, not the document."""
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+
+    assert entrypoint(["upgrade", "--json"]) == 0
+
+
+def test_a_pin_naming_a_version_other_than_the_installed_one_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first guard on the note: the pin must name the version that is installed.
+
+    The hint names a version other than the one this installation runs, so the pin
+    is not a record of where the installation is, and the note that a pin holds
+    nothing back cannot be made about it whatever the index says. It keeps the
+    error type, the exit code and the reinstall line, and it never reaches the
+    currency resolution, which is why none is supplied here.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["pinned_version"] == "0.7.1"
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert entrypoint(["upgrade", "--json"]) == 1
+
+
+def test_a_stale_pin_at_the_installed_release_is_refused_when_the_index_offers_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real stale-pin state, which the manager's own output cannot show (round 1, finding 1).
+
+    Previous, installed and pinned are all one release, and `uv tool upgrade` --
+    which resolves under the pin -- says `Nothing to upgrade` and names that same
+    version in its hint. Both halves the earlier code read as currency are present,
+    and they are present on every pinned installation whether or not a newer
+    release exists; an installation genuinely below the latest looks exactly like
+    one pinned at it. The independent unpinned resolution is what tells them apart:
+    here it would install `9.9.9`, so the pin is holding a release back and keeps
+    the refusal rather than being reported as `already_current` and exit 0.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    calls = _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=subprocess.CompletedProcess([], 0, "Resolved 8 packages in 12ms\nWould install agentic-hil==9.9.9\n", ""),
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert "already_current" not in result
+    # Previous, installed and pinned are the one release; the newer one is only in
+    # the independent resolution, which is what earns the refusal.
+    assert result["previous_version"] == result["version"] == result["pinned_version"] == __version__
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert any("--dry-run" in call for call in calls)
+    assert entrypoint(["upgrade", "--json"]) == 1
+
+
+def test_the_currency_probe_upgrades_only_agentic_hil_so_a_stale_dependency_is_no_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A current pin carrying one older-but-compatible dependency is not a block (round 1, finding 1).
+
+    `uv pip install --upgrade` re-resolves the *whole* dependency set to the newest
+    each constraint allows, so an installation already at the newest Agentic HIL
+    release but carrying an older compatible dependency had the dry run offer only
+    that dependency's update, come back without `Would make no changes`, and be
+    refused as `upgrade_blocked_by_pin` over an Agentic HIL that was exactly
+    current. The probe now scopes the upgrade to the one distribution the question
+    is about, `--upgrade-package agentic-hil`, so uv is asked whether *Agentic HIL*
+    has a newer release and a stale dependency is left where it is.
+
+    The stub answers the query with whatever is handed to it whatever the command,
+    so the guard against the regression is the command's own shape: a global
+    `--upgrade` is what re-resolved the dependency set, and it must not be what
+    runs. With the scoped probe answering `Would make no changes`, the pin at the
+    current release is the note it is rather than the refusal it was.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    calls = _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert "error_type" not in result
+    # The one query is scoped to the top-level distribution: `--upgrade-package
+    # agentic-hil`, never the global `--upgrade` that would re-resolve the whole
+    # set and let a stale dependency mask the pin's currency.
+    probe = next(call for call in calls if "--dry-run" in call)
+    assert "--upgrade-package" in probe
+    assert probe[probe.index("--upgrade-package") + 1] == "agentic-hil"
+    assert "--upgrade" not in probe
+
+
+def test_a_pin_the_manager_did_not_resolve_against_the_index_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both halves are needed, and the resolution is the one that carries weight.
+
+    The pin naming the installed version says where the installation is; it does
+    not say that nothing newer exists. What says that is the manager putting the
+    requirement to the index and coming back with nothing to upgrade. Without
+    that line in its output this run knows only that a pin is recorded, which is
+    the refusal's own case.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["pinned_version"] == __version__
+
+
+def test_a_pin_whose_version_cannot_be_read_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saying the pin names the installed release needs the pin's version.
+
+    A hint whose wording this cannot parse leaves that unanswerable, and inventing
+    the number from the installed one would make the claim true whatever the pin
+    says. So an unreadable pin falls to the refusal, which is where it fell
+    before.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", "hint: this tool was installed with an exact version pin."),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
 
 
 # ---------------------------------------------------------------------------
@@ -1295,7 +2629,8 @@ def test_a_registration_that_exists_without_a_skill_is_refreshed_too(
 
     invocations = [command for command, _cwd in calls if "agent-install" in command]
     assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "claude-code", "--force", "--json"]]
-    assert result["summary"].endswith("The MCP registration was rewritten for Claude Code, so restart Claude Code to load it.")
+    assert "Claude Code has this server registered, so restart it to load the new release." in result["summary"]
+    assert result["summary"].endswith("The MCP registration was rewritten for Claude Code, so that restart is also what picks up the launcher this upgrade resolved.")
 
 
 def test_naming_an_agent_narrows_the_refresh_and_never_widens_it(
@@ -1633,17 +2968,382 @@ def test_a_shared_prefix_counts_only_this_distributions_own_console_script(
 def test_nothing_is_reported_where_the_platform_replaces_a_running_executable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """POSIX unlinks the old file and lets the running process keep reading it.
+    """A host that cannot answer the question reports no list rather than an empty one.
 
-    The upgrade completes and nothing is lost, so a refusal there would block a
-    valid upgrade over a failure that platform does not have.
+    Empty and "cannot say" are different claims, and only the first is worth
+    printing. The upgrade completes either way and nothing is lost, so a refusal
+    there would block a valid upgrade over a failure that host does not have.
+
+    None rather than the empty list, because the empty list is the answer "the
+    table was read and nothing of ours was in it", and returning it here put
+    "No restart is needed." on the summaries of every macOS bench and of every
+    Windows host whose snapshot raised.
     """
     from agentic_hil.upgrade import _processes_holding_installation
 
     monkeypatch.setattr(sys, "prefix", _TOOL_ENV)
     monkeypatch.setattr("agentic_hil.upgrade.snapshot_process_images", lambda: None)
 
+    assert _processes_holding_installation() is None
+
+
+def test_a_reported_process_carries_the_project_it_runs_in_and_when_it_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pid and image were all an operator got, and two servers look alike in them.
+
+    What tells one bench's MCP server from another's is the project its host
+    opened it for, which is the directory it was started in, and how long it has
+    been up. Both are read per process and both are left off where the host did
+    not answer, so no entry carries a field that had to be invented.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    server = _fake_process(400, 999, f"{_TOOL_ENV}/Scripts/python.exe", created_ns=134_330_660_430_000_000)
+    _watch_installation(monkeypatch, (*_UPGRADE_ITSELF, server))
+    monkeypatch.setattr("agentic_hil.upgrade.process_working_directory", lambda pid: "/projects/blinky" if pid == 400 else None)
+
+    assert _processes_holding_installation() == [
+        {
+            "pid": 400,
+            "image": f"{_TOOL_ENV}/Scripts/python.exe",
+            "working_directory": "/projects/blinky",
+            "started_at": "2026-09-05T07:14:03+00:00",
+        }
+    ]
+
+
+def test_a_creation_time_the_host_did_not_report_is_never_read_as_one() -> None:
+    """Zero is what both readers write when the platform answered with no time.
+
+    Converted as a FILETIME it is midnight on the first of January 1601, and a
+    result that printed that would be stating a fact about the operator's
+    machine that came from nowhere. Anything at or below the Unix epoch is the
+    same kind of value, because no process running right now started before
+    1970. The floor is what makes the two hosts agree: Windows raises on such a
+    number out of `fromtimestamp` and drops the field by accident, and Linux
+    converts it happily and prints 1601."""
+    from agentic_hil.process import filetime_epoch_seconds
+
+    assert filetime_epoch_seconds(0) is None
+    assert filetime_epoch_seconds(-1) is None
+    assert filetime_epoch_seconds(5) is None
+    assert filetime_epoch_seconds(11_644_473_600 * 10_000_000) is None
+    assert filetime_epoch_seconds(134_330_660_430_000_000) == pytest.approx(1788592443.0)
+
+
+def test_a_process_whose_host_answered_neither_carries_neither_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A creation time of zero is not a moment in 1601, and an unreadable cwd is not one."""
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    server = _fake_process(400, 999, f"{_TOOL_ENV}/Scripts/python.exe", created_ns=0)
+    _watch_installation(monkeypatch, (*_UPGRADE_ITSELF, server))
+    monkeypatch.setattr("agentic_hil.upgrade.process_working_directory", lambda _pid: None)
+
+    assert _processes_holding_installation() == [{"pid": 400, "image": f"{_TOOL_ENV}/Scripts/python.exe"}]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader needs the symlinks a POSIX host makes without privileges")
+def test_a_linux_host_reads_its_process_table_out_of_proc(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reader that lets a Linux bench name the servers running out of it.
+
+    Until this, the process table was a Windows-only answer, because the only
+    caller was asking whether a file could be replaced. Naming the processes
+    that keep the old copy is a question on every host, and the reported defect
+    was measured on a Linux bench: a live `agentic-hil mcp-stdio`, an upgrade
+    that swapped the environment underneath it, and a result with no field
+    saying so.
+
+    The entry that cannot be read is left out rather than guessed at, which is
+    the same rule the Windows reader applies to a process it cannot open.
+    """
+    from agentic_hil.process import filetime_epoch_seconds, process_working_directory, snapshot_process_images
+
+    proc = tmp_path / "proc"
+    project = tmp_path / "projects" / "blinky"
+    project.mkdir(parents=True)
+    interpreter = tmp_path / "tools" / "agentic-hil" / "bin" / "python3"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("", encoding="utf-8")
+    live = proc / "4242"
+    live.mkdir(parents=True)
+    (live / "exe").symlink_to(interpreter)
+    (live / "cwd").symlink_to(project)
+    (live / "status").write_text("Name:\t(python3) 3\nPPid:\t7\n", encoding="utf-8")
+    # The two files the start time is read out of, shaped the way Linux writes
+    # them: a comm field carrying a space and a bracket of its own, so a reader
+    # that split the whole line on whitespace would take the wrong field, and
+    # 4200 clock ticks since boot as field 22.
+    (live / "stat").write_text(f"4242 (python3 (worker)) {' '.join(['0'] * 19)} 4200 0 0\n", encoding="utf-8")
+    (proc / "stat").write_text("cpu  1 2 3\nbtime 1700000000\nprocesses 12\n", encoding="utf-8")
+    # A process whose executable this user may not read, and the non-numeric
+    # entries every /proc carries.
+    (proc / "99").mkdir()
+    (proc / "self").mkdir()
+    (proc / "uptime").write_text("1 1\n", encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+
+    snapshot = snapshot_process_images()
+
+    assert snapshot is not None
+    assert [(entry.pid, entry.parent_pid, entry.image) for entry in snapshot] == [(4242, 7, str(interpreter))]
+    # Boot time plus this process's own `starttime`, and not the moment /proc was
+    # first looked at.
+    assert filetime_epoch_seconds(snapshot[0].created_ns) == pytest.approx(1700000000 + 4200 / os.sysconf("SC_CLK_TCK"))
+    assert process_working_directory(4242) == str(project)
+    assert process_working_directory(99) is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="a real child's start time is read out of /proc, which only Linux publishes")
+def test_a_linux_start_time_is_when_the_process_started_and_not_when_it_was_looked_at() -> None:
+    """The reported defect: every process looked new the first time it was read.
+
+    procfs stamps a process directory's own inode times when the entry is first
+    looked up, so `os.stat(f"/proc/{pid}").st_ctime` answered "now" for a server
+    that had been up for hours, and `agentic-hil upgrade` printed that as
+    ", started <ISO>" inside the very sentence that tells the operator whether
+    that server predates the last upgrade. Measured before the fix: a `sleep 120`
+    started 6.26 seconds earlier reported a creation 0.0 seconds ago.
+
+    Against a real child, because the whole content of the fix is that the number
+    comes from the kernel's own record of when the process began rather than from
+    when this code first asked about it.
+    """
+    from agentic_hil.process import filetime_epoch_seconds, snapshot_process_images
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        started_at = time.time()
+        # Long enough that a lookup time and a start time cannot be mistaken for
+        # one another, and short enough to stay a unit test.
+        time.sleep(2.0)
+        snapshot = snapshot_process_images()
+        assert snapshot is not None
+        entry = next(image for image in snapshot if image.pid == child.pid)
+        reported = filetime_epoch_seconds(entry.created_ns)
+        assert reported is not None
+        assert reported == pytest.approx(started_at, abs=1.0)
+        assert time.time() - reported >= 1.5
+    finally:
+        child.kill()
+        child.wait()
+
+
+def _proc_entry(
+    proc: Path,
+    pid: int,
+    *,
+    exe: Path,
+    cmdline: tuple[str, ...] = (),
+    environment: tuple[str, ...] = (),
+    parent_pid: int = 1,
+) -> None:
+    """One process directory shaped the way Linux publishes it."""
+    entry = proc / str(pid)
+    entry.mkdir(parents=True)
+    (entry / "exe").symlink_to(exe)
+    (entry / "status").write_text(f"Name:\tpython3\nPPid:\t{parent_pid}\n", encoding="utf-8")
+    (entry / "cmdline").write_bytes(b"".join(f"{item}\0".encode() for item in cmdline))
+    (entry / "environ").write_bytes(b"".join(f"{item}\0".encode() for item in environment))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX venv's symlinked interpreter needs symlinks to reproduce")
+def test_a_linux_server_started_by_the_environments_own_python_is_found(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reported bench run: nothing this project shipped for Linux ever matched.
+
+    With a live, initialised `agentic-hil mcp-stdio` running out of the tool
+    environment, `agentic-hil upgrade --json` answered `restart_required: false`,
+    carried no `restart_required_by` and said no restart was needed. A POSIX
+    virtual environment's `bin/python` is a symlink to the system interpreter, so
+    `/proc/<pid>/exe` resolves to `/usr/bin/python3.x` for every process that
+    environment starts, and the image was the only thing being read.
+
+    So the path the process was invoked by is read too. Here that is argv[0], the
+    environment's own `bin/python` as the caller spelled it, which the resolution
+    would have thrown away.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    proc = tmp_path / "proc"
+    system_python = tmp_path / "usr" / "bin" / "python3.12"
+    system_python.parent.mkdir(parents=True)
+    system_python.write_text("", encoding="utf-8")
+    environment = tmp_path / "uv" / "tools" / "agentic-hil"
+    (environment / "bin").mkdir(parents=True)
+    venv_python = environment / "bin" / "python"
+    venv_python.symlink_to(system_python)
+    _proc_entry(proc, 4242, exe=system_python, cmdline=(str(venv_python), "-c", "from agentic_hil.server import main; main()"))
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    monkeypatch.setattr(sys, "executable", str(venv_python))
+    monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+
+    assert _processes_holding_installation() == [{"pid": 4242, "image": str(system_python)}]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX venv's symlinked interpreter needs symlinks to reproduce")
+@pytest.mark.parametrize("named_by", ["console-script-as-argv0", "virtual-env-in-the-environment"])
+def test_a_linux_server_is_found_by_its_console_script_or_by_virtual_env(
+    named_by: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The other two ways a process says which environment it belongs to.
+
+    An agent host starts the console script, so argv[0] is
+    `<prefix>/bin/agentic-hil` and argv[1] is nothing; an activated environment
+    puts `VIRTUAL_ENV` into every child it starts, which is what a shell session
+    inside the environment leaves behind. Either is this installation's process.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    proc = tmp_path / "proc"
+    system_python = tmp_path / "usr" / "bin" / "python3.12"
+    system_python.parent.mkdir(parents=True)
+    system_python.write_text("", encoding="utf-8")
+    environment = tmp_path / "uv" / "tools" / "agentic-hil"
+    (environment / "bin").mkdir(parents=True)
+    venv_python = environment / "bin" / "python"
+    venv_python.symlink_to(system_python)
+    script = environment / "bin" / "agentic-hil"
+    script.write_text("", encoding="utf-8")
+    if named_by == "console-script-as-argv0":
+        _proc_entry(proc, 4242, exe=system_python, cmdline=(str(script), "mcp-stdio"))
+    else:
+        _proc_entry(proc, 4242, exe=system_python, cmdline=("python3", "-m", "agentic_hil"), environment=(f"VIRTUAL_ENV={environment}", "HOME=/home/bench"))
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    monkeypatch.setattr(sys, "executable", str(venv_python))
+    monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+
+    assert [holder["pid"] for holder in _processes_holding_installation() or []] == [4242]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX venv's symlinked interpreter needs symlinks to reproduce")
+def test_a_linux_process_of_another_installation_is_still_not_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The neighbouring direction, which is the whole risk of reading a command line.
+
+    The same system interpreter runs every other Python program on the machine,
+    and a second virtual environment beside this one is somebody else's. Neither
+    the invoked path nor `VIRTUAL_ENV` names this installation's prefix, so
+    neither is claimed and no upgrade is reported as held by an unrelated
+    process.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    proc = tmp_path / "proc"
+    system_python = tmp_path / "usr" / "bin" / "python3.12"
+    system_python.parent.mkdir(parents=True)
+    system_python.write_text("", encoding="utf-8")
+    environment = tmp_path / "uv" / "tools" / "agentic-hil"
+    (environment / "bin").mkdir(parents=True)
+    (environment / "bin" / "python").symlink_to(system_python)
+    other = tmp_path / "uv" / "tools" / "somethingelse"
+    (other / "bin").mkdir(parents=True)
+    (other / "bin" / "python").symlink_to(system_python)
+    _proc_entry(proc, 100, exe=system_python, cmdline=(str(other / "bin" / "python"), "-m", "somethingelse"))
+    _proc_entry(proc, 101, exe=system_python, cmdline=("python3", "-m", "http.server"), environment=(f"VIRTUAL_ENV={other}",))
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    monkeypatch.setattr(sys, "executable", str(environment / "bin" / "python"))
+    monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+
     assert _processes_holding_installation() == []
+
+
+def test_a_relative_command_line_is_never_read_against_this_process_own_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A relative argv belongs to that process's directory, which nothing here has.
+
+    Making it absolute uses this process's working directory instead, so
+    `agentic-hil upgrade` run from inside the tool environment would read every
+    `bash` and every `python3` on the machine as a process started out of that
+    environment and ask the operator to restart all of them. Only an absolute
+    argument says where it came from.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    environment = tmp_path / "uv" / "tools" / "agentic-hil"
+    (environment / "bin").mkdir(parents=True)
+    interpreter = tmp_path / "usr" / "bin" / "python3.12"
+    interpreter.parent.mkdir(parents=True)
+    monkeypatch.chdir(environment)
+    unrelated = ProcessImage(pid=400, parent_pid=999, image=str(interpreter), created_ns=5, launch_arguments=("python3", "-m"))
+    _watch_installation(monkeypatch, (unrelated,), prefix=str(environment), executable=str(environment / "bin" / "python"))
+
+    assert _processes_holding_installation() == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+def test_a_start_time_that_cannot_be_read_leaves_the_field_off_rather_than_inventing_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The neighbouring direction: no `btime`, no `stat`, no date on the result.
+
+    A /proc that answers neither is not a process that started in 1601. Zero is
+    what the reader writes, `filetime_epoch_seconds` drops it, and the entry
+    carries a pid and an image and nothing invented beside them.
+    """
+    from agentic_hil.process import snapshot_process_images
+
+    proc = tmp_path / "proc"
+    interpreter = tmp_path / "tools" / "agentic-hil" / "bin" / "python3"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("", encoding="utf-8")
+    live = proc / "4242"
+    live.mkdir(parents=True)
+    (live / "exe").symlink_to(interpreter)
+    (live / "status").write_text("Name:\tpython3\nPPid:\t7\n", encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+
+    snapshot = snapshot_process_images()
+
+    assert snapshot is not None
+    assert [(entry.pid, entry.created_ns) for entry in snapshot] == [(4242, 0)]
+
+
+def test_the_step_before_a_reinstall_is_the_one_this_host_actually_needs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pin refusal opened with a step about Windows on a Linux bench.
+
+    "which on Windows means deleting it, and that delete fails while the MCP
+    server the host started is still running out of it" is true of one host and
+    of no other, and printing it everywhere sent an operator to close sessions
+    over a failure their machine does not have. The step is chosen by the host,
+    in the catalogue, because which reader a step is for is part of what the
+    step says.
+    """
+    from agentic_hil.knowledge import reinstall_first_step, remediation_fields
+
+    monkeypatch.setattr("agentic_hil.knowledge._host_locks_running_files", lambda: True)
+    windows = reinstall_first_step()
+    monkeypatch.setattr("agentic_hil.knowledge._host_locks_running_files", lambda: False)
+    posix = reinstall_first_step()
+
+    assert "Close the agent host first" in windows
+    assert "deleting it" in windows
+    assert "can be run with a server up" in posix
+    assert "deleting" not in posix
+    assert "Windows" not in posix
+    # And it is the step the refusal actually carries, in first place, on
+    # whichever host the suite is running on.
+    assert remediation_fields("upgrade_blocked_by_pin")["remediation"][0] == reinstall_first_step()
+    assert remediation_fields("upgrade_blocked_by_recorded_option")["remediation"][0] == reinstall_first_step()
 
 
 def test_an_operator_upgrade_runs_while_servers_are_up_and_names_them_for_the_restart(
@@ -1683,16 +3383,344 @@ def test_an_operator_upgrade_runs_while_servers_are_up_and_names_them_for_the_re
     assert result["restart_required_by_count"] == 1
     assert __version__ in result["restart_notice"]
     assert "until the host that started it restarts" in result["restart_notice"]
+    # And on the line a person reads first, which is what read the same with a
+    # live server and with nothing running at all.
+    assert "pid 4242" in result["summary"]
+
+
+_LIVE_SERVER = {
+    "pid": 4242,
+    "image": f"{_TOOL_ENV}/bin/python3",
+    "working_directory": "/projects/blinky",
+    "started_at": "2026-09-05T07:14:03+00:00",
+}
+
+
+def test_the_running_servers_are_named_by_project_and_start_time_not_only_by_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported defect: the result had no field naming a running server.
+
+    `agentic-hil upgrade` swapped the environment under a live
+    `agentic-hil mcp-stdio` and returned the same `restart_required: true` and
+    the same summary it returns with nothing running. Two servers on one machine
+    are told apart by the project each was started for, so the entry carries the
+    working directory and the start time beside the pid, and the summary names
+    them.
+    """
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["restart_required_by"] == [_LIVE_SERVER]
+    assert "pid 4242 in /projects/blinky, started 2026-09-05T07:14:03+00:00" in result["summary"]
+
+
+def test_a_live_server_asks_for_a_restart_even_where_nothing_was_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the defect: already current with a live server said false.
+
+    That is the case where the restart matters most. Nothing here replaced
+    anything, so the running server answers with whatever was on disk when it
+    started, and an earlier upgrade is exactly how it comes to be older than the
+    installation it runs out of. Nothing about it is refused or delayed.
+    """
+    _recording_manager(monkeypatch, answers={"resolution": PIP_WOULD_INSTALL_NOTHING})
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["install_skipped"] is True
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [_LIVE_SERVER]
+    assert "/projects/blinky" in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+
+
+def test_a_live_server_is_named_where_a_manager_ran_and_moved_nothing_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same, on the route where the manager runs and reports nothing to do."""
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        version_after=__version__,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["already_current"] is True
+    assert result["restart_required"] is True
+    assert result["restart_required_by_count"] == 1
+    assert "pid 4242" in result["summary"]
+
+
+def test_a_live_server_is_named_on_the_pin_note_as_well(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third outcome that replaced nothing, held to the same sentence.
+
+    A pin at the release that is installed reports the pin as a note and exits
+    0, and it said `No restart is needed` in the same breath as the two other
+    already-current answers this was fixed for. Nothing was replaced here
+    either, so a server that was already up is running whatever was on disk when
+    it started; the note names it, asks for the restart, and keeps both its exit
+    code and the line that clears the pin.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["pinned_version"] == __version__
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil@latest"'
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [_LIVE_SERVER]
+    assert "pid 4242 in /projects/blinky" in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+
+
+def test_the_pin_refusal_names_the_running_server_and_asks_for_the_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one unchanged outcome that never carried the servers it left running.
+
+    A pin below the release the index offers replaced nothing, exactly as the
+    pin note and the plain already-current answer replaced nothing, so a server
+    started before this call is running whatever was on disk then and the same
+    reasoning applies word for word. It was the only outcome that did not carry
+    it: measured with a holder under the environment root, the refusal answered
+    `restart_required: false` and named nobody.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["ok"] is False
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [_LIVE_SERVER]
+    assert result["restart_required_by_count"] == 1
+    assert "pid 4242 in /projects/blinky" in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+    # And the refusal keeps everything it already carried.
+    assert result["pinned_version"] == "0.7.1"
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil@latest"'
+
+
+def test_a_pin_refusal_on_a_quiet_machine_still_says_no_restart_is_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neighbouring direction: an empty table is still the answer "nothing"."""
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["restart_required"] is False
+    assert "restart_required_by" not in result
+    assert "No restart is needed." in result["summary"]
+
+
+def _table_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host that publishes no process table: macOS, or a snapshot that raised."""
+    monkeypatch.setattr("agentic_hil.upgrade.snapshot_process_images", lambda: None)
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: None)
+
+
+_CANNOT_SAY = "could not be read on this host"
+
+
+def test_a_host_that_cannot_read_its_process_table_says_so_where_nothing_was_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported defect: macOS was told no restart was needed, on no evidence.
+
+    `snapshot_process_images()` answers None on a host with no process table of
+    its own, which is macOS and a Windows snapshot that raised, and that answer
+    used to arrive at the summary as the empty list. Both already-current
+    answers then printed "No restart is needed." about a machine nothing here
+    had looked at. The sentence now says what is actually known, and
+    `restart_required` is left off rather than answered false.
+    """
+    _recording_manager(monkeypatch, answers={"resolution": PIP_WOULD_INSTALL_NOTHING})
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["install_skipped"] is True
+    assert "restart_required" not in result
+    assert "restart_required_by" not in result
+    assert _CANNOT_SAY in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+    assert entrypoint(["upgrade", "--json"]) == 0
+
+
+def test_a_host_that_cannot_read_its_process_table_says_so_after_an_upgrade_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The swap path, where the command line composes the answer out of two halves.
+
+    One half is the process table, which this host cannot read, and the other is
+    an agent host with the server registered, of which there is none here. Their
+    disjunction was answered false, printed beside a summary sentence saying the
+    first half could not be read at all.
+    """
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+    )
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["upgraded_on_disk"] is True
+    assert "restart_required" not in result
+    assert _CANNOT_SAY in result["summary"]
+
+
+def test_a_registered_agent_host_answers_the_restart_question_a_quiet_host_cannot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction: one half unknown and the other one true is still true."""
+    _place_agent_skill("opencode")
+    _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": MANAGER_INSTALLED,
+            "version": _version_answer("9.9.9"),
+            "agent-install": AGENT_INSTALL_DONE,
+        },
+    )
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["restart_required"] is True
+
+
+def test_a_host_that_cannot_read_its_process_table_says_so_where_the_manager_moved_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second already-current summary, held to the same sentence."""
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        version_after=__version__,
+    )
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert "restart_required" not in result
+    assert _CANNOT_SAY in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+
+
+def test_a_host_that_cannot_read_its_process_table_says_so_on_the_pin_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """And the third, so one host tells one story across every unchanged outcome."""
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert "restart_required" not in result
+    assert _CANNOT_SAY in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+
+
+def test_an_upgrade_with_a_registered_agent_host_and_no_live_server_still_asks_for_the_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host with the registration starts its server out of the new launcher.
+
+    Nothing is running right now, so the manager's own half of the question is
+    false; the refresh has just looked at every agent host and found one with
+    this server registered, which is the other half.
+    """
+    _place_agent_skill("opencode")
+    _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": MANAGER_INSTALLED,
+            "version": _version_answer("9.9.9"),
+            "agent-install": AGENT_INSTALL_DONE,
+        },
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert "restart_required_by" not in result
+    assert result["restart_required"] is True
+    # Named, not described: the advice says which host has it registered.
+    assert "opencode has this server registered, so restart it to load the new release." in result["summary"]
 
 
 def test_an_upgrade_with_nothing_running_out_of_it_says_nothing_about_restarting_processes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The neighbouring case, unchanged: no holders, no list, no sentence.
+    """No holders and no host with the registration: no list, no sentence, no restart.
 
-    A field that appeared empty on every POSIX upgrade would be one more thing
-    to read on a result that has nothing to say, so it is absent rather than
-    empty."""
+    A field that appeared empty on every upgrade would be one more thing to read
+    on a result that has nothing to say, so it is absent rather than empty. The
+    request itself is now the same: `restart_required: true` used to be printed
+    identically on a machine where nothing was running and no agent host had the
+    server registered, which is a machine with nothing to restart."""
     _recording_manager(
         monkeypatch,
         answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
@@ -1701,10 +3729,11 @@ def test_an_upgrade_with_nothing_running_out_of_it_says_nothing_about_restarting
     result = upgrade_installation()
 
     assert result["upgraded_on_disk"] is True
-    assert result["restart_required"] is True
+    assert result["restart_required"] is False
     assert "restart_required_by" not in result
     assert "restart_required_by_count" not in result
     assert "restart_notice" not in result
+    assert "restart" not in result["summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -5400,6 +7429,49 @@ def test_a_refusal_says_what_to_do_and_what_not_to_do() -> None:
     assert "change the authoritative config" not in denied["next_step"]
     # Only refusals carry it; an ordinary error must not grow advice it cannot honour.
     assert "next_step" not in tool_error("flash_firmware", "artifact_validation_failed", "bad image")
+
+
+def test_a_permission_refusal_names_the_key_in_the_field_the_summary_and_the_next_step() -> None:
+    """#443: "report the permission that is denied" with no permission to report.
+
+    Over MCP the instruction to name the denied permission arrived with no key
+    anywhere in the payload, so a caller that followed it had nothing to say and
+    an operator reading the report had nothing to paste. The key now travels in
+    all three places a reader looks, and the grant line is named as the
+    operator's own, at the operator's own shell.
+    """
+    from agentic_hil.tools import tool_error
+
+    key = "debuggers.dut.permissions.allow_reset"
+    denied = tool_error("reset_target", "permission_denied", "Target reset is disabled by the authoritative config.", key)
+
+    assert denied["permission"] == key
+    assert denied["summary"].endswith(f"The permission is `{key}` and it is false.")
+    assert f"name the permission that is denied, `{key}`," in denied["next_step"]
+    assert f"agentic-hil grant {key}" in denied["next_step"]
+    # Still report-and-stop: the command is the operator's, and this surface
+    # cannot reach it at all.
+    assert "Report it and name the permission that is denied" in denied["next_step"]
+    assert "nothing on this surface opens it" in denied["next_step"]
+
+
+def test_the_reset_a_revoked_permission_refuses_names_that_permission(tmp_path: Path) -> None:
+    """#443, through the tool the battery run actually called.
+
+    `reset_target` after `agentic-hil revoke debuggers.dut.permissions.allow_reset`
+    answered `permission_denied` with no key in any field of the payload.
+    """
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    service = AgenticHILToolService(config)
+    try:
+        refused = mcp_tool_call(service, "reset_target", {"mode": "run"})
+    finally:
+        service.close()
+
+    assert refused["error_type"] == "permission_denied"
+    assert refused["permission"] == "debuggers.dut.permissions.allow_reset"
+    assert "debuggers.dut.permissions.allow_reset" in refused["summary"]
+    assert "agentic-hil grant debuggers.dut.permissions.allow_reset" in refused["next_step"]
 
 
 def test_gateway_tool_descriptions_name_what_they_replace() -> None:

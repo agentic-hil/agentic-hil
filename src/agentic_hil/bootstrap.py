@@ -263,8 +263,10 @@ def _usb_enumeration(available: JsonObject, timeout_s: float) -> JsonObject:
         # OpenOCD drives that exposes no VCP -- can be attached and never appear
         # here: an empty reading is not proof no probe is connected, and a nonempty
         # one is not proof it lists every probe attached. Carried so the no-config
-        # `debugger-probes` listing this feeds fails `conclusive_success` rather
-        # than exiting 0 over a partial inventory (round 0, finding 1).
+        # `debugger-probes` listing this feeds states how far it reaches, in the
+        # field and in its summary. Not a verdict: a reading this backend can never
+        # report complete is not a run that went wrong, and scoring it as one
+        # exited 1 on a bench where everything worked (#445).
         "complete": False,
         "side_effect_committed": False,
         "side_effect_status": "not_started",

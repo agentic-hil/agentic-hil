@@ -19,14 +19,16 @@ from datetime import datetime, timezone
 from functools import cache
 from importlib import resources
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, NoReturn
 
 import yaml
 from jsonschema import Draft202012Validator, SchemaError
 from yaml.constructor import ConstructorError
 from yaml.resolver import BaseResolver
 
+from agentic_hil import __version__
 from agentic_hil.knowledge import (
+    CONFIG_NAMED_SECTIONS,
     EXCLUSIVE_FLASH_PERMISSIONS,
     remediation_fields,
     safe_state_root_suggestion,
@@ -82,6 +84,26 @@ CONFIG_DIGEST_ALGORITHM = "sha256"
 CONFIG_SCHEMA_ID = "https://agentic-hil.local/schemas/config.schema.json"
 CONFIG_SCHEMA_RESOURCE = "schemas/config.schema.json"
 GDB_AUTODETECT_CANDIDATES = ["arm-none-eabi-gdb", "gdb-multiarch", "gdb"]
+# When each configuration field arrived, for the fields a release added to a
+# section that already existed. The keys are schema locations with the name of a
+# named entry collapsed to `*`, because what a release adds it adds to every
+# entry of that section rather than to one bench's debugger.
+#
+# This is the only thing that separates the two causes of an unknown-field
+# refusal. A key nobody ever wrote is a typo; a key this schema knows arrived in
+# a release newer than the one running is a file a newer Agentic HIL wrote, and
+# the operator's move is `agentic-hil upgrade` rather than an hour spent looking
+# for a misspelling. Nothing else can tell them apart: an installation cannot
+# recognise a field it has never heard of, so the table has to be written when
+# the field is, which is why it starts with the three keys 0.21.3 added and why
+# a release that adds a field adds its line here.
+FIELDS_INTRODUCED_IN: dict[str, dict[str, str]] = {
+    "debuggers.*": {
+        "discovered_by": "0.21.3",
+        "probe_inventory": "0.21.3",
+        "probe_inventory_note": "0.21.3",
+    },
+}
 _PATH_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 
@@ -173,7 +195,11 @@ def validate_config_schema(raw: JsonObject, config_path: str | None = None) -> N
 
     errors = sorted(Draft202012Validator(schema).iter_errors(raw), key=lambda item: list(item.absolute_path))
     if errors:
-        raise_config_validation_error(errors[0], config_path)
+        # The whole document travels with the error, because the one fact that
+        # tells a file from a newer release apart from a typo is written in the
+        # file itself and a `ValidationError` carries only the subtree it failed
+        # on.
+        raise_config_validation_error(errors[0], config_path, raw)
 
 
 @dataclass(frozen=True)
@@ -2950,14 +2976,13 @@ def to_posix(value: str) -> str:
     return value.replace("\\", "/")
 
 
-def raise_config_validation_error(error: Any, config_path: str | None = None) -> None:
+def raise_config_validation_error(error: Any, config_path: str | None = None, document: Any = None) -> None:
     details: JsonObject = {"field": schema_error_field(error)}
     if config_path is not None:
         details["path"] = config_path
 
     if error.validator == "additionalProperties":
-        details["allowed_fields"] = sorted((error.schema.get("properties") or {}).keys())
-        raise ConfigError("config_invalid", "Unknown Agentic HIL configuration field.", details) from error
+        raise_unknown_field_error(error, details, document)
     if error.validator == "enum":
         details["allowed_values"] = error.validator_value
         add_scalar_schema_value(details, error.instance)
@@ -2971,6 +2996,164 @@ def raise_config_validation_error(error: Any, config_path: str | None = None) ->
     details["schema_error"] = "Value does not satisfy the Agentic HIL configuration schema."
     add_scalar_schema_value(details, error.instance)
     raise ConfigError("config_invalid", "Agentic HIL configuration failed schema validation.", details) from error
+
+
+def raise_unknown_field_error(error: Any, details: JsonObject, document: Any = None) -> NoReturn:
+    """Refuse the keys this schema does not define, and say which they are.
+
+    The refusal used to name the container the keys sat under and the thirteen
+    keys that were allowed there, and never the keys it had thrown out, which is
+    the one thing an operator needs in order to find them in their own file. It
+    reads as "you mistyped something" either way, and on the bench that reported
+    this the truth was the other cause: a newer Agentic HIL had written the file
+    and the installation reading it had not caught up. So a refusal that can tell
+    which cause it is looking at says so, and names the upgrade as the next step
+    rather than leaving an operator to hunt for a typo that is not there.
+
+    Which release wrote the file is read out of the file. `provenance.
+    agentic_hil_version` is written on generation and is the only record of it
+    that travels with the document. `FIELDS_INTRODUCED_IN` cannot answer the
+    question on its own and never could: a build only knows the fields it has,
+    so a key a later release adds is a key this table has no entry for, and the
+    branch it guarded was unreachable on every shipped build. It stays as a
+    refinement for a file with no provenance at all, where a key the table does
+    know is still evidence of the same thing.
+
+    The strictness does not move. An unknown key still stops the load on both
+    branches: a configuration read past in silence is a policy nobody wrote being
+    enforced, and a file from a newer release is exactly a file whose meaning this
+    code does not know.
+    """
+    rejected = unexpected_property_names(error.message)
+    if rejected:
+        details["rejected_fields"] = rejected
+    details["allowed_fields"] = sorted((error.schema.get("properties") or {}).keys())
+    parts = [str(part) for part in error.absolute_path]
+    where = f"under {format_field_path(parts)}" if parts else "at the top level of the file"
+    wrote_it = recorded_writing_release(document)
+    introduced = fields_from_a_newer_release(config_container_key(parts), rejected) if not wrote_it else {}
+    newest = wrote_it or (max(introduced.values(), key=release_order) if introduced else "")
+    if newest and release_order(newest) > release_order(__version__):
+        if introduced:
+            details["fields_introduced_in"] = introduced
+        details["written_by_release"] = newest
+        details["installed_version"] = __version__
+        details["next_step"] = "Run `agentic-hil upgrade` on this machine, then start Agentic HIL again."
+        arrived = (
+            f"{name_fields(rejected)} {where} arrived in {newest}"
+            if introduced
+            else f"it records {newest} as the release that wrote it, and it carries {name_fields(rejected)} {where}"
+        )
+        summary = f"This configuration was written by a newer Agentic HIL than this one: {arrived}, and this installation is {__version__}."
+        raise ConfigError("config_invalid", summary, details) from error
+    if not rejected:
+        # The validator named no key, which leaves the sentence this always was.
+        # A container named with no keys beside it would read as the container
+        # being the unknown thing.
+        raise ConfigError("config_invalid", "Unknown Agentic HIL configuration field.", details) from error
+    noun = "field" if len(rejected) == 1 else "fields"
+    raise ConfigError("config_invalid", f"Unknown Agentic HIL configuration {noun} {name_fields(rejected)} {where}.", details) from error
+
+
+def name_fields(fields: list[str]) -> str:
+    """A list of keys as a person reads it, with the last one joined by `and`."""
+    quoted = [f"`{field}`" for field in fields]
+    if len(quoted) < 2:
+        return "".join(quoted)
+    return ", ".join(quoted[:-1]) + f" and {quoted[-1]}"
+
+
+def unexpected_property_names(message: str) -> list[str]:
+    """The keys jsonschema names in an `additionalProperties` message.
+
+    Read off the message because that is where the validator puts them: the
+    error carries the schema and the instance, and the difference between them
+    is computed only for this sentence. One key is quoted and "was unexpected";
+    several are quoted, comma separated, and "were unexpected", which is why
+    reading only the singular form left every multi-key refusal naming nothing.
+    Sorted rather than left in the file's own order, so one document produces one
+    refusal whatever order the keys were written in.
+    """
+    match = re.match(r"^Additional properties are not allowed \((.+) (?:was|were) unexpected\)$", message)
+    if match is None:
+        return []
+    return sorted({single or double for single, double in re.findall(r"'([^']*)'|\"([^\"]*)\"", match.group(1))})
+
+
+def config_container_key(parts: list[str]) -> str:
+    """Where a container sits in the schema, with the bench's own names taken out.
+
+    `debuggers.dut` and `debuggers.board_b` are one place in the schema and one
+    line in the release table; the entry name belongs to whoever wrote the file.
+    Collapsing it here rather than in the table is what keeps the table a record
+    of the schema instead of a list of names a bench happens to use.
+    """
+    named = list(parts)
+    if len(named) > 1 and named[0] in CONFIG_NAMED_SECTIONS:
+        named[1] = "*"
+    return format_field_path(named)
+
+
+def recorded_writing_release(document: Any) -> str:
+    """The release the file says wrote it, or empty where it says nothing.
+
+    `provenance.agentic_hil_version` is stamped on generation and is the one
+    record of the writing release that travels with the document, so it is the
+    only thing that can tell a file from a *later* release apart from a
+    misspelling. The table of field additions cannot: a build knows only the
+    fields it has, so the keys a later release adds are exactly the keys no entry
+    exists for, and the branch reading the table for this was unreachable on
+    every shipped build.
+
+    Informational elsewhere and informational here: it grants nothing, changes no
+    permission and decides only which of two sentences an operator reads about a
+    file that is being refused either way. A value that is not a release number
+    is no answer at all.
+    """
+    if not isinstance(document, dict):
+        return ""
+    provenance = document.get("provenance")
+    recorded = provenance.get("agentic_hil_version") if isinstance(provenance, dict) else None
+    if not isinstance(recorded, str) or not release_order(recorded.strip()):
+        return ""
+    return recorded.strip()
+
+
+def fields_from_a_newer_release(container: str, fields: list[str]) -> dict[str, str]:
+    """`fields` with the release that added each, or empty unless all of them qualify.
+
+    All of them, deliberately. The upgrade sentence is only true when nothing
+    else is wrong with the section, and one misspelling next to three keys a
+    later release added would make it a sentence that sends an operator away from
+    the typo actually in their file. The general refusal names every rejected key
+    in that case, which is what a person needs in order to see both.
+
+    A refinement rather than the judgement: it is consulted only for a document
+    with no `provenance.agentic_hil_version`, because a file that records which
+    release wrote it has already answered the question this is guessing at.
+    """
+    known = FIELDS_INTRODUCED_IN.get(container, {})
+    installed = release_order(__version__)
+    introduced = {field: known[field] for field in fields if field in known and release_order(known[field]) > installed}
+    return introduced if fields and len(introduced) == len(fields) else {}
+
+
+def release_order(version: str) -> tuple[int, ...]:
+    """A release string as the numbers that order it against another.
+
+    The leading numeric components and nothing else, so `0.21.4.dev0` orders as
+    `0.21.4`: a development build of a release is treated as having that
+    release's fields, which is the direction that errs toward the general
+    refusal rather than toward telling an operator their own file came from the
+    future.
+    """
+    parts: list[int] = []
+    for piece in version.split("."):
+        digits = re.match(r"\d+", piece)
+        if digits is None:
+            break
+        parts.append(int(digits.group(0)))
+    return tuple(parts)
 
 
 def add_scalar_schema_value(details: JsonObject, value: object) -> None:
@@ -2998,11 +3181,18 @@ def reject_nonfinite_numbers(value: object, error_type: str, path: str | None = 
 
 
 def schema_error_field(error: Any) -> str:
+    """The dotted key one refusal is about.
+
+    A single unexpected key is part of the field path, because the field the
+    refusal is about is that key. Several of them are not: there is no one field
+    to name, so the path stops at the container they sat under and
+    `rejected_fields` carries the keys themselves.
+    """
     parts = [str(part) for part in error.absolute_path]
     if error.validator == "additionalProperties":
-        match = re.search(r"'([^']+)' was unexpected", error.message)
-        if match:
-            parts.append(match.group(1))
+        names = unexpected_property_names(error.message)
+        if len(names) == 1:
+            parts.append(names[0])
     return format_field_path(parts)
 
 

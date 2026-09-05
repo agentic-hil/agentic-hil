@@ -1870,15 +1870,17 @@ def test_the_sole_visible_probe_is_bound_and_carries_the_blind_spot(monkeypatch:
     assert result["probe_inventory_note"] in result["summary"]
 
 
-def test_the_no_config_probe_listing_is_not_a_clean_pass_off_a_partial_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`debugger-probes` before the first setup must not exit 0 over a partial read.
+def test_the_no_config_probe_listing_states_its_scope_and_still_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`debugger-probes` before the first setup answers, and says how far (#445).
 
     With no STM32CubeProgrammer the bootstrap listing enumerates from the host's
     USB serial inventory, which reaches an ST-Link only through the VCP it
     publishes. A single visible probe is a real finding, but not an authoritative
     count, and an empty reading is not proof no probe is attached. So the listing
-    carries `complete: false` and fails `conclusive_success`, which is the verdict
-    the CLI exit code is taken from (round 0, finding 1)."""
+    carries `complete: false` and says it in the summary, and the exit status
+    stays 0: this is the one moment an operator wants a probe listing with nothing
+    else in place, and an exit code of 1 over a read that worked would send them
+    looking for a fault that is not there."""
     # One visible probe: a nonempty but non-authoritative reading.
     _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
     listing = bootstrap_probe_listing()
@@ -1887,17 +1889,19 @@ def test_the_no_config_probe_listing_is_not_a_clean_pass_off_a_partial_inventory
     assert listing["backend"] == "openocd"
     assert [entry["probe_id"] for entry in listing["probes"]] == ["066AFF303435554157113106"]
     assert listing["complete"] is False
-    assert agentic_hil.cli.result_succeeded(listing) is False
+    assert agentic_hil.cli.result_succeeded(listing) is True
     assert "not an authoritative count" in listing["summary"]
 
-    # And the empty reading is the same verdict: "nothing on the serial bus" is
-    # not "no probe attached", because a VCP-less probe never enters this listing.
+    # And the empty reading answers the same way: "nothing on the serial bus" is
+    # not "no probe attached", because a VCP-less probe never enters this listing,
+    # and that is what the summary is for rather than the exit code.
     _linux_openocd_host(monkeypatch, ports=[])
     empty = bootstrap_probe_listing()
     assert empty["ok"] is True
     assert empty["probes"] == []
     assert empty["complete"] is False
-    assert agentic_hil.cli.result_succeeded(empty) is False
+    assert agentic_hil.cli.result_succeeded(empty) is True
+    assert "not an authoritative count" in empty["summary"]
 
 
 def test_discovery_refuses_naming_both_toolchains_when_the_host_has_neither(monkeypatch: pytest.MonkeyPatch) -> None:

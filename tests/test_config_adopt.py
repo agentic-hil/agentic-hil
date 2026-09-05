@@ -61,7 +61,7 @@ from agentic_hil.config import (
     skeleton_debugger_scripts,
 )
 from agentic_hil.configstate import STATE_UNREADABLE
-from agentic_hil.configwrite import ACTOR_HUMAN, PROJECT_CONFIG_SET
+from agentic_hil.configwrite import ACTOR_COMMAND_LINE, PROJECT_CONFIG_SET
 from agentic_hil.coordination import (
     DEBUGGER_READONLY_TARGET_STATE_REASON,
     RECOVERY_ACTION_VIA,
@@ -282,6 +282,15 @@ def test_a_value_a_person_set_is_reported_and_never_replaced(tmp_path: Path, mon
     # The disagreement is named in what the caller is told to do next, so it
     # cannot be read as "everything is fine now".
     assert any("kept" in step for step in applied["next_steps"])
+    # And the comparison says why the configured value is the one kept, which
+    # for this key is not "somebody set it": the configured name is a part and
+    # the discovered one is the family a target script covers (#442).
+    assert "family rather than a part" in kept["target.controller"]["reason"]
+    assert "adoption keeps it" in kept["target.controller"]["reason"]
+    # Every other compared key keeps the general reason, which is the whole of
+    # what is true about it.
+    assert "somebody set it" in kept["com_ports.dut_uart.device"]["reason"]
+    assert "family" not in kept["com_ports.dut_uart.device"]["reason"]
 
 
 def test_a_different_attached_board_is_refused_whole_rather_than_partly_carried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -462,7 +471,10 @@ def test_setup_without_a_board_then_plugging_it_in_reaches_a_green_doctor(tmp_pa
     }
     filled = document_of(path)
     assert filled["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
-    assert filled["provenance"]["last_modified_by"] == ACTOR_HUMAN
+    # Recorded as the surface it came through: adoption runs under the
+    # operator's authority, and with no terminal answering, that a person ran it
+    # is not something this process can state.
+    assert filled["provenance"]["last_modified_by"] == ACTOR_COMMAND_LINE
     assert filled["provenance"]["last_modified_via"] == "cli:adopt-hardware"
     # No grant was needed and none moved. The skeleton names every project
     # permission granted, and they are still exactly what it named: this path
@@ -862,7 +874,7 @@ def test_without_the_description_grant_the_agent_gets_the_values_and_not_the_wri
 
     assert refused["ok"] is False
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == CONFIG_DESCRIPTION_RIGHT
+    assert refused["permission"] == f"permissions.{CONFIG_DESCRIPTION_RIGHT}"
     assert refused["applied"] is False
     assert {item["key"]: item["value"] for item in refused["carried"]}["debuggers.dut.probe_id"] == PROBE_SERIAL
     assert refused["write"]["tool"] == PROJECT_CONFIG_SET
@@ -1824,7 +1836,10 @@ def test_a_version_one_configuration_that_denies_probing_is_not_read(tmp_path: P
 
     assert refused["ok"] is False
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == "allow_probe"
+    # `permission` carries the whole key now, the way every permission refusal
+    # on this surface does; `permission_key` is the older name for the same
+    # fact and still stands beside it (#443).
+    assert refused["permission"] == "debuggers.dut.permissions.allow_probe"
     assert refused["permission_key"] == "debuggers.dut.permissions.allow_probe"
     # The same answer the ordinary probe read gives on this file, which is the
     # whole point: one policy, not two.

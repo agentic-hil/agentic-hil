@@ -216,6 +216,134 @@ def recovery_operator_command(quarantine_id: str | None) -> str:
     return f"agentic-hil recover --confirm-safe-state --quarantine-id {quarantine_id or '<id>'}"
 
 
+# What a refusal one permission caused is called, wherever it is raised. Named
+# rather than spelled out at each site because the classification is load
+# bearing: it is the error_type this project's own agent instructions key on
+# (stop, report it, let the operator decide), so a surface answering a denied
+# permission with anything else sends the reader down another path. The test
+# reactor answered `test_config_invalid`, which says the plan is at fault, for a
+# plan that was valid and a configuration that said no (#444).
+PERMISSION_DENIED_ERROR = "permission_denied"
+
+# The dotted path one permission is named by, everywhere a refusal is about one.
+# `agentic-hil grant` and `agentic-hil revoke` take exactly this spelling, and
+# `project_config_describe` reports it, so a refusal that carries it hands the
+# operator something to paste rather than a flag name they have to place in a
+# file themselves. The short spelling the two commands also accept
+# (`debuggers.dut.allow_reset`) is deliberately not what a refusal prints: it is
+# a convenience for somebody typing, and a refusal is read by somebody who does
+# not yet know which section the entry is in.
+#
+# `<name>` stands in where the entry has no name to give, which on this surface
+# means an unbound debugger. Half a key is still better than none: it says which
+# section and which flag, and leaves one blank.
+PERMISSION_KEY_PLACEHOLDER = "<section>.<name>.permissions.<key>"
+# The two grants that sit directly on a section instead of under a named
+# entry's `permissions:` block. They have no `<section>.<name>` half at all,
+# so each of these is the whole key, and it is the spelling `agentic-hil grant`
+# takes for them.
+ALLOW_ALL_SYMBOLS_PERMISSION = "debug.allow_all_symbols"
+ARTIFACT_UPLOAD_PERMISSION = "artifacts.allow_upload"
+
+
+def permission_key(section: str, name: str | None, key: str) -> str:
+    """The dotted path `agentic-hil grant` takes for one entry's permission."""
+    return f"{section}.{name or '<name>'}.permissions.{key}"
+
+
+def permission_denied_summary(summary: str, permission: str) -> str:
+    """``summary`` with the key that is closed named in it.
+
+    The sentence a person reads first has to carry the key, not only the
+    document's fields: an agent told to name the permission it was refused on
+    reads the summary out, and a summary that says "disabled by the
+    authoritative config" names nothing anybody can act on (#443).
+    """
+    return f"{summary} The permission is `{permission}` and it is false."
+
+
+def permission_granted_summary(summary: str, permission: str) -> str:
+    """``summary`` with the key that is *open* named in it.
+
+    The exclusivity half. Saying only that a permission is involved would send
+    the reader to the grant, which for these is the one move that keeps the
+    action refused, so the value is stated with the key.
+    """
+    return f"{summary} The permission is `{permission}` and it is true."
+
+
+def permission_denied_next_step(permission: str | None = None) -> str:
+    """What to do about a refusal one permission caused, for either reader.
+
+    Deliberately no verb phrase the caller itself can act on. An earlier wording
+    said "ask the operator to change the authoritative config" and a small model
+    rewrote the config itself to grant `allow_flash`; a caller refused here once
+    diagnosed correctly through the other tools and then flashed the board with
+    `st-flash`. So the instruction stays "report it and stop", and what changes
+    with the key in hand is that the report can name the permission and the
+    operator has the line to paste.
+
+    One text for every surface. The command it names is the operator's, at the
+    operator's own shell, and saying so is what keeps naming it from reading as
+    a route this caller may take: `agentic-hil grant` is reachable from no tool
+    on this server.
+    """
+    named = f", `{permission}`," if permission else ""
+    grant = (
+        f" The operator opens exactly that key at their own shell with `{CONFIG_GRANT_COMMAND} {permission}`, which "
+        "leaves every other key in the file alone; nothing on this surface opens it."
+        if permission
+        else ""
+    )
+    return (
+        f"This refusal is the answer to the request. Report it and name the permission that is denied{named} then "
+        "stop. You must not enable it: the authoritative configuration belongs to the operator and only the operator "
+        "may edit it. You must not carry out the action another way either: a debugger, serial device or CAN adapter "
+        f"driven outside Agentic HIL defeats the policy this refusal enforces.{grant}"
+    )
+
+
+def permission_denied_fields(permission: str | None) -> JsonObject:
+    """The key a permission refusal is about, and the one move it leaves open.
+
+    Merged into a refusal by every surface that raises one, so the field and the
+    sentence never come apart. Empty for a refusal that cannot name a single
+    key, because a `permission` field naming the wrong one is worse than none.
+    """
+    if not permission:
+        return {}
+    return {"permission": permission, "next_step": permission_denied_next_step(permission)}
+
+
+# The scope for the other kind of permission refusal: one a *granted* key
+# causes. `permission_denied` unscoped says a key is false and the operator
+# opens it; these say a key is true and the operator closes it, and handing the
+# unscoped advice to one of them would send an operator to grant the very flag
+# that is blocking them.
+EXCLUSIVE_PERMISSION_SCOPE = "exclusive"
+
+
+def exclusive_permission_fields(blocking: str, debugger_id: str | None) -> JsonObject:
+    """The key an exclusivity refusal is about, and the direction it has to move.
+
+    Same `permission` field as every other refusal on this surface, so a caller
+    reads one key wherever the answer came from. The advice is the scoped
+    entry's, not the unscoped one's, and it is carried on the result rather than
+    looked up later: the two cases are one `error_type` and a renderer asking
+    the catalogue by error type alone cannot tell them apart.
+    """
+    key = permission_key("debuggers", debugger_id, blocking)
+    return {
+        "permission": key,
+        "next_step": (
+            f"This refusal is the answer to the request. Report it and name `{key}`, which is true and is what blocks "
+            f"this, then stop. The operator closes exactly that key from their own shell with `{CONFIG_REVOKE_COMMAND} "
+            f"{key}`; no tool on this server is behind that flag, so closing it takes nothing away."
+        ),
+        **remediation_fields("permission_denied", EXCLUSIVE_PERMISSION_SCOPE, permission=key),
+    }
+
+
 def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | None) -> str:
     """Why an action is refused by a permission that is *granted*, and the fix.
 
@@ -227,7 +355,7 @@ def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | 
     policies" on its own reads as an arbitrary interlock, and an operator who
     takes it that way reaches for the flag it names, which is the one move that
     keeps flashing refused."""
-    entry = f"debuggers.{debugger_id or '<name>'}.permissions.{blocking}"
+    entry = permission_key("debuggers", debugger_id, blocking)
     return (
         f"{action} is disabled while {blocking.removeprefix('allow_')} is allowed on this probe: it acts on flash "
         f"outside the path this server validates, so while it is allowed a flash report's claim about what is on the "
@@ -331,8 +459,65 @@ def _substitutions() -> dict[str, str]:
         "safe_user_config": safe_user_config_suggestion(),
         "reopen_command": CONFIG_REOPEN_COMMAND,
         "grant_command": CONFIG_GRANT_COMMAND,
+        "revoke_command": CONFIG_REVOKE_COMMAND,
         "test_plan_reference": TEST_PLAN_URI,
+        # The key a `permission_denied` entry is about, which the catalogue
+        # cannot know: it is a fact about the refusal in hand, not about this
+        # host. The generic shape stands where no refusal is being rendered (the
+        # MCP error reference, which serves the entry to a reader who has not
+        # met one yet), and `remediation_fields(permission=...)` replaces it with
+        # the actual key when a result carries one (#443).
+        "permission": PERMISSION_KEY_PLACEHOLDER,
+        "reinstall_first_step": reinstall_first_step(),
     }
+
+
+def _host_locks_running_files() -> bool:
+    """Whether this platform refuses to replace the files of a running process.
+
+    The same question `upgrade._host_locks_running_files` asks, spelled again
+    here rather than imported: `upgrade` imports this module, so an import the
+    other way would be a cycle. A function rather than a constant for the same
+    reason it is one there: it is the seam a test replaces to read either side of
+    the branch on whichever host the suite happens to run on, and the alternative
+    a test reaches for otherwise is writing a platform name into the shared `os`
+    module, which this suite has been broken by twice.
+    """
+    return os.name == "nt"
+
+
+def reinstall_first_step() -> str:
+    """What comes before a reinstall, in the terms of the host it will be run on.
+
+    On a host that refuses to delete a file mapped as a running image, a
+    reinstall removes the environment first and that delete fails while the MCP
+    server the host started is running out of it: closing the host is not a
+    precaution there, it is the difference between a repair and a half-removed
+    installation. Everywhere else the old files are unlinked while the processes
+    using them keep reading their own copies, so the reinstall goes through with
+    a server up and the thing that is true instead is that the server keeps
+    answering with the release it imported.
+
+    Both sentences were on one bench at once until now: the Windows one was
+    printed as step 1 of the pin refusal on a Linux host, which sent an operator
+    to close sessions over a failure their machine does not have. A step whose
+    subject is the host has to be chosen by the host, and the catalogue is where
+    that choice belongs, because which reader a step is for is part of what the
+    step says.
+    """
+    if _host_locks_running_files():
+        return (
+            "Close the agent host first. The command below reinstalls the environment, which on this host means "
+            "deleting it, and that delete fails while the MCP server the host started is still running out of it. "
+            "`agentic-hil upgrade` moves the launcher on PATH out of the manager's way before it runs; a reinstall "
+            "typed by hand has nothing of the kind, and the delete it starts with is the step that fails."
+        )
+    return (
+        "The command below can be run with a server up. On this host the old files are unlinked while the process "
+        "using them goes on reading its own copy, so nothing fails and nothing is lost. What that process does not "
+        "do is pick up the new release: the host that started it still has to be restarted afterwards, and until it "
+        "is, that server answers with the release it imported."
+    )
 
 
 # The one thing that fixes a proxy neither the manager's roots nor this machine's
@@ -391,6 +576,18 @@ _CONFIG_MISSING_REPORT_AND_ASK = (
     "into any of them and never `true`. No tool here reads raw debugger commands or mass erase as permission to do "
     "anything, so wherever the generated file leaves them false they are a closed default rather than a grant gone "
     "missing."
+)
+
+# The one remediation step that is a pointer rather than an instruction. It is
+# worth its place only where the field it points at exists, and a plan refusal
+# that carries no `validation_error.next_step` printed it anyway, telling the
+# reader to read a field that was not there (#446). Named here so the rendering
+# can recognise the entry's own sentence rather than a copy of it: a renderer
+# matching a string it keeps itself would go quiet the day somebody reworded
+# this one, which is the failure nobody would notice.
+READ_VALIDATION_NEXT_STEP = (
+    "Read `next_step` inside `validation_error` first. It names the key that is wrong and the command or the "
+    "configuration field that fixes it; the steps below are the general form of the same three answers."
 )
 
 # Keys are "<error_type>" or "<error_type>:<scope>", where scope is the config
@@ -594,14 +791,14 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`uv tool install \"agentic-hil==X.Y.Z\"` records `==X.Y.Z` and every later `uv tool upgrade` honours it."
         ),
         remediation=(
-            "Close the agent host first. The command below reinstalls the environment, which on Windows means deleting "
-            "it, and that delete fails while the MCP server the host started is still running out of it. `agentic-hil "
-            "upgrade` moves the launcher on PATH out of the manager's way before it runs; a reinstall typed by hand "
-            "has nothing of the kind, and the delete it starts with is the step that fails.",
-            "Run the command in `reinstall_command` on this result. It is the one that clears the pin *and* keeps this "
-            "installation's extras: `installed_extras` says which ones were found, and reinstalling without them "
-            "removes what they installed. On a bench with `can`, that silently takes CAN support away. The hint `uv` "
-            "prints names the bare distribution and would do exactly that, so use ours and not that one.",
+            "{reinstall_first_step}",
+            "Run the command in `reinstall_command` on this result. It is the one that clears the pin *and* rebuilds "
+            "this installation as it stands: `installed_extras` says which extras were found, `with_packages` names "
+            "every package `uv`'s own receipt records as installed alongside this one, and `recorded_python` names the "
+            "interpreter the install recorded when it recorded one. Reinstalling without any of them removes it: on a "
+            "bench with `can` that silently takes CAN support away, and on one created with `--with pytest` it "
+            "uninstalls pytest. The hint `uv` prints names the bare distribution and would do exactly that, so use "
+            "ours and not that one.",
             "Then run `agentic-hil --version` to confirm the number moved, and start the agent host, which loads the "
             "new server. Nothing was restarted or reloaded by this attempt; there is nothing new to load yet.",
             "Later upgrades work normally: the reinstall records an unpinned requirement, so `agentic-hil upgrade` "
@@ -610,13 +807,50 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not report this as an upgrade, and do not ask the operator to restart anything on the strength of it. "
             "The installation still runs the version it ran before, with that version's behaviour and its refusals.",
-            "Do not run `uv tool install agentic-hil@latest` from `uv`'s own hint. It names the distribution without "
-            "extras, and `uv` records the requirement literally, so it uninstalls whatever `[can]` or `[pyocd]` "
-            "brought in.",
+            "Do not run `uv tool install agentic-hil@latest` from `uv`'s own hint. It names the distribution alone, "
+            "and `uv` records the requirement literally, so it uninstalls whatever `[can]` or `[pyocd]` brought in "
+            "and every package the receipt records beside it: a bench installed with `--with pytest` loses pytest, "
+            "and `Uninstalled 5 packages` is the only notice it gets.",
             "Do not have Agentic HIL rewrite the installation on the operator's behalf, and do not reach for "
             "`--force` to make the pinned upgrade take. Which version a machine runs is the operator's decision; a "
             "pin can be deliberate, and an upgrade that replaces an installation nobody asked it to replace is a "
             "bigger surprise than the one being reported here.",
+        ),
+    ),
+    "upgrade_blocked_by_recorded_option": ErrorRemedy(
+        meaning=(
+            "The package manager resolved nothing to install and the index publishes a newer release than the one "
+            "installed, so the two disagree, and this installation's own receipt says why: `held_back_by` names what "
+            "was recorded for it. A `uv tool install --exclude-newer <date>` writes that date into the receipt, and "
+            "every later `uv tool upgrade` resolves as of it and prints `Nothing to upgrade` however many releases "
+            "have appeared since; `uv` records the option whether it was given as a flag or through the environment, "
+            "and offers no command that clears it. A recorded exact `==` requirement does the same thing when the "
+            "manager does not say so in words; a `>=` or `~=` floor never does, because a floor resolves to whatever "
+            "the index offers above it, and an installation created with one is not reported here at all. Nothing was "
+            "changed: no command capable of replacing this installation ran. What was refused is the release itself, "
+            "which is why this exits non-zero: `version` is what is installed, `newest_release` is what the index "
+            "publishes, and the difference between them is the whole of this result."
+        ),
+        remediation=(
+            "{reinstall_first_step}",
+            "Run the command in `reinstall_command` on this result. It records this installation again from what it "
+            "is given, without the recorded option, and it carries what the installation already has: the extras in "
+            "`installed_extras`, the packages in `with_packages` that the receipt records beside it, and the "
+            "interpreter in `recorded_python` where one was recorded.",
+            "Then run `agentic-hil --version` to confirm the number moved, and restart the agent hosts, which is what "
+            "loads the new server. Nothing was restarted or reloaded by this attempt.",
+            "If the option was deliberate, this result is the confirmation that it is still in force and what it now "
+            "costs: `newest_release` is the release it is holding out. Leaving it is a decision, not a fault.",
+        ),
+        do_not=(
+            "Do not report this as an installation that is already current. The manager said it had nothing to "
+            "install; the index says there is a newer release, and reading the first as the second is exactly what "
+            "left a bench a release behind believing it was on the newest one.",
+            "Do not run `uv tool upgrade` again, with or without `--reinstall`, to make it take. It resolves through "
+            "the recorded option every time, and it is the option rather than the resolution that has to change.",
+            "Do not have Agentic HIL rewrite the installation on the operator's behalf. A recorded option can be "
+            "deliberate policy about which releases this machine takes, and which release a bench runs is the "
+            "operator's decision.",
         ),
     ),
     "permission_denied:allow_upgrade": ErrorRemedy(
@@ -726,6 +960,44 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "already have.",
         ),
     ),
+    # The refusal a configuration that exists but does not load lands on, and
+    # the one that went out with nothing attached while every neighbour carried
+    # a way forward. It has two causes with opposite fixes and the refusal
+    # cannot always tell which it is looking at, so the entry names both and
+    # says which field separates them.
+    "config_invalid": ErrorRemedy(
+        meaning=(
+            "The authoritative configuration was found and read and does not match the schema this Agentic HIL "
+            "enforces, so nothing was loaded: no bench, no permission, no state directory. `field` is the dotted key "
+            "the refusal is about and `path` the file it is in. There are two ways to get here and they have opposite "
+            "fixes. One is a mistake in the file, and `rejected_fields` (the keys this schema does not define), "
+            "`allowed_fields` (the keys it does), `allowed_values` and `expected_type` are what locate it. The other "
+            "is that a newer Agentic HIL wrote this file: `written_by_release` says which release added the keys, "
+            "`installed_version` says what is running here, and the summary says so in words. Nothing was changed on "
+            "either route."
+        ),
+        remediation=(
+            "Read `written_by_release` first. When the refusal carries it, the file is not wrong and there is nothing "
+            "in it to correct: a newer Agentic HIL than the one reading it wrote those keys. Run `agentic-hil "
+            "upgrade` on this machine and start Agentic HIL again.",
+            "Otherwise fix the file at `field` in `path`. `rejected_fields` names the keys that were thrown out, "
+            "`allowed_fields` the keys that section accepts, and a misspelling is usually visible between the two. "
+            "`allowed_values` and `expected_type` do the same job where the key is right and what it holds is not.",
+            "`agentic-hil schema` prints the whole schema this installation validates against, which is the "
+            "authority on what a section may carry when the two field lists are not enough.",
+            "Nothing is loaded, so nothing needs recovering and no hardware was touched. Run `agentic-hil doctor` "
+            "once the file is corrected or the upgrade is done; it parses the file fresh and reports the next thing "
+            "that is wrong with it.",
+        ),
+        do_not=(
+            "Do not delete the offending keys to make a newer release's file load here. They are the policy that "
+            "release wrote, and dropping them silently narrows or widens a bench nobody reviewed; upgrade the "
+            "installation instead.",
+            "Do not write the configuration again from scratch to get past this. `agentic-hil init --force` replaces "
+            "the whole file, every narrowed permission included, so it throws away the operator's own decisions in "
+            "order to fix one key.",
+        ),
+    ),
     "permission_denied:allow_config_description_write": ErrorRemedy(
         meaning=(
             "A field-wise configuration change reached a description key (what the bench is), and "
@@ -821,6 +1093,68 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not drive GDB, OpenOCD or another debugger outside Agentic HIL to send the continue yourself. That "
             "reaches the exact target state this refusal withholds, outside the audit trail that would have recorded "
             "it.",
+        ),
+    ),
+    # The unscoped entry the four above fall back to, and the one every device
+    # permission lands on: a probe's `allow_reset`, a port's `allow_write`, a
+    # bus's `allow_read`. It carries `{permission}`, which is not a fact about
+    # this host and so not one `_substitutions()` can supply; the refusal in hand
+    # supplies it through `remediation_fields(permission=...)`, and the generic
+    # shape stands where the entry is read on its own. Until this existed, the
+    # most common refusal on the whole surface answered with no advice at all
+    # and named no key, so an agent told to report the permission it was denied
+    # had nothing to report and an operator had nothing to paste (#443).
+    "permission_denied": ErrorRemedy(
+        meaning=(
+            "The authoritative configuration does not grant this action on this entry, so nothing was locked, opened "
+            "or driven and there is nothing to clean up. `permission` names the key, in the spelling the file uses "
+            "and the operator's commands take: `{permission}`. This is a decision somebody made about this bench, not "
+            "a fault in it and not a state that clears itself, so the same call refused now is refused on every "
+            "retry until an operator moves that key."
+        ),
+        remediation=(
+            "Report the refusal and name `{permission}`, the key it is about. That is the whole of what this surface "
+            "can do about it, and it is what makes the refusal actionable for whoever owns the bench.",
+            "The operator opens exactly that key from their own shell with `{grant_command} {permission}`. It leaves "
+            "every other key in the file alone, and it is reachable from no tool on this server.",
+            "`project_config_describe` says which permissions this entry does grant right now, so the part of the "
+            "task that is possible is not abandoned along with the part that is not.",
+        ),
+        do_not=(
+            "Do not edit the authoritative configuration to grant it. `project_config_set` writes only `false` into a "
+            "permission, whatever else it may write, and a file edited with your own tools is the exact move the "
+            "host deny rules `agentic-hil setup` installs exist to stop.",
+            "Do not carry the action out another way. A debugger, serial device or CAN adapter driven outside "
+            "Agentic HIL reaches the same hardware with the policy and the audit trail both stepped around, and that "
+            "is what this refusal is for.",
+            "Do not run `{reopen_command}` to get past it. That rewrites the whole file from hardware discovery, so "
+            "it takes every other narrowing, the baudrate, the `resource_id`, the `state_root` and the artifact roots "
+            "with it: a reset, not a repair.",
+        ),
+    ),
+    f"permission_denied:{EXCLUSIVE_PERMISSION_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The same `error_type` for the opposite state: `{permission}` is **true**, and this action is refused "
+            "because it is. `allow_raw_debugger_commands` and `allow_mass_erase` act on flash outside the path this "
+            "server validates, so while either is open a flash report's claim about what is on the device is not one "
+            "this server can stand behind, and validated flashing and unrestricted debugger access are mutually "
+            "exclusive policies rather than an arbitrary interlock. Nothing was sent to the target."
+        ),
+        remediation=(
+            "Report the refusal and name `{permission}`, the key that is open and is what blocks this. Naming the "
+            "wrong direction is the whole risk here: an operator told only that a permission refused this reaches "
+            "for the grant, which is the one move that keeps it refused.",
+            "The operator closes exactly that key from their own shell with `{revoke_command} {permission}`. No tool "
+            "on this server is behind that flag, so nothing becomes unavailable by closing it, and a generated "
+            "configuration leaves both of these false for this reason.",
+            "`project_config_describe` reports the key's current value, so whether this bench is in that state is "
+            "read rather than guessed at by trying the action again.",
+        ),
+        do_not=(
+            "Do not ask for `{permission}` to be granted, or treat it as the missing grant. It is already granted; "
+            "that is the refusal.",
+            "Do not flash or erase through the raw debugger the open flag allows. That is precisely the unvalidated "
+            "path whose existence made this refusal necessary.",
         ),
     ),
     RECOVERY_PHYSICAL_CHECK_ERROR: ErrorRemedy(
@@ -1175,19 +1509,24 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "not have. `validation_error` says which. `field` there is the dotted path into the plan "
             "(`steps[2].port_id`), `step` the step number the report repeats as `failed_step`, and `next_step` the "
             "one move that fixes this case. A refusal about a name also carries what the configuration does declare, "
-            "under `configured_com_ports`, `configured_can_buses` or `configured_debuggers`."
+            "under `configured_com_ports`, `configured_can_buses` or `configured_debuggers`.\n\n"
+            "It is never about a permission. A step the configuration's permissions deny is a valid plan and a bench "
+            "that says no, and it is refused as `permission_denied` with the key it is about, on this surface exactly "
+            "as over MCP. Nothing here applies to one, and the regeneration named below least of all."
         ),
         remediation=(
-            "Read `next_step` inside `validation_error` first. It names the key that is wrong and the command or the "
-            "configuration field that fixes it; the steps below are the general form of the same three answers.",
+            READ_VALIDATION_NEXT_STEP,
             "A step naming a device the configuration does not declare is corrected in the plan: `device:` has to be "
             "one of the names the refusal lists under the `configured_*` key for that kind.",
-            "A bench that genuinely has no such entry is filled in rather than argued with. With the board attached, "
-            "`agentic-hil adopt-hardware` fills a declared debugger or COM-port entry's hardware in; adoption "
-            "has no CAN half, so a `can_buses` entry's adapter and channel are written by hand. Where the section is "
-            "empty because `agentic-hil init` ran with no bench attached, `agentic-hil init --force` from the project "
-            "root writes the file again from the project profile and the hardware it finds. `--force` replaces the "
-            "whole file, every narrowed permission included, so it is a reset rather than a repair.",
+            "A declared entry with no hardware behind it is filled in rather than argued with. With the board "
+            "attached, `agentic-hil adopt-hardware` fills a declared debugger or COM-port entry's hardware in; "
+            "adoption has no CAN half, so a `can_buses` entry's adapter and channel are written by hand.",
+            "Only where the section is empty because `agentic-hil init` ran with no bench attached does the file need "
+            "writing again: `agentic-hil init --force` from the project root writes it from the project profile and "
+            "the hardware it finds. That is the missing-entry case and no other. `--force` replaces the whole file, "
+            "every narrowed permission included, so it is a reset rather than a repair, and it is never the way past "
+            "a permission: a refusal that names one is `permission_denied` and `{grant_command} <key>` moves that one "
+            "key and leaves the rest of the file standing.",
             "A `field` naming a plan key rather than a device is a plan the schema rejects. "
             "`{test_plan_reference}` is what it was validated against; it reads the shipped schema rather than "
             "describing it, so the version that admits a step is in the same table as the step.",
@@ -1201,6 +1540,37 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not raise the plan's `version:` to reach a step it refuses. The version is what the plan was written "
             "against, and a step that is too new for it is refused by name here rather than failing on an older "
             "install for no stated reason.",
+            "Do not reach for `{reopen_command}` because a step was refused. It is the answer to an empty section and "
+            "to nothing else: it rewrites the file from hardware discovery, so every narrowed permission, the "
+            "baudrate, the `resource_id`, the `state_root` and the artifact roots go with it. A bench somebody "
+            "narrowed on purpose is exactly the bench where that costs the most.",
+        ),
+    ),
+    # The one `test_config_invalid` that is not about the plan's contents at all.
+    # It is raised by the loader before a single byte of the file is read, so
+    # every step the unscoped entry above offers is about a document nothing has
+    # looked at: it sent a reader who typed one path to check device names, run
+    # adoption and compare plan versions. This entry is scoped on the field the
+    # refusal names so that the reader gets the move that fixes it and nothing
+    # else.
+    "test_config_invalid:workspace_root": ErrorRemedy(
+        meaning=(
+            "The plan path resolves outside the workspace this configuration binds. `path` is where it resolved to, "
+            "symlinks followed, and `workspace_root` is the boundary it has to be inside. The file was never opened: "
+            "nothing was parsed, nothing was locked and no hardware was reached, so this says nothing about whether "
+            "the plan itself is valid.\n\n"
+            "A relative path is resolved against `workspace_root` rather than against the process's working "
+            "directory, which is what makes one plan path mean the same thing to the tool, to the command line and to "
+            "a detached worker. A path that leaves the root, `..` and a symlink out of it included, is refused here."
+        ),
+        remediation=(
+            "Move the plan inside the workspace root this refusal names under `workspace_root` and run it again by a "
+            "path that resolves there; `next_step` names that root. Nothing else about the bench is involved and "
+            "nothing needs recovering: the file was not opened.",
+        ),
+        do_not=(
+            "Do not repoint `workspace_root` at the plan. That key is what this configuration authorizes, and widening "
+            "it to admit one file admits everything else under the new root to every plan this bench runs.",
         ),
     ),
     "run_already_active": ErrorRemedy(
@@ -2203,21 +2573,43 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
 }
 
 
-def remediation_fields(error_type: str | None, scope: str | None = None) -> JsonObject:
+def remediation_fields(error_type: str | None, scope: str | None = None, *, permission: str | None = None) -> JsonObject:
     """The remediation fields for an error, or an empty object when none is known.
 
     Merge the result into a failing payload. Empty for every error_type the
     catalogue does not cover, so callers can apply it unconditionally without
     inventing advice for errors nobody has written a fix for.
+
+    ``permission`` is the one substitution the catalogue cannot supply itself:
+    the dotted key a `permission_denied` is about is a fact about the refusal in
+    hand. Given, it fills the `{permission}` placeholder in that entry's steps,
+    so the advice names the key the operator has to move; left out, the generic
+    shape stands and the entry still reads (#443).
     """
     remedy = lookup_remedy(error_type, scope)
-    if remedy is None:
+    if remedy is None or (permission is None and _needs_a_permission_key(remedy)):
         return {}
-    values = _substitutions()
+    values = {**_substitutions(), **({"permission": permission} if permission else {})}
     payload: JsonObject = {"remediation": [step.format(**values) for step in remedy.remediation]}
     if remedy.do_not:
         payload["do_not"] = [step.format(**values) for step in remedy.do_not]
     return payload
+
+
+def _needs_a_permission_key(remedy: ErrorRemedy) -> bool:
+    """Whether this entry's advice is about one named key and nothing else.
+
+    `permission_denied` is the one error_type two unlike refusals share. Most of
+    them are a key that is closed, and the entry tells the operator which key to
+    move. A few are not a key at all: a symbol outside `debug.allowed_symbols`,
+    a dump over `debug.max_dump_size_bytes`. Handing those the keyed entry would
+    tell an operator to grant a permission that has nothing to do with the
+    refusal, so an entry whose steps are written around `{permission}` answers
+    only for a refusal that supplies one. `catalogue_entry` is unaffected: a
+    reader browsing the error reference has met no refusal, and the generic
+    shape is what they are there to read.
+    """
+    return any("{permission}" in step for step in (*remedy.remediation, *remedy.do_not))
 
 
 def command_line_remediation(error_type: str | None, scope: str | None, steps: list[str]) -> list[str] | None:

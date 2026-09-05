@@ -233,7 +233,13 @@ def test_a_plan_a_permission_refuses_is_refused_the_same_way_on_both_routes(tmp_
 
     at_the_command_line = run_test_reactor(str(plan))
     assert over_mcp["ok"] is False
-    assert over_mcp["error_type"] == "test_config_invalid"
+    # #444: one classification for both routes, and it is the one the project's
+    # own agent instructions key on. The command line answered
+    # `test_config_invalid` for a plan that was valid and a bench that said no,
+    # so the two routes named the same refusal two different things.
+    assert over_mcp["error_type"] == "permission_denied"
+    assert over_mcp["step_error_type"] == "permission_denied"
+    assert over_mcp["permission"] == "debuggers.dut.permissions.allow_reset"
     assert over_mcp["validation_error"]["step"] == 1
     assert over_mcp["validation_error"]["action"] == "reset"
     assert "disabled" in over_mcp["validation_error"]["summary"]

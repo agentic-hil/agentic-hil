@@ -169,8 +169,15 @@ def test_the_change_is_reported_with_the_value_it_replaced(tmp_path: Path, monke
     assert any("project_config_reload_description" in step for step in result["next_steps"])
 
 
-def test_the_write_is_recorded_as_a_persons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provenance like any other write, with `human` as the actor."""
+def test_the_write_is_recorded_as_the_surface_it_came_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#452: it said a person had been here, and nothing here knew that.
+
+    The command is the operator's surface by design and it is also what a shell
+    script, a CI step and a provisioning tool run, with the same arguments and
+    nobody at the keyboard. `a person changed this` in a policy file's own
+    header is read later by somebody deciding who narrowed a permission, and it
+    was written out of an argument list. What is known is the surface, and that
+    is what stands."""
     workspace, path = bench(tmp_path, monkeypatch, device_permissions=dict.fromkeys(GRANT_SOURCES, True))
     assert document_of(path)["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is True
 
@@ -178,13 +185,72 @@ def test_the_write_is_recorded_as_a_persons(tmp_path: Path, monkeypatch: pytest.
 
     assert result["ok"] is True, result
     provenance = document_of(path)["provenance"]
-    assert provenance["last_modified_by"] == "human"
+    assert provenance["last_modified_by"] == "cli"
     assert provenance["last_modified_via"] == "cli:revoke"
     assert provenance["last_modified_keys"] == ["debuggers.dut.permissions.allow_mass_erase"]
     assert provenance["modification_count"] == 1
     # `created_by` answers who wrote the file, which a change does not alter.
     assert provenance["created_by"] == PROVENANCE["created_by"]
+    header = path.read_text(encoding="utf-8")
+    assert "# Changed by the command line through cli:revoke" in header
+    assert "a person" not in header
+
+
+def test_a_terminal_is_what_lets_the_file_say_a_person_was_here(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one piece of evidence this process has, and it is enough.
+
+    Nothing is withheld from an operator at their own shell: with a terminal
+    answering, the write says what it always said."""
+    workspace, path = bench(tmp_path, monkeypatch, device_permissions=dict.fromkeys(GRANT_SOURCES, True))
+    monkeypatch.setattr("agentic_hil.configwrite._at_an_interactive_terminal", lambda: True)
+
+    assert run(workspace, "revoke", "debuggers.dut.allow_mass_erase")["ok"] is True
+
+    assert document_of(path)["provenance"]["last_modified_by"] == "human"
     assert "# Changed by a person through cli:revoke" in path.read_text(encoding="utf-8")
+
+
+def test_a_terminal_that_will_not_answer_is_not_a_person(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stream with no answer, or none at all, is the absence of evidence.
+
+    `stdin` is closed under a detached service and replaced by every harness
+    that captures it, and asking a handle the platform will not classify raises
+    rather than answering. None of those is somebody typing."""
+    from agentic_hil.configwrite import _at_an_interactive_terminal
+
+    class Refuses:
+        def isatty(self) -> bool:
+            raise ValueError("I/O operation on closed file")
+
+    monkeypatch.setattr("sys.stdin", Refuses())
+    assert _at_an_interactive_terminal() is False
+    monkeypatch.setattr("sys.stdin", None)
+    assert _at_an_interactive_terminal() is False
+    monkeypatch.setattr("sys.stdin", object())
+    assert _at_an_interactive_terminal() is False
+
+
+def test_the_agents_own_writes_are_recorded_exactly_as_they_were(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A terminal says nothing about who is on the other end of MCP.
+
+    `project_config_set` over MCP is an agent by construction, and this is the
+    surface the whole ratchet is decided against, so nothing about it moves."""
+    from agentic_hil.configwrite import project_config_set
+
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True}, device_permissions=dict.fromkeys(GRANT_SOURCES, True))
+
+    written = project_config_set(
+        workspace,
+        load_authoritative_config(workspace),
+        [{"key": "debuggers.dut.permissions.allow_mass_erase", "value": False}],
+        open_holds=None,
+    )
+
+    assert written["ok"] is True, written
+    provenance = document_of(path)["provenance"]
+    assert provenance["last_modified_by"] == "agent"
+    assert provenance["last_modified_via"] == "mcp:project_config_set"
+    assert "# Changed by an agent through mcp:project_config_set" in path.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +337,7 @@ def test_the_waiver_is_not_reachable_with_an_agents_provenance(tmp_path: Path, m
     )
 
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == CONFIG_PERMISSIONS_RIGHT
+    assert refused["permission"] == f"permissions.{CONFIG_PERMISSIONS_RIGHT}"
     assert document_of(path)["can_buses"]["dut"]["permissions"]["allow_write"] is False
 
 
@@ -756,3 +822,82 @@ def test_the_widening_refusal_now_names_the_surgical_way_back(tmp_path: Path, mo
     assert CONFIG_GRANT_COMMAND in remediation
     assert "agentic-hil init --force" in remediation
     assert CONFIG_REVOKE_COMMAND == "agentic-hil revoke"
+
+
+# ---------------------------------------------------------------------------
+# Which question the side-effect fields answer (#449).
+
+
+def test_a_write_that_happened_says_what_the_side_effect_fields_are_about(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`side_effect_committed: no` beside a file that moved is a trap.
+
+    The reported reading: `agentic-hil revoke` writes the key, reports it under
+    `changed` with `restart_required: yes`, and in the same result says
+    `side_effect_committed no` and `side_effect_status not_started`. A caller
+    reading those two to learn whether the file moved gets `no` after a
+    successful write. They are about hardware, which this command never touches,
+    and the result now says so and names the field that does answer the question.
+    """
+    workspace, path = bench(tmp_path, monkeypatch, device_permissions=dict.fromkeys(GRANT_SOURCES, True))
+
+    result = run(workspace, "revoke", "debuggers.dut.allow_reset")
+
+    assert result["ok"] is True, result
+    assert result["changed"] == [{"key": "debuggers.dut.permissions.allow_reset", "previous_value": True, "value": False}]
+    assert document_of(path)["debuggers"]["dut"]["permissions"]["allow_reset"] is False
+    summary = result["summary"]
+    assert "side_effect_committed" in summary
+    assert "describe hardware" in summary
+    assert "under `changed`" in summary
+
+
+def test_the_same_sentence_reaches_the_other_direction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Grant carries it too: the two commands report through one result builder."""
+    workspace, _ = bench(tmp_path, monkeypatch)
+
+    result = run(workspace, "grant", "can_buses.dut.allow_write")
+
+    assert result["ok"] is True, result
+    assert "side_effect_committed" in result["summary"]
+    assert "under `changed`" in result["summary"]
+
+
+def test_the_fields_themselves_report_exactly_as_every_other_writing_surface_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agreement, pinned: four surfaces write this file and answer alike.
+
+    `project_config_set` is the one an agent reaches, and a successful write
+    there reports the same three values for the same reason. Scoring them
+    differently on one of the four would leave a caller unable to read the field
+    at all, so the sentence above is the fix and these values are not.
+    """
+    workspace, _ = bench(tmp_path, monkeypatch, **{CONFIG_WRITE_RIGHT: True, CONFIG_DESCRIPTION_RIGHT: True})
+    granted = run(workspace, "grant", "can_buses.dut.allow_write")
+
+    tools = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        written = tools.call(PROJECT_CONFIG_SET, {"changes": [{"key": "com_ports.dut_uart.baudrate", "value": 460800}]})
+    finally:
+        tools.close()
+
+    assert written["ok"] is True, written
+    for field in ("side_effect_committed", "side_effect_status", "hardware_state"):
+        assert granted[field] == written[field]
+    assert granted["side_effect_committed"] is False
+    assert granted["side_effect_status"] == "not_started"
+    assert granted["hardware_state"] == "unchanged"
+
+
+def test_a_call_that_wrote_nothing_does_not_talk_about_a_write_it_did_not_make(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The no-op result is a different sentence and stays one.
+
+    Nothing was written there, so `side_effect_committed: no` misleads nobody and
+    a note about a file change would be describing one that did not happen.
+    """
+    workspace, _ = bench(tmp_path, monkeypatch, device_permissions=dict.fromkeys(GRANT_SOURCES, True))
+
+    result = run(workspace, "grant", "debuggers.dut.allow_reset")
+
+    assert result["ok"] is True, result
+    assert result["changed"] == []
+    assert "Nothing was written" in result["summary"]
+    assert "under `changed`" not in result["summary"]

@@ -65,6 +65,7 @@ surface moves: the ratchet there is what it was.
 from __future__ import annotations
 
 import os
+import sys
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,6 +91,7 @@ from agentic_hil.config import (
 from agentic_hil.configstate import config_stale, config_status, with_config_status
 from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
+    CONFIG_GRANT_COMMAND,
     CONFIG_KEY_RULES,
     CONFIG_NAMED_SECTIONS,
     CONFIG_PERMISSIONS_RIGHT,
@@ -129,7 +131,20 @@ PROJECT_CONFIG_DESCRIBE = "project_config_describe"
 # their own shell is theirs.
 ACTOR_AGENT = "agent"
 ACTOR_HUMAN = "human"
-ACTOR_PHRASES = {ACTOR_AGENT: "an agent", ACTOR_HUMAN: "a person"}
+# What the file records when the write came through a command and this process
+# has no evidence that a person typed it. The command line is the operator's
+# surface by design, which is what `ACTOR_HUMAN` above authorizes, and a shell
+# script, a CI step and a provisioning tool run exactly the same command with
+# nobody at it. `a person changed this` in a policy file's own header is a claim
+# about who is accountable for a narrowing, and this process cannot make it out
+# of an argument list. The surface can be stated either way, so it is what
+# stands when the terminal does not answer.
+ACTOR_COMMAND_LINE = "cli"
+ACTOR_PHRASES = {ACTOR_AGENT: "an agent", ACTOR_HUMAN: "a person", ACTOR_COMMAND_LINE: "the command line"}
+# The `via` prefix that says the write came through a typed command. `via` is
+# already the surface (`cli:grant`, `mcp:project_config_set`), so this reads the
+# fact rather than adding a second way to say it.
+CLI_SURFACE_PREFIX = "cli:"
 
 # One comment line, rewritten rather than appended, so a file changed a hundred
 # times does not grow a hundred lines of banner. It sits in the header because
@@ -139,6 +154,21 @@ ACTOR_PHRASES = {ACTOR_AGENT: "an agent", ACTOR_HUMAN: "a person"}
 # believing the header without being told the file has moved.
 CHANGE_MARKER_PREFIX = "# Changed by "
 NOT_STARTED: JsonObject = {"side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged"}
+
+# What the `NOT_STARTED` block above is about, in the words of a result that
+# carries it beside a write that did happen. Every surface that writes this
+# configuration reports the same way: the three fields answer "what did this call
+# do to the hardware", which for a configuration write is nothing, and the file
+# change is reported under `changed`. A caller reading `side_effect_committed` to
+# find out whether the file moved gets `no` after a successful `agentic-hil
+# revoke` and concludes it did not, which is the reading this sentence closes
+# (#449). Said rather than scored: making one of the four surfaces answer these
+# fields about a file would leave the other three answering about hardware, and a
+# field that means two things is worse than one that means one and says so.
+SIDE_EFFECT_SCOPE_NOTE = (
+    "`side_effect_committed`, `side_effect_status` and `hardware_state` on this result describe hardware, which this "
+    "command does not touch; the change it made to the configuration file is the one reported under `changed`."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +461,48 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def recorded_actor(actor: str, via: str) -> str:
+    """What this write may claim about who made it.
+
+    Not what it is authorized as. ``ACTOR_HUMAN`` on the command line is an
+    authority: it is the surface `agentic-hil init --force` already runs under,
+    it waives the description grant and it is not held to the false-only
+    direction, and none of that changes here. What changes is what goes into the
+    file, which is a different question with a different standard of proof: a
+    provenance line is read later, by somebody deciding who narrowed a
+    permission and whether to trust the header above it.
+
+    The command line is the operator's surface and it is also a shell script, a
+    CI step and a provisioning run, and this process cannot tell those apart by
+    the arguments it was given. An interactive terminal is the one piece of
+    evidence it does have for a person being there. Where that is absent the
+    surface stands alone, which is the whole of what is known: `cli`, beside a
+    `via` that already says which command it was.
+
+    The agent's own writes are untouched. `mcp:project_config_set` is an agent
+    by construction, and nothing about a terminal is evidence about that.
+    """
+    if actor != ACTOR_HUMAN or not via.startswith(CLI_SURFACE_PREFIX):
+        return actor
+    return ACTOR_HUMAN if _at_an_interactive_terminal() else ACTOR_COMMAND_LINE
+
+
+def _at_an_interactive_terminal() -> bool:
+    """Whether somebody is typing at this process, as far as it can tell.
+
+    `stdin` rather than `stdout`, because output is redirected by people who are
+    very much there and input is not. Every way of not having one answers false:
+    a closed or detached stream (`None` under a windowed interpreter), a stream
+    that has been replaced by something without the method, and a handle the
+    platform refuses to classify. A refused answer is not a person.
+    """
+    stream = getattr(sys, "stdin", None)
+    try:
+        return bool(stream is not None and stream.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Grants.
 
@@ -539,18 +611,33 @@ def _permission_denied(tool: str, right: str, keys: list[str], path: Path) -> Js
         "summary": (
             f"Changing {'permissions in' if right == CONFIG_PERMISSIONS_RIGHT else 'the description of'} this project's "
             f"configuration is denied by permissions.{right} in the configuration itself. This server may read it and "
-            "not change it there, and only a person editing that file can change that."
+            f"not change it there; the operator opens exactly that key from their own shell with `{CONFIG_GRANT_COMMAND} "
+            f"{_right_key(right)}`, which is the one narrow way back."
         ),
-        "permission": right,
+        # The dotted key `agentic-hil grant` and `resolve_permission_key` take,
+        # under the `permission` name every refusal on this server advertises.
+        # `permission_key` is the older spelling of the same fact and is kept
+        # beside it rather than moved, because it is already published; the bare
+        # `right` stays only as the scope the catalogue is looked up by below
+        # (round 1, finding 3).
+        "permission": _right_key(right),
         "permission_key": _right_key(right),
         "reason": "config_write_denied",
         "denied_keys": sorted(keys),
         "path": str(path),
         "reference": CONFIG_SHAPE_URI,
+        # The exact operator command, not only "a person edits the file": the
+        # documented narrow recovery is the operator-only `agentic-hil grant`, and
+        # the scoped remediation this refusal carries tells the agent not to touch
+        # the file with its own tools. Saying "only the operator may edit it" while
+        # discouraging file edits in the same refusal left the actionable command
+        # unnamed (round 1, finding 3).
         "next_step": (
             "This refusal is the answer to the request. Report it, name the permission that is denied and the file "
-            f"that carries it, then stop. You must not enable it: {_right_key(right)} belongs to the operator and "
-            "only the operator may edit it. You must not reach the same change another way either."
+            f"that carries it, then stop. You must not enable it: {_right_key(right)} belongs to the operator, who "
+            f"opens exactly that key from their own shell with `{CONFIG_GRANT_COMMAND} {_right_key(right)}`, which "
+            "leaves every other key in the file alone. You must not reach the same change another way either, and you "
+            "must not edit the file yourself: the host deny rules exist for exactly that."
         ),
         **remediation_fields("permission_denied", right),
         **NOT_STARTED,
@@ -761,8 +848,14 @@ def _project_config_set(
             return _permission_denied(PROJECT_CONFIG_SET, CONFIG_DESCRIPTION_RIGHT, [item["key"] for item in applied], target_path)
 
         timestamp = _utc_now()
-        _record_provenance(updated, [str(item["key"]) for item in applied], timestamp, actor, via)
-        text = _marked_header(previous_text, timestamp, actor, via) + yaml.safe_dump(updated, sort_keys=False, allow_unicode=False)
+        # What the file says it was changed by, which is not always what the
+        # change was authorized as: `actor` decided every check above it, and
+        # what a written line may claim is bounded by what this process can
+        # actually know. Both places take the same value, so the header and
+        # `provenance` cannot say different things about one write.
+        recorded = recorded_actor(actor, via)
+        _record_provenance(updated, [str(item["key"]) for item in applied], timestamp, recorded, via)
+        text = _marked_header(previous_text, timestamp, recorded, via) + yaml.safe_dump(updated, sort_keys=False, allow_unicode=False)
 
         # 3. Validate, then replace. write_generated_config loads the new text
         #    from a temporary file first, so a change that would not load never
@@ -1537,7 +1630,16 @@ def _permission_change_result(command: str, value: bool, written: JsonObject, un
             f"{len(changed)} permission(s) {verb} in {written.get('path')}"
             + (f"; {len(unchanged)} named permission(s) were already {str(value).lower()} and were not written" if unchanged else "")
             + ". Nothing else in the file was touched. A running MCP server does not re-read permissions, so restart it "
-            "before relying on this."
+            "before relying on this. "
+            # The write happened and `side_effect_committed` says no, which is a
+            # caller reading the wrong field for the question they are asking: on
+            # every surface here those two describe hardware, and this command
+            # touches none. `project_config_set`, `adopt-hardware --apply` and
+            # `init` all report a completed configuration write with the same
+            # `not_started` pair, so the answer is to say which question the pair
+            # answers rather than to make one surface out of four score it
+            # differently (#449).
+            + SIDE_EFFECT_SCOPE_NOTE
         ),
         "changed": changed,
         "unchanged": unchanged,
@@ -1833,6 +1935,7 @@ def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], op
 
 __all__ = [
     "ACTOR_AGENT",
+    "ACTOR_COMMAND_LINE",
     "ACTOR_HUMAN",
     "GRANTING_PATH",
     "PERMISSION_COMMAND_VALUES",
@@ -1850,6 +1953,7 @@ __all__ = [
     "permission_widening",
     "project_config_describe",
     "project_config_set",
+    "recorded_actor",
     "resolve_permission_key",
     "set_permission",
 ]

@@ -353,6 +353,55 @@ def test_test_plan_must_remain_inside_workspace(tmp_path: Path) -> None:
     assert rejected.value.details["workspace_root"] == str(workspace.resolve())
 
 
+def test_the_workspace_boundary_refusal_carries_only_the_move_that_fixes_it(tmp_path: Path) -> None:
+    """#448: it printed the remediation for a different error.
+
+    The loader refuses this before the file is opened, so the plan's contents
+    are not what is wrong with it. The unscoped `test_config_invalid` entry is
+    about contents: device names, `adopt-hardware`, `init --force`, plan schema
+    versions and two `com_ports` warnings. A reader who mistyped one path was
+    handed all of it.
+    """
+    from agentic_hil.knowledge import remediation_fields
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    plan = tmp_path / "outside.yaml"
+    plan.write_text("version: 2\nsteps:\n  - {port_id: dut_uart, action: uart_open}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as rejected:
+        load_test_config(str(plan), str(workspace))
+    refusal = rejected.value.to_dict()
+
+    assert refusal["remediation"] == remediation_fields("test_config_invalid", "workspace_root")["remediation"]
+    assert len(refusal["remediation"]) == 1
+    # The root to move it under is named as a path, which no standing catalogue
+    # text can do.
+    assert refusal["next_step"] == f"Move the plan under {workspace.resolve()} and name it by a path that resolves there."
+    # And none of the advice for a plan whose contents are wrong.
+    advice = " ".join([*refusal["remediation"], *refusal["do_not"]])
+    for absent in ("adopt-hardware", "init --force", "com_ports", "can_buses", "version:"):
+        assert absent not in advice, absent
+
+
+def test_a_plan_the_schema_rejects_still_gets_the_advice_about_its_contents(tmp_path: Path) -> None:
+    """The scoping moved one refusal and left the rest of them alone.
+
+    A plan inside the workspace that does not hold is the case the unscoped
+    entry was written for, and it still answers there, in full."""
+    from agentic_hil.knowledge import remediation_fields
+
+    path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {port_id: dut_uart, action: no_such_action}\n")
+
+    with pytest.raises(ConfigError) as rejected:
+        load_test_config(str(path), str(tmp_path))
+    refusal = rejected.value.to_dict()
+
+    assert refusal["error_type"] == "test_config_invalid"
+    assert refusal["remediation"] == remediation_fields("test_config_invalid")["remediation"]
+    assert len(refusal["remediation"]) > 1
+
+
 def test_reactor_schema_rejects_traversal_breakpoint_file(tmp_path: Path) -> None:
     path = write_test_config(
         tmp_path,
@@ -914,6 +963,55 @@ def test_reactor_converts_step_exception_to_structured_failure(tmp_path: Path) -
     assert result["steps"][0]["result"]["exception_type"] == "OSError"
 
 
+def test_every_step_record_carries_how_long_the_step_took(tmp_path: Path) -> None:
+    """#455: only the debugger's steps had a duration, so only they had a row.
+
+    `elapsed_ms` came from whatever tool the step called, and the debugger
+    backends are the only ones that report one. So a run's evidence carried a
+    number for `flash` and an empty cell for the serial steps around it, which
+    is most of what a plan does. The reactor sees every step, so it is what
+    times them, block steps included."""
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 4
+steps:
+  - {device: dut, action: flash, image_path: build/app.elf}
+  - {device: dut_uart, action: uart_open}
+  - {action: repeat, count: 2, steps: [{device: dut_uart, action: uart_read}]}
+  - {device: dut_uart, action: uart_close}
+""",
+    )
+    service = RecordingService(uart_reads=[b"ready\n", b"ready\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert [record["action"] for record in result["steps"]] == ["flash", "uart_open", "repeat", "uart_close"]
+    for record in result["steps"]:
+        elapsed = record["elapsed_ms"]
+        assert isinstance(elapsed, int) and not isinstance(elapsed, bool), record
+        assert elapsed >= 0, record
+    # The steps inside a block are steps, and they are timed by the same pass.
+    for nested in result["steps"][2]["iterations"][0]["steps"]:
+        assert isinstance(nested["elapsed_ms"], int)
+
+
+def test_a_step_that_failed_is_timed_like_one_that_passed(tmp_path: Path) -> None:
+    """How long the failing step took is the row a reader looks at first.
+
+    It is measured around the step rather than around the tool call, so a step
+    that raised before any result existed has one too."""
+    config = load_config(str(write_config(tmp_path)))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: flash, image_path: build/app.elf}\n")
+
+    result = TestReactor(config, RecordingService(raise_flash=True)).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 1
+    assert isinstance(result["steps"][0]["elapsed_ms"], int)
+
+
 def test_reactor_treats_audit_failure_as_failed_step(tmp_path: Path) -> None:
     config = load_config(
         str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')),
@@ -1137,6 +1235,282 @@ def test_check_plan_renders_a_refusal_for_a_person(monkeypatch: pytest.MonkeyPat
     assert exit_code == 1
     printed = capsys.readouterr().out
     assert "v1.testconfig.yaml" in printed
+
+
+def _bench_with_one_uart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A workspace whose configuration declares `dut` and `dut_uart` and no more."""
+    workspace = (tmp_path / "workspace").resolve()
+    write_authoritative_config(workspace, monkeypatch, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
+def test_check_plan_names_the_devices_the_configuration_does_not_declare(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """#453: it passed a plan the bench refuses at its first step.
+
+    The plan loads, so `check-plan` said all plans load, and `test-reactor` then
+    refused the same file as `test_config_invalid` because the step names a port
+    the configuration does not have. The command already reads that
+    configuration far enough to enforce `workspace_root`, and a pre-flight check
+    that misses the most common plan defect is a pre-flight check nobody is
+    served by."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "typo.testconfig.yaml"
+    plan.write_text(
+        "version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n  - {device: dut_uart, action: uart_open}\n",
+        encoding="utf-8",
+    )
+
+    exit_code = entrypoint(["check-plan", str(plan), "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    # A finding, not a failure: a repository holds plans for other benches too.
+    assert exit_code == 0
+    assert result["ok"] is True
+    assert result["plans"][0]["unconfigured_devices"] == ["dut_uart2"]
+    assert "dut_uart2" in result["summary"]
+    assert result["configuration"]["ok"] is True
+    assert result["configuration"]["com_ports"] == ["dut_uart"]
+
+
+def test_check_plan_strict_makes_that_finding_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The job that does mean this bench asks for the nonzero exit."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "typo.testconfig.yaml"
+    plan.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--strict", "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert result["ok"] is False
+    assert result["strict"] is True
+    assert result["plans"][0]["unconfigured_devices"] == ["dut_uart2"]
+
+
+def test_check_plan_strict_heads_its_failure_and_the_plan_row_carries_the_finding(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """#467: it exited 1 under a heading that read as a pass.
+
+    The rendering opened `All 1 test plan(s) load through the reactor's loader,
+    ...` and left the failure in a subordinate clause at the end, and the row for
+    the very plan that failed the run was introduced by the word `ok` with the
+    finding filed under it. A preflight that fails has to say so where every
+    other surface says it: first, and on the plan it failed on."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "typo.testconfig.yaml"
+    plan.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--strict"])
+
+    assert exit_code == 1
+    printed = " ".join(capsys.readouterr().out.split())
+    # The outcome, then the count it failed on, before anything else.
+    assert printed.startswith("Failed: 1 of 1 test plan(s) name device(s) this workspace's configuration does not declare (dut_uart2).")
+    # The plan itself still loads, and the rendering still says so, so nobody
+    # goes looking for a syntax error in a plan that has none.
+    assert "load through the reactor's loader" in printed
+    # The row is the finding rather than the bare verdict it used to open with.
+    assert "- Loads, and names 1 device(s) this workspace's configuration does not declare: dut_uart2." in printed
+    assert "- ok" not in printed
+
+
+def test_check_plan_without_strict_keeps_its_informational_heading(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The other direction of #467, which must not move.
+
+    Without `--strict` the finding is a finding: the run exits 0 because a
+    repository holds plans for benches other than this one, so the heading stays
+    the informational sentence and must never open `Failed`. The row carries the
+    same finding either way, because the finding is a fact about the plan and
+    only the verdict is about the flag."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "typo.testconfig.yaml"
+    plan.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan)])
+
+    assert exit_code == 0
+    printed = " ".join(capsys.readouterr().out.split())
+    assert printed.startswith("All 1 test plan(s) load through the reactor's loader,")
+    assert "Failed" not in printed
+    assert "which --strict makes a failure" in printed
+    assert "- Loads, and names 1 device(s) this workspace's configuration does not declare: dut_uart2." in printed
+
+
+def test_check_plan_says_nothing_about_devices_a_plan_gets_right(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A plan whose names the configuration declares is green either way.
+
+    Every kind is exercised, and `--strict` changes nothing about a plan with
+    nothing to report."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "good.testconfig.yaml"
+    plan.write_text(
+        "version: 3\nname: good\nsteps:\n  - {device: dut, action: reset}\n  - {device: dut_uart, action: uart_open}\n",
+        encoding="utf-8",
+    )
+
+    exit_code = entrypoint(["check-plan", str(plan), "--strict", "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert result["ok"] is True
+    assert "unconfigured_devices" not in result["plans"][0]
+    assert result["summary"] == "All 1 test plan(s) load through the reactor's loader."
+
+
+def test_check_plan_without_a_configuration_says_so_and_checks_loadability(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The hosted simulator has no bench at all, and this is its whole job.
+
+    Nothing is compared, the result says why, and a plan naming a device nobody
+    declared is still reported as loading, because on a workspace with no
+    configuration that is the entire truth available."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "no-config"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-config"))
+    monkeypatch.delenv("AGENTIC_HIL_CONFIG", raising=False)
+    plan = tmp_path / "typo.testconfig.yaml"
+    plan.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--strict", "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert result["ok"] is True
+    assert result["configuration"]["ok"] is False
+    assert result["configuration"]["error_type"] == "config_file_not_found"
+    assert "loadability only" in result["configuration"]["summary"]
+    assert "unconfigured_devices" not in result["plans"][0]
+    assert result["summary"] == "All 1 test plan(s) load through the reactor's loader."
+
+
+def test_check_plan_strict_fails_when_the_configuration_is_present_but_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A present-but-broken bench file is not the no-configuration case.
+
+    `check-plan --strict` is the preflight for this bench, so it must not report
+    that every plan loads and exit 0 when the configuration whose device names it
+    would compare against cannot be read. Only `config_file_not_found` is the
+    tolerated no-bench case; a malformed, unreadable, noncanonical or
+    wrong-workspace file fails the strict check (round 1, finding 2)."""
+    workspace = (tmp_path / "workspace").resolve()
+    config_path = write_authoritative_config(workspace, monkeypatch, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')
+    # Present (so not config_file_not_found) but will not load.
+    config_path.write_text("workspace_root: [unterminated\n", encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    plan = workspace / "good.testconfig.yaml"
+    plan.write_text("version: 3\nname: good\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--strict", "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert result["ok"] is False
+    assert result["strict"] is True
+    assert result["configuration"]["ok"] is False
+    assert result["configuration"]["error_type"] != "config_file_not_found"
+    # The plan itself still loads; the failure is the unreadable bench, and no
+    # device comparison could be made against it.
+    assert result["plans"][0]["ok"] is True
+    assert "unconfigured_devices" not in result["plans"][0]
+    assert "could not be loaded" in result["summary"]
+    # The other strict failure, headed by its outcome for the same reason (#467).
+    assert result["summary"].startswith("Failed:")
+
+
+def test_check_plan_without_strict_reports_an_invalid_configuration_but_still_checks_loadability(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Without --strict the job is loadability, which a broken bench does not stop.
+
+    It exits 0, and the configuration failure is reported in the `configuration`
+    block rather than folded into the exit code: the difference from strict mode
+    is the exit, not the reporting (round 1, finding 2)."""
+    workspace = (tmp_path / "workspace").resolve()
+    config_path = write_authoritative_config(workspace, monkeypatch, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')
+    config_path.write_text("workspace_root: [unterminated\n", encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    plan = workspace / "good.testconfig.yaml"
+    plan.write_text("version: 3\nname: good\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert result["ok"] is True
+    assert result["configuration"]["ok"] is False
+    assert result["configuration"]["error_type"] != "config_file_not_found"
+    assert result["plans"][0]["ok"] is True
+
+
+def test_check_plan_reports_a_refused_plan_before_any_device_finding(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A plan that does not load has nothing to compare device names against.
+
+    The refusal is the answer for that plan, and the finding on its neighbour
+    does not change what the run exits with, which was already nonzero."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    broken = workspace / "dupe.testconfig.yaml"
+    broken.write_text("version: 3\nname: one\nname: two\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+    typo = workspace / "typo.testconfig.yaml"
+    typo.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(broken), str(typo), "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert result["plans"][0]["ok"] is False
+    assert "unconfigured_devices" not in result["plans"][0]
+    assert result["plans"][1]["unconfigured_devices"] == ["dut_uart2"]
+    assert "would be refused by the reactor" in result["summary"]
+
+
+def test_check_plan_names_an_undeclared_device_for_a_person_too(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The operator reading the CI log gets the name, not a machine document."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "typo.testconfig.yaml"
+    plan.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan)])
+
+    assert exit_code == 0
+    printed = " ".join(capsys.readouterr().out.split())
+    assert "dut_uart2" in printed
+    assert "--strict" in printed
 
 
 def test_a_run_names_the_per_run_report_copy_the_next_run_will_not_overwrite(
@@ -1884,7 +2258,7 @@ steps:
     assert result["ok"] is False
     assert result["failed_step"] == 2
     assert result["validation_error"]["field"] == "steps[1].action"
-    assert result["validation_error"]["permission"] == "allow_write"
+    assert result["validation_error"]["permission"] == "can_buses.dut_can.permissions.allow_write"
     assert result["steps"] == []
     assert service.calls == []
 
@@ -2419,13 +2793,228 @@ def test_reset_step_is_refused_without_the_reset_permission(tmp_path: Path) -> N
     result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
 
     assert result["ok"] is False
-    assert result["error_type"] == "test_config_invalid"
+    # #444: the plan is valid and the configuration denies the step, so this is
+    # the bench saying no rather than the plan being wrong. It was
+    # `test_config_invalid`, which sent the reader to correct a plan that had
+    # nothing wrong with it.
+    assert result["error_type"] == "permission_denied"
+    assert result["step_error_type"] == "permission_denied"
+    assert result["validation_error"]["error_type"] == "permission_denied"
     assert result["validation_error"]["field"] == "steps[1].action"
     # Named, so the operator is sent to the grant and not to the bench.
-    assert result["validation_error"]["summary"] == "Target reset is disabled for this debugger by the authoritative config."
+    assert result["validation_error"]["summary"] == (
+        "Target reset is disabled for this debugger by the authoritative config. "
+        "The permission is `debuggers.dut.permissions.allow_reset` and it is false."
+    )
+    assert result["validation_error"]["permission"] == "debuggers.dut.permissions.allow_reset"
+    assert "agentic-hil grant debuggers.dut.permissions.allow_reset" in result["validation_error"]["next_step"]
     # Refused before the run, so the flash the plan would have done never happened.
     assert result["steps"] == []
     assert service.calls == []
+
+
+def test_a_denied_permission_is_named_at_the_top_level_and_in_the_advice(tmp_path: Path) -> None:
+    """#443: the key an operator has to move, where each reader looks for it.
+
+    A plan refused after `agentic-hil revoke debuggers.dut.permissions.allow_reset`
+    said "Target reset is disabled for this debugger by the authoritative
+    config" and the string `allow_reset` stood nowhere in the document. An agent
+    told to name the permission it was denied could not comply, and an operator
+    had nothing to paste. Three readers, three places: the field a caller
+    parses, the summary an agent reads out, and the line the operator runs.
+    """
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: reset}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    key = "debuggers.dut.permissions.allow_reset"
+    # The top level, so a caller reading the result's own fields finds it
+    # without descending into the validation error.
+    assert result["permission"] == key
+    assert result["validation_error"]["permission"] == key
+    assert result["validation_error"]["summary"].endswith(f"The permission is `{key}` and it is false.")
+    next_step = result["validation_error"]["next_step"]
+    assert f"name the permission that is denied, `{key}`," in next_step
+    assert f"agentic-hil grant {key}" in next_step
+    # Named as the operator's own command, at the operator's own shell: an agent
+    # reading this must not take it as a route it may run itself.
+    assert "The operator opens exactly that key at their own shell" in next_step
+
+
+def test_a_denied_permission_is_a_permission_refusal_and_not_an_invalid_plan(tmp_path: Path) -> None:
+    """#444: the plan is valid; the configuration says no.
+
+    The reactor answered `test_config_invalid` for a step a permission denied,
+    which is the classification that says the plan is at fault, and it sent the
+    reader to correct a document that had nothing wrong with it. Over MCP the
+    same situation was already `permission_denied`, the error type this
+    project's own agent instructions key on, so the two routes named one refusal
+    two things.
+    """
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: reset}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["error_type"] == "permission_denied"
+    assert result["step_error_type"] == "permission_denied"
+    assert result["validation_error"]["error_type"] == "permission_denied"
+    # The plan itself is still reported as the valid document it is: the step,
+    # the field and the failed step all stand, so nothing about where the
+    # refusal happened is lost by naming the right cause for it.
+    assert result["failed_step"] == 1
+    assert result["validation_error"]["field"] == "steps[0].action"
+
+
+def test_the_outermost_summary_of_a_permission_refusal_names_the_permission(tmp_path: Path) -> None:
+    """#468: the last field still speaking from before #443 and #444.
+
+    Those two put the key and the `permission_denied` classification into every
+    other part of this result, and the string a caller logs, and the one an agent
+    reads out, still said "Test reactor configuration failed semantic
+    validation". A caller that reads only that string was told to go and correct
+    a plan with nothing wrong with it, which is the one move this refusal must
+    not prompt.
+    """
+    from agentic_hil.humanize import render_result
+
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: reset}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    key = "debuggers.dut.permissions.allow_reset"
+    assert result["summary"] == (
+        f"This bench's policy refused the plan at the permission `{key}`, which is `permission_denied` and not a fault "
+        "in the plan; no steps were executed."
+    )
+    assert "semantic validation" not in result["summary"]
+    # The sentence reaches the reader who only ever sees the rendering, too.
+    assert result["summary"] in " ".join(render_result(result, "test-reactor").split())
+    # And the fields #443 and #444 settled are exactly as they were: the key at
+    # the top level, and the block that carries the direction and the command.
+    assert result["permission"] == key
+    assert result["error_type"] == "permission_denied"
+    assert result["step_error_type"] == "permission_denied"
+    assert result["validation_error"]["error_type"] == "permission_denied"
+    assert result["validation_error"]["permission"] == key
+    assert result["validation_error"]["summary"] == (
+        "Target reset is disabled for this debugger by the authoritative config. "
+        f"The permission is `{key}` and it is false."
+    )
+    assert f"agentic-hil grant {key}" in result["validation_error"]["next_step"]
+
+
+def test_a_plan_the_semantics_reject_keeps_the_summary_it_had(tmp_path: Path) -> None:
+    """The neighbour #468 must not move: a plan that really is wrong.
+
+    `test_config_invalid` means the document is the fault and the reader is
+    right to go and correct it, so that refusal keeps its sentence. Only the
+    refusal whose cause is the bench's policy stops borrowing it."""
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {port_id: typo_uart, action: uart_open}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["error_type"] == "test_config_invalid"
+    assert result["summary"] == "Test reactor configuration failed semantic validation; no steps were executed."
+    assert "permission" not in result
+
+
+def test_a_denied_permission_is_never_answered_with_a_regeneration(tmp_path: Path) -> None:
+    """#444: `init --force` was offered as a way past a narrowed permission.
+
+    That command replaces the whole file, every narrowed permission included, by
+    its own text. Offering it to somebody whose bench just refused a step
+    because a permission was narrowed on purpose is the one command they must
+    not run, and it stood in the advice the refusal carried.
+    """
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: reset}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    offered = " ".join(result["remediation"])
+    assert "agentic-hil grant debuggers.dut.permissions.allow_reset" in offered
+    # Not among the things to do, and named among the things not to do: a
+    # reader who reaches for it anyway is told what it costs.
+    assert "agentic-hil init --force" not in offered
+    assert any("agentic-hil init --force" in item for item in result["do_not"])
+
+
+def test_the_invalid_plan_entry_still_offers_the_regeneration_for_a_missing_entry() -> None:
+    """The other half of the split: the case regeneration is actually for.
+
+    `init --force` is the answer to a section `agentic-hil init` left empty
+    because no bench was attached, and taking it out of the entry altogether
+    would cost that reader their one route. It stays, saying which case it is
+    for and what it costs.
+    """
+    from agentic_hil.knowledge import catalogue_entry, remediation_fields
+
+    entry = remediation_fields("test_config_invalid")
+    regeneration = next(step for step in entry["remediation"] if "agentic-hil init --force" in step)
+
+    assert "Only where the section is empty" in regeneration
+    assert "never the way past a permission" in regeneration
+    # And the entry says which refusals it is about where a reader decides
+    # whether it is about theirs at all.
+    served = catalogue_entry("test_config_invalid")
+    assert served is not None
+    assert "It is never about a permission." in served["meaning"]
+
+
+def test_a_permission_that_blocks_by_being_granted_is_not_answered_with_a_grant(tmp_path: Path) -> None:
+    """#443: the same field, the opposite direction, and the opposite advice.
+
+    `allow_mass_erase` refuses flashing by being *true*. An operator told only
+    that a permission refused this reaches for the grant, which is the one move
+    that keeps flashing refused, so the advice this refusal carries has to be
+    the one that closes the key.
+    """
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_mass_erase": True})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: flash, image_path: build/app.elf}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    key = "debuggers.dut.permissions.allow_mass_erase"
+    assert result["permission"] == key
+    # The outermost summary names this key too, and stays neutral about which
+    # way it has to move: the direction is `validation_error`'s to settle (#468).
+    assert result["summary"] == (
+        f"This bench's policy refused the plan at the permission `{key}`, which is `permission_denied` and not a fault "
+        "in the plan; no steps were executed."
+    )
+    assert result["validation_error"]["permission_granted"] is True
+    assert result["validation_error"]["summary"].endswith(f"The permission is `{key}` and it is true.")
+    next_step = result["validation_error"]["next_step"]
+    assert f"agentic-hil revoke {key}" in next_step
+    assert f"agentic-hil grant {key}" not in next_step
+
+
+def test_the_grant_line_a_refused_plan_carries_reaches_the_screen(tmp_path: Path) -> None:
+    """#446 over #443, end to end: the document and the rendering agree.
+
+    The battery run's operator saw `Target reset is disabled for this debugger
+    by the authoritative config.` and, under it, advice to read a field the
+    rendering did not print. The key and the line that opens it are in the
+    refusal now, and the rendering is where the operator meets them.
+    """
+    from agentic_hil.humanize import render_result
+
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: reset}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+    on_screen = " ".join(render_result(result, "test-reactor").split())
+
+    assert "Refused: permission_denied" in on_screen
+    assert "debuggers.dut.permissions.allow_reset" in on_screen
+    assert "agentic-hil grant debuggers.dut.permissions.allow_reset" in on_screen
+    # The validation error's own next step, which only it carries: the
+    # rendering printed every other member of that object and dropped this one.
+    assert "This refusal is the answer to the request." in on_screen
 
 
 def test_reset_step_is_refused_while_a_debug_session_is_open(tmp_path: Path) -> None:
@@ -3533,8 +4122,11 @@ steps:
     assert result["ok"] is False
     refusal = result["validation_error"]
     assert refusal["field"] == "steps[1].action"
-    assert refusal["summary"] == "Writing to this COM port is disabled by the authoritative config."
-    assert refusal["permission"] == "allow_write"
+    assert refusal["summary"] == (
+        "Writing to this COM port is disabled by the authoritative config. "
+        "The permission is `com_ports.dut_uart.permissions.allow_write` and it is false."
+    )
+    assert refusal["permission"] == "com_ports.dut_uart.permissions.allow_write"
     assert service.calls == []
 
 
@@ -5139,13 +5731,17 @@ steps:
     )
 
     assert result["ok"] is False
-    assert result["error_type"] == "test_config_invalid"
+    # The configuration denies the read; the plan is valid (#444).
+    assert result["error_type"] == "permission_denied"
     assert result["failed_step"] == 2
     refusal = result["validation_error"]
     assert refusal["field"] == "steps[1].action"
     assert refusal["action"] == "read_symbol"
-    assert refusal["summary"] == "Reading target memory requires allow_probe on this debugger."
-    assert refusal["permission"] == "allow_probe"
+    assert refusal["summary"] == (
+        "Reading target memory requires allow_probe on this debugger. "
+        "The permission is `debuggers.dut.permissions.allow_probe` and it is false."
+    )
+    assert refusal["permission"] == "debuggers.dut.permissions.allow_probe"
     # No step ran: the flash the plan led with never reached the service.
     assert result["steps"] == []
     assert service.calls == []
@@ -5178,8 +5774,11 @@ steps:
     refusal = result["validation_error"]
     assert refusal["field"] == "steps[1].action"
     assert refusal["action"] == "dump_memory"
-    assert refusal["summary"] == "Reading target memory requires allow_probe on this debugger."
-    assert refusal["permission"] == "allow_probe"
+    assert refusal["summary"] == (
+        "Reading target memory requires allow_probe on this debugger. "
+        "The permission is `debuggers.dut.permissions.allow_probe` and it is false."
+    )
+    assert refusal["permission"] == "debuggers.dut.permissions.allow_probe"
     assert result["steps"] == []
     assert service.calls == []
 

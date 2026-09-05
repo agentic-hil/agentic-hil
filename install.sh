@@ -837,6 +837,11 @@ manager_bin_dir() {
 # this run installs a copy, it becomes that copy's own path, so an older
 # agentic-hil earlier on PATH cannot answer for the install that just happened.
 AGENTIC_HIL_CMD="agentic-hil"
+# What the copy this run installed answers, once step 3 has found it and asked.
+# Empty where nothing was installed, or where the fresh copy could not be located
+# where the manager put it. The closing sentence reads it to say whether the
+# version actually moved, rather than claiming a refresh for every run.
+RESOLVED_VERSION=""
 
 installed_executable_dir() {
     # The manager's own destination directory, and only that. Step 2 installed into
@@ -885,6 +890,11 @@ report_path() {
         # for the rest of the run: it, not an older agentic-hil earlier on PATH,
         # is what registers the skill and the MCP server.
         AGENTIC_HIL_CMD="$found_dir/agentic-hil"
+        # Asked again here rather than carried out of the check above, because
+        # that check runs in a command substitution and a variable set inside one
+        # never reaches this shell. What it answers is what the closing sentence
+        # compares against the version step 1 found.
+        RESOLVED_VERSION=$("$AGENTIC_HIL_CMD" --version 2>/dev/null) || RESOLVED_VERSION=""
         # STARTUP_PATH, never the live PATH: the live one may already carry this
         # directory because this run put it there, and saying "already on your
         # PATH" about our own edit is the claim #430 is about.
@@ -954,9 +964,18 @@ DISCOVERED_PYTHON=""
 # satisfies the request unless it is told to, and a current-but-broken copy is
 # exactly the one the anchor exists to repair. `pin` is `refresh` with the
 # operator's own release named, which sets the requirement outright.
+#
+# FIRST_INSTALL is the closing line's question and not step 2's, which is why it
+# is not read off INSTALL_MODE: the development branch below installs nothing at
+# all and is still a machine that already has this tool. The closing sentence
+# about creating this project's configuration is written for somebody meeting
+# the tool for the first time, and on a host that already has project
+# configurations of its own, it was the wrong thing to end on.
 NEEDS_PACKAGE=1
 INSTALL_MODE="fresh"
+FIRST_INSTALL=0
 if ! have agentic-hil; then
+    FIRST_INSTALL=1
     step 1 "probe: no agentic-hil on this PATH, installing it user-local"
 elif ! installed=$(agentic-hil --version 2>/dev/null); then
     INSTALL_MODE="refresh"
@@ -1133,5 +1152,31 @@ elif [ "$RUNNING_COUNT" -gt 1 ]; then
     printf '\n'
 else
     step 5 "restart: no agent CLI of yours is running, so there is nothing to restart"
+fi
+
+# The last thing on the screen, and it follows what step 2 actually did rather
+# than what this run was asked to do. A first install ends on what happens next,
+# because nothing has happened yet. A run that moved the version ends on what
+# changed and what has not caught up with it: the installation on disk is the
+# new one, and every agentic-hil server already running goes on answering with
+# the release it started with until the agent CLI that started it is restarted.
+# A run that kept what was here ends on that, and says which of the two kinds of
+# keeping it was.
+#
+# The first-install sentence used to be printed on every run that was not one,
+# and on a host with project configurations already on it, "the first hardware
+# question creates this project's configuration" is an answer to a question that
+# machine settled long ago. The refresh sentence then took its place on every
+# run that was not a first install, which is how a run that printed "nothing to
+# install, the development installation stays as it is" closed on having
+# refreshed this installation in place. Measured on a bench, and again after a
+# `Nothing to upgrade`.
+if [ "$FIRST_INSTALL" -eq 1 ]; then
     say "The next start of your agent has everything, and the first hardware question creates this project's configuration."
+elif [ "$NEEDS_PACKAGE" -eq 0 ]; then
+    say "The development installation already on this PATH was kept and nothing was installed over it, and your project configurations were not touched. Nothing moved to a newer release, so no agentic-hil MCP server is behind this installation and none of them needs restarting on account of this run."
+elif [ -n "$RESOLVED_VERSION" ] && [ "$RESOLVED_VERSION" = "${installed:-}" ]; then
+    say "This installation stayed at $RESOLVED_VERSION, the release it was already on, and your project configurations were not touched. Nothing moved to a newer release, so no agentic-hil MCP server is behind this installation and none of them needs restarting on account of this run."
+else
+    say "This installation was refreshed in place, and your project configurations were not touched. Any agentic-hil MCP server still running keeps answering with the release it started with, so restart the agent CLIs that started one to pick this installation up."
 fi
