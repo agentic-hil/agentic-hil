@@ -4,6 +4,12 @@ All notable changes to Agentic Hardware-in-the-Loop (Agentic HIL) will be docume
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning while pre-1.0 changes may still move quickly.
 
+## [Unreleased]
+
+### Changed
+
+- The tree carries the development version after 0.21.3, with the CI examples moved to the release they now build toward, as the version gate requires.
+
 ## [0.21.3] - 2026-09-05
 
 ### Added
