@@ -525,8 +525,8 @@ def build_parser() -> argparse.ArgumentParser:
             "the bench would apply, so a plan this accepts is one the reactor can load. Where this workspace has a "
             "configuration, it also reports which device names a plan uses that the configuration does not declare, "
             "which is the other thing the bench refuses a plan for; where it has none, it says so and checks "
-            "loadability alone. Exit is nonzero if any plan is refused. This is the pre-flight check a hosted "
-            "simulator job runs; a schema-only reader passes plans the reactor then refuses"
+            "loadability alone. Exit is nonzero if any plan is refused. This is the pre-flight check a board-free CI "
+            "job runs; a schema-only reader passes plans the reactor then refuses"
         ),
     )
     check_plan_parser.add_argument("plans", nargs="+", metavar="PLAN", help="one or more test plan paths inside this workspace")
@@ -3476,7 +3476,7 @@ test_schema.__test__ = False  # type: ignore[attr-defined] - keep pytest from co
 def check_plan(plans: list[str], *, strict: bool = False) -> JsonObject:
     """Load each plan through the reactor's own loader and report whether it holds.
 
-    The hosted simulator job's one job is to establish that every plan in the
+    The board-free CI job's one job is to establish that every plan in the
     repository is one the reactor can load, and a schema-only reader cannot: it
     ignores `x-since-version`, so a plan using a key from a later plan version
     passes it and is then refused on the bench; and `yaml.safe_load` silently
@@ -3485,8 +3485,8 @@ def check_plan(plans: list[str], *, strict: bool = False) -> JsonObject:
     the whole of that guarantee: the duplicate-key rejection, the non-finite
     number rejection, the plan-version supersession and the feature gates, in one
     place rather than reimplemented in a workflow. It touches no hardware; the
-    workspace is this working directory, which is the checkout the simulator runs
-    in and the root a plan must stay inside.
+    workspace is this working directory, which is the checkout that job runs in
+    and the root a plan must stay inside.
 
     Where this workspace has a configuration, the check goes one step further and
     says which device names a plan uses that the configuration does not declare.
@@ -3500,7 +3500,7 @@ def check_plan(plans: list[str], *, strict: bool = False) -> JsonObject:
 
     Where there is no configuration, nothing is compared and the result says so.
     A plan is checked for loadability exactly as before, which is what a hosted
-    simulator with no bench at all can establish.
+    job with no bench at all can establish.
 
     A red plan does not stop the ones after it: every plan is reported, so one
     run names all of them rather than the first to fail, and `ok` is false when
@@ -3594,8 +3594,8 @@ def _configuration_unreadable(configuration: JsonObject) -> bool:
     """Whether a configuration is present but could not be loaded.
 
     True for every configuration-loading failure except `config_file_not_found`,
-    which is the one this command tolerates as the hosted-simulator case with no
-    bench at all. A malformed, unreadable, noncanonical or wrong-workspace file is
+    which is the one this command tolerates as the board-free case with no bench
+    at all. A malformed, unreadable, noncanonical or wrong-workspace file is
     a bench whose configuration is broken, and strict plan checking fails on it
     (round 1, finding 2).
     """
