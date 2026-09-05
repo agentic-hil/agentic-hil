@@ -290,7 +290,7 @@ MCP_TOOLS: list[JsonObject] = [
         "inputSchema": object_schema(
             {
                 "apply": {"type": "boolean", "default": False, "description": "Write the plan. Without it the call reads hardware and the configuration and changes nothing."},
-                "probe_id": {**NONEMPTY_STRING, "description": "Which attached probe this is about. Only needed when more than one is attached; it selects among them and never adds one."},
+                "probe_id": {**NONEMPTY_STRING, "description": "Which attached probe this is about. Needed when more than one is attached, and on a host without STM32CubeProgrammer, where probes are read from the USB serial inventory that cannot rule out a VCP-less ST-LINK/V2 beside the one it saw; it selects among the attached probes and never adds one."},
                 "debugger_id": {**NONEMPTY_STRING, "description": "Which configured debugger entry receives the values. Only needed when the configuration declares more than one."},
                 "com_port_id": {**NONEMPTY_STRING, "description": "Which com_ports entry receives the discovered device. Created with every permission false if it does not exist."},
             }

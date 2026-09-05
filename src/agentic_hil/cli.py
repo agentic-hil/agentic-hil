@@ -2200,13 +2200,23 @@ def _placeholder_reason(discovery: JsonObject) -> str:
     ports are named instead."""
     enumerated = _enumerated_stlink_ports(discovery)
     if discovery.get("error_type") == "adapter_not_found":
-        if not enumerated:
-            return "No attached bench was found"
-        devices = ", ".join(str(port.get("stable_device") or port.get("device") or "?") for port in enumerated)
-        return (
-            f"No usable probe serial was enumerated, although this host is showing {len(enumerated)} "
-            f"ST-Link serial port(s) ({devices})"
-        )
+        if enumerated:
+            devices = ", ".join(str(port.get("stable_device") or port.get("device") or "?") for port in enumerated)
+            return (
+                f"No usable probe serial was enumerated, although this host is showing {len(enumerated)} "
+                f"ST-Link serial port(s) ({devices})"
+            )
+        if "stlink_ports" in discovery:
+            # The USB serial inventory was read and held no ST-Link. Branching on
+            # the key, the same way `_discovery_account` does, is what tells this
+            # from the STM32CubeProgrammer path below: the inventory is not an
+            # authoritative count, because a VCP-less ST-LINK/V2 publishes no port
+            # for it to reach, so "none visible here" is not "no bench attached"
+            # (round 1, finding 1).
+            return "No ST-Link probe was visible in this host's USB serial inventory, which cannot see a VCP-less ST-LINK/V2"
+        # STM32CubeProgrammer's own listing ran and enumerated no probe, which is
+        # the one empty reading that is authoritative.
+        return "No attached bench was found"
     reason = str(discovery.get("summary") or "hardware discovery identified no bench").rstrip(".")
     return f"Hardware discovery did not configure a bench ({reason})"
 
@@ -2290,6 +2300,15 @@ def _placeholder_next_step(discovery: JsonObject) -> str:
             "More than one probe is attached, so leave one connected or name the board this project is about "
             "with `agentic-hil adopt-hardware --probe-id <serial>`; the attached serials are listed under "
             f"`hardware_discovery.probes`. Adoption then fills in {_ADOPT_FILLS}."
+        )
+    elif error_type == "probe_inventory_incomplete":
+        remedy = (
+            "STM32CubeProgrammer is not installed, so probes are read from this host's USB serial inventory, which "
+            "reaches an ST-Link only through its virtual COM port and so cannot rule out a VCP-less ST-LINK/V2 attached "
+            "beside what it saw; discovery will not choose a board off it. Name the one this project is about with "
+            "`agentic-hil adopt-hardware --probe-id <serial>` -- the serials this host can see are under "
+            "`hardware_discovery.probes` and from `agentic-hil debugger-probes` -- or install STM32CubeProgrammer for an "
+            f"authoritative count. Adoption then fills in {_ADOPT_FILLS}."
         )
     elif error_type == "target_not_detected":
         remedy = (

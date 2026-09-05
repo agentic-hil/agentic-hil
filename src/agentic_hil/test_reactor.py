@@ -1032,21 +1032,27 @@ def _com_adopt_instruction(config: AgenticHILConfig, name: str) -> str:
     name or `identity_source` -- is refused on the next load, so setting only
     `.device` there is a repair that leaves the file invalid, on Windows in
     particular (round 0, finding 5). So under that version the manual path names
-    the identity keys `agentic-hil com-ports` reports alongside the device, and
-    the deliberate `identity_source: device` for an adapter that publishes none.
-    Under the earlier version a bare device still loads, so the shorter form
-    stays."""
+    the identity keys `agentic-hil com-ports` reports alongside the device: a
+    `serial_number`, which stands on its own, and the `vid`/`pid` pair, which names
+    a kind of adapter rather than a unit and so must carry `identity_source:
+    vid_pid` (or `vid`/`pid` when only one is published) or the file is refused
+    exactly as a bare device is, with `identity_source: device` the deliberate
+    opt-out for an adapter that publishes none (round 1, finding 2). Under the
+    earlier version a bare device still loads, so the shorter form stays."""
     key = f"com_ports.{name}.device"
     # `getattr` rather than attribute access so a caller passing a lightweight
     # config stand-in still gets a truthful (version-1) answer instead of an
     # AttributeError; every real `AgenticHILConfig` carries `config_version`.
     if getattr(config, "config_version", 1) >= IDENTIFIED_COM_PORT_CONFIG_VERSION:
         manual = (
-            f"set `{key}` yourself together with the identity `agentic-hil com-ports` reports for it -- its "
-            f"`serial_number`, or its `vid` and `pid` -- because under version {IDENTIFIED_COM_PORT_CONFIG_VERSION} a "
-            "bare device with no `serial_number`, `resource_id`, `/dev/serial/by-id/...` name or `identity_source` is "
-            f"refused on the next load; if the adapter publishes none of those, set `com_ports.{name}.identity_source: "
-            "device` to state deliberately that the kernel name is all it has."
+            f"set `{key}` yourself together with the identity `agentic-hil com-ports` reports for it: its "
+            f"`serial_number`, which identifies the unit on its own, or its `vid` and `pid` beside "
+            f"`com_ports.{name}.identity_source: vid_pid` (`vid` or `pid` when the adapter publishes only one), because "
+            f"under version {IDENTIFIED_COM_PORT_CONFIG_VERSION} a bare device with no `serial_number`, `resource_id`, "
+            "`/dev/serial/by-id/...` name or `identity_source` is refused on the next load, and a `vid`/`pid` names a kind "
+            "of adapter rather than a unit, so it is refused the same way until that `identity_source` declares it; if the "
+            f"adapter publishes none of those, set `com_ports.{name}.identity_source: device` to state deliberately that "
+            "the kernel name is all it has."
         )
     else:
         manual = f"name `{key}` yourself; `agentic-hil com-ports` lists what this host has."

@@ -1737,13 +1737,16 @@ def test_an_stlink_is_enumerated_from_the_usb_inventory_without_the_cube_cli(mon
     STM32CubeProgrammer's listing to ask. But the host already knows: an ST-Link
     publishes its serial in the USB descriptor of the virtual COM port it
     exposes, `agentic-hil com-ports` was already showing it, and that string is
-    exactly what OpenOCD's `adapter serial` takes. So the probe is read out of
+    exactly what OpenOCD's `adapter serial` takes. So a named probe is read out of
     the inventory, the toolchain is the OpenOCD on PATH, and nothing is said to a
     board: the profile names the controller, and a profile is a person's
-    statement about their own bench."""
+    statement about their own bench. The USB inventory is not an authoritative
+    count, so the operator names the board this is about; discovery does not
+    choose one off a reading that cannot rule out a VCP-less probe beside it
+    (round 1, finding 1)."""
     _linux_openocd_host(monkeypatch)
 
-    result = discover_attached_hardware(profile=STARTER_PROFILE)
+    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile=STARTER_PROFILE)
 
     assert result["ok"] is True, result
     assert result["backend"] == "openocd"
@@ -1757,13 +1760,10 @@ def test_an_stlink_is_enumerated_from_the_usb_inventory_without_the_cube_cli(mon
     }
     # And the port that carries the same serial, by its replug-proof name.
     assert result["com_port"]["stable_device"] == NUCLEO_VCP["stable_device"]
-    # The board was chosen without the caller naming it, off an inventory that is
-    # not an authoritative count, so the choice is disclosed rather than silent: a
-    # VCP-less ST-Link could sit beside the one that was seen, and the answer says
-    # so and names the confirmation path (round 0, finding 1).
-    assert result["probe_inventory_complete"] is False
-    assert "not an authoritative count" in result["summary"]
-    assert "name its serial as probe_id" in result["summary"]
+    # The operator named the board, so the answer is exact and carries no
+    # partial-inventory caveat.
+    assert "probe_inventory_complete" not in result
+    assert "not an authoritative count" not in result["summary"]
 
 
 def test_only_the_stlink_usb_products_are_read_as_probe_serials() -> None:
@@ -1822,10 +1822,10 @@ def test_two_attached_stlinks_are_still_ambiguous_on_the_usb_path(monkeypatch: p
 def test_naming_the_probe_reads_it_as_the_operators_own_explicit_choice(monkeypatch: pytest.MonkeyPatch) -> None:
     """An explicit probe_id is a selection nothing had to infer (round 0, finding 1).
 
-    The USB inventory is not an authoritative count, so a board discovery *chose*
-    off it carries the blind-spot caveat. But a caller that named the serial has
-    made the choice itself: the inventory's incompleteness cannot have picked the
-    wrong board, so the answer is exact and adds no caveat."""
+    The USB inventory is not an authoritative count, so discovery will not choose
+    a board off it on its own. A caller that named the serial has made the choice
+    itself: the inventory's incompleteness cannot have picked the wrong board, so
+    the answer is exact and adds no caveat."""
     _linux_openocd_host(monkeypatch)
 
     result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile=STARTER_PROFILE)
@@ -1836,26 +1836,37 @@ def test_naming_the_probe_reads_it_as_the_operators_own_explicit_choice(monkeypa
     assert "not an authoritative count" not in result["summary"]
 
 
-def test_a_vcp_less_probe_beside_the_visible_one_is_disclosed_not_silently_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The mixed bench the USB path cannot see whole (round 0, finding 1).
+def test_a_vcp_less_probe_beside_the_visible_one_is_not_bound_without_a_named_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mixed bench the USB path cannot see whole (round 0, finding 1; round 1, finding 1).
 
     A standalone ST-LINK/V2 (or any probe with no virtual COM port) publishes no
     VCP, so the USB serial inventory never lists it: a host with that probe *and*
     a VCP-backed Nucleo shows exactly one probe, the same reading a host with only
-    the Nucleo shows. Discovery cannot tell the two apart, so choosing the sole
-    visible probe is a choice made off an inventory that could not rule out the
-    second board. The answer discloses that rather than presenting the one it saw
-    as the only one attached."""
+    the Nucleo shows. Discovery cannot tell the two apart, so binding the sole
+    visible probe would be a silent choice of a board a later flash or reset
+    trusts. A caveat on a successful answer does not travel into the configuration
+    the choice is written to, so instead of disclosing the guess discovery refuses
+    to bind it: the answer is a failure carrying the serial it did see and how to
+    name a board, and `init` writes an unbound placeholder from it rather than a
+    bound probe."""
     # The inventory the host can take: only the VCP-backed probe. The VCP-less
     # ST-LINK/V2 attached beside it contributes no serial-bus entry at all.
     _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
 
     result = discover_attached_hardware(profile=STARTER_PROFILE)
 
-    assert result["ok"] is True, result
-    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["ok"] is False, result
+    assert overall_success(result) is False
+    assert result["error_type"] == "probe_inventory_incomplete"
+    # No board was chosen: the visible serial is offered for selection, not bound.
+    assert result.get("probe_id") is None
+    assert [entry["probe_id"] for entry in result["probes"]] == ["066AFF303435554157113106"]
     assert result["probe_inventory_complete"] is False
     assert "standalone ST-LINK/V2" in result["summary"]
+    assert "066AFF303435554157113106" in result["summary"]
+    # The way to bind is to name the board, and the answer says so.
+    assert "probe_id" in result["next_step"]
+    assert "adopt-hardware --probe-id" in result["next_step"]
 
 
 def test_the_no_config_probe_listing_is_not_a_clean_pass_off_a_partial_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1960,7 +1971,9 @@ def test_openocd_names_the_target_when_the_profile_does_not(monkeypatch: pytest.
 
     commands = _linux_openocd_host(monkeypatch, spawn=spawn)
 
-    result = discover_attached_hardware(profile={"target": {"name": "demo"}})
+    # Named explicitly: the USB inventory binds only a named probe now, so this is
+    # how discovery reaches the target read at all (round 1, finding 1).
+    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile={"target": {"name": "demo"}})
 
     assert result["ok"] is True, result
     assert result["target"] == {"probe_id": "066AFF303435554157113106", "controller": "stm32f4x", "source": "openocd"}
@@ -2003,7 +2016,9 @@ def test_a_probe_that_answers_with_no_target_still_configures_the_bench(monkeypa
 
     _linux_openocd_host(monkeypatch, spawn=spawn)
 
-    result = discover_attached_hardware(profile={"target": {"name": "demo"}})
+    # Named explicitly: the USB inventory binds only a named probe now, so this is
+    # how discovery reaches the target read at all (round 1, finding 1).
+    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile={"target": {"name": "demo"}})
 
     assert result["ok"] is True, result
     assert result["probe_id"] == "066AFF303435554157113106"
@@ -2029,7 +2044,9 @@ def test_a_timed_out_openocd_read_is_a_failure_not_an_unnamed_target(monkeypatch
 
     _linux_openocd_host(monkeypatch, spawn=spawn)
 
-    result = discover_attached_hardware(profile={"target": {"name": "demo"}})
+    # Named explicitly: the USB inventory binds only a named probe now, so this is
+    # how discovery reaches the target read at all (round 1, finding 1).
+    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile={"target": {"name": "demo"}})
 
     assert result["ok"] is False, result
     assert result["error_type"] == "timeout"
@@ -2057,7 +2074,9 @@ def test_openocd_gone_before_the_read_is_a_pre_contact_failure(monkeypatch: pyte
 
     _linux_openocd_host(monkeypatch, spawn=spawn)
 
-    result = discover_attached_hardware(profile={"target": {"name": "demo"}})
+    # Named explicitly: the USB inventory binds only a named probe now, so this is
+    # how discovery reaches the target read at all (round 1, finding 1).
+    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile={"target": {"name": "demo"}})
 
     assert result["ok"] is False, result
     assert result["error_type"] == "debugger_not_found"
@@ -2125,13 +2144,17 @@ def test_a_discovery_that_found_the_cube_cli_still_writes_an_stlink_entry() -> N
     assert "interface_cfg" not in configured["debuggers"]["dut"]
 
 
-def test_init_on_a_linux_openocd_host_writes_the_bench_it_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """End to end, on the host the report came from.
+def test_init_on_a_linux_openocd_host_leaves_the_probe_unbound_until_it_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`init` on the USB path does not bind a probe off an unconfirmed count (round 1, finding 1).
 
-    `init` from the starter root wrote `probe_id: null`, `executable: null`,
-    `com_ports: {}` and said no attached bench was found. It now writes the
-    probe, the OpenOCD on PATH and the board's own UART, and says which
-    enumeration answered and what it saw."""
+    `init` reads the board through the same USB serial inventory as
+    `debugger-probes`, which reaches an ST-Link only through the VCP it publishes,
+    so a VCP-less ST-LINK/V2 could sit beside the one it saw. Binding the sole
+    visible probe would write a possibly-wrong board into the file a later flash
+    trusts, so `init` writes the profile's unbound placeholder and its report
+    carries the visible serial and how to name it. The bench is bound by
+    `agentic-hil adopt-hardware --probe-id <serial>`, the operator's own
+    confirmation, or by an authoritative STM32CubeProgrammer count."""
     workspace = tmp_path / "starter"
     workspace.mkdir()
     (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
@@ -2141,21 +2164,56 @@ def test_init_on_a_linux_openocd_host_writes_the_bench_it_found(tmp_path: Path, 
     result = init_config()
 
     assert result["ok"] is True, result
-    assert result["summary"].startswith("Attached hardware was discovered and configured")
+    # The debugger is a placeholder: no probe was bound off the incomplete count.
     written = load_authoritative_config(workspace)
-    assert written.debuggers["dut"].type == "openocd"
-    assert written.debuggers["dut"].executable == FAKE_OPENOCD_PATH
-    assert written.debuggers["dut"].probe_id == "066AFF303435554157113106"
+    assert written.debuggers["dut"].probe_id is None
+    assert com_port_is_unbound(written.com_ports["dut_uart"]) is True
+    # The profile's own names are still carried, so nothing the project stated is
+    # lost while the bench waits to be bound.
     assert written.target.controller == "stm32f446ret6"
-    assert written.com_ports["dut_uart"].device == NUCLEO_VCP["stable_device"]
-    assert written.com_ports["dut_uart"].serial_number == "066AFF303435554157113106"
-    # And the account of what discovery did, which is what "No attached bench
-    # was found" left an operator no way to check.
-    assert result["next_steps"][0] == (
+    assert sorted(written.com_ports) == ["dut_uart"]
+    # The reason names the incomplete inventory and the confirmation command,
+    # rather than an absent bench.
+    assert result["hardware_discovery"]["error_type"] == "probe_inventory_incomplete"
+    assert "No attached bench was found" not in result["summary"]
+    assert any("adopt-hardware --probe-id" in step for step in result["next_steps"])
+    # The account still names the serial the operator has to confirm, which is
+    # what "No attached bench was found" left them no way to check.
+    assert result["next_steps"][1] == (
         "Discovery looked for STM32_Programmer_CLI (STM32CubeProgrammer): not on this host; "
         f"openocd (OpenOCD): found at {FAKE_OPENOCD_PATH}. ST-Link serial port(s) on this host: "
         f"066AFF303435554157113106 on {NUCLEO_VCP['stable_device']}."
     )
+
+
+def test_project_config_create_refuses_to_bind_a_probe_off_an_incomplete_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP generation writes no bound probe off the USB inventory (round 1, finding 1).
+
+    `project_config_create` is the agent's own path to a configuration, and it
+    reads the board through the same USB serial inventory `init` does. That
+    inventory is not an authoritative count, so a sole visible probe could have a
+    VCP-less ST-LINK/V2 beside it. Where `init` falls back to an unbound
+    placeholder, the MCP path has no placeholder to write -- a file naming no probe
+    is worse than the `config_file_not_found` it started from -- so it refuses
+    outright rather than committing a possibly-wrong board an agent would then
+    flash. The refusal names the visible serial and how to confirm it, and no
+    configuration is written."""
+    workspace = tmp_path / "server"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
+
+    result = project_config_create(workspace, None)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "probe_inventory_incomplete"
+    # The refusal hands back the visible serial and the confirmation path.
+    assert [entry["probe_id"] for entry in result["probes"]] == ["066AFF303435554157113106"]
+    assert "adopt-hardware --probe-id" in result["next_step"]
+    # No file was written: nothing bound a board off the incomplete count.
+    with pytest.raises(ConfigError) as unwritten:
+        load_authoritative_config(workspace)
+    assert unwritten.value.error_type == "config_file_not_found"
 
 
 def test_an_enumerated_stlink_is_never_reported_as_an_absent_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2189,9 +2247,13 @@ def test_adopt_hardware_fills_a_placeholder_on_a_host_with_only_openocd(tmp_path
     They share the read, so fixing it fixes both, and this pins that they do
     rather than that they happen to.
 
-    The three values it carries are the three nobody retypes correctly: the
-    24-character probe serial, the toolchain path, and which of the host's
-    thirty-odd serial devices is this board's.
+    The USB serial inventory is not an authoritative count, so binding is the
+    operator's own confirmation: `--probe-id <serial>` names the board this is
+    about, and discovery reads it out of the inventory rather than choosing one
+    off a reading that could not rule out a VCP-less probe beside it (round 1,
+    finding 1). The three values it then carries are the three nobody retypes
+    correctly: the 24-character probe serial, the toolchain path, and which of the
+    host's thirty-odd serial devices is this board's.
 
     The controller is read off the board through OpenOCD, never out of the
     workspace profile: adoption is a tool reached over MCP, so a checkout does not
@@ -2213,7 +2275,7 @@ def test_adopt_hardware_fills_a_placeholder_on_a_host_with_only_openocd(tmp_path
         return CompletedCommand(OPENOCD_TARGETS_OUTPUT, "", 0, False, False)
 
     _linux_openocd_host(monkeypatch, spawn=openocd_reads_the_target)
-    result = adopt_hardware(com_port_id="dut_uart")
+    result = adopt_hardware(com_port_id="dut_uart", probe_id="066AFF303435554157113106")
 
     assert result["ok"] is True, result
     assert result["applied"] is True

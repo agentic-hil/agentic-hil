@@ -640,6 +640,57 @@ def test_the_debugger_free_com_repair_names_a_version_3_bench_s_identity(tmp_pat
     assert load_config(str(identified)).com_ports["dut_uart"].device == "COM7"
 
 
+def test_the_debugger_free_com_repair_s_vid_pid_route_also_loads(tmp_path: Path) -> None:
+    """The vid/pid alternative the repair offers must load too (round 2, finding 2).
+
+    An adapter that publishes USB ids but no serial number is the second half of
+    the version-3 repair, and version 3 refuses a `device` carrying `vid`/`pid`
+    and nothing else exactly as it refuses a bare one: USB ids name a kind of
+    adapter, not a unit, so the entry must also declare `identity_source: vid_pid`.
+    The earlier guidance named only the `vid` and `pid`, so an operator with a
+    serial-less adapter followed the repair into a file that fails its next load.
+    The guidance now names that `identity_source`, and following it produces a
+    file that loads (round 1, finding 2).
+    """
+    config_path = write_config(
+        tmp_path / "bench",
+        config_version=3,
+        com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n",
+    )
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(re.sub(r"(?ms)^debuggers:\n(?:  .*\n)+", "debuggers: {}\n", text), encoding="utf-8")
+    config = load_config(str(config_path))
+    assert config.debuggers == {}
+
+    guidance = UartRunner.entry_fill_step(config, "dut_uart")
+    # The vid/pid alternative names the `identity_source` a bare vid/pid lacks, not
+    # only the ids as it did before (round 1, finding 2).
+    assert "vid" in guidance and "pid" in guidance
+    assert "identity_source: vid_pid" in guidance
+
+    # The repair followed literally on the vid/pid route: `device` + `vid` + `pid`
+    # with no `identity_source` is refused, exactly as a bare device is, because
+    # USB ids name a kind of adapter rather than a unit...
+    bare_ids = write_config(
+        tmp_path / "bare-ids",
+        config_version=3,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "/dev/ttyUSB0"\n    vid: 6790\n    pid: 29987\n    baudrate: 115200\n',
+    )
+    with pytest.raises(ConfigError) as refused:
+        load_config(str(bare_ids))
+    assert refused.value.to_dict()["actual_identity_source"] == "vid_pid"
+    # ...and the same entry carrying the `identity_source` the guidance now names
+    # loads, which the old advice never produced.
+    identified = write_config(
+        tmp_path / "typed",
+        config_version=3,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "/dev/ttyUSB0"\n    vid: 6790\n    pid: 29987\n    identity_source: "vid_pid"\n    baudrate: 115200\n',
+    )
+    loaded = load_config(str(identified))
+    assert loaded.com_ports["dut_uart"].device == "/dev/ttyUSB0"
+    assert loaded.com_ports["dut_uart"].identity_source == "vid_pid"
+
+
 def test_com_fill_on_a_multi_debugger_bench_asks_which_debugger() -> None:
     """Several debuggers, and none can be picked for the operator (round 2, finding 2).
 
