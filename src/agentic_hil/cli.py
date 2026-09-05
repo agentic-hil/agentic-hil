@@ -3513,6 +3513,14 @@ def check_plan(plans: list[str], *, strict: bool = False) -> JsonObject:
             missing = [] if config is None else unconfigured_devices(config, loaded)
             if missing:
                 entry["unconfigured_devices"] = missing
+                # The row says what was found on this plan, in its own sentence.
+                # A rendering takes a nested result's opening line from its
+                # summary and falls back to "ok" when it has none, so the plan
+                # the whole run failed on was introduced by the word `ok` with
+                # the finding filed underneath it as one more field (#467). The
+                # sentence is the same in both modes, because the finding is a
+                # fact about the plan and only the verdict is about `--strict`.
+                entry["summary"] = f"Loads, and names {len(missing)} device(s) this workspace's configuration does not declare: {', '.join(missing)}."
             checked.append(entry)
     refused = [entry["plan"] for entry in checked if not entry["ok"]]
     findings = [entry for entry in checked if entry.get("unconfigured_devices")]
@@ -3588,21 +3596,35 @@ def _configuration_unreadable(configuration: JsonObject) -> bool:
 
 
 def _check_plan_summary(checked: list[JsonObject], refused: list[object], findings: list[JsonObject], configuration: JsonObject, *, strict: bool) -> str:
+    """The one sentence the run is read by, headed by its own outcome when it failed.
+
+    A strict run that exits 1 used to open `All 1 test plan(s) load through the
+    reactor's loader, ...` and put the only nonzero signal in a subordinate
+    clause at the end, so the rendering of a failed preflight read as a pass
+    (#467). Every strict failure is now headed `Failed:` and names the count it
+    failed on first; the informational run, which exits 0 and is telling the
+    reader about plans written for another bench, keeps the heading it had.
+    """
     if refused:
         return f"{len(refused)} of {len(checked)} test plan(s) would be refused by the reactor: {', '.join(str(name) for name in refused)}."
     if strict and _configuration_unreadable(configuration):
         return (
-            f"All {len(checked)} test plan(s) load through the reactor's loader, but this workspace's configuration "
-            f"could not be loaded ({configuration.get('error_type')}), so --strict could not compare their device names "
-            "against it and fails."
+            f"Failed: this workspace's configuration could not be loaded ({configuration.get('error_type')}), so --strict "
+            f"could not compare the device names of {len(checked)} test plan(s) against it. All {len(checked)} of them "
+            "load through the reactor's loader."
         )
     if not findings:
         return f"All {len(checked)} test plan(s) load through the reactor's loader."
     names = ", ".join(sorted({str(name) for entry in findings for name in entry["unconfigured_devices"]}))
-    verdict = "and --strict makes that a failure" if strict else "which --strict makes a failure"
+    if strict:
+        return (
+            f"Failed: {len(findings)} of {len(checked)} test plan(s) name device(s) this workspace's configuration does "
+            f"not declare ({names}). All {len(checked)} of them load through the reactor's loader, and --strict makes "
+            "that finding a failure."
+        )
     return (
         f"All {len(checked)} test plan(s) load through the reactor's loader, and {len(findings)} of them name "
-        f"device(s) this workspace's configuration does not declare ({names}), {verdict}."
+        f"device(s) this workspace's configuration does not declare ({names}), which --strict makes a failure."
     )
 
 

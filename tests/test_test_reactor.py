@@ -1296,6 +1296,62 @@ def test_check_plan_strict_makes_that_finding_a_failure(
     assert result["plans"][0]["unconfigured_devices"] == ["dut_uart2"]
 
 
+def test_check_plan_strict_heads_its_failure_and_the_plan_row_carries_the_finding(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """#467: it exited 1 under a heading that read as a pass.
+
+    The rendering opened `All 1 test plan(s) load through the reactor's loader,
+    ...` and left the failure in a subordinate clause at the end, and the row for
+    the very plan that failed the run was introduced by the word `ok` with the
+    finding filed under it. A preflight that fails has to say so where every
+    other surface says it: first, and on the plan it failed on."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "typo.testconfig.yaml"
+    plan.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--strict"])
+
+    assert exit_code == 1
+    printed = " ".join(capsys.readouterr().out.split())
+    # The outcome, then the count it failed on, before anything else.
+    assert printed.startswith("Failed: 1 of 1 test plan(s) name device(s) this workspace's configuration does not declare (dut_uart2).")
+    # The plan itself still loads, and the rendering still says so, so nobody
+    # goes looking for a syntax error in a plan that has none.
+    assert "load through the reactor's loader" in printed
+    # The row is the finding rather than the bare verdict it used to open with.
+    assert "- Loads, and names 1 device(s) this workspace's configuration does not declare: dut_uart2." in printed
+    assert "- ok" not in printed
+
+
+def test_check_plan_without_strict_keeps_its_informational_heading(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The other direction of #467, which must not move.
+
+    Without `--strict` the finding is a finding: the run exits 0 because a
+    repository holds plans for benches other than this one, so the heading stays
+    the informational sentence and must never open `Failed`. The row carries the
+    same finding either way, because the finding is a fact about the plan and
+    only the verdict is about the flag."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "typo.testconfig.yaml"
+    plan.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan)])
+
+    assert exit_code == 0
+    printed = " ".join(capsys.readouterr().out.split())
+    assert printed.startswith("All 1 test plan(s) load through the reactor's loader,")
+    assert "Failed" not in printed
+    assert "which --strict makes a failure" in printed
+    assert "- Loads, and names 1 device(s) this workspace's configuration does not declare: dut_uart2." in printed
+
+
 def test_check_plan_says_nothing_about_devices_a_plan_gets_right(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1383,6 +1439,8 @@ def test_check_plan_strict_fails_when_the_configuration_is_present_but_invalid(
     assert result["plans"][0]["ok"] is True
     assert "unconfigured_devices" not in result["plans"][0]
     assert "could not be loaded" in result["summary"]
+    # The other strict failure, headed by its outcome for the same reason (#467).
+    assert result["summary"].startswith("Failed:")
 
 
 def test_check_plan_without_strict_reports_an_invalid_configuration_but_still_checks_loadability(
