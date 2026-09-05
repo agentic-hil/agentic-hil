@@ -3020,6 +3020,134 @@ def test_a_linux_start_time_is_when_the_process_started_and_not_when_it_was_look
         child.wait()
 
 
+def _proc_entry(
+    proc: Path,
+    pid: int,
+    *,
+    exe: Path,
+    cmdline: tuple[str, ...] = (),
+    environment: tuple[str, ...] = (),
+    parent_pid: int = 1,
+) -> None:
+    """One process directory shaped the way Linux publishes it."""
+    entry = proc / str(pid)
+    entry.mkdir(parents=True)
+    (entry / "exe").symlink_to(exe)
+    (entry / "status").write_text(f"Name:\tpython3\nPPid:\t{parent_pid}\n", encoding="utf-8")
+    (entry / "cmdline").write_bytes(b"".join(f"{item}\0".encode() for item in cmdline))
+    (entry / "environ").write_bytes(b"".join(f"{item}\0".encode() for item in environment))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX venv's symlinked interpreter needs symlinks to reproduce")
+def test_a_linux_server_started_by_the_environments_own_python_is_found(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reported bench run: nothing this project shipped for Linux ever matched.
+
+    With a live, initialised `agentic-hil mcp-stdio` running out of the tool
+    environment, `agentic-hil upgrade --json` answered `restart_required: false`,
+    carried no `restart_required_by` and said no restart was needed. A POSIX
+    virtual environment's `bin/python` is a symlink to the system interpreter, so
+    `/proc/<pid>/exe` resolves to `/usr/bin/python3.x` for every process that
+    environment starts, and the image was the only thing being read.
+
+    So the path the process was invoked by is read too. Here that is argv[0], the
+    environment's own `bin/python` as the caller spelled it, which the resolution
+    would have thrown away.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    proc = tmp_path / "proc"
+    system_python = tmp_path / "usr" / "bin" / "python3.12"
+    system_python.parent.mkdir(parents=True)
+    system_python.write_text("", encoding="utf-8")
+    environment = tmp_path / "uv" / "tools" / "agentic-hil"
+    (environment / "bin").mkdir(parents=True)
+    venv_python = environment / "bin" / "python"
+    venv_python.symlink_to(system_python)
+    _proc_entry(proc, 4242, exe=system_python, cmdline=(str(venv_python), "-c", "from agentic_hil.server import main; main()"))
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    monkeypatch.setattr(sys, "executable", str(venv_python))
+    monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+
+    assert _processes_holding_installation() == [{"pid": 4242, "image": str(system_python)}]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX venv's symlinked interpreter needs symlinks to reproduce")
+@pytest.mark.parametrize("named_by", ["console-script-as-argv0", "virtual-env-in-the-environment"])
+def test_a_linux_server_is_found_by_its_console_script_or_by_virtual_env(
+    named_by: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The other two ways a process says which environment it belongs to.
+
+    An agent host starts the console script, so argv[0] is
+    `<prefix>/bin/agentic-hil` and argv[1] is nothing; an activated environment
+    puts `VIRTUAL_ENV` into every child it starts, which is what a shell session
+    inside the environment leaves behind. Either is this installation's process.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    proc = tmp_path / "proc"
+    system_python = tmp_path / "usr" / "bin" / "python3.12"
+    system_python.parent.mkdir(parents=True)
+    system_python.write_text("", encoding="utf-8")
+    environment = tmp_path / "uv" / "tools" / "agentic-hil"
+    (environment / "bin").mkdir(parents=True)
+    venv_python = environment / "bin" / "python"
+    venv_python.symlink_to(system_python)
+    script = environment / "bin" / "agentic-hil"
+    script.write_text("", encoding="utf-8")
+    if named_by == "console-script-as-argv0":
+        _proc_entry(proc, 4242, exe=system_python, cmdline=(str(script), "mcp-stdio"))
+    else:
+        _proc_entry(proc, 4242, exe=system_python, cmdline=("python3", "-m", "agentic_hil"), environment=(f"VIRTUAL_ENV={environment}", "HOME=/home/bench"))
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    monkeypatch.setattr(sys, "executable", str(venv_python))
+    monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+
+    assert [holder["pid"] for holder in _processes_holding_installation() or []] == [4242]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX venv's symlinked interpreter needs symlinks to reproduce")
+def test_a_linux_process_of_another_installation_is_still_not_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The neighbouring direction, which is the whole risk of reading a command line.
+
+    The same system interpreter runs every other Python program on the machine,
+    and a second virtual environment beside this one is somebody else's. Neither
+    the invoked path nor `VIRTUAL_ENV` names this installation's prefix, so
+    neither is claimed and no upgrade is reported as held by an unrelated
+    process.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    proc = tmp_path / "proc"
+    system_python = tmp_path / "usr" / "bin" / "python3.12"
+    system_python.parent.mkdir(parents=True)
+    system_python.write_text("", encoding="utf-8")
+    environment = tmp_path / "uv" / "tools" / "agentic-hil"
+    (environment / "bin").mkdir(parents=True)
+    (environment / "bin" / "python").symlink_to(system_python)
+    other = tmp_path / "uv" / "tools" / "somethingelse"
+    (other / "bin").mkdir(parents=True)
+    (other / "bin" / "python").symlink_to(system_python)
+    _proc_entry(proc, 100, exe=system_python, cmdline=(str(other / "bin" / "python"), "-m", "somethingelse"))
+    _proc_entry(proc, 101, exe=system_python, cmdline=("python3", "-m", "http.server"), environment=(f"VIRTUAL_ENV={other}",))
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    monkeypatch.setattr(sys, "executable", str(environment / "bin" / "python"))
+    monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+
+    assert _processes_holding_installation() == []
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
 def test_a_start_time_that_cannot_be_read_leaves_the_field_off_rather_than_inventing_one(
     monkeypatch: pytest.MonkeyPatch,

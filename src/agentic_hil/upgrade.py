@@ -963,14 +963,82 @@ def _installation_console_scripts() -> tuple[str, ...]:
     return tuple(dict.fromkeys(_normalized_location(directory / name) for directory in directories))
 
 
-def _belongs_to_installation(image: str, owned_prefix: str | None, scripts: tuple[str, ...]) -> bool:
-    location = _normalized_location(image)
-    if owned_prefix is not None and location.startswith(owned_prefix):
+def _unresolved_location(path: str | Path) -> str:
+    """A path in the one spelling two of them compare in, symlinks left alone.
+
+    The sibling of `_normalized_location`, and the difference is the whole point
+    of it: that one resolves, which is right for an image the kernel already
+    resolved, and destroys the one fact a command line carries. A virtual
+    environment's `bin/python` is a symlink to the system interpreter, so
+    resolving the path a process was *invoked* by answers where that interpreter
+    lives rather than which environment invoked it.
+    """
+    return os.path.normcase(os.path.abspath(str(path))).replace("\\", "/").casefold()
+
+
+def _location_spellings(path: str) -> tuple[str, ...]:
+    """One path as written and, where they differ, as it resolves.
+
+    Both, because the two ends of the comparison are written by different
+    things: `sys.prefix` may itself sit behind a symlinked home directory, and a
+    command line names whatever the caller typed.
+    """
+    written = _unresolved_location(path)
+    with suppress(OSError, ValueError):
+        resolved = _normalized_location(path)
+        if resolved != written:
+            return (written, resolved)
+    return (written,)
+
+
+def _under_owned_prefix(path: str, owned_prefixes: tuple[str, ...]) -> bool:
+    return any(spelling.startswith(prefix) for spelling in _location_spellings(path) for prefix in owned_prefixes)
+
+
+def _owned_prefixes(owned_root: Path | None) -> tuple[str, ...]:
+    """The environment this distribution owns alone, in every spelling it has."""
+    if owned_root is None:
+        return ()
+    return tuple(dict.fromkeys(spelling.rstrip("/") + "/" for spelling in _location_spellings(str(owned_root))))
+
+
+def _belongs_to_installation(entry: ProcessImage, owned_prefixes: tuple[str, ...], scripts: tuple[str, ...]) -> bool:
+    """Whether one running process belongs to the installation being replaced.
+
+    The image decides it on Windows, where a virtual environment's interpreter
+    is a copy and `QueryFullProcessImageNameW` therefore answers a path inside
+    the environment.
+
+    It decides nothing on Linux, and that is the reported defect: a POSIX
+    virtual environment's `bin/python` is a symlink to the system interpreter,
+    so `/proc/<pid>/exe` resolves to `/usr/bin/python3.x` for every process the
+    environment starts. Measured on a bench with a live, initialised
+    `agentic-hil mcp-stdio` running out of the tool environment:
+    `agentic-hil upgrade --json` answered `restart_required: false`, named
+    nobody, and said no restart was needed. Nothing this project shipped for
+    naming running servers worked on Linux at all.
+
+    So two more ways in, both about how the process was started rather than what
+    the kernel resolved it to. The path it was invoked by is argv[0] or argv[1],
+    which is the console script, or the environment's own `bin/python` as the
+    caller spelled it; and `VIRTUAL_ENV` is what an activated environment puts
+    in its children. Either one under this installation's prefix is this
+    installation's process. Both are read with the same tolerance the image gets:
+    a process that answers neither is a process this cannot claim, never a
+    failure.
+    """
+    if _under_owned_prefix(entry.image, owned_prefixes):
         return True
-    return location in scripts
+    if any(spelling in scripts for spelling in _location_spellings(entry.image)):
+        return True
+    if not owned_prefixes:
+        return False
+    if entry.virtual_env and any(spelling.rstrip("/") + "/" in owned_prefixes for spelling in _location_spellings(entry.virtual_env)):
+        return True
+    return any(_under_owned_prefix(argument, owned_prefixes) for argument in entry.launch_arguments if argument)
 
 
-def _upgrading_process_and_its_launchers(by_pid: dict[int, ProcessImage], owned_prefix: str | None, scripts: tuple[str, ...]) -> set[int]:
+def _upgrading_process_and_its_launchers(by_pid: dict[int, ProcessImage], owned_prefixes: tuple[str, ...], scripts: tuple[str, ...]) -> set[int]:
     """This process, plus the parents inside the installation that started it.
 
     `agentic-hil upgrade` runs out of the very installation it replaces, so it
@@ -994,7 +1062,7 @@ def _upgrading_process_and_its_launchers(by_pid: dict[int, ProcessImage], owned_
         parent = by_pid.get(current.parent_pid)
         if parent is None or parent.pid in excluded:
             break
-        if not _belongs_to_installation(parent.image, owned_prefix, scripts):
+        if not _belongs_to_installation(parent, owned_prefixes, scripts):
             break
         if parent.created_ns > current.created_ns:
             # A pid is reused once its process exits. Nothing can be younger
@@ -1032,14 +1100,13 @@ def _processes_holding_installation() -> list[JsonObject] | None:
     snapshot = snapshot_process_images()
     if snapshot is None:
         return None
-    owned_root = _dedicated_environment_root()
-    owned_prefix = _normalized_location(owned_root).rstrip("/") + "/" if owned_root is not None else None
+    owned_prefixes = _owned_prefixes(_dedicated_environment_root())
     scripts = _installation_console_scripts()
-    excluded = _upgrading_process_and_its_launchers({entry.pid: entry for entry in snapshot}, owned_prefix, scripts)
+    excluded = _upgrading_process_and_its_launchers({entry.pid: entry for entry in snapshot}, owned_prefixes, scripts)
     holders = [
         {"pid": entry.pid, "image": entry.image, **_where_and_when(entry)}
         for entry in snapshot
-        if entry.pid not in excluded and _belongs_to_installation(entry.image, owned_prefix, scripts)
+        if entry.pid not in excluded and _belongs_to_installation(entry, owned_prefixes, scripts)
     ]
     return sorted(holders, key=lambda holder: holder["pid"])
 

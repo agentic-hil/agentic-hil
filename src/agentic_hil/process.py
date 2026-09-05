@@ -28,12 +28,24 @@ class ProcessImage:
     where the platform did not report one. It exists so a parent link can be
     checked: a pid is reused once its process exits, and a "parent" younger
     than its child is a different process that inherited the number.
+
+    ``launch_arguments`` are the first two arguments the process was started
+    with, and ``virtual_env`` is the ``VIRTUAL_ENV`` its environment carries.
+    Both exist because ``image`` alone cannot say which installation a process
+    on a POSIX host belongs to: a virtual environment's ``bin/python`` is a
+    symlink to the system interpreter, so ``/proc/<pid>/exe`` resolves outside
+    the environment for every process that environment starts. Only the first
+    two arguments are kept, because those are the two an interpreter can be
+    named by, and a whole command line is somebody's private argument list this
+    has no reason to hold. Both are empty on a host that does not publish them.
     """
 
     pid: int
     parent_pid: int
     image: str
     created_ns: int = 0
+    launch_arguments: tuple[str, ...] = ()
+    virtual_env: str = ""
 
 
 @dataclass
@@ -709,9 +721,54 @@ def _proc_process_images() -> tuple[ProcessImage, ...]:
                 # start time an operator reads as a fact about their machine has
                 # to have come from their machine.
                 created_ns=int((started + _FILETIME_EPOCH_OFFSET_S) * _FILETIME_TICKS_PER_SECOND) if started is not None else 0,
+                launch_arguments=_proc_launch_arguments(pid),
+                virtual_env=_proc_virtual_env(pid),
             )
         )
     return tuple(images)
+
+
+# How much of ``cmdline`` and ``environ`` is read. Both are NUL-separated lists
+# and only their beginning is wanted, so this bounds the work per process
+# without changing what can be found: an argument list longer than this has its
+# first two arguments well inside it, and an environment block longer than this
+# is one where ``VIRTUAL_ENV`` may fall outside and simply is not found, which
+# is the same answer as a host that does not publish it.
+_PROC_READ_LIMIT = 65536
+
+
+def _proc_launch_arguments(pid: int) -> tuple[str, ...]:
+    """The first two arguments this process was started with, or none of them.
+
+    ``/proc/<pid>/cmdline`` is NUL-separated, and the same ``OSError`` tolerance
+    the ``exe`` read gets applies: a process this user may not look into is a
+    process with nothing to say here, not a failure.
+    """
+    try:
+        with open(f"{_PROC}/{pid}/cmdline", "rb") as handle:
+            raw = handle.read(_PROC_READ_LIMIT)
+    except OSError:
+        return ()
+    return tuple(part.decode("utf-8", "replace") for part in raw.split(b"\0") if part)[:2]
+
+
+def _proc_virtual_env(pid: int) -> str:
+    """The ``VIRTUAL_ENV`` this process carries, or empty where it carries none.
+
+    The environment block is NUL-separated like ``cmdline`` and is readable only
+    for this user's own processes, which is exactly the set a local
+    installation's servers are in; anything else answers ``PermissionError`` and
+    is left alone.
+    """
+    try:
+        with open(f"{_PROC}/{pid}/environ", "rb") as handle:
+            raw = handle.read(_PROC_READ_LIMIT)
+    except OSError:
+        return ""
+    for item in raw.split(b"\0"):
+        if item.startswith(b"VIRTUAL_ENV="):
+            return item[len(b"VIRTUAL_ENV=") :].decode("utf-8", "replace")
+    return ""
 
 
 def _boot_time_epoch_seconds() -> float | None:
