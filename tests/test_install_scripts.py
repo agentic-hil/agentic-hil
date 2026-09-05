@@ -80,14 +80,18 @@ REFRESH_LINE = (
 # upgrade`. Measured on a bench.
 KEPT_DEVELOPMENT_LINE = (
     "The development installation already on this PATH was kept and nothing was installed over it, and your "
-    "project configurations were not touched. No agentic-hil MCP server is behind a newer release than the one it "
-    "started with, so none of them needs restarting on account of this run."
+    "project configurations were not touched. Nothing moved to a newer release, so no agentic-hil MCP server is "
+    "behind this installation and none of them needs restarting on account of this run."
 )
 # The version this one names comes out of the run, so the shared text is the rest
-# of the sentence.
+# of the sentence. It covers the anchor run too, where the same release is written
+# again over a copy that had stopped working: the files moved, the release did
+# not, and what a running server is or is not behind is the question this
+# sentence answers.
 KEPT_CURRENT_TAIL = (
-    "and was kept there, and your project configurations were not touched. No agentic-hil MCP server is behind a "
-    "newer release than the one it started with, so none of them needs restarting on account of this run."
+    "the release it was already on, and your project configurations were not touched. Nothing moved to a newer "
+    "release, so no agentic-hil MCP server is behind this installation and none of them needs restarting on "
+    "account of this run."
 )
 # The plural form of the restart block. Step 5 names every running agent CLI
 # rather than the first one found: a warning that names one is read as clearing
@@ -520,7 +524,7 @@ def test_a_run_that_moved_nothing_says_the_installation_was_kept_at_its_version(
 
     transcript = _closing_sentence_run(tmp_path, installed_version="99.0.0", manager_version="99.0.0")
 
-    assert f"This installation was already at 99.0.0 {KEPT_CURRENT_TAIL}" in transcript, transcript
+    assert f"This installation stayed at 99.0.0, {KEPT_CURRENT_TAIL}" in transcript, transcript
     assert REFRESH_LINE not in transcript, transcript
 
 
@@ -2077,8 +2081,12 @@ def test_a_refresh_closes_on_the_installation_it_replaced_and_not_on_a_first_ins
     start of your agent has everything, and the first hardware question creates
     this project's configuration", on a host with four project configurations on
     it. That sentence is an answer for somebody meeting the tool for the first
-    time; after a refresh the thing to say is what moved and what has not caught
-    up with it.
+    time, and no run over an installation that is already here may reach it.
+
+    This one is the anchor run: a copy already at the release, reinstalled in
+    place because it had stopped working. The files moved and the release did
+    not, so what it closes on is the sentence about staying where it is, not the
+    one asking for a restart to pick a new release up.
     """
     if os.name != "posix":
         pytest.skip("the shell install flow is exercised on the POSIX half")
@@ -2091,7 +2099,8 @@ def test_a_refresh_closes_on_the_installation_it_replaced_and_not_on_a_first_ins
     transcript = f"{result.stdout}{result.stderr}"
     assert result.returncode == 0, transcript
     assert "refreshing this current installation" in transcript, transcript
-    assert REFRESH_LINE in transcript, transcript
+    assert f"This installation stayed at {_release()}, {KEPT_CURRENT_TAIL}" in transcript, transcript
+    assert REFRESH_LINE not in transcript, transcript
     assert CALM_LINE not in transcript, transcript
 
 

@@ -956,9 +956,9 @@ if ($running.Count -eq 1) {
 if ($FirstInstall) {
     Write-Say "The next start of your agent has everything, and the first hardware question creates this project's configuration."
 } elseif (-not $needsPackage) {
-    Write-Say "The development installation already on this PATH was kept and nothing was installed over it, and your project configurations were not touched. No agentic-hil MCP server is behind a newer release than the one it started with, so none of them needs restarting on account of this run."
+    Write-Say "The development installation already on this PATH was kept and nothing was installed over it, and your project configurations were not touched. Nothing moved to a newer release, so no agentic-hil MCP server is behind this installation and none of them needs restarting on account of this run."
 } elseif ($ResolvedVersion -and $ResolvedVersion -eq $installed) {
-    Write-Say "This installation was already at $ResolvedVersion and was kept there, and your project configurations were not touched. No agentic-hil MCP server is behind a newer release than the one it started with, so none of them needs restarting on account of this run."
+    Write-Say "This installation stayed at $ResolvedVersion, the release it was already on, and your project configurations were not touched. Nothing moved to a newer release, so no agentic-hil MCP server is behind this installation and none of them needs restarting on account of this run."
 } else {
     Write-Say "This installation was refreshed in place, and your project configurations were not touched. Any agentic-hil MCP server still running keeps answering with the release it started with, so restart the agent CLIs that started one to pick this installation up."
 }

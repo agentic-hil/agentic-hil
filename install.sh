@@ -1174,9 +1174,9 @@ fi
 if [ "$FIRST_INSTALL" -eq 1 ]; then
     say "The next start of your agent has everything, and the first hardware question creates this project's configuration."
 elif [ "$NEEDS_PACKAGE" -eq 0 ]; then
-    say "The development installation already on this PATH was kept and nothing was installed over it, and your project configurations were not touched. No agentic-hil MCP server is behind a newer release than the one it started with, so none of them needs restarting on account of this run."
+    say "The development installation already on this PATH was kept and nothing was installed over it, and your project configurations were not touched. Nothing moved to a newer release, so no agentic-hil MCP server is behind this installation and none of them needs restarting on account of this run."
 elif [ -n "$RESOLVED_VERSION" ] && [ "$RESOLVED_VERSION" = "${installed:-}" ]; then
-    say "This installation was already at $RESOLVED_VERSION and was kept there, and your project configurations were not touched. No agentic-hil MCP server is behind a newer release than the one it started with, so none of them needs restarting on account of this run."
+    say "This installation stayed at $RESOLVED_VERSION, the release it was already on, and your project configurations were not touched. Nothing moved to a newer release, so no agentic-hil MCP server is behind this installation and none of them needs restarting on account of this run."
 else
     say "This installation was refreshed in place, and your project configurations were not touched. Any agentic-hil MCP server still running keeps answering with the release it started with, so restart the agent CLIs that started one to pick this installation up."
 fi
