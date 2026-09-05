@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentic-hil"
-version = "0.21.4.dev0"
+version = "0.21.4"
 description = "Hardware-in-the-loop MCP server for AI coding agents: develop firmware on the real board behind your debug probe, flashing, resetting and driving UART and CAN against it. The run on the hardware is the gate that decides the work is done, and a pytest plugin runs the same gate in CI."
 readme = "README.md"
 requires-python = ">=3.10"
