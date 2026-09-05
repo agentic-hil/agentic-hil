@@ -884,21 +884,34 @@ def test_the_pin_refusal_says_whose_words_the_relayed_block_is_before_printing_i
     assert flat.index("printed as uv wrote it") < flat.index("reinstall with `uv tool install agentic-hil@latest`")
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('[tool]\nrequirements = [{ name = "agentic-hil" }]\n\n[tool.options]\npython = "3.12"\n', id="recorded-under-tool-options"),
+        pytest.param('[tool]\npython = "3.12"\nrequirements = [{ name = "agentic-hil" }]\n', id="recorded-under-tool-the-way-uv-writes-it-now"),
+        pytest.param(
+            '[tool]\npython = "3.12"\nrequirements = [{ name = "agentic-hil" }]\n\n[tool.options]\npython = ""\n',
+            id="recorded-under-tool-beside-an-empty-options-entry",
+        ),
+    ],
+)
 def test_the_pin_refusal_replays_the_interpreter_the_receipt_recorded(
+    body: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A recorded `--python` is part of the installation, so the line carries it.
 
-    `[tool.options]` is where uv keeps it, and a reinstall without it resolves
-    an interpreter of uv's own choosing, which is a different installation
-    wearing the same name.
+    A reinstall without it resolves an interpreter of uv's own choosing, which is
+    a different installation wearing the same name.
+
+    Both levels are read, `[tool]` first, because uv moved it: current uv writes
+    `python` directly under `[tool]`, and a reader that looked only under
+    `[tool.options]` found nothing on such a receipt. Measured on a bench, where
+    the printed line carried no `--python` at all while the sentence beside it
+    promised to rebuild the installation as it stands.
     """
-    _uv_tool_receipt(
-        monkeypatch,
-        tmp_path,
-        '[tool]\nrequirements = [{ name = "agentic-hil" }]\n\n[tool.options]\npython = "3.12"\n',
-    )
+    _uv_tool_receipt(monkeypatch, tmp_path, body)
     monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
     _upgrade_reporting(
         monkeypatch,

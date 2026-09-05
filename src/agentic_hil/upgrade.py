@@ -307,7 +307,7 @@ def _recorded_install() -> _RecordedInstall:
     )
     section = _receipt_section(receipt, "options")
     options: JsonObject = {str(key): value for key, value in section.items()} if isinstance(section, dict) else {}
-    python = options.get("python")
+    python = _recorded_python(receipt, options)
     pins = [
         specifier.strip()
         for entry in entries
@@ -316,7 +316,24 @@ def _recorded_install() -> _RecordedInstall:
         and specifier.strip()
     ]
     pin = pins[0] if pins else ""
-    return _RecordedInstall(beside, python.strip() if isinstance(python, str) else "", pin, _exact_pin(pin), options)
+    return _RecordedInstall(beside, python, pin, _exact_pin(pin), options)
+
+
+def _recorded_python(receipt: JsonObject | None, options: JsonObject) -> str:
+    """The interpreter this installation was created with, wherever uv wrote it.
+
+    Both levels, `[tool].python` first, because uv moved it. uv 0.12.9 writes
+    `python = "/usr/bin/python3"` directly under `[tool]`, and a reader that
+    looked only under `[tool.options]` found nothing on such a receipt: measured
+    on a bench, where the reinstall line came out with no `--python` at all while
+    the summary beside it promised to rebuild the installation as it stands. A
+    line that rebuilds an installation on a different interpreter is a different
+    installation wearing the same command.
+    """
+    for candidate in (_receipt_section(receipt, "python"), options.get("python")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
 
 
 # A recorded requirement that names one release and nothing else: `==` or `===`
