@@ -2211,6 +2211,16 @@ def test_project_config_create_refuses_to_bind_a_probe_off_an_incomplete_count(t
     # The refusal hands back the visible serial and the confirmation path.
     assert [entry["probe_id"] for entry in result["probes"]] == ["066AFF303435554157113106"]
     assert "adopt-hardware --probe-id" in result["next_step"]
+    # The catalogued fix rides the public MCP refusal itself, not only a standalone
+    # `remediation_fields` lookup: its `remediation` and `do_not` are present and
+    # equal the served catalogue entry's, so the refusal carries the inline content
+    # the contract promises rather than a next step with nothing behind it
+    # (round 3, finding 1).
+    served = read_resource(f"{ERRORS_URI}/probe_inventory_incomplete")
+    assert served is not None
+    entry = json.loads(str(served["text"]))
+    assert result["remediation"] == entry["remediation"]
+    assert result["do_not"] == entry["do_not"]
     # No file was written: nothing bound a board off the incomplete count.
     with pytest.raises(ConfigError) as unwritten:
         load_authoritative_config(workspace)
@@ -2310,13 +2320,68 @@ def test_an_empty_usb_inventory_is_a_blind_spot_not_an_absent_bench(tmp_path: Pa
     assert discovery["probes"] == []
     assert "adopt-hardware --probe-id" not in discovery["next_step"]
     assert "STM32CubeProgrammer" in discovery["next_step"]
+    # The empty-inventory refusal carries the same inline fix the catalogue serves,
+    # so this public discovery result is not a bare next step either (round 3,
+    # finding 1).
+    served = read_resource(f"{ERRORS_URI}/probe_inventory_incomplete")
+    assert served is not None
+    entry = json.loads(str(served["text"]))
+    assert discovery["remediation"] == entry["remediation"]
+    assert discovery["do_not"] == entry["do_not"]
 
-    # And `init` writes the placeholder whose first next step is not "attach a bench".
+    # And `init` writes the placeholder whose first next step is not "attach a
+    # bench", and which names `--probe-id` rather than a bare adopt that would
+    # refuse the probe attached after it (round 3, finding 2).
     result = init_config()
     assert result["ok"] is True, result
     assert result["hardware_discovery"]["error_type"] == "probe_inventory_incomplete"
     assert "Attach the bench" not in result["next_steps"][0]
+    assert "adopt-hardware --probe-id" in result["next_steps"][0]
     assert load_authoritative_config(workspace).debuggers["dut"].probe_id is None
+
+
+def test_the_empty_inventory_next_step_reaches_a_bound_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The empty-inventory placeholder's first next step has to reach a bound bench (round 3, finding 2).
+
+    On an OpenOCD-only host that saw no probe, `init` writes a placeholder whose
+    first next step used to say attach a VCP-publishing probe and run bare
+    `agentic-hil adopt-hardware`. But a probe attached after that is a single
+    reading off a USB inventory that is still `complete: false`, so bare adoption
+    refuses it `probe_inventory_incomplete` exactly as the empty read did: the
+    advertised command did not do what the result said. The step now names the
+    serial with `--probe-id`, and this follows it through: the placeholder, then
+    the refusing bare call, then the succeeding named one."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+
+    # Nothing visible: the placeholder, and its first next step names `--probe-id`
+    # rather than a bare adopt that would refuse.
+    _linux_openocd_host(monkeypatch, ports=[])
+    placeholder = init_config()
+    assert placeholder["ok"] is True, placeholder
+    assert placeholder["hardware_discovery"]["error_type"] == "probe_inventory_incomplete"
+    assert "adopt-hardware --probe-id" in placeholder["next_steps"][0]
+    assert load_authoritative_config(workspace).debuggers["dut"].probe_id is None
+
+    def openocd_reads_the_target(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand(OPENOCD_TARGETS_OUTPUT, "", 0, False, False)
+
+    # A VCP-publishing probe is attached, exactly as the step described. It is now
+    # visible, but a lone reading off this inventory is still not a complete count,
+    # so the bare adoption the old wording sent the operator to refuses it and
+    # binds nothing.
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP], spawn=openocd_reads_the_target)
+    bare = adopt_hardware(com_port_id="dut_uart")
+    assert bare["ok"] is False, bare
+    assert bare["error_type"] == "probe_inventory_incomplete"
+    assert load_authoritative_config(workspace).debuggers["dut"].probe_id is None
+
+    # Naming the now-visible serial is what binds it, which is what the step says.
+    named = adopt_hardware(com_port_id="dut_uart", probe_id="066AFF303435554157113106")
+    assert named["ok"] is True, named
+    assert load_authoritative_config(workspace).debuggers["dut"].probe_id == "066AFF303435554157113106"
 
 
 def test_the_incomplete_inventory_error_is_in_the_reference_contract() -> None:
@@ -2324,8 +2389,11 @@ def test_the_incomplete_inventory_error_is_in_the_reference_contract() -> None:
 
     `probe_inventory_incomplete` is returned publicly by `project_config_create`
     and `agentic-hil init`, so like every other public `error_type` it has a
-    catalogue entry: a meaning, an ordered fix and the wrong fix, reachable both as
-    the remediation fields a refusal merges in and as its own reference resource."""
+    catalogue entry: a meaning, an ordered fix and the wrong fix, served as its own
+    reference resource. That the public refusal merges those same fields inline,
+    rather than carrying a bare `next_step`, is asserted against this entry where
+    the `project_config_create` refusal and the empty-inventory discovery are
+    produced (round 3, finding 1)."""
     fields = remediation_fields("probe_inventory_incomplete")
     assert fields["remediation"], fields
     assert fields["do_not"], fields
@@ -2363,7 +2431,10 @@ def test_an_enumerated_stlink_is_never_reported_as_an_absent_bench(tmp_path: Pat
     An ST-Link that published no serial number enumerates no probe, so discovery
     answers `adapter_not_found` while the host inventory is showing the probe and
     its virtual COM port. Telling that operator no bench was found contradicts a
-    listing they can read; the ports are named instead."""
+    listing they can read; the ports are named instead. And the first next step is
+    not "attach the bench" either: that would contradict the same visible serial
+    port, so the visible-but-serial-less case is branched onto the driver/vendor
+    remedy (round 3, finding 3)."""
     workspace = tmp_path / "starter"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
@@ -2376,6 +2447,11 @@ def test_an_enumerated_stlink_is_never_reported_as_an_absent_bench(tmp_path: Pat
     assert "No attached bench was found" not in result["summary"]
     assert "No usable probe serial was enumerated" in result["summary"]
     assert NUCLEO_VCP["stable_device"] in result["summary"]
+    # The first next step names the driver/vendor remedy for a visible serial-less
+    # port, not "attach the bench" over hardware this same result lists.
+    assert "Attach the bench" not in result["next_steps"][0]
+    assert "no probe serial could be read" in result["next_steps"][0]
+    assert "adopt-hardware --probe-id" in result["next_steps"][0]
     assert "no serial on" in result["next_steps"][1]
 
 

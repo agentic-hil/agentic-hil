@@ -291,8 +291,11 @@ serial, the backend's executable, the detected controller, and the probe's own
 COM device. It supplies no value of its own; its arguments only select, and it
 returns the plan unless you send `{"apply": true}`. A key that already holds
 somebody's value comes back under `kept` and is left alone. Several attached
-probes, none at all, or no serial port carrying the probe's serial: each is an
-answer naming what to do next rather than a choice made for you. An entry that
+probes, a lone probe read off a non-authoritative USB serial inventory with no
+STM32CubeProgrammer to confirm the count (`probe_inventory_incomplete`: name its
+serial as `probe_id`, or install STM32CubeProgrammer), none at all, or no serial
+port carrying the probe's serial: each is an answer naming what to do next rather
+than a choice made for you. An entry that
 already names a probe with a different one attached is `hardware_mismatch` and
 no plan at all. Reading the probe is a hardware call: it takes the same
 machine-wide lock every board read takes, so a board somebody else holds answers

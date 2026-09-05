@@ -2273,14 +2273,18 @@ def _placeholder_next_step(discovery: JsonObject) -> str:
     Every branch opens the same way -- the file describes no board yet and the
     whole result is under `hardware_discovery` -- and then names the remedy the
     discovery result actually calls for. "Attach the bench" is the right move for
-    `adapter_not_found`, where enumeration ran and listed no probe. It is the
-    wrong move for a missing toolchain, two attached probes, a target that did
-    not answer, or a timeout: each of those can happen with the board plugged in
-    the whole time, so telling the operator to attach one sends them to reseat
-    hardware that is already there instead of to the fix. Each names its own
-    remedy and keeps `agentic-hil adopt-hardware` as the command that fills the
-    file in once the reason is cleared. This is the `next_steps` sibling of
-    `_placeholder_reason`, which does the same for the headline (#416).
+    `adapter_not_found` only when enumeration ran and this host showed no ST-Link
+    serial port at all. It is the wrong move for a missing toolchain, two attached
+    probes, a target that did not answer, or a timeout: each of those can happen
+    with the board plugged in the whole time, so telling the operator to attach
+    one sends them to reseat hardware that is already there instead of to the fix.
+    It is the wrong move too for an `adapter_not_found` that lists an ST-Link
+    serial port it could read no probe serial off, which is a visible probe rather
+    than an absent bench, so that case is branched onto its own driver/vendor
+    remedy (round 3, finding 3). Each names its own remedy and keeps `agentic-hil
+    adopt-hardware` as the command that fills the file in once the reason is
+    cleared. This is the `next_steps` sibling of `_placeholder_reason`, which does
+    the same for the headline (#416).
     """
     summary = discovery.get("summary") or "no attached bench was identified"
     preamble = (
@@ -2313,15 +2317,25 @@ def _placeholder_next_step(discovery: JsonObject) -> str:
             )
         else:
             # Nothing was visible to name here, so `--probe-id <serial>` has no
-            # serial to take; the empty reading still is not an absent bench,
+            # serial to take yet; the empty reading still is not an absent bench,
             # because the inventory cannot see a VCP-less ST-LINK/V2. So this does
-            # not say "attach the bench" either (round 2, finding 3).
+            # not say "attach the bench" either (round 2, finding 3). But it also
+            # cannot send the operator to bare `adopt-hardware` once a probe is
+            # attached: on this OpenOCD-only host the newly visible probe is a
+            # single reading off a count still `complete: false`, so bare adoption
+            # would refuse it `probe_inventory_incomplete` exactly as this run did.
+            # The way across is the serial it then publishes, named with
+            # `--probe-id`, or an authoritative STM32CubeProgrammer count under
+            # which bare adoption binds (round 3, finding 2).
             remedy = (
                 "STM32CubeProgrammer is not installed, so probes are read from this host's USB serial inventory, which "
                 "reaches an ST-Link only through its virtual COM port and saw none here; that does not rule out a "
                 "VCP-less ST-LINK/V2 attached right now, so no absent bench is reported. Install STM32CubeProgrammer for "
-                "an authoritative count, or attach a probe that publishes a virtual COM port, then run "
-                f"`agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
+                "an authoritative count and then `agentic-hil adopt-hardware` binds the board on its own; or attach a "
+                "probe that publishes a virtual COM port, read the serial it then shows under `hardware_discovery.probes` "
+                "(and from `agentic-hil debugger-probes`), and name it with `agentic-hil adopt-hardware --probe-id <serial>`, "
+                "because a lone probe off this inventory is still not a complete count and bare adoption would refuse it the "
+                f"same way this run did. Either fills in {_ADOPT_FILLS}."
             )
     elif error_type == "target_not_detected":
         remedy = (
@@ -2334,7 +2348,30 @@ def _placeholder_next_step(discovery: JsonObject) -> str:
             f"board responds, which fills in {_ADOPT_FILLS}."
         )
     elif error_type == "adapter_not_found":
-        remedy = f"Attach the bench and run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
+        if _enumerated_stlink_ports(discovery):
+            # Enumeration ran and this host is showing an ST-Link serial port, but
+            # no probe serial could be read off it to bind. "Attach the bench"
+            # contradicts the very serial port this same result lists under
+            # `stlink_ports` and the account it prints; the fix is to make the
+            # serial readable, not to reseat hardware that is already here. This is
+            # the visible-but-serial-less zero-ID case the empty-inventory finding
+            # left, told apart the same way `_placeholder_reason` and
+            # `_discovery_account` tell it apart, on the presence of a port with no
+            # serial off it (round 3, finding 3). Once STM32CubeProgrammer reads the
+            # serial off the probe directly its count is authoritative and bare
+            # adoption binds; on OpenOCD alone the serial that then appears is still
+            # one reading off a `complete: false` count, so it is named with
+            # `--probe-id`, exactly as the empty-inventory branch above says.
+            remedy = (
+                "This host is showing an ST-Link serial port but no probe serial could be read off it to bind, so check the "
+                "probe is a genuine ST unit with its driver installed, or install STM32CubeProgrammer, which reads the serial "
+                "off the probe itself. Then, if STM32CubeProgrammer supplied an authoritative count, `agentic-hil "
+                "adopt-hardware` binds the board on its own; on OpenOCD alone the serial that then appears under "
+                "`hardware_discovery.probes` (and from `agentic-hil debugger-probes`) is still not a complete count, so name it "
+                f"with `agentic-hil adopt-hardware --probe-id <serial>`. Either fills in {_ADOPT_FILLS}."
+            )
+        else:
+            remedy = f"Attach the bench and run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
     else:
         remedy = f"Run `agentic-hil adopt-hardware` once the bench is ready, which fills in {_ADOPT_FILLS}."
     return preamble + remedy

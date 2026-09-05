@@ -23,6 +23,7 @@ from agentic_hil.config import (
     generated_permissions,
     skeleton_debugger_scripts,
 )
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.types import JsonObject, fold_hardware_id
 
 PROJECT_PROFILE = "agentic-hil.config.example.yaml"
@@ -1040,7 +1041,13 @@ def _incomplete_inventory_refusal(probe_ids: list[str], *, executable: str, com_
     refuses, and neither commits a probe. Naming the intended serial as probe_id,
     or installing STM32CubeProgrammer for an authoritative count, is the way
     forward, and every serial this host can see travels under `probes`
-    (round 1, finding 1)."""
+    (round 1, finding 1).
+
+    The way forward rides the failure itself: the shared `probe_inventory_incomplete`
+    catalogue entry's `remediation` and `do_not` are merged in beside this call's own
+    `next_step`, so the public `project_config_create` refusal and the placeholder
+    `init` writes carry the same inline fix every other catalogued failure does,
+    rather than a next step with no catalogue content behind it (round 3, finding 1)."""
     saw = f"beside the {len(probe_ids)} it saw ({', '.join(probe_ids)})" if probe_ids else "even though it saw none"
     summary = (
         "This host's USB serial inventory is not an authoritative count of attached probes: it reaches an ST-Link only "
@@ -1072,5 +1079,6 @@ def _incomplete_inventory_refusal(probe_ids: list[str], *, executable: str, com_
         probe_inventory_complete=False,
         next_step=next_step,
         com_ports=com_ports,
+        **remediation_fields("probe_inventory_incomplete"),
         **found_by,
     )
