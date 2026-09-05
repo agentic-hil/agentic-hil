@@ -23,6 +23,7 @@ from agentic_hil.config import (
     generated_permissions,
     skeleton_debugger_scripts,
 )
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.types import JsonObject, fold_hardware_id
 
 PROJECT_PROFILE = "agentic-hil.config.example.yaml"
@@ -88,6 +89,81 @@ OPENOCD_EXECUTABLE = "openocd"
 # `DISCOVERED_BY_USB_INVENTORY`, which lives beside the enumeration that
 # produces it because the configured OpenOCD backend reports it too.
 DISCOVERED_BY_STLINK_CLI = "stm32cubeprogrammer_cli"
+
+# What a probe bound off the USB serial inventory says about the count it was
+# bound from, spelled once so the discovery result, the generated configuration
+# and every sentence written about either use the same word. The inventory
+# reaches an ST-Link only through the virtual COM port a V2-1 or a V3 publishes,
+# so it is a real reading and never a complete one, and the honest word for that
+# is `incomplete` rather than a silence or a refusal (#423).
+PROBE_INVENTORY_INCOMPLETE = "incomplete"
+
+# Who named the probe a discovery was asked to select, which is what decides
+# whether the sole-probe caveat is made. Two spellings, because a serial arriving
+# at `discover_attached_hardware` says nothing on its own about where it came
+# from, and only one of the two places it comes from is a statement about the
+# bench. `caller` is an operator at `agentic-hil adopt-hardware --probe-id`, or an
+# MCP caller passing `probe_id`: somebody looked at the bench and said which board
+# this is, so an inventory that cannot prove its count cannot have picked the
+# wrong one. `configuration` is a regeneration handing back the serial the file it
+# is about to rewrite already binds: nobody looked at anything, that serial is a
+# reading this same inventory produced earlier, and the count is exactly as
+# incomplete as it was when the file was first written (#423).
+PROBE_NAMED_BY_CALLER = "caller"
+PROBE_NAMED_BY_CONFIGURATION = "configuration"
+
+
+def probe_inventory_caveat(probe_id: str) -> JsonObject:
+    """The caveat a sole visible probe is bound under, as result and file fields.
+
+    The USB serial inventory shows exactly one ST-Link and discovery binds it,
+    because that is the whole of the supported first path on an ordinary Linux
+    workstation: OpenOCD is one `apt install`, STM32CubeProgrammer is a
+    registration wall, and an `init` from the project root has to reach a working
+    bench without anybody reading a 24-character serial off a sticker. What the
+    inventory cannot do is prove the count: a standalone ST-LINK/V2, or any probe
+    that publishes no VCP, can be attached beside the one it saw and never appear.
+
+    So the caveat travels rather than blocking. It travels as data on the
+    discovery result *and* into the generated configuration, which is the half a
+    disclosure on a successful answer alone used to miss: the file is what a later
+    flash or reset reads, so the file is where a reader has to be able to see
+    which enumeration chose this board and what that enumeration cannot see.
+    """
+    return {
+        "discovered_by": DISCOVERED_BY_USB_INVENTORY,
+        "probe_inventory": PROBE_INVENTORY_INCOMPLETE,
+        "probe_inventory_note": (
+            f"'{probe_id}' is the one ST-Link this host's USB serial inventory shows, and it is bound. That inventory "
+            "reaches an ST-Link only through the virtual COM port a V2-1 or a V3 publishes, so a standalone "
+            "ST-LINK/V2 -- or any probe with no VCP -- would not appear in it even if it were attached beside this "
+            "one. If that is this bench, name the intended board with `agentic-hil adopt-hardware --probe-id "
+            "<serial>`, or install STM32CubeProgrammer, whose own listing reads the serial off the probe itself and "
+            "is an authoritative count."
+        ),
+    }
+
+
+def bound_off_incomplete_inventory(discovery: JsonObject) -> str | None:
+    """The sentence a bench bound off the USB serial inventory is reported with, or None.
+
+    Discovery binds the one ST-Link that inventory shows rather than refusing to
+    choose, because binding it is what lets `agentic-hil init` on an ordinary
+    Linux workstation reach a working bench with nobody reading a 24-character
+    serial off a probe (#423). What that reading cannot do is prove the probe is
+    the only one attached, so the caveat travels: it is on the discovery result,
+    it is written into the generated configuration beside the `probe_id` it
+    qualifies, and this is the half a person is told, in the `agentic-hil init`
+    summary and next steps and in the `project_config_create` next steps.
+
+    None whenever there is no caveat to make: a board the caller named with
+    `probe_id`, an authoritative STM32CubeProgrammer count, or a read that bound
+    nothing at all."""
+    if discovery.get("ok") is not True or discovery.get("probe_inventory") != PROBE_INVENTORY_INCOMPLETE:
+        return None
+    note = str(discovery.get("probe_inventory_note") or "").strip()
+    return note or None
+
 
 # One row of OpenOCD's `targets` table: an index, an optional `*` for the
 # current target, then the target's own name. The header and its rule of dashes
@@ -180,13 +256,27 @@ def _usb_enumeration(available: JsonObject, timeout_s: float) -> JsonObject:
         "tools_searched": tools,
         "probes": [{"probe_id": found} for found in probe_ids],
         "stlink_ports": usb_stlink_ports(available),
+        # Not an authoritative count, exactly as the configured OpenOCD backend's
+        # own listing says of the same reading (`openocd.debugger_probes_list`).
+        # The USB serial inventory reaches an ST-Link only through the virtual COM
+        # port a V2-1 or a V3 publishes, so a standalone ST-LINK/V2 -- or any probe
+        # OpenOCD drives that exposes no VCP -- can be attached and never appear
+        # here: an empty reading is not proof no probe is connected, and a nonempty
+        # one is not proof it lists every probe attached. Carried so the no-config
+        # `debugger-probes` listing this feeds fails `conclusive_success` rather
+        # than exiting 0 over a partial inventory (round 0, finding 1).
+        "complete": False,
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
         "cleanup_required": False,
         "summary": (
-            f"{len(probe_ids)} connected debugger probe(s) detected from this host's USB serial inventory; "
-            "STM32CubeProgrammer is not installed, so nothing was said to a board to find them."
+            f"{len(probe_ids)} connected debugger probe(s) read from this host's USB serial inventory; "
+            "STM32CubeProgrammer is not installed, so nothing was said to a board to find them. That inventory "
+            "reaches an ST-Link only through the virtual COM port a V2-1 or a V3 publishes, so a standalone "
+            "ST-LINK/V2 -- or any probe with no VCP -- would not appear here even if attached: this is not "
+            "necessarily every probe connected. Read the ids off the probes or the adapter vendor's own tool for "
+            "an authoritative count."
         ),
     }
 
@@ -419,6 +509,7 @@ def discover_attached_hardware(
     timeout_s: float = 10.0,
     *,
     probe_id: str | None = None,
+    probe_named_by: str = PROBE_NAMED_BY_CALLER,
     before_connect: Callable[[str], JsonObject | None] | None = None,
     profile: JsonObject | None = None,
 ) -> JsonObject:
@@ -436,6 +527,19 @@ def discover_attached_hardware(
     ``fold_hardware_id``, which is the identity every device lock key and every
     probe comparison in this repository uses, so the probe this selects, the probe
     that gets locked and the probe a mismatch check names are one probe.
+
+    ``probe_named_by`` says where that serial came from, and it changes nothing
+    about the selection: the named probe has to be in the enumeration either way,
+    and one that is not is `adapter_not_found` either way. What it decides is the
+    sole-probe caveat below. `caller` is somebody stating which board this is, so
+    a count that could not rule out a second probe cannot have picked the wrong
+    one and no caveat is made. `configuration` is a regeneration carrying back the
+    serial the file already binds, which is this same partial inventory's earlier
+    reading rather than a statement about the bench, so the caveat is made exactly
+    as it was when that file was first written. The default is `caller`, because a
+    direct call naming a serial is a caller naming it; a wrapper that carries one
+    out of a file says so. Any other spelling is treated as not-the-caller, so a
+    value nobody recognises discloses rather than silently suppresses (#423).
 
     ``before_connect`` is called with the enumerated spelling of the selected
     serial after enumeration and before the HOTPLUG connect: the last point at
@@ -470,9 +574,28 @@ def discover_attached_hardware(
         **({"stlink_ports": listed["stlink_ports"]} if "stlink_ports" in listed else {}),
     }
     probe_ids = [str(found["probe_id"]) for found in listed["probes"]]
-    if not probe_ids:
-        return _discovery_failure("adapter_not_found", "No ST-Link probe is attached.", executable=executable, com_ports=com_ports, **found_by)
+    # Whether the enumeration that produced these ids is an authoritative count.
+    # STM32CubeProgrammer's own listing is; the USB serial inventory the OpenOCD
+    # fallback reads is not (`complete: false`), because it reaches an ST-Link
+    # only through the virtual COM port a V2-1 or a V3 publishes and a VCP-less
+    # ST-LINK/V2 can be attached beside the ones it saw. It decides what a chosen
+    # board is chosen *with*: a sole visible probe is bound and carries the caveat
+    # into the answer and into the file, while a reading that saw nothing at all
+    # is a blind spot rather than an empty bench (#423).
+    inventory_authoritative = listed.get("complete") is not False
+    # Captured before the caller's `probe_id` is folded into the enumerated
+    # spelling below, so the answer can say whether the board it bound was one it
+    # chose off a partial reading or one the operator named. Both halves matter: a
+    # serial regeneration carried out of the file it is about to rewrite is not
+    # anybody naming a board, it is this same inventory's earlier reading handed
+    # back, and treating it as an explicit choice dropped the caveat off every
+    # `agentic-hil init --force` and every `project_config_create` over a bound
+    # bench, on the exact hosts the caveat exists for (#423).
+    caller_named_probe = probe_id is not None and probe_named_by == PROBE_NAMED_BY_CALLER
     if probe_id is not None:
+        # An explicit selection is exact whatever the enumeration's completeness:
+        # the operator named the board, so a serial among the ones this host can
+        # see is bound and one that is not is refused rather than added.
         selected = select_probe_id(probe_id, probe_ids)
         if selected is None:
             return _discovery_failure(
@@ -484,6 +607,41 @@ def discover_attached_hardware(
                 com_ports=com_ports,
                 **found_by,
             )
+    elif not probe_ids:
+        # An empty probe reading, and which "empty" it is decides the answer.
+        # STM32CubeProgrammer's own listing is an authoritative count, so an empty
+        # one is a definitive "no board attached": `adapter_not_found`, and `init`
+        # tells the operator to attach the bench. The USB serial inventory is not,
+        # because it reaches an ST-Link only through the virtual COM port a V2-1 or
+        # a V3 publishes:
+        #   * an ST-Link serial port that is visible but published no probe serial
+        #     is a real, addressable finding the operator can see, so it stays
+        #     `adapter_not_found` and the account names the port; but
+        #   * a reading with no ST-Link port at all cannot rule out a VCP-less
+        #     ST-LINK/V2 attached right now, so declaring the bench empty and
+        #     sending the operator to attach one would point them at hardware that
+        #     may already be there. It is the one incomplete-inventory refusal
+        #     there is, because it is the only one with nothing to bind: `init`
+        #     writes an unbound placeholder whose next step is not "attach the
+        #     bench" and `project_config_create` refuses rather than reporting an
+        #     absent bench off a blind spot (round 2, finding 3).
+        if inventory_authoritative or listed.get("stlink_ports"):
+            return _discovery_failure(
+                "adapter_not_found",
+                (
+                    "No ST-Link probe is attached."
+                    if inventory_authoritative
+                    else (
+                        "This host's USB serial inventory shows an ST-Link serial port but read no probe serial off it "
+                        "to select, so there is no probe id to bind. Check the ST-Link is a genuine ST unit with its "
+                        "driver installed, or install STM32CubeProgrammer, which reads the serial off the probe itself."
+                    )
+                ),
+                executable=executable,
+                com_ports=com_ports,
+                **found_by,
+            )
+        return _incomplete_inventory_refusal(executable=executable, com_ports=com_ports, **found_by)
     elif len(probe_ids) != 1:
         return _discovery_failure(
             "ambiguous_hardware",
@@ -495,6 +653,16 @@ def discover_attached_hardware(
             **found_by,
         )
     else:
+        # Exactly one probe visible. It is bound, whether or not the reading that
+        # found it is an authoritative count, and the caveat travels with it: on
+        # the host this path exists for -- OpenOCD from a package manager, no
+        # STM32CubeProgrammer -- this is what makes `agentic-hil init` from the
+        # project root reach a working bench with nobody retyping a 24-character
+        # serial, which is the whole of #423. Refusing here to guard against a
+        # VCP-less probe nobody has attached took that away from every newcomer to
+        # protect the rarer bench, and the rarer bench is served by a caveat that
+        # travels instead: `probe_inventory: incomplete` on this answer and in the
+        # generated file, and `--probe-id` to name the other board.
         selected = probe_ids[0]
 
     # The enumerated spelling from here on, never the caller's: it is what the
@@ -531,6 +699,18 @@ def discover_attached_hardware(
             )
         )
 
+    # A board this call chose without the caller naming it, off an inventory that
+    # is not an authoritative count, is bound and says so. The caveat is data
+    # rather than only prose -- `probe_inventory: incomplete` beside
+    # `discovered_by: usb_serial_inventory` and the sentence naming what the
+    # inventory cannot see -- because `apply_discovery_to_template` carries those
+    # same fields into the generated configuration, which is what a later flash or
+    # reset actually reads. When the caller named the probe, or the enumeration was
+    # STM32CubeProgrammer's own authoritative listing, the selection is exact and
+    # no caveat is added (#423).
+    caveat = probe_inventory_caveat(probe_id) if not caller_named_probe and not inventory_authoritative else {}
+    if caveat:
+        summary = f"{summary} {caveat['probe_inventory_note']}"
     matched_port = correlate_com_port(probe_id, com_ports)
     return {
         "ok": True,
@@ -546,6 +726,7 @@ def discover_attached_hardware(
         "target_discovery": target_discovery,
         "com_port": matched_port,
         "available_com_ports": com_ports,
+        **caveat,
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "hardware_state": "unchanged",
@@ -738,11 +919,22 @@ def apply_discovery_to_template(template: JsonObject, profile: JsonObject, disco
         # `interface` is the stlink backend's transport and is ignored by the
         # others; it stays exactly where it was.
         transport = {"interface": str(skeleton_debugger.get("interface") or "SWD")}
+    # The caveat a probe bound off the USB serial inventory was bound under, in
+    # the file itself. It is the half a disclosure on the discovery answer alone
+    # could never do: the answer is read once by whoever ran the command, and the
+    # file is what every later flash, reset and probe read resolves the board
+    # through, so `discovered_by`, `probe_inventory: incomplete` and the sentence
+    # naming what that inventory cannot see belong beside the `probe_id` they
+    # qualify. Absent on an explicit selection and on STM32CubeProgrammer's own
+    # authoritative count, where there is no caveat to make (#423).
+    carried = ("discovered_by", "probe_inventory", "probe_inventory_note")
+    inventory_caveat = {field: discovery[field] for field in carried if field in discovery} if discovery.get("probe_inventory") == PROBE_INVENTORY_INCOMPLETE else {}
     template["debuggers"] = {
         "dut": {
             "type": backend,
             "executable": discovery["executable"],
             "probe_id": discovery["probe_id"],
+            **inventory_caveat,
             **transport,
             "timeout_s": profile_debugger.get("timeout_s", 60),
             # The template this fills in is a version 3 configuration, and from
@@ -946,3 +1138,54 @@ def _discovery_failure(error_type: str, summary: str, **details: object) -> Json
         "cleanup_required": False,
         **details,
     }
+
+
+def _incomplete_inventory_refusal(*, executable: str, com_ports: JsonObject, **found_by: object) -> JsonObject:
+    """Discovery's answer when the USB serial inventory saw no probe at all.
+
+    The one reading with nothing to bind and nothing to conclude. The inventory
+    reaches an ST-Link only through the virtual COM port a V2-1 or a V3 publishes,
+    so a standalone ST-LINK/V2 -- or any probe with no VCP -- can be attached and
+    never appear: seeing none is a blind spot, not a proof that none is connected.
+    Reporting `adapter_not_found` here would send an operator to attach a bench
+    that may be plugged in already, so `init` writes an unbound placeholder from
+    this failure and `project_config_create` refuses (round 2, finding 3).
+
+    A sole visible probe is a different reading and takes a different answer: it
+    is bound, carrying `probe_inventory: incomplete` into the result and into the
+    generated configuration, because the ordinary OpenOCD-only bench has to reach
+    a working configuration from `init` alone (#423). Two or more visible probes
+    are `ambiguous_hardware`, as they are on either enumeration.
+
+    The way forward rides the failure itself: the shared `probe_inventory_incomplete`
+    catalogue entry's `remediation` and `do_not` are merged in beside this call's own
+    `next_step`, so the public `project_config_create` refusal and the placeholder
+    `init` writes carry the same inline fix every other catalogued failure does,
+    rather than a next step with no catalogue content behind it (round 3, finding 1)."""
+    summary = (
+        "This host's USB serial inventory saw no ST-Link at all, and it is not an authoritative count: it reaches an "
+        "ST-Link only through the virtual COM port a V2-1 or a V3 publishes, so a standalone ST-LINK/V2 -- or any probe "
+        "with no VCP -- could be attached right now and would not appear. Discovery will not report an absent bench off "
+        "a reading that cannot see one."
+    )
+    # Nothing was visible to name, and a serial this inventory did not see is one
+    # `select_probe_id` cannot match, so pointing at `--probe-id` here would be a
+    # dead end. What reaches a bound bench is a probe this inventory can see, or
+    # the vendor CLI whose count is authoritative.
+    next_step = (
+        "This host's USB serial inventory saw no ST-Link at all and cannot reach one that publishes no virtual COM "
+        "port, so there is no visible serial to name as probe_id. Attach a probe that publishes a virtual COM port and "
+        "run this again, which binds the one it then shows, or install STM32CubeProgrammer for an authoritative probe "
+        "count."
+    )
+    return _discovery_failure(
+        "probe_inventory_incomplete",
+        summary,
+        executable=executable,
+        probes=[],
+        probe_inventory_complete=False,
+        next_step=next_step,
+        com_ports=com_ports,
+        **remediation_fields("probe_inventory_incomplete"),
+        **found_by,
+    )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -109,6 +110,72 @@ def _claimed_expiry(token: Any) -> datetime | None:
     if not isinstance(expiry, (int, float)) or isinstance(expiry, bool):
         return None
     return datetime.fromtimestamp(expiry, timezone.utc)
+
+
+def stored_expiry(kind: str, path: Path) -> str:
+    """What the file itself says about when its access token stops being accepted.
+
+    The moment where the file states one, and a sentence naming why there is none
+    where it does not. Read straight off the file rather than out of a health
+    verdict, because the question this answers is whether the file moved after a
+    CLI ran, and two verdicts can read the same while the documents under them do
+    not. Never raises: a caller reporting evidence about a refusal must not fail
+    while assembling the evidence.
+    """
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return f"unreadable ({type(error).__name__})"
+    if not isinstance(document, dict):
+        return "no expiry stated"
+    moment: datetime | None = None
+    if kind == "claude-auth":
+        section = document.get("claudeAiOauth")
+        if isinstance(section, dict):
+            moment = _moment(section.get("expiresAt"))
+    elif kind == "codex-auth":
+        tokens = document.get("tokens")
+        if isinstance(tokens, dict):
+            moment = _claimed_expiry(tokens.get("access_token"))
+    return moment.isoformat() if moment is not None else "no expiry stated"
+
+
+# Short enough that a field name or a scope survives into a log where it helps,
+# long enough that no token slips under it.
+SECRET_LENGTH = 8
+
+
+def _secret_strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value] if len(value) >= SECRET_LENGTH else []
+    if isinstance(value, list):
+        return [secret for item in value for secret in _secret_strings(item)]
+    if isinstance(value, dict):
+        return [secret for item in value.values() for secret in _secret_strings(item)]
+    return []
+
+
+def stored_secrets(path: Path) -> list[str]:
+    """Every literal out of a stored login that must never reach a log or a terminal.
+
+    The path, the document whole, and every string inside it long enough to be a
+    token. This is the set the evaluation hands its redactor for captured agent
+    output, and anything printing a CLI's own output about a login owes its
+    reader the same pass: a refresh failure is exactly the moment a CLI is
+    likeliest to quote the credential back.
+
+    Never raises, for the same reason `stored_expiry` does not.
+    """
+    resolved = Path(path)
+    values = [str(resolved), resolved.as_posix()]
+    try:
+        content = resolved.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [value for value in dict.fromkeys(values) if value]
+    values.append(content)
+    with contextlib.suppress(json.JSONDecodeError):
+        values.extend(_secret_strings(json.loads(content)))
+    return [value for value in dict.fromkeys(values) if value]
 
 
 def credential_health(kind: str, path: Path, now: datetime | None = None) -> tuple[str, str]:

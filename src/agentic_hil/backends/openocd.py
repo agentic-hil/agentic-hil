@@ -242,6 +242,17 @@ class OpenOCDBackend:
         identity rules exist to refuse. The result says which enumeration
         answered under `discovered_by`, so a caller never has to infer it.
 
+        The inventory reaches an ST-Link only through the virtual COM port a V2-1
+        or a V3 publishes, so a standalone ST-LINK/V2 and any probe with no VCP
+        are outside what it can see. That blind spot does not close once one
+        VCP-backed probe is found: a second, VCP-less probe can sit beside the
+        one that was seen, and this enumeration would never observe it. Every
+        listing off this inventory is therefore reported `complete: false` -- the
+        empty reading because "nothing on the serial bus" is not "no probe
+        attached", and a nonempty one because what it lists is not necessarily
+        every probe attached. A caller that needs an authoritative count reads
+        the ids off the probes or the adapter vendor's own tool.
+
         Nothing is contacted either way: this reads a USB descriptor listing and
         says nothing to a board."""
         tool = "debugger_probes_list"
@@ -279,6 +290,39 @@ class OpenOCDBackend:
                 **NOT_CONTACTED,
             }
         probe_ids = usb_stlink_probe_ids(inventory)
+        stlink_ports = usb_stlink_ports(inventory)
+        if not probe_ids and not stlink_ports:
+            # No ST-Link is on the serial bus at all: not one that published a
+            # serial to name it, and not one that published a VCP without a
+            # serial. This enumeration reaches an ST-Link only through the virtual
+            # COM port a V2-1 or a V3 exposes, so a standalone ST-LINK/V2, and any
+            # probe OpenOCD drives that publishes no VCP, never enter it. An empty
+            # reading here is therefore not proof no probe is attached, and
+            # answering `probes: []` as a finished count would say "no probe"
+            # about hardware this method cannot observe -- the false negative that
+            # made this worse than the old `not_supported` (round 0, finding 2).
+            # The reading itself succeeded, so `ok` stays true, but `complete` is
+            # false and the summary names the blind spot so a caller never reads
+            # it as an empty bench.
+            return {
+                "ok": True,
+                "tool": tool,
+                "backend": self.backend_name,
+                "discovered_by": DISCOVERED_BY_USB_INVENTORY,
+                "probes": [],
+                "stlink_ports": [],
+                "complete": False,
+                "interface_cfg": interface_cfg,
+                "summary": (
+                    "No ST-Link with a virtual COM port is on this host's USB serial inventory, and that inventory is "
+                    "the only enumeration behind this listing. It reaches an ST-Link only through the VCP a V2-1 or a "
+                    "V3 publishes, so a standalone ST-LINK/V2 -- or any probe OpenOCD drives that exposes no virtual "
+                    "COM port -- would not appear here even if it is attached: this is not proof no probe is "
+                    "connected. Read the id off the probe or the adapter vendor's own tool, or check "
+                    "`agentic-hil com-ports`."
+                ),
+                **NOT_CONTACTED,
+            }
         return {
             "ok": True,
             "tool": tool,
@@ -289,12 +333,22 @@ class OpenOCDBackend:
             # that published no serial. An empty `probes` beside a listed port is
             # a probe that is there and cannot be named, which is a different
             # fact from no probe at all.
-            "stlink_ports": usb_stlink_ports(inventory),
+            "stlink_ports": stlink_ports,
+            # At least one ST-Link is on the serial bus, so this is not the blind
+            # empty reading above -- but it is still not an authoritative count.
+            # The enumeration sees an ST-Link only through the VCP it publishes,
+            # so a standalone ST-LINK/V2 or any VCP-less probe beside the ones
+            # listed here would never appear. `complete` stays false so a caller
+            # cannot read this len() as "every probe attached".
+            "complete": False,
             "interface_cfg": interface_cfg,
             "summary": (
                 f"{len(probe_ids)} connected debugger probe(s) read from this host's USB serial inventory. OpenOCD has "
                 "no probe listing of its own, so the ids come from the USB descriptors the probes published and nothing "
-                "was said to a board."
+                "was said to a board. The inventory sees an ST-Link only through the virtual COM port it publishes, so a "
+                "standalone ST-LINK/V2 -- or any probe OpenOCD drives that exposes no virtual COM port -- would not "
+                "appear here even if attached: this is not necessarily every probe connected. Read the ids off the "
+                "probes or the adapter vendor's own tool for an authoritative count."
             ),
             **NOT_CONTACTED,
         }

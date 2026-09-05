@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Case, CredentialFile, Job, Matrix, Target, load_matrix
-from .credentials import authentication_failure, credential_health
+from .credentials import authentication_failure, credential_health, stored_secrets
 from .redaction import DEFAULT_LOG_CONTENT_BYTES, RedactingLogWriter, redact, redact_value
 from .refresh_login import apply_refreshed_login
 from .report import group_counts, report_results, result_group, timings_results, unstable_groups
@@ -935,23 +935,13 @@ def resolved_credential_files(job: Job) -> tuple[tuple[str, Path], ...]:
     return tuple((credential.kind, credential_file_path(credential)) for credential in job.credential_files)
 
 
-def _secret_strings(value: Any) -> list[str]:
-    if isinstance(value, str):
-        return [value] if len(value) >= 8 else []
-    if isinstance(value, list):
-        return [secret for item in value for secret in _secret_strings(item)]
-    if isinstance(value, dict):
-        return [secret for item in value.values() for secret in _secret_strings(item)]
-    return []
-
-
 def auth_values(job: Job) -> list[str]:
+    # `stored_secrets` is the same pass the loop wrapper's pre-flight uses on a
+    # CLI's own output, so a token has one definition of what must not be
+    # printed rather than one per surface that prints.
     values = [os.environ[name] for name in job.credentials if os.environ.get(name)]
     for _kind, path in resolved_credential_files(job):
-        content = path.read_text(encoding="utf-8", errors="replace")
-        values.extend((str(path), path.as_posix(), content))
-        with contextlib.suppress(json.JSONDecodeError):
-            values.extend(_secret_strings(json.loads(content)))
+        values.extend(stored_secrets(path))
     return list(dict.fromkeys(value for value in values if value))
 
 

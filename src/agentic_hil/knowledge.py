@@ -1128,7 +1128,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "mistake that was not there."
         ),
         remediation=(
-            "Plug the board in and run `agentic-hil adopt-hardware --apply`. It fills `com_ports.<name>.device` in "
+            "Plug the board in and run `agentic-hil adopt-hardware`. It fills `com_ports.<name>.device` in "
             "from the attached hardware, together with the serial number and USB ids that make the name checkable, "
             "and it fills in the probe and the toolchain path in the same call.",
             "If the port is not the probe's own virtual COM port, run `agentic-hil com-ports` to see what this host "
@@ -1183,10 +1183,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "A step naming a device the configuration does not declare is corrected in the plan: `device:` has to be "
             "one of the names the refusal lists under the `configured_*` key for that kind.",
             "A bench that genuinely has no such entry is filled in rather than argued with. With the board attached, "
-            "`agentic-hil adopt-hardware --apply` fills a declared entry's hardware in; where the section is empty "
-            "because `agentic-hil init` ran with no bench attached, `agentic-hil init --force` from the project root "
-            "writes the file again from the project profile and the hardware it finds. `--force` replaces the whole "
-            "file, every narrowed permission included, so it is a reset rather than a repair.",
+            "`agentic-hil adopt-hardware` fills a declared debugger or COM-port entry's hardware in; adoption "
+            "has no CAN half, so a `can_buses` entry's adapter and channel are written by hand. Where the section is "
+            "empty because `agentic-hil init` ran with no bench attached, `agentic-hil init --force` from the project "
+            "root writes the file again from the project profile and the hardware it finds. `--force` replaces the "
+            "whole file, every narrowed permission included, so it is a reset rather than a repair.",
             "A `field` naming a plan key rather than a device is a plan the schema rejects. "
             "`{test_plan_reference}` is what it was validated against; it reads the shipped schema rather than "
             "describing it, so the version that admits a step is in the same table as the step.",
@@ -1279,8 +1280,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
     "target_not_detected:openocd": ErrorRemedy(
         meaning="OpenOCD reached the debug adapter but no target answered on the selected transport.",
         remediation=(
-            "Confirm the probe enumerates at all: call debugger_probes_list. An empty list means the probe is missing, "
-            "not the target.",
+            "Confirm the probe enumerates at all: call debugger_probes_list. On OpenOCD it reads this host's USB "
+            "serial inventory, which sees an ST-Link only through the virtual COM port it publishes; a result carrying "
+            "`complete: false` found no such ST-Link, but a standalone ST-LINK/V2 with no VCP would not appear there, "
+            "so read the id off the probe before concluding it is missing.",
             "Check `debuggers.<name>.target_cfg` names the MCU family on the board. The default `target/stm32f4x.cfg` "
             "covers STM32F4 only.",
             "Check `debuggers.<name>.interface_cfg` matches the probe: `interface/stlink.cfg` for an on-board ST-Link.",
@@ -1416,6 +1419,38 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "so a shortened value can select a board you did not name.",
             "Connect the probe, or install the udev rule (Linux) or USB driver (Windows) for it.",
             "Close whatever else holds the probe.",
+        ),
+    ),
+    "probe_inventory_incomplete": ErrorRemedy(
+        meaning=(
+            "Bootstrap discovery found no probe to bind and cannot say the bench is empty. STM32CubeProgrammer is not "
+            "installed, so probes are enumerated from this host's USB serial inventory, which reaches an ST-Link only "
+            "through the virtual COM port a V2-1 or a V3 publishes, and that inventory showed no ST-Link at all. A "
+            "standalone ST-LINK/V2, or any probe that exposes no VCP, can be attached and never appear there, so this "
+            "reading is a blind spot rather than proof that nothing is connected: `adapter_not_found` would be a claim "
+            "about hardware this enumeration cannot see. `project_config_create` writes nothing and `agentic-hil init` "
+            "writes an unbound placeholder. It is only ever the empty reading: one visible ST-Link is bound and carries "
+            "`probe_inventory: incomplete` into the result and the generated file, and two or more are "
+            "`ambiguous_hardware`."
+        ),
+        remediation=(
+            "Attach a probe that publishes a virtual COM port and run the discovery again: the one ST-Link this "
+            "inventory then shows is bound on its own, with the incomplete count recorded on the entry it writes. "
+            "`agentic-hil debugger-probes` and `agentic-hil com-ports` show what this host can currently see.",
+            "Where the bench has a probe this inventory cannot reach, name the intended board's serial instead: "
+            "`agentic-hil adopt-hardware --probe-id <serial>` binds it, on a workspace that already has a "
+            "configuration for adoption to fill.",
+            "Or install STM32CubeProgrammer for an authoritative count: its own listing reads the serial off the probe "
+            "directly rather than through a virtual COM port, so it sees a VCP-less ST-LINK/V2 the inventory cannot, "
+            "then run the generation again.",
+        ),
+        do_not=(
+            "Do not read this as `adapter_not_found` or an absent bench. An empty inventory here is a blind spot, not a "
+            "proof that no probe is attached: a VCP-less ST-LINK/V2 could be plugged in right now, so reseating or "
+            "re-attaching hardware that is already there is the wrong move.",
+            "Do not read it as a rule against binding a single probe. One visible ST-Link is bound off this same "
+            "inventory and the incomplete count travels with it; this refusal is about a reading with nothing in it to "
+            "bind, and a second probe with no virtual COM port is what `--probe-id` is for.",
         ),
     ),
     "debugger_command_rejected:openocd": ErrorRemedy(
@@ -2683,6 +2718,22 @@ BOOTSTRAP_DISCOVERY_RULE = {
         "`openocd` on PATH, and the generated entry is `type: openocd` with its interface_cfg and target_cfg. This is "
         "the path on an ordinary Linux workstation, which normally has OpenOCD and not STM32CubeProgrammer."
     ),
+    "usb_serial_inventory_is_not_a_complete_count": (
+        "This inventory reaches an ST-Link only through the virtual COM port a V2-1 or a V3 publishes, so a standalone "
+        "ST-LINK/V2 -- or any probe with no VCP -- can be attached and never appear: `complete: false`, an empty "
+        "reading is not proof no probe is connected, and a sole visible one is not proof it is the only one. Exactly "
+        "one visible ST-Link is bound anyway, because that is the ordinary OpenOCD-only bench and it has to reach a "
+        "working configuration from `agentic-hil init` alone; what the incomplete count buys is a caveat rather than a "
+        "refusal. The discovery result and the generated entry carry `discovered_by: usb_serial_inventory`, "
+        "`probe_inventory: incomplete` and the sentence naming what this enumeration cannot see, and the `init` and "
+        "`project_config_create` reports say it in a step of their own. Where a probe this inventory cannot reach is "
+        "attached beside the visible one, name the intended board as probe_id (which `select_probe_id` still checks "
+        "against the inventory, so a serial this host cannot see is refused `adapter_not_found` rather than added); "
+        "where an authoritative count is what matters, install STM32CubeProgrammer, whose listing reads the serial off "
+        "the probe itself. Two or more visible probes stay `ambiguous_hardware`. Only a reading that saw no ST-Link at "
+        "all refuses `probe_inventory_incomplete`, because it has nothing to bind and cannot report an absent bench "
+        "either: `project_config_create` writes nothing and `agentic-hil init` writes an unbound placeholder."
+    ),
     "target_identity_without_the_cli": (
         "The workspace profile's `target.controller` when it names one, which is exact and says nothing to the board; "
         "otherwise a read-only OpenOCD `init`, `targets`, `shutdown` against the selected adapter serial, which "
@@ -3295,7 +3346,7 @@ com_ports:
     # /dev/serial/by-id/... device name: COM7 is an enumeration order, so it can
     # come to mean the other adapter. An adapter that publishes no serial says so
     # instead, with identity_source: vid_pid, or identity_source: device when it
-    # publishes nothing at all. `agentic-hil adopt-hardware --apply` writes it.
+    # publishes nothing at all. `agentic-hil adopt-hardware` writes it.
     serial_number: "066AFF495451885087171450"
     vid: 1155                   # the type, which is what makes the serial mean a unit
     pid: 14155
@@ -3614,7 +3665,7 @@ A third thing *describes* the hardware contact and guards nothing. Every tool in
 |---|---|
 | what is locked | the physical device: `physical:<resource_id>`, `probe:<serial>`, `probe-exe:<executable>`, `com:serial:<serial_number>`, `com:<device>`, `can:<adapter>:<channel>` |
 | case | a name for hardware (`resource_id`, a probe serial, a port's `serial_number`, a CAN channel) folds case on every platform, because `0669FF` and `0669ff` are one unit wherever the bench runs. A host path (a debugger executable, a serial device) folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
-| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order (attaching a second adapter can hand one entry another board), so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so, and from `version: 3` on that warning is a property of the file instead: such an entry must declare what identifies it with `identity_source` or the configuration is refused at load, naming `agentic-hil adopt-hardware --apply`. `vid`/`pid` sit beside the serial and name the device *type* rather than a unit, so they are never a lock key: a USB serial is unique only within its vendor, so a serial matching under a foreign vid/pid is refused too, and an adapter that publishes no serial at all is compared on the type alone, which separates a CH340 from an ST-Link and not one CH340 from another, and `identity_source: vid_pid` says exactly that. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all (no serial backend, not enumerated exactly once, no serial reported, or no USB ids reported where the entry names them) is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
+| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order (attaching a second adapter can hand one entry another board), so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so, and from `version: 3` on that warning is a property of the file instead: such an entry must declare what identifies it with `identity_source` or the configuration is refused at load, naming `agentic-hil adopt-hardware`. `vid`/`pid` sit beside the serial and name the device *type* rather than a unit, so they are never a lock key: a USB serial is unique only within its vendor, so a serial matching under a foreign vid/pid is refused too, and an adapter that publishes no serial at all is compared on the type alone, which separates a CH340 from an ST-Link and not one CH340 from another, and `identity_source: vid_pid` says exactly that. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all (no serial backend, not enumerated exactly once, no serial reported, or no USB ids reported where the entry names them) is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
 | where | `~/.agentic-hil/device-locks`, one agreed place per machine, never under `state_root`: a lock kept per configuration is not a bench lock |
 | how long | the whole run, from the declaration to its end; the lease each call takes borrows that hold |
 | what may be touched | only what the test description declares; anything else is refused with `undeclared_device` |

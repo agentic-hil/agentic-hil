@@ -22,7 +22,12 @@ import pytest
 from support import PUBLISH_ATOMICALLY_SOURCE, published, read_when_published
 
 from evals.install import refresh_login
-from evals.install.credentials import authentication_failure, credential_health, spent_refresh_token
+from evals.install.credentials import (
+    authentication_failure,
+    credential_health,
+    spent_refresh_token,
+    stored_expiry,
+)
 from evals.install.runner import docker_security_options
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -257,8 +262,16 @@ def test_a_healthy_pair_of_logins_starts(tmp_path: Path, monkeypatch: pytest.Mon
     assert [kind for kind, _path in resolved] == list(loop_in_container.LOGIN_FILES)
 
 
+def _stale_login(tmp_path: Path, kind: str = "claude-auth", *, expires_in: timedelta = timedelta(minutes=1)) -> Path:
+    """One stored login the pre-flight calls stale, on disk where it can be re-read."""
+    relative, build = RETURNED_LOGINS[kind]
+    path = tmp_path / relative.name
+    path.write_text(build(expires_in), encoding="utf-8")
+    return path
+
+
 def test_a_refresh_that_cannot_be_started_is_a_reason_rather_than_a_traceback(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(loop_in_container.shutil, "which", lambda _command: "/usr/bin/claude")
 
@@ -268,10 +281,12 @@ def test_a_refresh_that_cannot_be_started_is_a_reason_rather_than_a_traceback(
     monkeypatch.setattr(loop_in_container.subprocess, "run", refuses_to_launch)
 
     with pytest.raises(loop_in_container.Refused, match="could not start"):
-        loop_in_container.refresh_stale_login("claude-auth", "expires in 3 days")
+        loop_in_container.refresh_stale_login("claude-auth", "expires in 3 days", _stale_login(tmp_path))
 
 
-def test_a_refresh_that_hangs_says_the_login_was_not_refreshed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_refresh_that_hangs_says_the_login_was_not_refreshed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(loop_in_container.shutil, "which", lambda _command: "/usr/bin/claude")
 
     def hangs(*_args: object, **_kwargs: object) -> None:
@@ -280,7 +295,7 @@ def test_a_refresh_that_hangs_says_the_login_was_not_refreshed(monkeypatch: pyte
     monkeypatch.setattr(loop_in_container.subprocess, "run", hangs)
 
     with pytest.raises(loop_in_container.Refused, match="did not finish within 300s"):
-        loop_in_container.refresh_stale_login("claude-auth", "expires in 3 days")
+        loop_in_container.refresh_stale_login("claude-auth", "expires in 3 days", _stale_login(tmp_path))
 
 
 # --- the Codex login is this run's to answer for (issue #391) -----------------
@@ -390,13 +405,17 @@ def test_the_spent_state_is_read_off_the_line_the_cli_printed() -> None:
 
 
 def test_a_stale_codex_login_is_refreshed_here_rather_than_in_the_container(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The Claude login's treatment, applied to the one that was copied in blind."""
     attempts = _refresh_attempt(monkeypatch, subprocess.CompletedProcess([], 0, "ok", ""))
+    # The refreshed file the probe leaves behind, so this test stays about which
+    # command ran rather than about what the file says afterwards.
+    path = _stale_login(tmp_path, "codex-auth", expires_in=timedelta(days=1))
 
-    loop_in_container.refresh_stale_login("codex-auth", "the access token expires at 12:00")
+    state, _detail = loop_in_container.refresh_stale_login("codex-auth", "the access token expires at 12:00", path)
 
+    assert state == "ok"
     assert attempts == [["/usr/bin/codex", "exec", *loop_in_container.CODEX_SESSION, "reply with: ok"]]
     # The probe is about the login and nothing else: a repository it is not in,
     # a config file that could point it at another provider, and session files
@@ -406,32 +425,420 @@ def test_a_stale_codex_login_is_refreshed_here_rather_than_in_the_container(
 
 
 def test_a_refresh_token_another_copy_already_spent_is_named_before_a_round_starts(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The failure issue #391 met three quarters of an hour into a review."""
     _refresh_attempt(monkeypatch, subprocess.CompletedProcess([], 1, "", _spent()))
 
     with pytest.raises(loop_in_container.Refused) as refusal:
-        loop_in_container.refresh_stale_login("codex-auth", "the access token expires at 12:00")
+        loop_in_container.refresh_stale_login(
+            "codex-auth", "the access token expires at 12:00", _stale_login(tmp_path, "codex-auth")
+        )
 
     reason = str(refusal.value)
     assert "already been used" in reason
     # The exact line, because the CLI is the only thing that ever states this.
     assert "Please log out and sign in again." in reason
     assert "Sign in again with Codex" in reason
+    # And the evidence beside it, on this refusal like on every other one here:
+    # the sentence is a conclusion, and #438 is what it costs when a reader
+    # cannot check the conclusion against what the CLI did.
+    assert "codex exited 1." in reason
 
 
 def test_a_refresh_that_failed_for_another_reason_still_reports_what_the_cli_said(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The neighbour: only the spent state gets the spent state's sentence."""
+    """The neighbour: only a credential failure gets a credential's sentence.
+
+    It used to end at "the refresh attempt failed", which read as a login
+    problem whatever had gone wrong. An unavailable model is not answered by
+    signing in again, so this refusal says so and hands over the evidence.
+    """
     _refresh_attempt(monkeypatch, subprocess.CompletedProcess([], 1, "", "error: model gpt-9 is not available"))
 
     with pytest.raises(loop_in_container.Refused) as refusal:
-        loop_in_container.refresh_stale_login("codex-auth", "the access token expires at 12:00")
+        loop_in_container.refresh_stale_login(
+            "codex-auth", "the access token expires at 12:00", _stale_login(tmp_path, "codex-auth")
+        )
 
-    assert "model gpt-9 is not available" in str(refusal.value)
-    assert "already been used" not in str(refusal.value)
+    reason = str(refusal.value)
+    assert "model gpt-9 is not available" in reason
+    assert "already been used" not in reason
+    assert "sign in again" not in reason.lower()
+    assert "codex exited 1." in reason
+
+
+# --- the CLI decides, not the file (issue #438) -------------------------------
+#
+# The stored Claude login was stale, the pre-flight started the CLI here to
+# refresh it, the CLI exited 0 and answered, and the file still carried the old
+# expiry when it was read back a moment later. The wrapper refused: "still stale
+# after refreshing here ... Sign in again, then rerun." The identical command run
+# by hand minutes later refreshed the token and rewrote the file, and the
+# operator had been signing in again nightly on that message for nothing.
+#
+# What follows pins the two halves of the answer. A run that exited 0 and
+# answered is proof the login works, so the file is re-read for a short while and
+# then proceeded past whatever it says; and every refusal on this path hands over
+# the CLI's exit code and the tail of its output, redacted against the stored
+# login, so a reader can tell a dead refresh token from a wrapper that misjudged.
+
+_FAKE_CLI = "agentic-hil-fake-agent"
+
+
+def _fake_cli(
+    directory: Path,
+    name: str,
+    *,
+    stdout: str = "ok",
+    stderr: str = "",
+    exit_code: int = 0,
+    writes: tuple[Path, str] | None = None,
+) -> None:
+    """An executable on PATH that answers, optionally rewrites a login, and exits.
+
+    A real process rather than a patched `subprocess.run`, because what went
+    wrong in #438 is the order of two real events: the CLI exiting and the CLI's
+    file landing. A stub that cannot get that order wrong cannot show it handled.
+    The name is never a real agent CLI's, so nothing here can reach one.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    target, content = writes if writes is not None else (None, "")
+    script = directory / f"{name}-impl.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        f"sys.stdout.write({json.dumps(stdout)})\n"
+        f"sys.stderr.write({json.dumps(stderr)})\n"
+        f"target = {json.dumps(str(target)) if target is not None else 'None'}\n"
+        "if target is not None:\n"
+        f"    pathlib.Path(target).write_text({json.dumps(content)}, encoding='utf-8')\n"
+        f"raise SystemExit({exit_code})\n",
+        encoding="utf-8",
+    )
+    # A launcher rather than a shebang, on both platforms: an interpreter path
+    # with a space in it is not a shebang a kernel can read, and this one comes
+    # from wherever the suite is being run from.
+    if os.name == "nt":
+        (directory / f"{name}.bat").write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\nexit /b %ERRORLEVEL%\r\n',
+            encoding="utf-8",
+        )
+    else:
+        launcher = directory / name
+        launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
+        launcher.chmod(0o755)
+
+
+def _host_refresh_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str = "claude-auth", **behaviour: Any
+) -> None:
+    """Answer this login's host-side probe with a fake CLI, found the way the real one is."""
+    directory = tmp_path / "bin"
+    _fake_cli(directory, _FAKE_CLI, **behaviour)
+    monkeypatch.setenv("PATH", str(directory) + os.pathsep + os.environ.get("PATH", ""))
+    _name, product, _arguments = loop_in_container.HOST_REFRESH[kind]
+    monkeypatch.setitem(loop_in_container.HOST_REFRESH, kind, (_FAKE_CLI, product, ["reply with: ok"]))
+
+
+def test_a_login_the_cli_rewrites_here_is_read_back_as_refreshed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ordinary ending: the probe refreshed the token and the file says so."""
+    path = _stale_login(tmp_path)
+    _host_refresh_probe(
+        monkeypatch, tmp_path, writes=(path, _claude_login(timedelta(days=1), refresh_token="rotated"))
+    )
+
+    state, detail = loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    assert (state, "valid until" in detail) == ("ok", True)
+    # The rotated value is on this machine, which is the whole point of
+    # refreshing here rather than in a container that leaves with it.
+    assert _refresh_token("claude-auth", path.read_text(encoding="utf-8")) == "rotated"
+    assert "still carries the old expiry" not in capsys.readouterr().out
+
+
+def test_a_cli_that_answered_proceeds_even_when_the_stored_file_never_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#438 itself: the run watched this login authenticate, so it is not stopped."""
+    path = _stale_login(tmp_path)
+    expiry = stored_expiry("claude-auth", path)
+    _host_refresh_probe(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "REFRESH_SETTLE_SECONDS", 0.0)
+
+    state, _detail = loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    assert state == "stale"
+    # One line, and it carries both readings of the file rather than a verdict
+    # the operator has to take on trust.
+    said = [line for line in capsys.readouterr().out.splitlines() if "authenticated here and answered" in line]
+    assert len(said) == 1
+    assert "still carries the old expiry" in said[0]
+    assert f"expiry {expiry} before the run, {expiry} after it" in said[0]
+
+
+def test_the_stored_file_is_read_again_after_the_cli_that_refreshed_it_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CLI writes its file around the answer, so one read at the instant of exit is a race."""
+    path = _stale_login(tmp_path)
+    _host_refresh_probe(monkeypatch, tmp_path)
+    answers = iter([("stale", "the access token expires at 12:00"), ("ok", "valid until 13:00")])
+    reads: list[str] = []
+
+    def answered(kind: str, _path: Path, *_args: object, **_kwargs: object) -> tuple[str, str]:
+        reads.append(kind)
+        return next(answers)
+
+    monkeypatch.setattr(loop_in_container, "credential_health", answered)
+    monkeypatch.setattr(loop_in_container.time, "sleep", lambda _seconds: None)
+
+    state, detail = loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    assert (state, detail) == ("ok", "valid until 13:00")
+    assert reads == ["claude-auth", "claude-auth"]
+
+
+def test_a_spent_refresh_token_is_still_the_answer_that_asks_for_a_new_sign_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The neighbour #438 must not have relaxed: the CLI said the token is gone."""
+    path = _stale_login(tmp_path)
+    _host_refresh_probe(monkeypatch, tmp_path, stdout="", stderr=_spent(), exit_code=1)
+
+    with pytest.raises(loop_in_container.Refused) as refusal:
+        loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    reason = str(refusal.value)
+    assert "already been used" in reason
+    assert "Sign in again with Claude Code" in reason
+    assert f"{_FAKE_CLI} exited 1." in reason
+    assert "Please log out and sign in again." in reason
+
+
+def test_an_authentication_failure_without_the_reuse_wording_also_asks_for_a_sign_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the rule: a login the provider rejected is a login to replace."""
+    path = _stale_login(tmp_path)
+    _host_refresh_probe(monkeypatch, tmp_path, stdout="", stderr="API error: 401 Unauthorized\n", exit_code=1)
+
+    with pytest.raises(loop_in_container.Refused) as refusal:
+        loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    reason = str(refusal.value)
+    assert "could not authenticate" in reason
+    assert "Sign in again with Claude Code" in reason
+    assert f"{_FAKE_CLI} exited 1." in reason
+    assert "401 Unauthorized" in reason
+
+
+def test_a_failure_that_is_not_about_the_credential_reports_the_code_and_the_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unavailable model is not answered by signing in again, so it does not say so."""
+    path = _stale_login(tmp_path)
+    expiry = stored_expiry("claude-auth", path)
+    _host_refresh_probe(
+        monkeypatch, tmp_path, stdout="starting\n", stderr="error: model gpt-9 is not available\n", exit_code=3
+    )
+
+    with pytest.raises(loop_in_container.Refused) as refusal:
+        loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    reason = str(refusal.value)
+    assert "sign in again" not in reason.lower()
+    assert f"{_FAKE_CLI} exited 3." in reason
+    assert "stdout tail: starting" in reason
+    assert "stderr tail: error: model gpt-9 is not available" in reason
+    # Both readings of the file, on the refusal itself: whether the file moved
+    # while the CLI ran is the fact a reader needs and cannot recover afterwards.
+    assert f"expiry was {expiry} before the run and {expiry} after it" in reason
+
+
+def test_an_exit_of_zero_without_the_reply_it_asked_for_is_not_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit 0 alone says nothing: a CLI that printed nothing answered nothing."""
+    path = _stale_login(tmp_path)
+    _host_refresh_probe(monkeypatch, tmp_path, stdout="", stderr="")
+
+    with pytest.raises(loop_in_container.Refused) as refusal:
+        loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    reason = str(refusal.value)
+    assert "without the reply it asked for" in reason
+    assert "sign in again" not in reason.lower()
+    assert f"{_FAKE_CLI} exited 0." in reason
+    assert "stdout tail: (nothing)" in reason
+
+
+def test_a_token_the_cli_printed_never_reaches_the_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The evidence is on its way to a terminal an operator will paste from."""
+    token = "refresh-token-that-must-never-be-printed"
+    path = tmp_path / ".credentials.json"
+    path.write_text(_claude_login(timedelta(minutes=1), refresh_token=token), encoding="utf-8")
+    _host_refresh_probe(
+        monkeypatch, tmp_path, stdout="", stderr=f"error: POST /refresh rejected {token}\n", exit_code=1
+    )
+
+    with pytest.raises(loop_in_container.Refused) as refusal:
+        loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    reason = str(refusal.value)
+    assert token not in reason
+    assert "[REDACTED]" in reason
+    # Redacted, not withheld: the line that says what failed is still readable.
+    assert "POST /refresh rejected" in reason
+
+
+def test_a_token_split_by_the_output_boundary_is_still_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tail is cut from redacted text, not redacted after it is cut (round 0, finding 2).
+
+    The evidence prints only the last `OUTPUT_TAIL_CHARS` of a chatty stream. When
+    that boundary fell inside a token the old order truncated first, leaving a
+    suffix the literal redactor -- which matches whole values -- could no longer
+    recognise, and it printed that suffix. Here a token straddles the boundary so
+    only its tail lands in the window; redacting the whole stream before trimming
+    is what keeps that tail out of the refusal.
+    """
+    tail_chars = loop_in_container.OUTPUT_TAIL_CHARS
+    marker = "LEAKMARKER0123456789ABCDEF0123456789ABCDEF0123456789ABCD"
+    token = ("P" * 40) + marker
+    path = tmp_path / ".credentials.json"
+    path.write_text(_claude_login(timedelta(minutes=1), refresh_token=token), encoding="utf-8")
+    # The token sits so the last `tail_chars` begin partway through it: its prefix
+    # is beyond the window, its suffix (the marker) inside it.
+    stderr = ("x" * (tail_chars + 100)) + token + ("y" * (tail_chars - 30))
+    _host_refresh_probe(monkeypatch, tmp_path, stdout="", stderr=stderr, exit_code=3)
+
+    with pytest.raises(loop_in_container.Refused) as refusal:
+        loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    reason = str(refusal.value)
+    # The suffix that the truncate-first order would have printed is gone.
+    assert marker not in reason
+    assert marker[-30:] not in reason
+    assert token not in reason
+    assert "[REDACTED]" in reason
+
+
+def test_a_token_the_cli_rotates_before_it_fails_is_redacted_against_the_new_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Evidence is redacted against the login as it stands after the run (round 0, finding 2).
+
+    A refresh rotates the login: the CLI can write a new access and refresh token
+    to the file and then fail while quoting that just-written value. The secrets
+    read before the run do not include it, so evidence redacted against them alone
+    would print the new token. Re-reading the login after the run and merging the
+    two sets is what covers the value the run itself wrote.
+    """
+    old_token = "old-refresh-token-that-was-there-before-the-run-000000"
+    new_token = "rotated-refresh-token-the-cli-just-wrote-1234567890ABCDEF"
+    path = tmp_path / ".credentials.json"
+    path.write_text(_claude_login(timedelta(minutes=1), refresh_token=old_token), encoding="utf-8")
+    _host_refresh_probe(
+        monkeypatch,
+        tmp_path,
+        stdout="",
+        stderr=f"error: model gpt-9 is not available; refreshed to {new_token}\n",
+        exit_code=3,
+        writes=(path, _claude_login(timedelta(days=1), refresh_token=new_token)),
+    )
+
+    with pytest.raises(loop_in_container.Refused) as refusal:
+        loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    reason = str(refusal.value)
+    # Neither the value that was there nor the one the run wrote reaches the terminal.
+    assert new_token not in reason
+    assert old_token not in reason
+    assert "[REDACTED]" in reason
+    # And the non-secret diagnostic is still readable.
+    assert "model gpt-9 is not available" in reason
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [
+        # `token` contains the two characters `ok`; a Codex diagnostic that names
+        # it is not the model reply.
+        ("initializing token cache\n", ""),
+        # A negative answer contains the positive one as a substring.
+        ("not ok\n", ""),
+        # The reply asked for, but on the stream reserved for diagnostics.
+        ("", "ok\n"),
+    ],
+)
+def test_incidental_ok_is_not_read_as_the_requested_reply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str, stderr: str
+) -> None:
+    """Exit 0 is proof only when the model's own reply is on the stream it answers on (round 0, finding 3).
+
+    The proof used to be `"ok" in (stdout + stderr).lower()`, so `token`, `not ok`
+    or an `ok` printed to stderr all passed for a reply the model never gave. The
+    check now requires a whole line of stdout to be the reply, so none of these
+    stand in for it."""
+    path = _stale_login(tmp_path)
+    _host_refresh_probe(monkeypatch, tmp_path, stdout=stdout, stderr=stderr, exit_code=0)
+
+    with pytest.raises(loop_in_container.Refused) as refusal:
+        loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    reason = str(refusal.value)
+    assert "without the reply it asked for" in reason
+    assert "sign in again" not in reason.lower()
+
+
+def test_the_reply_is_read_as_one_line_among_a_cli_s_other_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CLI that logs to stdout and then answers has answered (round 0, finding 3).
+
+    The whole-line rule must not demand that `ok` be the only thing on stdout: a
+    CLI may print its own progress there before the model's reply. One line that
+    is exactly the reply, wherever it sits, is the proof."""
+    path = _stale_login(tmp_path)
+    _host_refresh_probe(
+        monkeypatch, tmp_path, stdout="loaded config\nreaching provider...\nOK\n", stderr="warming token cache\n"
+    )
+    monkeypatch.setattr(loop_in_container, "REFRESH_SETTLE_SECONDS", 0.0)
+
+    state, _detail = loop_in_container.refresh_stale_login("claude-auth", "a refresh is due", path)
+
+    assert state == "stale"
+
+
+def test_the_pre_flight_no_longer_stops_a_run_over_a_file_the_cli_did_not_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The whole path an operator meets, refusing nothing it has just seen work."""
+    home = tmp_path / "profile"
+    _stored_logins(home)
+    (home / ".claude" / ".credentials.json").write_text(_claude_login(timedelta(minutes=1)), encoding="utf-8")
+    _at_home(monkeypatch, home)
+    _host_refresh_probe(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_in_container, "REFRESH_SETTLE_SECONDS", 0.0)
+
+    loop_in_container.check_logins(loop_in_container.mounted_files())
+
+    printed = capsys.readouterr().out
+    assert "authenticated here and answered" in printed
+    assert "claude-auth: stale (" in printed
+    # The neighbour: a login with nothing left to refresh with is still refused
+    # here, and no CLI is started for it.
+    (home / ".claude" / ".credentials.json").write_text(
+        _claude_login(timedelta(minutes=1), refresh_expires_in=timedelta(days=-1)), encoding="utf-8"
+    )
+    with pytest.raises(loop_in_container.Refused, match="Sign in again"):
+        loop_in_container.check_logins(loop_in_container.mounted_files())
 
 
 def test_a_stale_login_stops_the_run_before_a_container_is_ever_started(

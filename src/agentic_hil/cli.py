@@ -23,6 +23,7 @@ from agentic_hil.bootstrap import (
     DEFAULT_PROJECT_PROFILE,
     apply_discovery_to_template,
     apply_profile_to_placeholder,
+    bound_off_incomplete_inventory,
     enumerate_attached_probes,
     load_project_profile,
 )
@@ -93,11 +94,17 @@ from agentic_hil.knowledge import (
 )
 from agentic_hil.reactorrun import run_plan, start_plan_detached
 from agentic_hil.redact import redact_sensitive
-from agentic_hil.report import overall_success
+from agentic_hil.report import conclusive_success, overall_success
 from agentic_hil.runevidence import write_run_evidence
 from agentic_hil.runlifecycle import request_run_stop, run_status
 from agentic_hil.stdio import run_stdio_server
-from agentic_hil.test_reactor import DEFAULT_TEST_CONFIG_PATH, flatten_steps, load_test_config
+from agentic_hil.test_reactor import (
+    DEFAULT_TEST_CONFIG_PATH,
+    DebuggerRunner,
+    UartRunner,
+    flatten_steps,
+    load_test_config,
+)
 from agentic_hil.tools import (
     AgenticHILToolService,
     UnprovisionedToolService,
@@ -350,7 +357,13 @@ def redaction_unavailable(command: str | None) -> JsonObject:
 
 
 def result_succeeded(result: JsonObject) -> bool:
-    return overall_success(result)
+    # `conclusive_success`, not `overall_success`: a discovery that answered but
+    # says it is not authoritative (`complete: false`, which only the OpenOCD
+    # probe listing writes) must not exit 0. Exit 0 there tells automation "every
+    # probe was found" over a reading that cannot see a VCP-less probe. It stays
+    # off `overall_success` so the same read is neither filed as a failure nor
+    # turned into an MCP error; see `conclusive_success`.
+    return conclusive_success(result)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2188,13 +2201,23 @@ def _placeholder_reason(discovery: JsonObject) -> str:
     ports are named instead."""
     enumerated = _enumerated_stlink_ports(discovery)
     if discovery.get("error_type") == "adapter_not_found":
-        if not enumerated:
-            return "No attached bench was found"
-        devices = ", ".join(str(port.get("stable_device") or port.get("device") or "?") for port in enumerated)
-        return (
-            f"No usable probe serial was enumerated, although this host is showing {len(enumerated)} "
-            f"ST-Link serial port(s) ({devices})"
-        )
+        if enumerated:
+            devices = ", ".join(str(port.get("stable_device") or port.get("device") or "?") for port in enumerated)
+            return (
+                f"No usable probe serial was enumerated, although this host is showing {len(enumerated)} "
+                f"ST-Link serial port(s) ({devices})"
+            )
+        if "stlink_ports" in discovery:
+            # The USB serial inventory was read and held no ST-Link. Branching on
+            # the key, the same way `_discovery_account` does, is what tells this
+            # from the STM32CubeProgrammer path below: the inventory is not an
+            # authoritative count, because a VCP-less ST-LINK/V2 publishes no port
+            # for it to reach, so "none visible here" is not "no bench attached"
+            # (round 1, finding 1).
+            return "No ST-Link probe was visible in this host's USB serial inventory, which cannot see a VCP-less ST-LINK/V2"
+        # STM32CubeProgrammer's own listing ran and enumerated no probe, which is
+        # the one empty reading that is authoritative.
+        return "No attached bench was found"
     reason = str(discovery.get("summary") or "hardware discovery identified no bench").rstrip(".")
     return f"Hardware discovery did not configure a bench ({reason})"
 
@@ -2251,14 +2274,18 @@ def _placeholder_next_step(discovery: JsonObject) -> str:
     Every branch opens the same way -- the file describes no board yet and the
     whole result is under `hardware_discovery` -- and then names the remedy the
     discovery result actually calls for. "Attach the bench" is the right move for
-    `adapter_not_found`, where enumeration ran and listed no probe. It is the
-    wrong move for a missing toolchain, two attached probes, a target that did
-    not answer, or a timeout: each of those can happen with the board plugged in
-    the whole time, so telling the operator to attach one sends them to reseat
-    hardware that is already there instead of to the fix. Each names its own
-    remedy and keeps `agentic-hil adopt-hardware` as the command that fills the
-    file in once the reason is cleared. This is the `next_steps` sibling of
-    `_placeholder_reason`, which does the same for the headline (#416).
+    `adapter_not_found` only when enumeration ran and this host showed no ST-Link
+    serial port at all. It is the wrong move for a missing toolchain, two attached
+    probes, a target that did not answer, or a timeout: each of those can happen
+    with the board plugged in the whole time, so telling the operator to attach
+    one sends them to reseat hardware that is already there instead of to the fix.
+    It is the wrong move too for an `adapter_not_found` that lists an ST-Link
+    serial port it could read no probe serial off, which is a visible probe rather
+    than an absent bench, so that case is branched onto its own driver/vendor
+    remedy (round 3, finding 3). Each names its own remedy and keeps `agentic-hil
+    adopt-hardware` as the command that fills the file in once the reason is
+    cleared. This is the `next_steps` sibling of `_placeholder_reason`, which does
+    the same for the headline (#416).
     """
     summary = discovery.get("summary") or "no attached bench was identified"
     preamble = (
@@ -2279,6 +2306,26 @@ def _placeholder_next_step(discovery: JsonObject) -> str:
             "with `agentic-hil adopt-hardware --probe-id <serial>`; the attached serials are listed under "
             f"`hardware_discovery.probes`. Adoption then fills in {_ADOPT_FILLS}."
         )
+    elif error_type == "probe_inventory_incomplete":
+        # The inventory saw no ST-Link at all, which is the only reading that
+        # reaches here: a sole visible probe is bound with its caveat and two are
+        # `ambiguous_hardware`. Nothing was visible to name, so `--probe-id
+        # <serial>` has no serial to take yet, and the empty reading still is not
+        # an absent bench, because the inventory cannot see a VCP-less ST-LINK/V2.
+        # So this does not say "attach the bench" either (round 2, finding 3).
+        # Once a probe that publishes a virtual COM port is attached, bare
+        # `adopt-hardware` binds the one this inventory then shows; `--probe-id`
+        # is for the bench where a second probe without a VCP is attached beside
+        # it, which this inventory would not list.
+        remedy = (
+            "STM32CubeProgrammer is not installed, so probes are read from this host's USB serial inventory, which "
+            "reaches an ST-Link only through its virtual COM port and saw none here; that does not rule out a "
+            "VCP-less ST-LINK/V2 attached right now, so no absent bench is reported. Attach a probe that publishes a "
+            "virtual COM port and run `agentic-hil adopt-hardware`, which binds the one this host then shows; name "
+            "the board with `agentic-hil adopt-hardware --probe-id <serial>` instead if a second probe without a "
+            "virtual COM port is attached beside it, or install STM32CubeProgrammer for an authoritative count. "
+            f"Either fills in {_ADOPT_FILLS}."
+        )
     elif error_type == "target_not_detected":
         remedy = (
             "The ST-Link answered but named no target, so check the board is powered and wired to the probe, "
@@ -2290,7 +2337,28 @@ def _placeholder_next_step(discovery: JsonObject) -> str:
             f"board responds, which fills in {_ADOPT_FILLS}."
         )
     elif error_type == "adapter_not_found":
-        remedy = f"Attach the bench and run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
+        if _enumerated_stlink_ports(discovery):
+            # Enumeration ran and this host is showing an ST-Link serial port, but
+            # no probe serial could be read off it to bind. "Attach the bench"
+            # contradicts the very serial port this same result lists under
+            # `stlink_ports` and the account it prints; the fix is to make the
+            # serial readable, not to reseat hardware that is already here. This is
+            # the visible-but-serial-less zero-ID case the empty-inventory finding
+            # left, told apart the same way `_placeholder_reason` and
+            # `_discovery_account` tell it apart, on the presence of a port with no
+            # serial off it (round 3, finding 3). Once a serial can be read off the
+            # port, bare adoption binds the probe it names, on either enumeration;
+            # `--probe-id` is for the bench that has a second probe the inventory
+            # cannot see, exactly as the empty-inventory branch above says.
+            remedy = (
+                "This host is showing an ST-Link serial port but no probe serial could be read off it to bind, so check the "
+                "probe is a genuine ST unit with its driver installed, or install STM32CubeProgrammer, which reads the serial "
+                "off the probe itself. Then `agentic-hil adopt-hardware` binds the board on its own; name it with "
+                "`agentic-hil adopt-hardware --probe-id <serial>` instead if a second probe without a virtual COM port is "
+                f"attached beside it. Either fills in {_ADOPT_FILLS}."
+            )
+        else:
+            remedy = f"Attach the bench and run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
     else:
         remedy = f"Run `agentic-hil adopt-hardware` once the bench is ready, which fills in {_ADOPT_FILLS}."
     return preamble + remedy
@@ -2868,6 +2936,17 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
     account = _discovery_account(discovery)
     if account is not None:
         next_steps.insert(1 if not discovered else 0, account)
+    # A bench bound off the USB serial inventory says so first. The file it wrote
+    # carries the same three fields on the debugger entry, so the operator reading
+    # this report and the operator reading the configuration a month later are told
+    # the same thing about how the board was chosen (#423).
+    inventory_caveat = bound_off_incomplete_inventory(discovery)
+    if inventory_caveat is not None:
+        next_steps.insert(
+            0,
+            f"{inventory_caveat} The same is recorded in the file under `debuggers.dut.probe_inventory` and "
+            "`debuggers.dut.discovered_by`.",
+        )
     # First, and before anything about COM ports or OpenOCD scripts: a bench that
     # was narrowed and is open again is the one thing here that changes what this
     # machine may be told to do.
@@ -2898,6 +2977,7 @@ def init_config(config_path: str | None = None, force: bool = False, *, _locked:
                 if discovered
                 else f"{_placeholder_reason(discovery)}, so the placeholder Agentic HIL project configuration was written, {granted_clause}."
             )
+            + (f" {inventory_caveat}" if inventory_caveat is not None else "")
             + (
                 f" The file it replaced had {len(discarded)} {'permission' if len(discarded) == 1 else 'permissions'} "
                 f"set to false that this one grants, so {'it is' if len(discarded) == 1 else 'they are'} open again: "
@@ -4616,6 +4696,82 @@ def _doctor_state_root(config: AgenticHILConfig) -> JsonObject:
     return {"ok": True, "field": "state_root", "path": str(root), "summary": "The configured state root accepts the writes every hardware action is recorded by."}
 
 
+def _adopt_reads_board_instruction(config: AgenticHILConfig) -> str:
+    """The debugger-aware `adopt-hardware` that reads the board to fill identity keys.
+
+    For the state where no device is unbound but the file still carries a
+    placeholder somebody fills by reading the board -- `target.controller` is the
+    one the verdict does not fail on. Adoption reads it through a debugger, so the
+    command names one the same way the reactor's COM fill does: the sole probe,
+    one chosen from several, or -- with no debugger to read through -- the manual
+    path, because a bare `adopt-hardware` refuses when it cannot select a probe
+    (round 0, finding 4)."""
+    debuggers = sorted(config.debuggers)
+    if len(debuggers) == 1:
+        return (
+            f"With the board attached, `{ADOPT_HARDWARE_COMMAND} --debugger {debuggers[0]}` reads it and fills the "
+            "identity keys still unset in the declared entries -- `target.controller` among them -- from the attached "
+            "hardware, and leaves everything a person has set alone."
+        )
+    if debuggers:
+        return (
+            f"With the board attached, name which configured probe it is and run `{ADOPT_HARDWARE_COMMAND} --debugger "
+            f"<name>` (this project declares several: {', '.join(debuggers)}); it reads the board and fills the identity "
+            "keys still unset in the declared entries, `target.controller` among them, and leaves everything a person "
+            "has set alone."
+        )
+    return (
+        "This project declares no debugger, so `adopt-hardware` cannot read the board to fill `target.controller`; set "
+        "it by hand to the part the board actually is."
+    )
+
+
+def _bench_binding_next_step(config: AgenticHILConfig, unbound: list[JsonObject], placeholders: list[JsonObject]) -> str:
+    """The repair for each device this file declares but has not bound, per bench.
+
+    Built from the actual unbound entries and this bench's debugger count, not a
+    single fixed `agentic-hil adopt-hardware`. That bare command is what the
+    headline used to name, and it could not perform the fill it promised on two of
+    the benches this project now supports: a debugger-free UART bench, where
+    adoption refuses before it reaches the port because there is no debugger to
+    select, and a partly bound multi-debugger bench, where it refuses an unnamed
+    debugger (round 0, finding 4). So each unbound entry gets the same
+    debugger-aware step a refused plan would reach -- the reactor's own
+    `entry_fill_step`, which names the sole debugger, asks the operator to choose
+    among several, and gives the complete manual path when there is none -- and
+    `doctor` and a plan refusal name one command.
+
+    A debugger placeholder is filled by `--debugger <name>`; a `com_ports` entry
+    by the COM path, which runs through adoption's debugger-first selection. The
+    fields carry the names `_doctor_bench_binding` already collected.
+
+    A file with no unbound device but a `target.controller` placeholder still gets
+    the board read: adoption fills that key too, and the per-device steps already
+    do so when there is one, so the standalone board-read instruction is added
+    only when nothing unbound would have carried it.
+    """
+    runners = {"debuggers": DebuggerRunner, "com_ports": UartRunner}
+    steps: list[str] = []
+    for entry in unbound:
+        runner = runners.get(str(entry.get("field")))
+        if runner is None:
+            continue
+        for name in entry.get("entries", []):
+            steps.append(runner.entry_fill_step(config, str(name)))
+    if not unbound and placeholders:
+        steps.append(_adopt_reads_board_instruction(config))
+    # And the other way back, for a file that predates the project's own profile:
+    # `init --force` rewrites the whole file -- every narrowed permission included
+    # -- from the profile and the hardware it finds, which is a bigger hammer than
+    # filling the unset identity keys and is named as exactly that.
+    steps.append(
+        f"Where the file was written before the project had a profile at all, `{CONFIG_REOPEN_COMMAND}` writes it again "
+        "from the project profile and the hardware it finds; that one replaces the whole file, every narrowed "
+        "permission included."
+    )
+    return " ".join(steps)
+
+
 def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
     """Whether this configuration names hardware yet, asked before a plan does.
 
@@ -4627,17 +4783,28 @@ def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
     that had never been bound, with nothing in the green report to have warned
     them.
 
-    Two facts decide the verdict, each a device this file declares and does not
-    identify, and each refusing by itself:
+    The verdict is built per declared device, never per section (round 0,
+    finding 3). Each device this file declares and does not identify refuses by
+    itself:
 
-    * every configured debugger is a placeholder, so nothing here can flash,
-      reset, probe or open a debug session, and no plan runs at all;
-    * a `com_ports` entry names no device, so every step that opens it is
-      refused `com_port_not_bound`.
+    * each configured debugger that is a placeholder names no toolchain, so
+      nothing can flash, reset, probe or open a debug session on it;
+    * each `com_ports` entry that names no device is refused `com_port_not_bound`
+      by every step and every COM tool call that opens it.
 
-    Together they are unhealthy the way `state_root` is: a bench that cannot run
-    the thing this tool exists to run is not a healthy bench, and the exit code
-    is the one signal a provisioning script reads.
+    Section-level logic answered both wrong. It called an empty `debuggers`
+    section unbound though a UART-only or CAN-only plan runs with no debugger at
+    all, and it hid a placeholder debugger sitting beside a real one because the
+    section held at least one bound entry. An empty debugger section declares no
+    debugger device, so there is no unbound debugger to report; a placeholder
+    entry is an unbound device wherever it sits.
+
+    Together the unbound devices are unhealthy the way `state_root` is: a bench
+    with a device it cannot reach is not a healthy bench, and the exit code is the
+    one signal a provisioning script reads. Whether *no* plan at all can run is a
+    separate, stronger fact -- true only when nothing here is bound -- and the
+    headline says it only then, because a bench with one bound COM port runs a
+    UART plan past every placeholder debugger it declares.
 
     `target.controller` at the skeleton's own placeholder is reported beside
     them, under `placeholders`, and decides nothing. Nothing routes through it,
@@ -4648,24 +4815,23 @@ def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
     no probe id (see the `debugger-backends` reference): it has no second entry
     to be confused with, so demanding one would call the documented Nucleo bench
     broken. The state an unset `probe_id` actually arrives in is a placeholder
-    entry, which the first rule already catches."""
+    entry, which the debugger rule already catches through its executable."""
     unbound: list[JsonObject] = []
     # `debugger_is_placeholder`, not `debugger_drives_hardware`: the second
     # also reads the permissions, and a bench narrowed to nothing is a policy
     # decision rather than an unbound device. The question here is only
-    # whether this entry has a toolchain and an identity behind it.
-    bound = [name for name, entry in config.debuggers.items() if not debugger_is_placeholder(entry)]
-    if config.debuggers and not bound:
+    # whether this entry has a toolchain and an identity behind it. Asked of each
+    # entry, so a placeholder beside a real probe is still reported.
+    placeholder_debuggers = sorted(name for name, entry in config.debuggers.items() if debugger_is_placeholder(entry))
+    if placeholder_debuggers:
         unbound.append({
             "field": "debuggers",
-            "entries": sorted(config.debuggers),
+            "entries": placeholder_debuggers,
             "summary": (
-                "No configured debugger has a toolchain behind it, so nothing here can flash, reset, probe or open a "
-                "debug session, and no test plan can run."
+                f"{len(placeholder_debuggers)} declared debugger(s) name no toolchain, so nothing can flash, reset, "
+                "probe or open a debug session on them: " + ", ".join(f"debuggers.{name}.executable" for name in placeholder_debuggers)
             ),
         })
-    if not config.debuggers:
-        unbound.append({"field": "debuggers", "entries": [], "summary": "This configuration declares no debugger at all, so no test plan can run."})
     unbound_ports = sorted(port_id for port_id, port in config.com_ports.items() if com_port_is_unbound(port))
     if unbound_ports:
         unbound.append({
@@ -4691,7 +4857,24 @@ def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
         })
     if not unbound and not placeholders:
         return {"ok": True, "field": "bench_binding", "unbound": [], "placeholders": [], "summary": "Every device this configuration declares names the hardware behind it."}
+    # Whether any declared device is bound at all. "No test plan can run" is the
+    # strong claim the old section-level check made unconditionally and got wrong:
+    # a bench with one bound COM port runs a UART plan though every debugger it
+    # declares is a placeholder, and a CAN bus is written by hand so any declared
+    # one is bound. The sentence belongs only to the state where nothing here is
+    # bound -- the just-installed file #433 exists to catch.
+    can_run_a_plan = (
+        any(not debugger_is_placeholder(entry) for entry in config.debuggers.values())
+        or any(not com_port_is_unbound(port) for port in config.com_ports.values())
+        or bool(config.can_buses)
+    )
     stated = [*(str(entry["summary"]) for entry in unbound), *(str(entry["summary"]) for entry in placeholders)]
+    if not unbound:
+        lead = "This configuration still carries what `init` writes when nothing is attached: "
+    elif not can_run_a_plan:
+        lead = "This configuration describes a bench that is not bound to hardware, so no test plan can run against it yet: "
+    else:
+        lead = "This configuration describes a bench with a device that is not bound to hardware: "
     return {
         # The verdict is about devices, and only about devices: a placeholder in
         # the description is reported without deciding anything.
@@ -4699,16 +4882,8 @@ def _doctor_bench_binding(config: AgenticHILConfig) -> JsonObject:
         "field": "bench_binding",
         "unbound": unbound,
         "placeholders": placeholders,
-        "summary": (
-            ("This configuration describes a bench that is not bound to hardware: " if unbound else "This configuration still carries what `init` writes when nothing is attached: ")
-            + " ".join(stated)
-        ),
-        "next_step": (
-            f"Attach the board and run `{ADOPT_HARDWARE_COMMAND}`, which fills the identity keys that are still unset "
-            "from the attached hardware and leaves everything a person has set alone. Where the file was written before "
-            "the project had a profile at all, `agentic-hil init --force` writes it again from the project profile and "
-            "the hardware it finds; that one replaces the whole file, every narrowed permission included."
-        ),
+        "summary": lead + " ".join(stated),
+        "next_step": _bench_binding_next_step(config, unbound, placeholders),
     }
 
 
@@ -4983,10 +5158,27 @@ def bootstrap_probe_listing() -> JsonObject:
         **{key: value for key, value in listed.items() if key not in {"ok", "tool", "backend"}},
     }
     if listed["ok"]:
+        # An enumeration that disclaims its own completeness (`complete: false`,
+        # which the OpenOCD/USB-inventory fallback sets) must not read as a
+        # finished count: it reaches an ST-Link only through the virtual COM port
+        # a V2-1 or a V3 publishes, so a VCP-less probe can sit beside the ones it
+        # saw. The verdict (`conclusive_success`) already exits non-zero over it;
+        # the summary says why, so the exit code is not a silent one (round 0,
+        # finding 1).
+        incomplete = result.get("complete") is False
         result["summary"] = (
-            f"{len(listed['probes'])} connected debugger probe(s) detected by bootstrap discovery. This project has no "
-            "authoritative configuration yet, so the fixed read-only setup commands answered and no configured "
-            "debugger backend was involved."
+            f"{len(listed['probes'])} connected debugger probe(s) read by bootstrap discovery from this host's USB "
+            "serial inventory, which is not an authoritative count: it sees an ST-Link only through the virtual COM "
+            "port a V2-1 or a V3 publishes, so a standalone ST-LINK/V2 -- or any probe with no VCP -- would not appear "
+            "even if attached. This project has no authoritative configuration yet, so the fixed read-only setup "
+            "commands answered and no configured debugger backend was involved. Read the ids off the probes or the "
+            "adapter vendor's own tool for an authoritative count."
+            if incomplete
+            else (
+                f"{len(listed['probes'])} connected debugger probe(s) detected by bootstrap discovery. This project has no "
+                "authoritative configuration yet, so the fixed read-only setup commands answered and no configured "
+                "debugger backend was involved."
+            )
         )
     result["next_step"] = (
         "Write this project's configuration with `agentic-hil setup --agent <agent>` from its root. After that this "
@@ -5042,6 +5234,12 @@ def debugger_probes() -> JsonObject:
         finally:
             service.close()
     failed = sorted(name for name, result in results.items() if not overall_success(result))
+    # A child that answered without error but says its enumeration is not
+    # authoritative (`complete: false`, which the OpenOCD USB-serial listing
+    # always sets) is not a failure, so it stays out of `failed` and off `ok`;
+    # but the aggregate must not read as a finished count either, so it carries
+    # `complete: false` up and the CLI verdict below takes it.
+    incomplete = sorted(name for name, result in results.items() if result.get("complete") is False)
     aggregate: JsonObject = {
         # `all`, not `any`: one probe answering must not report the run as
         # healthy while another failed, and the CLI exit code is derived from
@@ -5050,14 +5248,20 @@ def debugger_probes() -> JsonObject:
         "tool": "debugger_probes_list",
         "debuggers": results,
         "summary": (
-            f"Probe discovery ran for {len(results)} configured debugger(s)."
-            if not failed
-            else f"Probe discovery failed for: {', '.join(failed)}."
+            f"Probe discovery failed for: {', '.join(failed)}."
+            if failed
+            else f"Probe discovery ran for {len(results)} configured debugger(s), but at least one listing is not an "
+            f"authoritative count of attached probes (`complete: false`): {', '.join(incomplete)}."
+            if incomplete
+            else f"Probe discovery ran for {len(results)} configured debugger(s)."
         ),
     }
     # A containment marker on any probe has to reach the top level, or
-    # overall_success() reads clean over a nested quarantine.
-    for marker, unsafe in (("cleanup_required", True), ("quarantined", True), ("audit_ok", False)):
+    # overall_success() reads clean over a nested quarantine. `complete: false`
+    # rides up the same way: it is not an overall_success() marker, but it is the
+    # CLI verdict's (`conclusive_success`), so a VCP-less probe beside the ones a
+    # child saw cannot be exited 0 over.
+    for marker, unsafe in (("cleanup_required", True), ("quarantined", True), ("audit_ok", False), ("complete", False)):
         if any(result.get(marker) is unsafe for result in results.values()):
             aggregate[marker] = unsafe
     unsafe_effect = next((result.get("side_effect_status") for result in results.values() if result.get("side_effect_status") in {"unknown", "partial"}), None)

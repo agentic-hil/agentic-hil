@@ -26,7 +26,7 @@ import textwrap
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
 from agentic_hil.knowledge import command_line_remediation, remediation_fields
-from agentic_hil.report import overall_success
+from agentic_hil.report import conclusive_success
 from agentic_hil.types import JsonObject
 
 # What `--json` says on every `--help` page. One text, because the flag is added
@@ -363,21 +363,24 @@ def _verdict(result: Mapping[str, object]) -> str:
     return "" if result.get("ok") is True else "Failed."
 
 
-# The markers that make `overall_success` false over a result whose own `ok` is
-# true: a call that reached the hardware and could not say what it left behind.
-_CONTAINMENT_MARKERS = ("cleanup_required", "quarantined", "quarantine_id", "audit_ok", "target_ok", "cleanup_ok", "side_effect_status", "hardware_state", "lease_state")
+# The markers that make the exit-code verdict false over a result whose own `ok`
+# is true: a call that reached the hardware and could not say what it left
+# behind, or a discovery that answered but disclaims its own completeness
+# (`complete: false`, which the exit code takes through `conclusive_success`).
+_CONTAINMENT_MARKERS = ("cleanup_required", "quarantined", "quarantine_id", "audit_ok", "target_ok", "cleanup_ok", "side_effect_status", "hardware_state", "lease_state", "complete")
 
 
 def _containment(result: JsonObject) -> list[str]:
     """Name a result that says `ok` and is not clean, because the exit code will.
 
-    `overall_success` is the verdict the exit code is taken from, and it is not
+    `conclusive_success` is the verdict the exit code is taken from, and it is not
     `ok` alone: a quarantine, an audit that could not be written, an effect this
-    bench cannot account for. A rendering that printed only the summary would
-    show a person a calm sentence beside an exit code of 1, which is the one
-    disagreement this layer must never introduce.
+    bench cannot account for, or an enumeration that reports itself incomplete. A
+    rendering that printed only the summary would show a person a calm sentence
+    beside an exit code of 1, which is the one disagreement this layer must never
+    introduce.
     """
-    if result.get("ok") is not True or overall_success(dict(result)):
+    if result.get("ok") is not True or conclusive_success(dict(result)):
         return []
     rows = [(marker, result[marker]) for marker in _CONTAINMENT_MARKERS if marker in result]
     body = _wrap("This did not come back clean, and the exit code says so. What is standing:", indent=_INDENT)

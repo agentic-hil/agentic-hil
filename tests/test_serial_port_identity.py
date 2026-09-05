@@ -904,7 +904,8 @@ def test_a_version_three_entry_identified_by_nothing_is_refused_naming_adopt(tmp
     assert details["field"] == "com_ports.dut_uart"
     assert details["actual_identity_source"] == "device"
     assert details["config_version"] == IDENTIFIED_COM_PORT_CONFIG_VERSION
-    assert "agentic-hil adopt-hardware --apply" in details["migration"]["identify"]
+    assert "agentic-hil adopt-hardware" in details["migration"]["identify"]
+    assert "--apply" not in details["migration"]["identify"], "the CLI has no --apply flag; adoption applies by default"
     assert f"version: {READ_FREE_CONFIG_VERSION}" in details["migration"]["order"]
     assert "identity_source" in details["summary"] and "COM7" in details["summary"]
 

@@ -6,11 +6,13 @@ whose report has just become free text, and the report is the thing this
 repository asked them for. These files are YAML nobody executes, which makes this
 the only place that reads them at all.
 
-What is pinned here is the schema GitHub's form parser applies (an element type it
-knows, an identifier it accepts, a label where one is required, options where a
-choice is offered, and the one combination it refuses outright: a rendered
-textarea that is also required) and the routing the templates promise, so a
-Discussions category or a first-run field cannot quietly leave the set.
+What is pinned here is the subset of GitHub's form schema this helper can check
+from the file alone (an element type it knows, an identifier it accepts, a label
+where one is required, options where a choice is offered, and a validation key it
+recognises) and the routing the templates promise, so a Discussions category or a
+first-run field cannot quietly leave the set. It claims no more than that subset:
+a rendered textarea that is also required is a form GitHub serves -- its own
+documented example is one -- so this does not refuse the pair.
 """
 
 from __future__ import annotations
@@ -91,11 +93,6 @@ def problems(form: dict[str, Any]) -> list[str]:
                 found.append(f"{where} states the validation {key!r}, which this schema has no place for")
             elif not isinstance(value, bool):
                 found.append(f"{where} states required as {value!r} rather than a boolean")
-        # GitHub refuses this pair outright: a textarea whose answer it renders
-        # into a code block cannot also be required, and a form carrying both is
-        # dropped rather than corrected.
-        if kind == "textarea" and attributes.get("render") and validations.get("required"):
-            found.append(f"{where} is a rendered textarea that is also required")
     return found
 
 
@@ -133,8 +130,16 @@ def test_a_repeated_element_id_is_refused() -> None:
     assert found == ["body[1] repeats the id 'probe'"]
 
 
-def test_a_rendered_textarea_that_is_also_required_is_refused() -> None:
-    """The one combination GitHub answers by dropping the whole form."""
+def test_a_rendered_required_textarea_is_accepted() -> None:
+    """GitHub serves a textarea that is both rendered and required (round 0, finding 4).
+
+    An earlier version of this helper refused the pair, claiming GitHub drops any
+    form that carries it. That is not a rule GitHub's parser applies: its own
+    documented form-schema example renders a required textarea, so pinning the
+    prohibition would reject a valid future template and read as though the helper
+    mirrored the platform schema when it did not. The validator recognises
+    `render` and `required` on their own and says nothing about the two together.
+    """
     found = problems(
         {
             "name": "x",
@@ -143,14 +148,14 @@ def test_a_rendered_textarea_that_is_also_required_is_refused() -> None:
                 {
                     "type": "textarea",
                     "id": "output",
-                    "attributes": {"label": "Output", "render": "text"},
+                    "attributes": {"label": "Output", "render": "shell"},
                     "validations": {"required": True},
                 }
             ],
         }
     )
 
-    assert found == ["body[0] is a rendered textarea that is also required"]
+    assert found == []
 
 
 def test_a_choice_with_nothing_to_choose_from_is_refused() -> None:

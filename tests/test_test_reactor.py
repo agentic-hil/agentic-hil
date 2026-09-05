@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import DEFAULT_TEST_PERMISSIONS, FAKE_GDB, FAKE_OPENOCD, write_authoritative_config, write_config
@@ -11,7 +12,7 @@ from agentic_hil.backends.gdbdebug import decode_symbol_value
 from agentic_hil.cli import build_parser, entrypoint
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR
-from agentic_hil.test_reactor import TestReactor, load_test_config, merge_result_status
+from agentic_hil.test_reactor import DebuggerRunner, TestReactor, UartRunner, load_test_config, merge_result_status
 from agentic_hil.tools import AgenticHILToolService
 
 
@@ -167,6 +168,19 @@ def write_test_config(tmp_path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def adopt_argv(next_step: str) -> list[str]:
+    """The `agentic-hil adopt-hardware ...` command a next step names, as argv.
+
+    The advertised repair has to be one the CLI actually accepts: a reader who
+    copies it must not land on `unrecognized arguments` and exit 2, which is what
+    `adopt-hardware --apply` did (round 1, finding 2). So the tests parse the
+    emitted command against the real parser rather than only matching substrings.
+    """
+    match = re.search(r"`agentic-hil (adopt-hardware[^`]*)`", next_step)
+    assert match is not None, f"no adopt-hardware command found in: {next_step}"
+    return match.group(1).split()
 
 
 def test_reactor_flattens_and_deduplicates_all_audit_errors() -> None:
@@ -425,9 +439,15 @@ def test_a_step_naming_a_port_this_bench_declares_none_of_says_what_to_do(tmp_pa
     assert validation["configured_com_ports"] == []
     next_step = validation["next_step"]
     assert "`com_ports`" in next_step
+    # Emptiness is not read as proof the configuration is what is wrong: the more
+    # common reading, that the plan is for another bench, is offered first and
+    # regeneration only where the project profile is meant to carry the kind.
+    assert "another bench" in next_step
     assert "agentic-hil init --force" in next_step
-    # And it says what that command costs, because it replaces the file.
+    # And it says what that command costs, because it replaces the file: a reset,
+    # not a repair.
     assert "narrowed permission" in next_step
+    assert "reset rather than a repair" in next_step
     assert service.calls == []
 
 
@@ -452,7 +472,14 @@ def test_a_step_naming_a_port_this_bench_does_not_have_points_at_the_ones_it_doe
     next_step = validation["next_step"]
     assert "console" in next_step
     assert "`com_ports.dut_uart`" in next_step
-    assert "adopt-hardware" in next_step
+    # The advertised fill command names the entry it fills and parses on the real
+    # CLI. A bare `adopt-hardware` could not pick a freshly declared COM entry
+    # sitting beside `console`, and `--apply` is not a flag at all (round 1,
+    # finding 2), so the emitted argv is exercised rather than substring-matched.
+    parsed = build_parser().parse_args(adopt_argv(next_step))
+    assert parsed.command == "adopt-hardware"
+    assert parsed.com_port == "dut_uart"
+    assert "--apply" not in next_step
     # The empty-section instruction is the wrong one here and must not appear.
     assert "init --force" not in next_step
     assert service.calls == []
@@ -475,6 +502,249 @@ def test_a_step_naming_a_debugger_this_bench_does_not_have_answers_the_same_way(
     assert "`debuggers`" in next_step
     assert "`debuggers.typo`" in next_step
     assert "dut" in next_step
+    # The debugger fill command names the entry with `--debugger` and parses on
+    # the real CLI: with `dut` already declared, a bare `adopt-hardware` refuses
+    # an unnamed debugger (round 1, finding 2).
+    parsed = build_parser().parse_args(adopt_argv(next_step))
+    assert parsed.command == "adopt-hardware"
+    assert parsed.debugger == "typo"
+    assert "--apply" not in next_step
+    assert service.calls == []
+
+
+def test_the_declared_debugger_fill_command_selects_the_new_entry_on_a_multi_entry_bench() -> None:
+    """The emitted debugger command performs the fill it advertises (round 1, finding 2).
+
+    `entry_fill_step` runs in the branch where the bench already declares entries
+    and the operator has just declared the missing one beside them. Adoption then
+    faces several, so its selection refuses an unnamed debugger. This parses the
+    argv the debugger kind emits and runs adoption's own selection on the
+    multi-entry document, to prove the named flag lands on the freshly declared
+    entry where the bare command could not. The COM kind's own selection, which
+    also runs through the debugger step first, is covered by the three
+    `_com_adopt_instruction` tests below.
+    """
+    from agentic_hil.adopt import _choose_debugger
+
+    config = SimpleNamespace(debuggers={"dut": {"type": "openocd"}, "newprobe": {"type": "openocd"}})
+    # A debugger that already had `dut`, with `newprobe` just declared beside it.
+    debugger_doc = {"debuggers": {"dut": {"type": "openocd"}, "newprobe": {"type": "openocd"}}}
+    debugger_argv = adopt_argv(DebuggerRunner.entry_fill_step(config, "newprobe"))
+    debugger_parsed = build_parser().parse_args(debugger_argv)
+    assert debugger_parsed.debugger == "newprobe"
+    # The flag lands adoption on exactly the declared entry...
+    assert _choose_debugger(debugger_doc, debugger_parsed.debugger) == ("newprobe", debugger_doc["debuggers"]["newprobe"])
+    # ...where the bare command (no --debugger) is refused as ambiguous.
+    bare_debugger = _choose_debugger(debugger_doc, None)
+    assert isinstance(bare_debugger, dict) and bare_debugger["ok"] is False
+
+
+def test_com_fill_command_names_the_only_debugger_so_adoption_selects_it() -> None:
+    """A COM fill runs through adoption's debugger-first selection (round 2, finding 2).
+
+    `_adopt` calls `_choose_debugger` before `_choose_com_port`, so the COM-only
+    fill the guidance advertises has to survive the debugger step. With one
+    debugger configured the command names it -- so a second one added later does
+    not silently start refusing it -- and this parses the emitted argv and runs
+    adoption's two selections in order, proving the command lands on both the
+    debugger and the freshly declared port.
+    """
+    from agentic_hil.adopt import _choose_com_port, _choose_debugger
+
+    config = SimpleNamespace(debuggers={"dut": {"type": "openocd"}})
+    document = {"debuggers": {"dut": {"type": "openocd"}}, "com_ports": {"console": {"device": "COM7"}, "new_uart": {}}}
+
+    argv = adopt_argv(UartRunner.entry_fill_step(config, "new_uart"))
+    parsed = build_parser().parse_args(argv)
+    assert parsed.command == "adopt-hardware"
+    assert parsed.debugger == "dut"
+    assert parsed.com_port == "new_uart"
+    assert "--apply" not in " ".join(argv)
+    # Adoption's real order: the debugger first, then the port it can now reach.
+    assert _choose_debugger(document, parsed.debugger) == ("dut", document["debuggers"]["dut"])
+    assert _choose_com_port(document, parsed.com_port, ()) == ("new_uart", document["com_ports"]["new_uart"])
+
+
+def test_com_fill_on_a_debugger_free_bench_does_not_promise_adoption() -> None:
+    """A UART-only bench has no debugger, so adoption cannot run there (round 2, finding 2).
+
+    `_choose_debugger` refuses a configuration with no debugger before any port is
+    reached, so the previous `adopt-hardware --com-port <name>` sent the reader to
+    a command that could never fill the port. The guidance names the manual path
+    instead and advertises no COM adoption command.
+    """
+    from agentic_hil.adopt import _choose_debugger
+
+    config = SimpleNamespace(debuggers={})
+    document = {"debuggers": {}, "com_ports": {"new_uart": {}}}
+
+    guidance = UartRunner.entry_fill_step(config, "new_uart")
+    # Adoption really cannot select an entry here...
+    refusal = _choose_debugger(document, None)
+    assert isinstance(refusal, dict) and refusal["ok"] is False
+    # ...so no `adopt-hardware ... --com-port` command is advertised...
+    assert re.search(r"`agentic-hil adopt-hardware[^`]*--com-port", guidance) is None
+    # ...and the reader is told to fill the device by hand.
+    assert "com_ports.new_uart.device" in guidance
+    assert "agentic-hil com-ports" in guidance
+
+
+def test_the_debugger_free_com_repair_names_a_version_3_bench_s_identity(tmp_path: Path) -> None:
+    """The only repair a UART-only version-3 bench has must load (round 0, finding 5).
+
+    Generated configurations are version 3, where a `com_ports` entry with a bare
+    `device` -- a `COM7` or a `/dev/ttyACM0` with no `serial_number`,
+    `resource_id`, `/dev/serial/by-id/...` name or `identity_source` -- is refused
+    on the next load. On a debugger-free bench adoption cannot run, so the manual
+    path is the whole repair, and telling the operator to set only `.device` there
+    left the configuration invalid, on Windows in particular. The guidance now
+    names the identity a bind needs, and following it produces a file that loads.
+    """
+    config_path = write_config(
+        tmp_path / "bench",
+        config_version=3,
+        com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n",
+    )
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(re.sub(r"(?ms)^debuggers:\n(?:  .*\n)+", "debuggers: {}\n", text), encoding="utf-8")
+    config = load_config(str(config_path))
+    assert config.config_version == 3
+    assert config.debuggers == {}
+
+    guidance = UartRunner.entry_fill_step(config, "dut_uart")
+    # No debugger, so adoption cannot run and no COM adoption command is advertised.
+    assert re.search(r"`agentic-hil adopt-hardware[^`]*--com-port", guidance) is None
+    # The repair names the device AND the identity a bare version-3 device lacks,
+    # not only `.device` as it did before (round 0, finding 5).
+    assert "com_ports.dut_uart.device" in guidance
+    assert "agentic-hil com-ports" in guidance
+    assert "serial_number" in guidance
+    assert "identity_source" in guidance
+
+    # The repair, followed: a version-3 bound device with no identity is refused,
+    # and the same device carrying the serial the guidance names loads. Following
+    # the old "set only `.device`" advice is the first of these.
+    bare = write_config(
+        tmp_path / "bare",
+        config_version=3,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n    baudrate: 115200\n',
+    )
+    with pytest.raises(ConfigError) as refused:
+        load_config(str(bare))
+    assert "identified" in str(refused.value)
+    identified = write_config(
+        tmp_path / "identified",
+        config_version=3,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM7"\n    serial_number: "066AFF303435"\n    baudrate: 115200\n',
+    )
+    assert load_config(str(identified)).com_ports["dut_uart"].device == "COM7"
+
+
+def test_the_debugger_free_com_repair_s_vid_pid_route_also_loads(tmp_path: Path) -> None:
+    """The vid/pid alternative the repair offers must load too (round 2, finding 2).
+
+    An adapter that publishes USB ids but no serial number is the second half of
+    the version-3 repair, and version 3 refuses a `device` carrying `vid`/`pid`
+    and nothing else exactly as it refuses a bare one: USB ids name a kind of
+    adapter, not a unit, so the entry must also declare `identity_source: vid_pid`.
+    The earlier guidance named only the `vid` and `pid`, so an operator with a
+    serial-less adapter followed the repair into a file that fails its next load.
+    The guidance now names that `identity_source`, and following it produces a
+    file that loads (round 1, finding 2).
+    """
+    config_path = write_config(
+        tmp_path / "bench",
+        config_version=3,
+        com_ports_yaml="com_ports:\n  dut_uart:\n    baudrate: 115200\n",
+    )
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(re.sub(r"(?ms)^debuggers:\n(?:  .*\n)+", "debuggers: {}\n", text), encoding="utf-8")
+    config = load_config(str(config_path))
+    assert config.debuggers == {}
+
+    guidance = UartRunner.entry_fill_step(config, "dut_uart")
+    # The vid/pid alternative names the `identity_source` a bare vid/pid lacks, not
+    # only the ids as it did before (round 1, finding 2).
+    assert "vid" in guidance and "pid" in guidance
+    assert "identity_source: vid_pid" in guidance
+
+    # The repair followed literally on the vid/pid route: `device` + `vid` + `pid`
+    # with no `identity_source` is refused, exactly as a bare device is, because
+    # USB ids name a kind of adapter rather than a unit...
+    bare_ids = write_config(
+        tmp_path / "bare-ids",
+        config_version=3,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "/dev/ttyUSB0"\n    vid: 6790\n    pid: 29987\n    baudrate: 115200\n',
+    )
+    with pytest.raises(ConfigError) as refused:
+        load_config(str(bare_ids))
+    assert refused.value.to_dict()["actual_identity_source"] == "vid_pid"
+    # ...and the same entry carrying the `identity_source` the guidance now names
+    # loads, which the old advice never produced.
+    identified = write_config(
+        tmp_path / "typed",
+        config_version=3,
+        com_ports_yaml='com_ports:\n  dut_uart:\n    device: "/dev/ttyUSB0"\n    vid: 6790\n    pid: 29987\n    identity_source: "vid_pid"\n    baudrate: 115200\n',
+    )
+    loaded = load_config(str(identified))
+    assert loaded.com_ports["dut_uart"].device == "/dev/ttyUSB0"
+    assert loaded.com_ports["dut_uart"].identity_source == "vid_pid"
+
+
+def test_com_fill_on_a_multi_debugger_bench_asks_which_debugger() -> None:
+    """Several debuggers, and none can be picked for the operator (round 2, finding 2).
+
+    Adoption would refuse an unnamed debugger before it reached the port, so the
+    guidance names every debugger and asks for `--debugger` rather than
+    advertising the bare command that refuses. Once the operator names one, the
+    two selections run in order and land on the debugger and then the port.
+    """
+    from agentic_hil.adopt import _choose_com_port, _choose_debugger
+
+    config = SimpleNamespace(debuggers={"dut": {"type": "openocd"}, "spare": {"type": "openocd"}})
+    document = {"debuggers": {"dut": {"type": "openocd"}, "spare": {"type": "openocd"}}, "com_ports": {"new_uart": {}}}
+
+    guidance = UartRunner.entry_fill_step(config, "new_uart")
+    # Both debuggers are named and the operator is asked to choose one.
+    assert "dut" in guidance and "spare" in guidance
+    assert "--debugger" in guidance
+    assert "--com-port new_uart" in guidance
+    # The bare command (no --debugger) is exactly what adoption refuses here, which
+    # is why the guidance cannot advertise it.
+    bare = _choose_debugger(document, None)
+    assert isinstance(bare, dict) and bare["ok"] is False
+    # Once the operator names one, the two selections run in order and land.
+    assert _choose_debugger(document, "spare") == ("spare", document["debuggers"]["spare"])
+    assert _choose_com_port(document, "new_uart", ()) == ("new_uart", document["com_ports"]["new_uart"])
+
+
+def test_unbound_com_refusal_names_the_debugger_dependency_end_to_end(tmp_path: Path) -> None:
+    """The cited path (`UartRunner.unbound_refusal`) emits the same debugger-aware
+    guidance a real plan reaches (round 2, finding 2).
+
+    A plan opening a declared-but-unbound port on a single-debugger bench is
+    refused `com_port_not_bound`, and the `next_step` now carries the `--debugger`
+    the COM-only fill needs, parseable on the real CLI and selecting through
+    adoption's own order.
+    """
+    from agentic_hil.adopt import _choose_com_port, _choose_debugger
+
+    config_path = write_config(tmp_path, com_ports_yaml="com_ports:\n  dut_uart:\n    device: null\n")
+    config = load_config(str(config_path))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {action: uart_open, port_id: dut_uart}\n")
+    service = RecordingService()
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["error_type"] == "com_port_not_bound"
+    next_step = result["validation_error"]["next_step"]
+    argv = adopt_argv(next_step)
+    parsed = build_parser().parse_args(argv)
+    assert parsed.debugger == "dut"
+    assert parsed.com_port == "dut_uart"
+    document = {"debuggers": {"dut": {"type": "openocd"}}, "com_ports": {"dut_uart": {"device": ""}}}
+    assert _choose_debugger(document, parsed.debugger) == ("dut", document["debuggers"]["dut"])
+    assert _choose_com_port(document, parsed.com_port, ()) == ("dut_uart", document["com_ports"]["dut_uart"])
     assert service.calls == []
 
 
@@ -494,7 +764,10 @@ def test_troubleshooting_has_a_section_for_the_refusal_a_first_plan_hits() -> No
     section = page.split(heading, 1)[1].split("\n## ", 1)[0]
     # The three routes out, the same three the refusal's own `next_step` names.
     assert "agentic-hil init --force" in section
-    assert "agentic-hil adopt-hardware --apply" in section
+    assert "agentic-hil adopt-hardware" in section
+    # The CLI has no --apply flag; adoption applies by default. The section must
+    # not send a reader to a command that exits 2 at argument parsing.
+    assert "adopt-hardware --apply" not in section
     assert "configured_com_ports" in section
     # And the field a reader is told to read first, which is where the concrete
     # answer for their case is.
@@ -1580,8 +1853,15 @@ def test_preflight_rejects_a_can_bus_the_config_does_not_declare(tmp_path: Path)
     result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
 
     assert result["ok"] is False
-    assert result["validation_error"]["field"] == "steps[0].bus_id"
-    assert result["validation_error"]["configured_can_buses"] == ["dut_can"]
+    validation = result["validation_error"]
+    assert validation["field"] == "steps[0].bus_id"
+    assert validation["configured_can_buses"] == ["dut_can"]
+    # Adoption has no CAN half, so a CAN refusal must not send the reader to
+    # `adopt-hardware` for a fill it cannot perform; the adapter and channel are
+    # written by hand instead (round 0, finding 1).
+    next_step = validation["next_step"]
+    assert "adopt-hardware" not in next_step
+    assert "adapter and channel" in next_step
     assert service.calls == []
 
 

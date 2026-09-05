@@ -122,6 +122,14 @@ forwarding one is how the isolation stops being the isolation that was measured.
 payload that decides the same things from inside it (`--cd`, `--sandbox`,
 `-c sandbox_mode=…`, and every short or attached spelling of them), because
 Codex reads the last one it is given and these arrive after the loop's own.
+A stale login is refreshed here before the run, by starting that CLI once, and
+the CLI is what settles the verdict: a probe that exits `0` and answers proves
+the login works, so the run proceeds even when the stored file still carries the
+old expiry, which is printed as one line rather than treated as a reason to
+stop. Every refusal on that path carries the probe's exit code, the tail of its
+output (redacted against the stored login) and the file's expiry before and
+after the run, and it asks you to sign in again only when the CLI itself
+reported a spent refresh token or an authentication failure.
 Neither agent shares an environment with the other: each gets a virtualenv built
 from the committed tree it works in and rebuilt when that tree's
 `pyproject.toml` moves, so a round that changes the packaging is reviewed

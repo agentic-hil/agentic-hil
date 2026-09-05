@@ -802,6 +802,30 @@ def overall_success(result: JsonObject) -> bool:
     return failed_success_check(result) is None
 
 
+def conclusive_success(result: JsonObject) -> bool:
+    """`overall_success`, and also that the result does not disclaim its own scope.
+
+    A discovery can answer without error yet state that its answer is not the
+    whole picture: an OpenOCD probe listing carries ``complete: false`` because it
+    reaches an ST-Link only through the virtual COM port that probe publishes, so
+    a VCP-less probe can sit beside the ones it saw. Such a read is a success --
+    it is filed as no failure and an MCP call over it is no error -- but it is not
+    a *clean* pass a caller may read as "every probe was found". The exit code and
+    the prose a person reads take this stricter verdict.
+
+    Deliberately apart from `overall_success`, which `is_failure_report` and the
+    MCP ``isError`` flag are also derived from: folding `complete` into that
+    shared predicate would file every successful-but-incomplete read as the
+    bench's `last_failure` and turn its tool call into an error, when it is
+    neither. Only the presentation boundary -- the CLI exit status and the
+    rendering -- treats "not authoritative" as "not a clean pass". `complete` is
+    written by exactly one producer (the OpenOCD USB-serial probe listing), so
+    this narrows nothing else: a result that never claims completeness is scored
+    exactly as `overall_success` scores it.
+    """
+    return overall_success(result) and result.get("complete") is not False
+
+
 def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[str], list[str]]) -> JsonObject:
     report = read_last_failure(config)
     if report.get("ok") is not True and report.get("tool") == "classify_last_error" and report.get("error_type") not in {None, "report_not_found"}:
