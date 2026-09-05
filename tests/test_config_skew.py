@@ -119,6 +119,81 @@ def test_keys_a_later_release_added_are_reported_as_a_newer_release_wrote_this(
     assert "agentic-hil upgrade" in refusal["next_step"]
 
 
+def test_the_file_saying_which_release_wrote_it_is_what_reaches_this_branch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#460's sentence could not fire on any build this project ships.
+
+    A key reached it only if `FIELDS_INTRODUCED_IN` recorded it with a release
+    above the running one, and a build knows only the fields it has: the keys a
+    later release adds are exactly the keys the table has no entry for, and the
+    two tests below pin every entry to at or under `__version__`. So the branch
+    was unreachable, on a real installation, against a real file from a newer
+    release, which is the one case it exists for.
+
+    The file says which release wrote it, and that is read instead. No
+    `__version__` is patched here and no schema is taken apart: this is the
+    shipped build, refusing a key it does not have in a file that records a
+    release above its own.
+    """
+    raw = config_written_by_a_newer_release(tmp_path)
+    raw["debuggers"]["dut"] = {"type": "openocd", "a_field_from_the_future": True}
+    raw["provenance"] = {"created_by": "agent", "agentic_hil_version": "99.0.0"}
+
+    refusal = refuse(raw, monkeypatch)
+
+    assert "newer Agentic HIL" in refusal["summary"]
+    assert refusal["written_by_release"] == "99.0.0"
+    assert refusal["installed_version"] == __version__
+    assert refusal["rejected_fields"] == ["a_field_from_the_future"]
+    assert "a_field_from_the_future" in refusal["summary"]
+    assert "agentic-hil upgrade" in refusal["next_step"]
+    # The table said nothing about this key, and did not have to.
+    assert "fields_introduced_in" not in refusal
+
+
+@pytest.mark.parametrize("recorded", ["0.0.1", __version__, "not a version", ""])
+def test_a_file_from_this_release_or_an_older_one_keeps_the_refusal_about_the_typo(
+    recorded: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction, which is the ordinary case: somebody mistyped a key.
+
+    A file this installation or an older one wrote is not a file from the
+    future, whatever unknown key it carries, and telling that operator to upgrade
+    would send them away from the typo actually in their file. A provenance value
+    that is not a release number answers nothing and falls to the same place.
+    """
+    raw = config_written_by_a_newer_release(tmp_path)
+    raw["debuggers"]["dut"] = {"type": "openocd", "probe_idd": "PROBE-A"}
+    raw["provenance"] = {"created_by": "human", "agentic_hil_version": recorded}
+
+    refusal = refuse(raw, monkeypatch)
+
+    assert "newer Agentic HIL" not in refusal["summary"]
+    assert "written_by_release" not in refusal
+    assert "next_step" not in refusal
+    assert refusal["rejected_fields"] == ["probe_idd"]
+    assert "probe_idd" in refusal["summary"]
+
+
+def test_a_recorded_newer_release_outranks_the_table_that_cannot_know_the_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The table is a refinement for a file that says nothing, not the judgement.
+
+    Here the file records a release above this one and the rejected keys are ones
+    the table happens to know about. The provenance decides, so the refusal is
+    the upgrade one whatever the table would have made of the keys.
+    """
+    raw = config_written_by_a_newer_release(tmp_path)
+    raw["debuggers"]["dut"]["probe_idd"] = "PROBE-A"
+    raw["provenance"] = {"created_by": "agent", "agentic_hil_version": "99.0.0"}
+
+    refusal = refuse(raw, monkeypatch, schema=schema_without(*NEWER_RELEASE_KEYS), version="0.21.2")
+
+    assert "newer Agentic HIL" in refusal["summary"]
+    assert refusal["written_by_release"] == "99.0.0"
+    assert refusal["rejected_fields"] == sorted([*NEWER_RELEASE_KEYS, "probe_idd"])
+
+
 def test_one_key_no_release_ever_added_keeps_the_refusal_about_the_typo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
