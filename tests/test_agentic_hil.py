@@ -1782,6 +1782,44 @@ def test_the_withdrawn_pin_note_carries_every_sentence_exactly_once(
     assert summary.count("No restart is needed.") == 1
 
 
+def test_a_withdrawn_note_does_not_name_the_pin_the_resolution_just_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two sentences of one summary would otherwise contradict each other.
+
+    A receipt recording an exact pin at the installed release, on a bench whose
+    own index is behind the public one: the unpinned resolution moved nothing, so
+    the pin demonstrably holds nothing back and the note says exactly that, and
+    naming the same pin under `held_back_by` in the next sentence would take it
+    back. A recorded option, which no resolution here has cleared, is still
+    named.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        f'[tool]\nrequirements = [{{ name = "agentic-hil", specifier = "=={__version__}" }}]\n',
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert "held_back_by" not in result
+    assert "the recorded requirement" not in result["summary"]
+    assert "The pin holds no release back" in result["summary"]
+    assert "What a resolution reaches is the installation's own" in result["summary"]
+
+
 def test_a_pin_note_above_the_index_says_it_is_ahead_and_not_that_it_is_on_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

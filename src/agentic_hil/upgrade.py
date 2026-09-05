@@ -2109,9 +2109,20 @@ def _resolution_holds(recorded: _RecordedInstall) -> tuple[str, ...]:
     of what a floor does; such a receipt now falls to the branch that says
     nothing recorded explains it.
     """
-    holds = [f"the recorded requirement `agentic-hil{recorded.exact_pin}`"] if recorded.exact_pin else []
-    holds.extend(f"the recorded option `{key} = {recorded.options[key]}`" for key in _RESOLUTION_HOLDING_OPTIONS if recorded.options.get(key) not in (None, False))
-    return tuple(holds)
+    requirement = [f"the recorded requirement `agentic-hil{recorded.exact_pin}`"] if recorded.exact_pin else []
+    return (*requirement, *_recorded_option_holds(recorded))
+
+
+def _recorded_option_holds(recorded: _RecordedInstall) -> tuple[str, ...]:
+    """The recorded options alone, without the requirement that may not be holding.
+
+    Read on its own by the pin note, where an unpinned resolution has already
+    established that the recorded requirement holds nothing back: naming it there
+    would put "the pin holds no release back" and "this installation stays here
+    because its receipt records the pin" in consecutive sentences of one summary.
+    A recorded option is unaffected by that resolution and still applies.
+    """
+    return tuple(f"the recorded option `{key} = {recorded.options[key]}`" for key in _RESOLUTION_HOLDING_OPTIONS if recorded.options.get(key) not in (None, False))
 
 
 def _newest_release(manager: str, command: list[str], current_version: str) -> _NewestRelease:
@@ -2554,6 +2565,12 @@ def _upgrade_changed_nothing(
         # named once here, and which of the index sentences it gets is the only
         # thing the index decides.
         withdrawn = check.behind
+        # The recorded options and not the recorded requirement, because the
+        # unpinned resolution above has just established that the requirement
+        # holds nothing back: naming it here would put "the pin holds no release
+        # back" and "this installation stays here because its receipt records the
+        # pin" in consecutive sentences of one summary.
+        option_holds = _recorded_option_holds(recorded)
         sentences = [
             f"Agentic HIL is at {current_version}, which is the version this installation is pinned to, and "
             f"{manager} resolved nothing newer to install.",
@@ -2575,10 +2592,10 @@ def _upgrade_changed_nothing(
                 (
                     f"The index publishes {check.version}, which is newer, so this is not the newest release there is: "
                     f"this installation stays at {current_version} because its own receipt records "
-                    f"{_named_series(list(check.holds))}, which {manager} reports as nothing to do and offers no command "
+                    f"{_named_series(list(option_holds))}, which {manager} reports as nothing to do and offers no command "
                     f"that clears."
                 )
-                if check.holds
+                if option_holds
                 else (
                     f"The index publishes {check.version}, which is newer, and {manager} still resolves nothing for "
                     f"this installation, so this is not the newest release. What a resolution reaches is the "
@@ -2611,7 +2628,7 @@ def _upgrade_changed_nothing(
                 **shape,
                 "reinstall_command": reinstall_command,
                 **newest_release,
-                **({"held_back_by": list(check.holds)} if withdrawn and check.holds else {}),
+                **({"held_back_by": list(option_holds)} if withdrawn and option_holds else {}),
                 **currency_fields,
             },
             currency_note,
