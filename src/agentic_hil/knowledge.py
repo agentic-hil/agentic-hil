@@ -824,10 +824,12 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "was recorded for it. A `uv tool install --exclude-newer <date>` writes that date into the receipt, and "
             "every later `uv tool upgrade` resolves as of it and prints `Nothing to upgrade` however many releases "
             "have appeared since; `uv` records the option whether it was given as a flag or through the environment, "
-            "and offers no command that clears it. A recorded exact requirement does the same thing when the manager "
-            "does not say so in words. Nothing was changed and nothing was refused: `version` is what is installed, "
-            "`newest_release` is what the index publishes, and the difference between them is the whole of this "
-            "result."
+            "and offers no command that clears it. A recorded exact `==` requirement does the same thing when the "
+            "manager does not say so in words; a `>=` or `~=` floor never does, because a floor resolves to whatever "
+            "the index offers above it, and an installation created with one is not reported here at all. Nothing was "
+            "changed: no command capable of replacing this installation ran. What was refused is the release itself, "
+            "which is why this exits non-zero: `version` is what is installed, `newest_release` is what the index "
+            "publishes, and the difference between them is the whole of this result."
         ),
         remediation=(
             "{reinstall_first_step}",
