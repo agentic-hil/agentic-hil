@@ -119,9 +119,9 @@ def test_the_probed_commands_are_exactly_the_ones_the_examples_invoke() -> None:
     invoked = invoked_subcommands(
         [
             *github_commands(GITHUB, "hardware"),
-            *github_commands(GITHUB, "simulator"),
+            *github_commands(GITHUB, "check-plan"),
             *gitlab_commands(GITLAB, "hardware"),
-            *gitlab_commands(GITLAB, "simulator"),
+            *gitlab_commands(GITLAB, "check-plan"),
         ]
     )
 

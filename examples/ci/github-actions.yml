@@ -5,9 +5,10 @@
 #
 # Two jobs, because there are two paths and a reader has to see both in one
 # file. `hardware` runs the plans on a self-hosted runner that has the board.
-# `simulator` runs on a hosted runner, has no bench, establishes nothing
-# electrical, and checks that the plans themselves are loadable: the cheapest
-# place to find a broken plan is here, and the most expensive is the bench.
+# `check-plan` runs on a hosted runner, has no bench, runs no firmware and
+# models no electrical behaviour, so it establishes nothing electrical; what it
+# checks is that the plans themselves are loadable, and the cheapest place to
+# find a broken plan is here while the most expensive is the bench.
 #
 # What the runner has to provide before this workflow can run at all is in
 # docs/ci-examples.md. Nothing here installs Agentic HIL, writes a
@@ -28,7 +29,7 @@ permissions:
 env:
   # The exact release this workflow is written against. The hardware job holds
   # the bench's own installation to it and stops when they disagree; the
-  # simulator job installs exactly it. No range, no `latest`, no git reference:
+  # check-plan job installs exactly it. No range, no `latest`, no git reference:
   # a version a resolver picked is a version nobody reviewed, and the two jobs
   # would stop being about the same code.
   AGENTIC_HIL_VERSION: "0.21.5"
@@ -173,13 +174,14 @@ jobs:
             .agentic-hil/reports/
           if-no-files-found: warn
 
-  simulator:
+  check-plan:
     # The other path. No bench, no board, so any hosted runner will do, and it
     # runs on every pull request including the ones from forks: there is
-    # nothing here for a fork to reach. It establishes nothing electrical. What
-    # it does establish is that every plan in this repository is one the
-    # reactor could load, which is the failure worth finding before anybody
-    # carries a board to it.
+    # nothing here for a fork to reach. It runs no firmware and models no
+    # electrical behaviour, so it establishes nothing electrical. What it does
+    # establish is that every plan in this repository is one the reactor could
+    # load, which is the failure worth finding before anybody carries a board
+    # to it.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
