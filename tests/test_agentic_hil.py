@@ -2483,13 +2483,18 @@ def test_nothing_is_reported_where_the_platform_replaces_a_running_executable(
     Empty and "cannot say" are different claims, and only the first is worth
     printing. The upgrade completes either way and nothing is lost, so a refusal
     there would block a valid upgrade over a failure that host does not have.
+
+    None rather than the empty list, because the empty list is the answer "the
+    table was read and nothing of ours was in it", and returning it here put
+    "No restart is needed." on the summaries of every macOS bench and of every
+    Windows host whose snapshot raised.
     """
     from agentic_hil.upgrade import _processes_holding_installation
 
     monkeypatch.setattr(sys, "prefix", _TOOL_ENV)
     monkeypatch.setattr("agentic_hil.upgrade.snapshot_process_images", lambda: None)
 
-    assert _processes_holding_installation() == []
+    assert _processes_holding_installation() is None
 
 
 def test_a_reported_process_carries_the_project_it_runs_in_and_when_it_started(
@@ -2849,6 +2854,145 @@ def test_a_live_server_is_named_on_the_pin_note_as_well(
     assert result["restart_required"] is True
     assert result["restart_required_by"] == [_LIVE_SERVER]
     assert "pid 4242 in /projects/blinky" in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+
+
+def test_the_pin_refusal_names_the_running_server_and_asks_for_the_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one unchanged outcome that never carried the servers it left running.
+
+    A pin below the release the index offers replaced nothing, exactly as the
+    pin note and the plain already-current answer replaced nothing, so a server
+    started before this call is running whatever was on disk then and the same
+    reasoning applies word for word. It was the only outcome that did not carry
+    it: measured with a holder under the environment root, the refusal answered
+    `restart_required: false` and named nobody.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["ok"] is False
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [_LIVE_SERVER]
+    assert result["restart_required_by_count"] == 1
+    assert "pid 4242 in /projects/blinky" in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+    # And the refusal keeps everything it already carried.
+    assert result["pinned_version"] == "0.7.1"
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil@latest"'
+
+
+def test_a_pin_refusal_on_a_quiet_machine_still_says_no_restart_is_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neighbouring direction: an empty table is still the answer "nothing"."""
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["restart_required"] is False
+    assert "restart_required_by" not in result
+    assert "No restart is needed." in result["summary"]
+
+
+def _table_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host that publishes no process table: macOS, or a snapshot that raised."""
+    monkeypatch.setattr("agentic_hil.upgrade.snapshot_process_images", lambda: None)
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: None)
+
+
+_CANNOT_SAY = "could not be read on this host"
+
+
+def test_a_host_that_cannot_read_its_process_table_says_so_where_nothing_was_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported defect: macOS was told no restart was needed, on no evidence.
+
+    `snapshot_process_images()` answers None on a host with no process table of
+    its own, which is macOS and a Windows snapshot that raised, and that answer
+    used to arrive at the summary as the empty list. Both already-current
+    answers then printed "No restart is needed." about a machine nothing here
+    had looked at. The sentence now says what is actually known, and
+    `restart_required` is left off rather than answered false.
+    """
+    _recording_manager(monkeypatch, answers={"resolution": PIP_WOULD_INSTALL_NOTHING})
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["install_skipped"] is True
+    assert "restart_required" not in result
+    assert "restart_required_by" not in result
+    assert _CANNOT_SAY in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+    assert entrypoint(["upgrade", "--json"]) == 0
+
+
+def test_a_host_that_cannot_read_its_process_table_says_so_where_the_manager_moved_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second already-current summary, held to the same sentence."""
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        version_after=__version__,
+    )
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert "restart_required" not in result
+    assert _CANNOT_SAY in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+
+
+def test_a_host_that_cannot_read_its_process_table_says_so_on_the_pin_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """And the third, so one host tells one story across every unchanged outcome."""
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert "restart_required" not in result
+    assert _CANNOT_SAY in result["summary"]
     assert "No restart is needed" not in result["summary"]
 
 

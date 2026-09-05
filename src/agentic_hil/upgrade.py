@@ -859,7 +859,7 @@ def _upgrading_process_and_its_launchers(by_pid: dict[int, ProcessImage], owned_
     return excluded
 
 
-def _processes_holding_installation() -> list[JsonObject]:
+def _processes_holding_installation() -> list[JsonObject] | None:
     """Processes running out of the installation an upgrade is about to replace.
 
     Read before the manager runs and reported afterwards, because those are the
@@ -869,10 +869,12 @@ def _processes_holding_installation() -> list[JsonObject]:
     owes an operator, and it is not a reason to refuse an upgrade the operator
     typed.
 
-    Empty on a host whose process table this cannot read, and empty is not the
-    same claim: a result carries the list only where there was one to take, so
-    "nothing is running out of this installation" is never said by a host that
-    could not have known.
+    None on a host whose process table this cannot read, and that is not the
+    empty list's claim: macOS publishes no such table and a Windows snapshot can
+    fail, and both used to arrive here as "nothing is running out of this
+    installation", which put "No restart is needed." on the two already-current
+    summaries of a machine that could not have known. The callers say so instead
+    and leave `restart_required` off the result rather than answering it false.
 
     Each entry carries what it takes to find the process again: the pid, the
     image it runs, the directory it was started in, which for an MCP server is
@@ -882,7 +884,7 @@ def _processes_holding_installation() -> list[JsonObject]:
     """
     snapshot = snapshot_process_images()
     if snapshot is None:
-        return []
+        return None
     owned_root = _dedicated_environment_root()
     owned_prefix = _normalized_location(owned_root).rstrip("/") + "/" if owned_root is not None else None
     scripts = _installation_console_scripts()
@@ -1899,13 +1901,26 @@ def _judged_against_the_index(outcome: JsonObject, check: _NewestRelease, manage
     }
 
 
+def _restart_sentence(waiting: JsonObject) -> str:
+    """The one sentence about restarting that this host is entitled to.
+
+    Three of them, and only two existed: a notice naming the processes still
+    running, the plain "No restart is needed." for a table that was read and held
+    none, and, for a host whose table could not be read at all, the sentence that
+    says so. macOS took the second one, which is a claim about that operator's
+    machine made without looking at it.
+    """
+    notice = waiting.get("restart_notice")
+    return str(notice) if isinstance(notice, str) and notice else "No restart is needed."
+
+
 def _nothing_to_install(
     tool: str,
     manager: str,
     command: list[str],
     current_version: str,
     resolution: JsonObject | None,
-    still_running: list[JsonObject],
+    still_running: list[JsonObject] | None,
 ) -> JsonObject:
     """Nothing to install, answered before the installation could be put at risk.
 
@@ -1929,7 +1944,7 @@ def _nothing_to_install(
                 f"Agentic HIL is at {current_version} and {manager} resolves nothing to install for this installation, "
                 f"so nothing was installed and no command that could replace it was run."
             )
-            + (f" {waiting['restart_notice']}" if waiting else " No restart is needed."),
+            + f" {_restart_sentence(waiting)}",
             "manager": manager,
             "command": command,
             "install_skipped": True,
@@ -1937,7 +1952,6 @@ def _nothing_to_install(
             "previous_version": current_version,
             "version": current_version,
             **({"resolution": resolution} if resolution is not None else {}),
-            "restart_required": False,
             **waiting,
         },
         _newest_release(manager, command, current_version),
@@ -2109,7 +2123,7 @@ def _upgrade_changed_nothing(
     previous_version: str,
     current_version: str,
     install_result: JsonObject,
-    still_running: list[JsonObject],
+    still_running: list[JsonObject] | None,
 ) -> JsonObject:
     """The outcomes a package manager reports with the same exit code as success.
 
@@ -2147,7 +2161,6 @@ def _upgrade_changed_nothing(
         "previous_version": previous_version,
         "version": current_version,
         "install": install_result,
-        "restart_required": False,
     }
     reinstall_command = _unpinned_reinstall_command(manager, command)
     # Read once for both outcomes that call this installation current: the pinned
@@ -2191,12 +2204,20 @@ def _upgrade_changed_nothing(
                     "error_type": "upgrade_blocked_by_pin",
                     "summary": (
                         f"Agentic HIL was not upgraded: {manager} holds this installation at an exact version pin, so it is "
-                        f"still {current_version}. Nothing was changed. `reinstall_command` is the line that clears the pin "
-                        f"and rebuilds this installation as it stands, with {_carried_by_the_reinstall(recorded)}. "
+                        f"still {current_version}. Nothing was changed. {_restart_sentence(waiting)} `reinstall_command` is "
+                        f"the line that clears the pin and rebuilds this installation as it stands, with "
+                        f"{_carried_by_the_reinstall(recorded)}. "
                         + (f"{loss} " if loss else "")
                         + "Running it is the operator's decision."
                     ),
                     "pinned_version": _pinned_version(install_result) or current_version,
+                    # This outcome replaced nothing, exactly like the note below
+                    # and the plain already-current answer, so a server started
+                    # before it is running whatever was on disk then and is named
+                    # here for the same reason it is named there. It was the one
+                    # unchanged outcome that never spread these, and it reported
+                    # `restart_required: false` over a live holder.
+                    **waiting,
                     **shape,
                     "reinstall_command": reinstall_command,
                     "manager_hint_note": _relayed_hint_note(manager, reinstall_command),
@@ -2218,7 +2239,7 @@ def _upgrade_changed_nothing(
                 f"Agentic HIL is already at {current_version}, which is the version this installation is pinned to, "
                 f"and {manager} resolved nothing newer to install. The pin holds no release back while it names the "
                 f"one that is installed, so it is reported here as a note rather than as a refusal. "
-                + (f"{waiting['restart_notice']} " if waiting else "No restart is needed. ")
+                + f"{_restart_sentence(waiting)} "
                 + f"`reinstall_command` is the line that clears the pin and rebuilds this installation as it stands, "
                 f"with {_carried_by_the_reinstall(recorded)}, for whenever later releases are to be picked up without "
                 f"it. "
@@ -2251,8 +2272,7 @@ def _upgrade_changed_nothing(
         {
             **base,
             "ok": True,
-            "summary": f"Agentic HIL is at {current_version}; {manager} had nothing to replace."
-            + (f" {waiting['restart_notice']}" if waiting else " No restart is needed."),
+            "summary": f"Agentic HIL is at {current_version}; {manager} had nothing to replace. {_restart_sentence(waiting)}",
             "already_current": True,
             **waiting,
         },
@@ -2280,7 +2300,17 @@ def _relayed_hint_note(manager: str, reinstall_command: str) -> str:
     )
 
 
-def _still_running_the_previous_version(holders: list[JsonObject], previous_version: str) -> JsonObject:
+# What a host that publishes no process table owes a result instead of a count.
+# macOS is one, and a Windows snapshot that raised is another; both are
+# supported platforms, and both used to be reported as "nothing is running out
+# of this installation".
+_CANNOT_READ_THE_PROCESS_TABLE = (
+    "Whether a server of this installation is running could not be read on this host, so whether one is still "
+    "answering with an earlier release is not something this result can say."
+)
+
+
+def _still_running_the_previous_version(holders: list[JsonObject] | None, previous_version: str) -> JsonObject:
     """The servers the swap did not reach, and the one thing left to do about them.
 
     Nothing here is a refusal. A process that was started out of this
@@ -2291,14 +2321,19 @@ def _still_running_the_previous_version(holders: list[JsonObject], previous_vers
     it was started in and when it started, plus the sentence that says why they
     still answer with the old number.
 
-    Empty where there is no such list, so a result gains these fields only where
+    A host that could not read its process table gets the sentence that says so
+    and no `restart_required`, because "cannot say" is not "no". Empty where the
+    table was read and held nothing, so a result gains these fields only where
     they say something.
     """
+    if holders is None:
+        return {"restart_notice": _CANNOT_READ_THE_PROCESS_TABLE}
     if not holders:
-        return {}
+        return {"restart_required": False}
     single = len(holders) == 1
     named = "1 process" if single else f"{len(holders)} processes"
     return {
+        "restart_required": True,
         "restart_required_by": holders[:_REPORTED_HOLDER_LIMIT],
         "restart_required_by_count": len(holders),
         "restart_notice": (
@@ -2326,7 +2361,7 @@ def _named_holders(holders: list[JsonObject]) -> str:
     return _named_series(named) + (f", and {rest} more under `restart_required_by`" if rest > 0 else "")
 
 
-def _nothing_new_to_load(holders: list[JsonObject]) -> JsonObject:
+def _nothing_new_to_load(holders: list[JsonObject] | None) -> JsonObject:
     """The servers running out of an installation that nothing replaced.
 
     The other half of the same reported defect: an installation that was already
@@ -2336,9 +2371,17 @@ def _nothing_new_to_load(holders: list[JsonObject]) -> JsonObject:
     nothing here can read that from outside. An earlier upgrade is exactly how a
     server comes to be older than the installation it runs out of, so the
     processes are named and the restart is asked for rather than ruled out.
+
+    Three answers, because there are three states and the last two were one:
+    processes to name, a table that was read and held none of them, and a host
+    that could not read its table at all. The third carries the sentence saying
+    so and no `restart_required`, so no result claims a restart is unnecessary on
+    the strength of a question nobody could put.
     """
+    if holders is None:
+        return {"restart_notice": _CANNOT_READ_THE_PROCESS_TABLE}
     if not holders:
-        return {}
+        return {"restart_required": False}
     named = "1 process is" if len(holders) == 1 else f"{len(holders)} processes are"
     return {
         "restart_required": True,
@@ -2521,8 +2564,8 @@ def replace_installation(*, tool: str) -> JsonObject:
                 # host with the server registered raises it from there, which is
                 # the command line, because a registration is a file this module
                 # does not read. An upgrade on a machine with neither had been
-                # asking for a restart of nothing.
-                "restart_required": bool(still_running),
+                # asking for a restart of nothing, and one on a host that cannot
+                # read its process table says so rather than answering false.
                 **({"superseded_entrypoints": superseded} if superseded else {}),
                 **_still_running_the_previous_version(still_running, previous_version),
             },
