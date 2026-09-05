@@ -1990,6 +1990,7 @@ def _upgrade_changed_nothing(
             "pinned_version": _pinned_version(install_result) or current_version,
             **shape,
             "reinstall_command": reinstall_command,
+            "manager_hint_note": _relayed_hint_note(manager, reinstall_command),
             **remediation_fields("upgrade_blocked_by_pin"),
         }
     waiting = _nothing_new_to_load(still_running)
@@ -2005,6 +2006,24 @@ def _upgrade_changed_nothing(
         _newest_release(manager, command, current_version),
         manager,
         current_version,
+    )
+
+
+def _relayed_hint_note(manager: str, reinstall_command: str) -> str:
+    """Whose words the captured output is, said before the operator reads them.
+
+    A refusal prints the manager's own output, which is right: the operator
+    reads their own machine's words. What it printed alongside was uv's hint to
+    `reinstall with uv tool install agentic-hil@latest`, unlabelled and
+    indistinguishable from this program's own advice, and then a Do-not bullet
+    further down contradicting it. So the block is introduced: whose text it is,
+    what following it costs, and which line on this result is the one to run.
+    """
+    return (
+        f"The `install` block under Details below carries {manager}'s own output, printed as {manager} wrote it and "
+        f"not as advice from here. Its own `reinstall with` line names the bare distribution, which is the one thing "
+        f"this refusal exists to talk an operator out of: it drops the extras and any package the receipt records "
+        f"beside them. The line to run is `reinstall_command`: {reinstall_command}"
     )
 
 

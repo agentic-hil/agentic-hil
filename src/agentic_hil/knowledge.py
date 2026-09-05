@@ -332,7 +332,56 @@ def _substitutions() -> dict[str, str]:
         "reopen_command": CONFIG_REOPEN_COMMAND,
         "grant_command": CONFIG_GRANT_COMMAND,
         "test_plan_reference": TEST_PLAN_URI,
+        "reinstall_first_step": reinstall_first_step(),
     }
+
+
+def _host_locks_running_files() -> bool:
+    """Whether this platform refuses to replace the files of a running process.
+
+    The same question `upgrade._host_locks_running_files` asks, spelled again
+    here rather than imported: `upgrade` imports this module, so an import the
+    other way would be a cycle. A function rather than a constant for the same
+    reason it is one there: it is the seam a test replaces to read either side of
+    the branch on whichever host the suite happens to run on, and the alternative
+    a test reaches for otherwise is writing a platform name into the shared `os`
+    module, which this suite has been broken by twice.
+    """
+    return os.name == "nt"
+
+
+def reinstall_first_step() -> str:
+    """What comes before a reinstall, in the terms of the host it will be run on.
+
+    On a host that refuses to delete a file mapped as a running image, a
+    reinstall removes the environment first and that delete fails while the MCP
+    server the host started is running out of it: closing the host is not a
+    precaution there, it is the difference between a repair and a half-removed
+    installation. Everywhere else the old files are unlinked while the processes
+    using them keep reading their own copies, so the reinstall goes through with
+    a server up and the thing that is true instead is that the server keeps
+    answering with the release it imported.
+
+    Both sentences were on one bench at once until now: the Windows one was
+    printed as step 1 of the pin refusal on a Linux host, which sent an operator
+    to close sessions over a failure their machine does not have. A step whose
+    subject is the host has to be chosen by the host, and the catalogue is where
+    that choice belongs, because which reader a step is for is part of what the
+    step says.
+    """
+    if _host_locks_running_files():
+        return (
+            "Close the agent host first. The command below reinstalls the environment, which on this host means "
+            "deleting it, and that delete fails while the MCP server the host started is still running out of it. "
+            "`agentic-hil upgrade` moves the launcher on PATH out of the manager's way before it runs; a reinstall "
+            "typed by hand has nothing of the kind, and the delete it starts with is the step that fails."
+        )
+    return (
+        "The command below can be run with a server up. On this host the old files are unlinked while the process "
+        "using them goes on reading its own copy, so nothing fails and nothing is lost. What that process does not "
+        "do is pick up the new release: the host that started it still has to be restarted afterwards, and until it "
+        "is, that server answers with the release it imported."
+    )
 
 
 # The one thing that fixes a proxy neither the manager's roots nor this machine's
@@ -594,10 +643,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "`uv tool install \"agentic-hil==X.Y.Z\"` records `==X.Y.Z` and every later `uv tool upgrade` honours it."
         ),
         remediation=(
-            "Close the agent host first. The command below reinstalls the environment, which on Windows means deleting "
-            "it, and that delete fails while the MCP server the host started is still running out of it. `agentic-hil "
-            "upgrade` moves the launcher on PATH out of the manager's way before it runs; a reinstall typed by hand "
-            "has nothing of the kind, and the delete it starts with is the step that fails.",
+            "{reinstall_first_step}",
             "Run the command in `reinstall_command` on this result. It is the one that clears the pin *and* rebuilds "
             "this installation as it stands: `installed_extras` says which extras were found, `with_packages` names "
             "every package `uv`'s own receipt records as installed alongside this one, and `recorded_python` names the "
@@ -636,13 +682,11 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "result."
         ),
         remediation=(
+            "{reinstall_first_step}",
             "Run the command in `reinstall_command` on this result. It records this installation again from what it "
             "is given, without the recorded option, and it carries what the installation already has: the extras in "
             "`installed_extras`, the packages in `with_packages` that the receipt records beside it, and the "
             "interpreter in `recorded_python` where one was recorded.",
-            "Run it with the agent host closed on Windows, where a file mapped as a running image cannot be replaced. "
-            "Elsewhere a running server keeps the files it has and answers with its own release until its host "
-            "restarts, so the reinstall itself is safe while one is up.",
             "Then run `agentic-hil --version` to confirm the number moved, and restart the agent hosts, which is what "
             "loads the new server. Nothing was restarted or reloaded by this attempt.",
             "If the option was deliberate, this result is the confirmation that it is still in force and what it now "

@@ -61,6 +61,11 @@ _HANDLED_EVERYWHERE = frozenset({"ok", "tool", "summary", "next_step", "next_ste
 # it into a key/value row turns a stack of `error:` lines into one unreadable
 # strip, which is the same as not printing it.
 _PROCESS_OUTPUT_KEYS = frozenset({"stdout", "stderr"})
+# What a refusal prints above its Details rather than among them. A sentence
+# saying whose words the captured block is has to come before the block, and a
+# key/value row of prose in the middle of the fields is neither before it nor
+# readable.
+_RENDERED_BEFORE_DETAILS = frozenset({"manager_hint_note"})
 # How much captured output a report prints before it says it is cutting. A
 # manager that fails writes a handful of lines and a build that fails writes
 # thousands, and the line that names the cause sits at either end of them, so
@@ -484,12 +489,30 @@ def render_refusal(result: JsonObject, command: str | None = None) -> list[str]:
     if isinstance(meaning, str) and meaning.strip():
         lines.append("")
         lines.extend(_wrap(meaning, indent=_INDENT))
+    lines.extend(_relayed_manager_text(result))
     lines.extend(_section("Details", _refusal_details(result)))
     steps, avoid = _remediation(result, command_line=command is not None)
     lines.extend(_section("What to do", _numbered(steps)))
     lines.extend(_section("Do not", _bullets(avoid)))
     lines.extend(_tail(result))
     return lines
+
+
+def _relayed_manager_text(result: JsonObject) -> list[str]:
+    """Whose words the captured output below is, printed before the operator reads it.
+
+    A refusal prints the manager's own output as the manager wrote it, and that
+    is right: the operator reads their own machine's words. What it printed
+    unlabelled was uv's hint to reinstall from the bare distribution, sitting in
+    `install.stderr` among this program's own fields and contradicted by a
+    Do-not bullet several lines further down. The document says whose text it is
+    in `manager_hint_note`, and this puts that sentence above the block rather
+    than after it.
+    """
+    note = result.get("manager_hint_note")
+    if not isinstance(note, str) or not note.strip():
+        return []
+    return ["", *_wrap(note, indent=_INDENT)]
 
 
 def _refusal_details(result: JsonObject) -> list[str]:
@@ -504,7 +527,7 @@ def _refusal_details(result: JsonObject) -> list[str]:
     captured streams are printed as the process wrote them. It stays a report:
     rows first, then the objects that need a body, and never a dump of braces.
     """
-    rows, bodies = _members({key: value for key, value in result.items() if key not in _HANDLED_EVERYWHERE})
+    rows, bodies = _members({key: value for key, value in result.items() if key not in _HANDLED_EVERYWHERE and key not in _RENDERED_BEFORE_DETAILS})
     lines = _fields(rows)
     for key, value in bodies:
         lines.extend(_member_lines(key, value, _INDENT))
