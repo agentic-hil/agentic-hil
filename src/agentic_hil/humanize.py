@@ -376,20 +376,21 @@ def _verdict(result: Mapping[str, object]) -> str:
 
 # The markers that make the exit-code verdict false over a result whose own `ok`
 # is true: a call that reached the hardware and could not say what it left
-# behind, or a discovery that answered but disclaims its own completeness
-# (`complete: false`, which the exit code takes through `conclusive_success`).
-_CONTAINMENT_MARKERS = ("cleanup_required", "quarantined", "quarantine_id", "audit_ok", "target_ok", "cleanup_ok", "side_effect_status", "hardware_state", "lease_state", "complete")
+# behind. `complete` is not one of them and was: an enumeration that states how
+# far it reaches says something about the enumeration rather than about this run
+# of it, the summary already says it in words, and scoring it here put "did not
+# come back clean" over a discovery that worked (#445).
+_CONTAINMENT_MARKERS = ("cleanup_required", "quarantined", "quarantine_id", "audit_ok", "target_ok", "cleanup_ok", "side_effect_status", "hardware_state", "lease_state")
 
 
 def _containment(result: JsonObject) -> list[str]:
     """Name a result that says `ok` and is not clean, because the exit code will.
 
     `conclusive_success` is the verdict the exit code is taken from, and it is not
-    `ok` alone: a quarantine, an audit that could not be written, an effect this
-    bench cannot account for, or an enumeration that reports itself incomplete. A
-    rendering that printed only the summary would show a person a calm sentence
-    beside an exit code of 1, which is the one disagreement this layer must never
-    introduce.
+    `ok` alone: a quarantine, an audit that could not be written, or an effect
+    this bench cannot account for. A rendering that printed only the summary
+    would show a person a calm sentence beside an exit code of 1, which is the
+    one disagreement this layer must never introduce.
     """
     if result.get("ok") is not True or conclusive_success(dict(result)):
         return []
@@ -1190,10 +1191,17 @@ def render_debugger_probes(result: JsonObject) -> list[str]:
     # enumeration that produced these ids is this host's USB serial inventory
     # rather than anything OpenOCD ran. A reader deciding whether a serial was
     # read off the probe or off the descriptor it published needs that on screen.
+    #
+    # `complete` with them, as one more thing this listing says about itself. It
+    # used to reach a person only through the containment block, which printed it
+    # under "this did not come back clean" beside an exit code of 1; the exit code
+    # no longer says that and the field still has to be on screen, because how far
+    # an enumeration reaches is exactly what a reader counting probes needs (#445).
     header = _fields([
         ("source", result.get("source")),
         ("backend", result.get("backend")),
         ("discovered_by", result.get("discovered_by")),
+        ("complete", result.get("complete")),
         ("quarantine_id", result.get("quarantine_id")),
     ])
     if header:

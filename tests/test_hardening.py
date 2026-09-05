@@ -4550,16 +4550,16 @@ def _incomplete_probe_answer(probe: str) -> dict:
     }
 
 
-def test_incomplete_single_probe_listing_is_not_a_clean_cli_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An OpenOCD listing that answered but disclaims its scope must not exit 0
-    (round 2, finding 1).
+def test_incomplete_single_probe_listing_exits_zero_and_keeps_saying_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An OpenOCD listing that answered exits 0, carrying its own scope (#445).
 
-    The single-debugger `debugger_probes()` returns the backend result straight
-    through, and the exit code the CLI takes from it is `conclusive_success`, not
-    `overall_success`. The read is a success -- no failure is filed and an MCP
-    call over it is no error -- but a caller reading exit 0 as "every probe found"
-    would miss a VCP-less probe this enumeration cannot see, so the CLI refuses it
-    while keeping the partial `probes`.
+    OpenOCD has no probe listing, so this enumeration can never report itself
+    complete: on a bound OpenOCD bench `complete: false` is what a working
+    discovery looks like, and it was the one field the exit status scored, which
+    made every healthy run exit 1. That broke any `set -e` script and read as a
+    fault to an agent, over a bench where the probe was found. The field stays on
+    the result and in the summary, because how far the enumeration reaches is
+    what a caller counting probes has to know; it just is not a verdict.
     """
     from agentic_hil import cli as cli_module
     from agentic_hil.cli import result_succeeded
@@ -4586,24 +4586,73 @@ def test_incomplete_single_probe_listing_is_not_a_clean_cli_success(tmp_path: Pa
     # The partial listing is retained exactly as the backend returned it...
     assert result["complete"] is False
     assert result["probes"] == [{"probe_id": "066AFF303435554157113106"}]
-    # ...and it is a success for recording and the MCP surface: neither files it
-    # as the bench's last failure nor turns the tool call into an error.
+    # ...and it is a success everywhere a success is read: no failure is filed,
+    # the MCP call is no error, and the shell gets 0.
     assert result["ok"] is True
     assert overall_success(result) is True
-    # ...but it is not a clean pass, so the CLI verdict and the exit code refuse it.
-    assert conclusive_success(result) is False
+    assert conclusive_success(result) is True
+    assert result_succeeded(result) is True
+    assert cli_module.entrypoint(["debugger-probes", "--json"]) == 0
+
+
+def test_a_probe_listing_that_failed_still_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbouring verdict, unchanged: the nonzero exit is for a failure.
+
+    Reserving it for a discovery that failed is the whole of the change above, so
+    the discovery that failed has to keep it. `ok: false` is scored exactly as it
+    was, `complete: false` beside it changes nothing either way.
+    """
+    from agentic_hil import cli as cli_module
+    from agentic_hil.cli import result_succeeded
+
+    workspace = tmp_path / "workspace"
+    write_authoritative_config(workspace, monkeypatch)
+    monkeypatch.chdir(workspace)
+
+    failed = {**_incomplete_probe_answer("066AFF303435554157113106"), "ok": False, "error_type": "probe_discovery_failed"}
+
+    class FakeService:
+        def __init__(self, config, *args, **kwargs) -> None:
+            pass
+
+        def call(self, name: str, arguments: dict | None = None) -> dict:
+            return failed
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli_module, "AgenticHILToolService", FakeService)
+
+    result = cli_module.debugger_probes()
+
+    assert result["ok"] is False
     assert result_succeeded(result) is False
     assert cli_module.entrypoint(["debugger-probes", "--json"]) == 1
 
 
+def test_a_quarantine_under_an_incomplete_listing_still_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other neighbouring verdict: `complete` is not what was protecting this.
+
+    A containment marker on a result that says `ok` exits nonzero on its own, and
+    it did before `complete` was scored. Dropping `complete` from the verdict must
+    not take the marker with it.
+    """
+    from agentic_hil.cli import result_succeeded
+
+    quarantined = {**_incomplete_probe_answer("066AFF303435554157113106"), "quarantined": True, "quarantine_id": "q-7f3a"}
+
+    assert quarantined["ok"] is True
+    assert result_succeeded(quarantined) is False
+
+
 def test_multi_probe_discovery_propagates_incompleteness_without_failing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The aggregate carries `complete: false` up and exits nonzero, yet is not a
-    failure (round 2, finding 1).
+    """The aggregate carries `complete: false` up, and exits 0 over it (#445).
 
     Two OpenOCD probes each answer with a partial listing. Neither errored, so
-    `ok` stays true and no child is in `failed`; but a VCP-less probe could sit
-    beside either, so the aggregate must not read as a finished count. The prior
-    code propagated `complete` nowhere and exited 0.
+    `ok` stays true and no child is in `failed`; a VCP-less probe could sit beside
+    either, so the aggregate must not read as a finished count and says so in the
+    field and in the summary. That is information for whoever reads the listing,
+    and the run itself did what it was asked, so the shell gets 0.
     """
     from agentic_hil import cli as cli_module
     from agentic_hil.cli import result_succeeded
@@ -4647,10 +4696,10 @@ def test_multi_probe_discovery_propagates_incompleteness_without_failing(tmp_pat
     assert result["complete"] is False
     assert "complete: false" in result["summary"]
     assert "probe_a" in result["summary"] and "probe_b" in result["summary"]
-    # ...and the CLI verdict and exit code refuse the incomplete aggregate.
-    assert conclusive_success(result) is False
-    assert result_succeeded(result) is False
-    assert cli_module.entrypoint(["debugger-probes", "--json"]) == 1
+    # ...as information beside a verdict that says the discovery succeeded.
+    assert conclusive_success(result) is True
+    assert result_succeeded(result) is True
+    assert cli_module.entrypoint(["debugger-probes", "--json"]) == 0
 
 
 def test_multi_probe_discovery_is_only_as_complete_as_its_least_complete_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4701,7 +4750,9 @@ def test_multi_probe_discovery_is_only_as_complete_as_its_least_complete_child(t
     assert result["complete"] is False
     # Only the child that disclaimed completeness is named as incomplete.
     assert "probe_b" in result["summary"]
-    assert result_succeeded(result) is False
+    # The propagation is what this test is about, and it happens whatever the
+    # verdict beside it says: nothing failed here, so the shell gets 0.
+    assert result_succeeded(result) is True
 
 
 def test_debug_load_refusal_names_the_permission_that_fired(tmp_path: Path) -> None:

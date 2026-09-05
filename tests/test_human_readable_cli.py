@@ -1174,3 +1174,57 @@ def test_a_plan_written_under_the_older_field_names_still_shows_its_values() -> 
 
     assert "target.controller configured stm32f446ret6, attached stm32f4x" in out
     assert "not set" not in out
+
+
+def test_a_healthy_probe_listing_is_not_rendered_as_a_containment() -> None:
+    """`complete: false` is a fact about the enumeration, not about this run (#445).
+
+    An OpenOCD bench enumerates probes from the host's USB serial inventory,
+    which can never report itself complete, so the field is false on every
+    healthy read. The rendering put it under "This did not come back clean, and
+    the exit code says so", beside an exit code that has stopped saying it: a
+    discovery that worked was shown to an operator as a fault.
+    """
+    listing = {
+        "ok": True,
+        "tool": "debugger_probes_list",
+        "backend": "openocd",
+        "discovered_by": "usb_serial_inventory",
+        "probes": [{"probe_id": "066AFF303435554157113106"}],
+        "complete": False,
+        "summary": "1 connected debugger probe(s) read from this host's USB serial inventory, which is not an authoritative count.",
+    }
+
+    out = _reflowed(_rendered(listing, "debugger-probes"))
+
+    assert "did not come back clean" not in out
+    # And it is still on screen, because how far the enumeration reaches is what
+    # a reader counting probes has to know.
+    assert "complete no" in out
+    assert "not an authoritative count" in out
+
+
+def test_a_probe_listing_with_something_standing_still_says_it_did_not_come_back_clean() -> None:
+    """The neighbouring rendering, unchanged: a marker still leads the answer.
+
+    And `complete` is not one of the things standing. It decides no verdict, so
+    naming it under "what is standing" would offer it as a reason for an exit
+    code it has nothing to do with; it belongs with the other facts the listing
+    states about itself, which are printed below that block.
+    """
+    listing = {
+        "ok": True,
+        "tool": "debugger_probes_list",
+        "backend": "openocd",
+        "probes": [],
+        "complete": False,
+        "quarantined": True,
+        "quarantine_id": "q-7f3a",
+        "summary": "Probe discovery ran.",
+    }
+
+    out = _reflowed(_rendered(listing, "debugger-probes"))
+
+    assert "did not come back clean" in out
+    assert "q-7f3a" in out
+    assert out.index("complete no") > out.index("backend openocd")

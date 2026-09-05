@@ -357,12 +357,14 @@ def redaction_unavailable(command: str | None) -> JsonObject:
 
 
 def result_succeeded(result: JsonObject) -> bool:
-    # `conclusive_success`, not `overall_success`: a discovery that answered but
-    # says it is not authoritative (`complete: false`, which only the OpenOCD
-    # probe listing writes) must not exit 0. Exit 0 there tells automation "every
-    # probe was found" over a reading that cannot see a VCP-less probe. It stays
-    # off `overall_success` so the same read is neither filed as a failure nor
-    # turned into an MCP error; see `conclusive_success`.
+    # The exit status says whether the command did its job, and nothing else. A
+    # discovery that answered and states how far it reaches (`complete: false`,
+    # which only the OpenOCD probe listing writes, and which it can never state
+    # otherwise because OpenOCD has no probe listing) did its job: it exits 0,
+    # carries the field, and says the limit in its own summary. Exiting 1 there
+    # broke every `set -e` script over a bench that was working and read as a
+    # fault to an agent (#445). A discovery that failed still exits nonzero,
+    # through `ok` and the containment checks `conclusive_success` folds in.
     return conclusive_success(result)
 
 
@@ -5162,9 +5164,10 @@ def bootstrap_probe_listing() -> JsonObject:
         # which the OpenOCD/USB-inventory fallback sets) must not read as a
         # finished count: it reaches an ST-Link only through the virtual COM port
         # a V2-1 or a V3 publishes, so a VCP-less probe can sit beside the ones it
-        # saw. The verdict (`conclusive_success`) already exits non-zero over it;
-        # the summary says why, so the exit code is not a silent one (round 0,
-        # finding 1).
+        # saw. The summary carries that in words, which is where it belongs and
+        # is now the whole of how it travels to a person: the exit status no
+        # longer scores the field, because a listing this backend can never
+        # report complete is not a run that went wrong (#445).
         incomplete = result.get("complete") is False
         result["summary"] = (
             f"{len(listed['probes'])} connected debugger probe(s) read by bootstrap discovery from this host's USB "
@@ -5238,7 +5241,8 @@ def debugger_probes() -> JsonObject:
     # authoritative (`complete: false`, which the OpenOCD USB-serial listing
     # always sets) is not a failure, so it stays out of `failed` and off `ok`;
     # but the aggregate must not read as a finished count either, so it carries
-    # `complete: false` up and the CLI verdict below takes it.
+    # `complete: false` up and names which listings it came from, as information
+    # a caller reads rather than as a verdict on the run (#445).
     incomplete = sorted(name for name, result in results.items() if result.get("complete") is False)
     aggregate: JsonObject = {
         # `all`, not `any`: one probe answering must not report the run as
@@ -5258,9 +5262,9 @@ def debugger_probes() -> JsonObject:
     }
     # A containment marker on any probe has to reach the top level, or
     # overall_success() reads clean over a nested quarantine. `complete: false`
-    # rides up the same way: it is not an overall_success() marker, but it is the
-    # CLI verdict's (`conclusive_success`), so a VCP-less probe beside the ones a
-    # child saw cannot be exited 0 over.
+    # rides up the same way and for a different reason: it scores no verdict at
+    # either level, and a caller reading only the aggregate still has to be able
+    # to see that a VCP-less probe could sit beside the ones a child saw.
     for marker, unsafe in (("cleanup_required", True), ("quarantined", True), ("audit_ok", False), ("complete", False)):
         if any(result.get(marker) is unsafe for result in results.values()):
             aggregate[marker] = unsafe
