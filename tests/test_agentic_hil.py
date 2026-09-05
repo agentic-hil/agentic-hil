@@ -3099,7 +3099,7 @@ def test_a_linux_host_reads_its_process_table_out_of_proc(
     assert process_working_directory(99) is None
 
 
-@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+@pytest.mark.skipif(sys.platform != "linux", reason="a real child's start time is read out of /proc, which only Linux publishes")
 def test_a_linux_start_time_is_when_the_process_started_and_not_when_it_was_looked_at() -> None:
     """The reported defect: every process looked new the first time it was read.
 
