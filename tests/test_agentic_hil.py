@@ -1152,6 +1152,11 @@ def test_a_recorded_marker_is_replayed_rather_than_dropped_in_silence(
         pytest.param('{ name = "pytest\\" ; echo pwned #" }', 'pytest" ; echo pwned #', "name", id="a-name-that-is-not-a-name"),
         pytest.param('{ name = "pytest", specifier = "; echo pwned" }', "pytest", "specifier", id="a-specifier-that-is-not-one"),
         pytest.param('{ name = "pytest", marker = "$(echo pwned)" }', "pytest", "marker", id="a-marker-that-is-not-one"),
+        # A marker and a specifier are still one to a resolver with a newline in
+        # them, and a `reinstall_command` carrying one is a pasted line that ends
+        # where the operator did not mean it to.
+        pytest.param("""{ name = "pytest", marker = "python_version >= '3.10'\\nrm -rf ." }""", "pytest", "marker", id="a-marker-carrying-a-newline"),
+        pytest.param('{ name = "pytest", specifier = "==1.0\\n" }', "pytest", "specifier", id="a-specifier-carrying-a-newline"),
         pytest.param('{ name = "pytest", extras = ["a b"] }', "pytest", "extras", id="an-extra-that-is-not-a-name"),
     ],
 )
@@ -1578,6 +1583,25 @@ def test_an_index_that_trickles_bytes_is_read_as_silence_once_the_deadline_passe
     # cap allows and not the single read that would take one byte for the body.
     assert 1 < response.reads < 100
     assert response.elapsed >= 10.0
+
+
+def test_a_body_already_here_is_not_thrown_away_by_the_deadline_behind_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadline can land between the last chunk and the read that sees the end.
+
+    A whole answer had arrived and only the read that would have reported the end
+    of the stream was still owed, so discarding what was in hand would report an
+    index that answered as one that did not. What has arrived is parsed; a body
+    that is genuinely half here does not parse and lands on the same wording an
+    unreachable index does.
+    """
+    response = _FakeIndexResponse(b'{"info": {"version": "1.2.3"}}', clock_step=11.0)
+    monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: response)
+    monkeypatch.setattr("agentic_hil.upgrade.monotonic", lambda: response.elapsed)
+
+    assert read_the_release_index() == "1.2.3"
+    assert response.reads == 1
 
 
 def test_an_index_that_answers_in_several_pieces_is_still_read_whole(
@@ -3238,6 +3262,31 @@ def test_a_linux_process_of_another_installation_is_still_not_claimed(
     assert _processes_holding_installation() == []
 
 
+def test_a_relative_command_line_is_never_read_against_this_process_own_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A relative argv belongs to that process's directory, which nothing here has.
+
+    Making it absolute uses this process's working directory instead, so
+    `agentic-hil upgrade` run from inside the tool environment would read every
+    `bash` and every `python3` on the machine as a process started out of that
+    environment and ask the operator to restart all of them. Only an absolute
+    argument says where it came from.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    environment = tmp_path / "uv" / "tools" / "agentic-hil"
+    (environment / "bin").mkdir(parents=True)
+    interpreter = tmp_path / "usr" / "bin" / "python3.12"
+    interpreter.parent.mkdir(parents=True)
+    monkeypatch.chdir(environment)
+    unrelated = ProcessImage(pid=400, parent_pid=999, image=str(interpreter), created_ns=5, launch_arguments=("python3", "-m"))
+    _watch_installation(monkeypatch, (unrelated,), prefix=str(environment), executable=str(environment / "bin" / "python"))
+
+    assert _processes_holding_installation() == []
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
 def test_a_start_time_that_cannot_be_read_leaves_the_field_off_rather_than_inventing_one(
     monkeypatch: pytest.MonkeyPatch,
@@ -3542,6 +3591,50 @@ def test_a_host_that_cannot_read_its_process_table_says_so_where_nothing_was_ins
     assert _CANNOT_SAY in result["summary"]
     assert "No restart is needed" not in result["summary"]
     assert entrypoint(["upgrade", "--json"]) == 0
+
+
+def test_a_host_that_cannot_read_its_process_table_says_so_after_an_upgrade_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The swap path, where the command line composes the answer out of two halves.
+
+    One half is the process table, which this host cannot read, and the other is
+    an agent host with the server registered, of which there is none here. Their
+    disjunction was answered false, printed beside a summary sentence saying the
+    first half could not be read at all.
+    """
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+    )
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["upgraded_on_disk"] is True
+    assert "restart_required" not in result
+    assert _CANNOT_SAY in result["summary"]
+
+
+def test_a_registered_agent_host_answers_the_restart_question_a_quiet_host_cannot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction: one half unknown and the other one true is still true."""
+    _place_agent_skill("opencode")
+    _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": MANAGER_INSTALLED,
+            "version": _version_answer("9.9.9"),
+            "agent-install": AGENT_INSTALL_DONE,
+        },
+    )
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["restart_required"] is True
 
 
 def test_a_host_that_cannot_read_its_process_table_says_so_where_the_manager_moved_nothing(

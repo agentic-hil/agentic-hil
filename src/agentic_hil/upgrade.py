@@ -287,14 +287,17 @@ def _receipt_section(receipt: JsonObject | None, key: str) -> object:
 # which this distribution does not depend on at runtime and must not start
 # depending on for a line it prints.
 _REQUIREMENT_NAME_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
-_VERSION_SPECIFIER_PATTERN = r"(?:===|==|!=|<=|>=|~=|<|>)\s*[A-Za-z0-9*+!._-]+"
-_REQUIREMENT_NAME_ONLY = re.compile(rf"^{_REQUIREMENT_NAME_PATTERN}$")
-_VERSION_SPECIFIER_SET = re.compile(rf"^\s*{_VERSION_SPECIFIER_PATTERN}(?:\s*,\s*{_VERSION_SPECIFIER_PATTERN})*\s*$")
+_VERSION_SPECIFIER_PATTERN = r"(?:===|==|!=|<=|>=|~=|<|>)[ \t]*[A-Za-z0-9*+!._-]+"
+_REQUIREMENT_NAME_ONLY = re.compile(rf"\A{_REQUIREMENT_NAME_PATTERN}\Z")
+_VERSION_SPECIFIER_SET = re.compile(rf"\A[ \t]*{_VERSION_SPECIFIER_PATTERN}(?:[ \t]*,[ \t]*{_VERSION_SPECIFIER_PATTERN})*[ \t]*\Z")
 # One token of an environment marker: a bare word, a quoted literal with no
-# quote of its own inside it, a comparison operator, a bracket or a comma. A
-# marker made of nothing but these carries no character a shell reads, which is
-# what makes the rendered line safe to paste as well as a real requirement.
-_MARKER_TOKEN = re.compile(r"""\s*(?:[A-Za-z0-9_.+*-]+|'[^']*'|"[^"]*"|===|==|!=|<=|>=|~=|<|>|\(|\)|,)\s*""")
+# quote of its own inside it, a comparison operator, a bracket or a comma,
+# separated by spaces and tabs and by nothing else. Spaces and tabs rather than
+# `\s`, and `\A`/`\Z` rather than `^`/`$`, because both of the loose spellings
+# let a newline through: a requirement carrying one is still a requirement to a
+# resolver, and a `reinstall_command` carrying one is a pasted line that ends
+# where the operator did not mean it to.
+_MARKER_TOKEN = re.compile(r"""[ \t]*(?:[A-Za-z0-9_.+*-]+|'[^']*'|"[^"]*"|===|==|!=|<=|>=|~=|<|>|\(|\)|,)[ \t]*""")
 # Which receipt members a `--with` can carry. Anything else is a source: a git,
 # url, path or editable requirement rebuilds into something other than what uv
 # recorded, and a `--with` that changed the requirement would be a different
@@ -417,7 +420,7 @@ def _recorded_python(receipt: JsonObject | None, options: JsonObject) -> str:
 # Deliberately not `>=`, `~=`, `<`, `>` or `!=`: those are floors and ceilings a
 # resolution moves inside, so they hold nothing back that the index would
 # otherwise have given.
-_EXACT_REQUIREMENT_CLAUSE = re.compile(r"^===?\s*[^\s,=!<>~]+$")
+_EXACT_REQUIREMENT_CLAUSE = re.compile(r"\A===?[ \t]*[^\s,=!<>~]+\Z")
 
 
 def _exact_pin(specifier: str) -> str:
@@ -1044,7 +1047,12 @@ def _belongs_to_installation(entry: ProcessImage, owned_prefixes: tuple[str, ...
         return False
     if entry.virtual_env and any(spelling.rstrip("/") + "/" in owned_prefixes for spelling in _location_spellings(entry.virtual_env)):
         return True
-    return any(_under_owned_prefix(argument, owned_prefixes) for argument in entry.launch_arguments if argument)
+    # Absolute arguments only. A relative one is relative to *that* process's
+    # working directory, which nothing here has, and making it absolute uses this
+    # process's instead: run `agentic-hil upgrade` from inside the tool
+    # environment and every process started as `bash` or `python3` would be
+    # claimed as a holder of it.
+    return any(_under_owned_prefix(argument, owned_prefixes) for argument in entry.launch_arguments if argument and os.path.isabs(argument))
 
 
 def _upgrading_process_and_its_launchers(by_pid: dict[int, ProcessImage], owned_prefixes: tuple[str, ...], scripts: tuple[str, ...]) -> set[int]:
@@ -2034,10 +2042,13 @@ def _index_payload_within(response: object, deadline: float) -> bytes | None:
     liked, against a comment promising five seconds.
 
     Reading a chunk at a time against a monotonic clock is what bounds it: the
-    deadline is checked before every read, and one that has passed is reported
-    the way an unreachable index is, because that is what the caller does with
-    both. A partial body is thrown away rather than parsed, since half a payload
-    is not a smaller answer.
+    deadline is checked before every read, and one that has passed stops the
+    reading there. What has arrived by then is handed back rather than discarded,
+    because the deadline can land between the last chunk of a complete body and
+    the read that would have seen the end of the stream, and throwing a whole
+    answer away over that would report an index that answered as one that did
+    not. A body that is genuinely half here does not parse, and lands on the same
+    "could not be checked" wording an unreachable index does.
     """
     read = getattr(response, "read", None)
     if not callable(read):
@@ -2046,7 +2057,7 @@ def _index_payload_within(response: object, deadline: float) -> bytes | None:
     remaining = _RELEASE_INDEX_MAX_BYTES
     while remaining > 0:
         if monotonic() >= deadline:
-            return None
+            break
         chunk = read(min(_RELEASE_INDEX_CHUNK_BYTES, remaining))
         if not chunk:
             break

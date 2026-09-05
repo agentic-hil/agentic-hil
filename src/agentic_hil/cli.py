@@ -702,6 +702,13 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     # which names the servers running right now. A machine with neither is asked
     # to restart nothing, which is what the generic sentence used to do to it.
     registered = [entry["agent"] for entry in refreshed if entry.get("registration") is True]
+    # Either half can be unknown, and their disjunction has to say so rather than
+    # answer false. `replace_installation` leaves `restart_required` off where the
+    # host could not read its process table, and a registered agent host raises the
+    # answer whatever that half says; with neither known and none registered,
+    # "false" would be an answer nobody established, printed beside a summary
+    # sentence that says the opposite.
+    restart_known = "restart_required" in result or bool(registered)
     restart_required = bool(result.get("restart_required")) or bool(registered)
     summary = f"Agentic HIL upgraded from {previous_version} to {current_version} on disk."
     notice = result.get("restart_notice")
@@ -738,7 +745,7 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     return {
         **result,
         **({"extras_warning": extras_warning} if extras_warning is not None else {}),
-        "restart_required": restart_required,
+        **({"restart_required": restart_required} if restart_known else {}),
         "summary": summary,
         "refreshed": refreshed,
     }
