@@ -25,6 +25,7 @@ from conftest import (
     FAKE_STLINK,
     FAKE_STLINK_HALT_UNCONFIRMED,
     FAKE_STLINK_UNCONFIRMED,
+    read_the_release_index,
     write_authoritative_config,
     write_config,
 )
@@ -960,6 +961,203 @@ def test_upgrade_that_finds_nothing_newer_succeeds_without_asking_for_a_restart(
     assert "reinstall_command" not in result
     assert "pinned_version" not in result
     assert not any("skill-install" in call for call in calls)
+    # Claimed only because the index was asked and answered this same number.
+    assert result["newest_release"] == __version__
+
+
+# ---------------------------------------------------------------------------
+# What the manager calls "nothing to upgrade", checked against the index.
+#
+# The reported defect, measured on a bench whose receipt carried an
+# `exclude-newer`: `agentic-hil upgrade` answered `already_current: true` two
+# hours after the release it was missing, on uv's `Nothing to upgrade` alone,
+# and pointed the operator at the recorded *requirement*, which was unpinned.
+# uv resolves through the option it recorded and offers no command that clears
+# it, so the claim was wrong and the next step was missing with it.
+
+
+_RECEIPT_WITH_EXCLUDE_NEWER = """
+[tool]
+requirements = [{ name = "agentic-hil", extras = ["can"] }]
+
+[tool.options]
+exclude-newer = "2026-09-01T00:00:00Z"
+"""
+
+
+def _nothing_to_upgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `uv tool upgrade` that ran, moved nothing, and said so."""
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        version_after=__version__,
+    )
+
+
+def test_a_recorded_option_that_holds_a_release_back_is_named_and_never_called_current(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The claim is withdrawn, the option is named, and the line that clears it is given.
+
+    uv records `exclude-newer` whether it was given as a flag or through the
+    environment, resolves through it forever, and has no command that clears it.
+    So the receipt is read, the recorded option is named beside the release it
+    is holding out, and the only line that records the installation again
+    without it is on the result. Nothing is refused: the manager had already run
+    and changed nothing.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_EXCLUDE_NEWER)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert "already_current" not in result
+    assert result["error_type"] == "upgrade_blocked_by_recorded_option"
+    assert result["newest_release"] == "9.9.9"
+    assert result["held_back_by"] == ['the recorded option `exclude-newer = 2026-09-01T00:00:00Z`']
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert result["installed_extras"] == ["can"]
+    assert result["version"] == __version__
+    assert "9.9.9" in result["summary"] and "exclude-newer" in result["summary"]
+    assert any("reinstall_command" in step for step in result["remediation"])
+    assert any("already current" in step for step in result["do_not"])
+
+
+def test_a_recorded_exact_requirement_is_read_off_the_receipt_as_well(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The other half of the receipt that keeps a resolution where it is.
+
+    `uv tool upgrade` names a pin in words on some paths and says nothing at all
+    on others, so the recorded requirement is read rather than waited for.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        '[tool]\nrequirements = [{ name = "agentic-hil", specifier = "==0.21.2" }]\n',
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert result["error_type"] == "upgrade_blocked_by_recorded_option"
+    assert result["held_back_by"] == ["the recorded requirement `agentic-hil==0.21.2`"]
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil@latest"'
+
+
+def test_an_index_that_cannot_be_reached_takes_the_claim_away_rather_than_making_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offline, air-gapped or behind a proxy: the field goes, the sentence says why.
+
+    The claim is about the whole index and the manager only ever spoke about
+    this installation's own recorded resolution. Where the index did not answer,
+    nothing here knows which release is the newest, so the result says that
+    instead of asserting one. Nothing is refused and nothing failed.
+    """
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: None)
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert "already_current" not in result
+    assert "newest_release" not in result
+    assert "error_type" not in result
+    assert "The newest release could not be checked" in result["summary"]
+    assert result["restart_required"] is False
+
+
+def test_a_newer_release_with_nothing_recorded_to_explain_it_states_both_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No receipt, no recorded option, and the index still publishes something newer.
+
+    A private index, or a release this interpreter cannot take. Nothing here
+    knows which, so nothing here says which: the claim is withdrawn, both
+    numbers are named, and no cause is invented.
+    """
+    _recording_manager(monkeypatch, answers={"resolution": PIP_WOULD_INSTALL_NOTHING})
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert "already_current" not in result
+    assert "error_type" not in result
+    assert result["newest_release"] == "9.9.9"
+    assert result["install_skipped"] is True
+    assert "9.9.9" in result["summary"] and __version__ in result["summary"]
+
+
+def test_an_upgrade_that_moved_the_installation_says_nothing_about_the_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neighbouring behaviour: the check belongs to the outcome that claims currency.
+
+    A manager with something to install has answered the question this exists to
+    ask, so the index is left alone and the result gains no field from it."""
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: pytest.fail("the index must not be asked when something is being installed"))
+
+    result = upgrade_installation([])
+
+    assert result["upgraded_on_disk"] is True
+    assert "newest_release" not in result
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        pytest.param(b'{"info": {"version": " 1.2.3 "}}', "1.2.3", id="the-version-the-index-publishes"),
+        pytest.param(b'{"info": {}}', None, id="a-payload-without-one"),
+        pytest.param(b"not json", None, id="a-payload-that-does-not-parse"),
+    ],
+)
+def test_the_index_reader_answers_only_what_the_payload_states(
+    payload: bytes,
+    expected: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One request, and anything it cannot read is None rather than a guess."""
+
+    class _Response:
+        def read(self, _limit: int | None = None) -> bytes:
+            return payload
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *_exception: object) -> None:
+            return None
+
+    monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: _Response())
+
+    assert read_the_release_index() == expected
+
+
+def test_an_index_that_does_not_answer_is_not_an_error_the_upgrade_carries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused connection, a timeout, a proxy: all of them answer None here."""
+
+    def refuse(_request: object, timeout: object = None) -> object:
+        raise OSError("no route to host")
+
+    monkeypatch.setattr("agentic_hil.upgrade.urlopen", refuse)
+
+    assert read_the_release_index() is None
 
 
 # ---------------------------------------------------------------------------
