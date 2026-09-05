@@ -56,7 +56,13 @@ from typing import Any
 
 import yaml
 
-from agentic_hil.bootstrap import DEFAULT_PROJECT_PROFILE, discover_attached_hardware, port_device_name
+from agentic_hil.bootstrap import (
+    DEFAULT_PROJECT_PROFILE,
+    PROBE_NAMED_BY_CALLER,
+    PROBE_NAMED_BY_CONFIGURATION,
+    discover_attached_hardware,
+    port_device_name,
+)
 from agentic_hil.config import DEFAULT_CONFIG_TEMPLATE, ConfigError
 from agentic_hil.configstate import config_status, with_config_status
 from agentic_hil.configwrite import (
@@ -768,7 +774,16 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
     # The configured serial selects, when there is one. Otherwise a bench with
     # two boards attached would enumerate, pick the one probe that answers, and
     # produce a plan about a board this entry is not for.
-    requested_probe = _optional_string(arguments.get("probe_id")) or configured_probe_id(debugger_entry)
+    #
+    # Which of the two supplied it is carried alongside, because the selection is
+    # the same and the disclosure is not. A `--probe-id` is an operator looking at
+    # their bench and saying which board this is, and a partial count cannot have
+    # picked the wrong one against that. The entry's own serial is the reading a
+    # previous call took off this same partial inventory, so a re-read that carries
+    # it back has learnt nothing new about how many probes are attached and says so
+    # (#423).
+    named_probe = _optional_string(arguments.get("probe_id"))
+    requested_probe = named_probe or configured_probe_id(debugger_entry)
     configured_resources = configured_probe_resource(existing, debugger_name)
     discovery, refusal = discover_under_hardware_lease(
         existing,
@@ -777,6 +792,7 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
         reason_prefix="adopt",
         resources=configured_resources,
         probe_id=requested_probe,
+        probe_named_by=PROBE_NAMED_BY_CALLER if named_probe is not None else PROBE_NAMED_BY_CONFIGURATION,
         # Package-owned discovery inputs, never this workspace's own
         # `agentic-hil.config.example.yaml`. Adoption is a tool an agent reaches
         # over MCP, and its contract is that it carries facts read off the
@@ -1006,6 +1022,7 @@ def discover_under_hardware_lease(
     reason_prefix: str,
     resources: list[str],
     probe_id: str | None = None,
+    probe_named_by: str = PROBE_NAMED_BY_CALLER,
     profile: JsonObject | None = None,
 ) -> tuple[JsonObject, JsonObject | None]:
     """Read the attached probe holding what a probe read holds.
@@ -1042,6 +1059,14 @@ def discover_under_hardware_lease(
     `project_config_create` are reached over MCP and hand the package-owned
     default, so a checkout cannot supply the scripts or the controller a hardware
     read here uses.
+
+    ``probe_id`` and ``probe_named_by`` travel together to
+    `discover_attached_hardware`, and only the second of them is a judgement: the
+    serial selects the same way whoever supplied it, while `caller` versus
+    `configuration` says whether somebody named that board or a file handed its own
+    earlier reading back, which is what the sole-probe caveat is made from. Every
+    caller here that carries a serial out of a configuration rather than out of an
+    operator's `--probe-id` passes `configuration` (#423).
 
     ``tool`` names the caller in every result and record, and ``reason_prefix``
     names it in a quarantine reason: the callers are `project_config_adopt_hardware`,
@@ -1080,7 +1105,7 @@ def discover_under_hardware_lease(
         return None
 
     try:
-        discovery = discover_attached_hardware(probe_id=probe_id, before_connect=before_connect, profile=profile)
+        discovery = discover_attached_hardware(probe_id=probe_id, probe_named_by=probe_named_by, before_connect=before_connect, profile=profile)
     except BaseException as error:
         # Fail closed. What reached the board is unknown, so the locks stay taken
         # and an operator (or `agentic-hil recover`) owns the incident.

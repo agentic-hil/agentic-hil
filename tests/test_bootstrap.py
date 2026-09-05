@@ -1173,7 +1173,7 @@ def test_first_init_refuses_a_probe_another_workspace_is_holding(tmp_path: Path,
 
     state = {"connected": False}
 
-    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, before_connect: object = None, profile: object = None) -> JsonObject:
+    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, probe_named_by: str = "caller", before_connect: object = None, profile: object = None) -> JsonObject:
         # Enumeration selected this probe; `before_connect` is the last gate before
         # HOTPLUG, and where the machine-wide probe lock is taken.
         if before_connect is not None:
@@ -1248,7 +1248,7 @@ def test_first_init_refuses_a_probe_another_workspace_holds_by_its_alias(tmp_pat
 
     state = {"connected": False}
 
-    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, before_connect: object = None, profile: object = None) -> JsonObject:
+    def fake_discovery(timeout_s: float = 10.0, *, probe_id: object = None, probe_named_by: str = "caller", before_connect: object = None, profile: object = None) -> JsonObject:
         # Enumeration selects the attached ST-Link by its serial, which is all the
         # bootstrap read can see of it; `before_connect` locks `probe:<serial>`.
         if before_connect is not None:
@@ -2190,6 +2190,69 @@ def test_init_on_a_linux_openocd_host_binds_the_one_visible_probe(tmp_path: Path
         f"openocd (OpenOCD): found at {FAKE_OPENOCD_PATH}. ST-Link serial port(s) on this host: "
         f"066AFF303435554157113106 on {NUCLEO_VCP['stable_device']}."
     )
+
+
+def test_a_serial_carried_from_the_file_is_not_the_operator_naming_a_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`init --force` over a bound file writes the caveat the first `init` wrote (#423).
+
+    Regeneration hands the serial the file already binds to discovery, so an
+    OpenOCD-only bench regenerates its own entry instead of being refused a count
+    nothing on that host can prove. That serial is a selection and nothing more:
+    it came off this very USB inventory the first time, so carrying it back has
+    learnt nothing about how many probes are attached. Reading it as the operator's
+    own choice made `--force` bind the same probe as the first `init` and write
+    none of `discovered_by`, `probe_inventory`, `probe_inventory_note`, and say
+    nothing about them, so the file a later flash resolves the board through
+    quietly lost the disclosure the file before it carried. Who named the probe is
+    what decides the caveat now: a file, or a person looking at the bench."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    # One visible probe and nothing spawned: the profile names the controller, so
+    # the whole of this read is the USB serial inventory.
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
+
+    first = init_config()
+    assert first["ok"] is True, first
+    bound = load_authoritative_config(workspace)
+    assert bound.debuggers["dut"].probe_id == "066AFF303435554157113106"
+    assert yaml.safe_load(Path(str(first["path"])).read_text(encoding="utf-8"))["debuggers"]["dut"]["probe_inventory"] == "incomplete"
+
+    # The same command again over the file it just wrote. The bound serial selects
+    # the same board, and the count behind it is exactly as incomplete as it was.
+    forced = init_config(force=True)
+
+    assert forced["ok"] is True, forced
+    regenerated = load_authoritative_config(workspace)
+    assert regenerated.debuggers["dut"].probe_id == "066AFF303435554157113106"
+    entry = yaml.safe_load(Path(str(forced["path"])).read_text(encoding="utf-8"))["debuggers"]["dut"]
+    assert entry["discovered_by"] == "usb_serial_inventory"
+    assert entry["probe_inventory"] == "incomplete"
+    assert "066AFF303435554157113106" in entry["probe_inventory_note"]
+    assert "no VCP" in entry["probe_inventory_note"]
+    # And the person who ran it is told, in the same sentence the first `init` said.
+    assert forced["hardware_discovery"]["probe_inventory"] == "incomplete"
+    assert "no VCP" in forced["summary"]
+    assert "adopt-hardware --probe-id" in forced["summary"]
+    assert "no VCP" in forced["next_steps"][0]
+
+    def openocd_reads_the_target(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand(OPENOCD_TARGETS_OUTPUT, "", 0, False, False)
+
+    # The other half, unchanged: an operator naming the board has made the choice
+    # a partial count could otherwise have got wrong, so that read is exact and
+    # adds no caveat. Over MCP the controller is read off the board, so this one
+    # spawns.
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP], spawn=openocd_reads_the_target)
+    named = adopt_hardware(com_port_id="dut_uart", probe_id="066AFF303435554157113106")
+
+    assert named["ok"] is True, named
+    discovery = named["hardware_discovery"]
+    assert discovery["probe_id"] == "066AFF303435554157113106"
+    assert "probe_inventory" not in discovery
+    assert "probe_inventory_note" not in discovery
+    assert "no VCP" not in discovery["summary"]
 
 
 def test_project_config_create_binds_the_visible_probe_and_carries_the_caveat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -98,6 +98,20 @@ DISCOVERED_BY_STLINK_CLI = "stm32cubeprogrammer_cli"
 # is `incomplete` rather than a silence or a refusal (#423).
 PROBE_INVENTORY_INCOMPLETE = "incomplete"
 
+# Who named the probe a discovery was asked to select, which is what decides
+# whether the sole-probe caveat is made. Two spellings, because a serial arriving
+# at `discover_attached_hardware` says nothing on its own about where it came
+# from, and only one of the two places it comes from is a statement about the
+# bench. `caller` is an operator at `agentic-hil adopt-hardware --probe-id`, or an
+# MCP caller passing `probe_id`: somebody looked at the bench and said which board
+# this is, so an inventory that cannot prove its count cannot have picked the
+# wrong one. `configuration` is a regeneration handing back the serial the file it
+# is about to rewrite already binds: nobody looked at anything, that serial is a
+# reading this same inventory produced earlier, and the count is exactly as
+# incomplete as it was when the file was first written (#423).
+PROBE_NAMED_BY_CALLER = "caller"
+PROBE_NAMED_BY_CONFIGURATION = "configuration"
+
 
 def probe_inventory_caveat(probe_id: str) -> JsonObject:
     """The caveat a sole visible probe is bound under, as result and file fields.
@@ -495,6 +509,7 @@ def discover_attached_hardware(
     timeout_s: float = 10.0,
     *,
     probe_id: str | None = None,
+    probe_named_by: str = PROBE_NAMED_BY_CALLER,
     before_connect: Callable[[str], JsonObject | None] | None = None,
     profile: JsonObject | None = None,
 ) -> JsonObject:
@@ -512,6 +527,19 @@ def discover_attached_hardware(
     ``fold_hardware_id``, which is the identity every device lock key and every
     probe comparison in this repository uses, so the probe this selects, the probe
     that gets locked and the probe a mismatch check names are one probe.
+
+    ``probe_named_by`` says where that serial came from, and it changes nothing
+    about the selection: the named probe has to be in the enumeration either way,
+    and one that is not is `adapter_not_found` either way. What it decides is the
+    sole-probe caveat below. `caller` is somebody stating which board this is, so
+    a count that could not rule out a second probe cannot have picked the wrong
+    one and no caveat is made. `configuration` is a regeneration carrying back the
+    serial the file already binds, which is this same partial inventory's earlier
+    reading rather than a statement about the bench, so the caveat is made exactly
+    as it was when that file was first written. The default is `caller`, because a
+    direct call naming a serial is a caller naming it; a wrapper that carries one
+    out of a file says so. Any other spelling is treated as not-the-caller, so a
+    value nobody recognises discloses rather than silently suppresses (#423).
 
     ``before_connect`` is called with the enumerated spelling of the selected
     serial after enumeration and before the HOTPLUG connect: the last point at
@@ -557,8 +585,13 @@ def discover_attached_hardware(
     inventory_authoritative = listed.get("complete") is not False
     # Captured before the caller's `probe_id` is folded into the enumerated
     # spelling below, so the answer can say whether the board it bound was one it
-    # chose off a partial reading or one the operator named.
-    caller_named_probe = probe_id is not None
+    # chose off a partial reading or one the operator named. Both halves matter: a
+    # serial regeneration carried out of the file it is about to rewrite is not
+    # anybody naming a board, it is this same inventory's earlier reading handed
+    # back, and treating it as an explicit choice dropped the caveat off every
+    # `agentic-hil init --force` and every `project_config_create` over a bound
+    # bench, on the exact hosts the caveat exists for (#423).
+    caller_named_probe = probe_id is not None and probe_named_by == PROBE_NAMED_BY_CALLER
     if probe_id is not None:
         # An explicit selection is exact whatever the enumeration's completeness:
         # the operator named the board, so a serial among the ones this host can
