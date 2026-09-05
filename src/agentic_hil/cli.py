@@ -686,14 +686,18 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     notice = result.get("restart_notice")
     if isinstance(notice, str) and notice:
         summary += f" {notice}"
-    elif restart_required:
-        summary += " Restart agent hosts to load the new MCP server."
+    if registered:
+        # Named rather than described. "Restart agent hosts to load the new MCP
+        # server" was printed identically on a machine where no agent host had
+        # this server registered at all, beside a `refreshed` block that said so
+        # in the same result.
+        hosts = _named_agents(registered)
+        summary += f" {hosts} {'has' if len(registered) == 1 else 'have'} this server registered, so restart {'it' if len(registered) == 1 else 'them'} to load the new release."
     if rewritten:
         # An agent host reads its MCP registration at startup, so the agent
         # whose entry moved is the one that has to be restarted before it uses
         # the launcher this upgrade resolved.
-        hosts = _named_agents(rewritten)
-        summary += f" The MCP registration was rewritten for {hosts}, so restart {hosts} to load it."
+        summary += f" The MCP registration was rewritten for {_named_agents(rewritten)}, so that restart is also what picks up the launcher this upgrade resolved."
     if failed:
         # Not a failed upgrade. The package moved; what did not is a file this
         # command maintains for somebody else's program, and each entry carries

@@ -847,6 +847,43 @@ def test_the_pin_refusal_keeps_the_with_packages_uv_recorded_beside_this_one(
     assert 'uv tool install "agentic-hil@latest"' in result["summary"]
 
 
+def test_the_pin_refusal_says_whose_words_the_relayed_block_is_before_printing_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """uv's hint was relayed unlabelled and then contradicted several lines later.
+
+    `install.stderr` carries `reinstall with uv tool install agentic-hil@latest`
+    in among this program's own fields, reading as advice from here, with the
+    Do-not bullet that answers it below the What-to-do list. The words stay,
+    because they are the operator's own machine's, and the sentence that says
+    whose they are and what following them costs is printed above the block.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    from agentic_hil.humanize import render_result
+
+    result = upgrade_installation([])
+    rendered = render_result(result, "upgrade")
+
+    # Still in the document, whole and unedited, for a caller reading --json.
+    assert result["install"]["stderr"] == _UV_EXACT_PIN_HINT
+    assert "carries uv's own output, printed as uv wrote it and not as advice from here" in result["manager_hint_note"]
+    # And on the screen the label comes first, the block after it. Read through
+    # the wrapping, which is what puts the sentence on the page in pieces.
+    flat = " ".join(rendered.split())
+    assert "printed as uv wrote it and not as advice from here" in flat
+    assert flat.index("printed as uv wrote it") < flat.index("reinstall with `uv tool install agentic-hil@latest`")
+
+
 def test_the_pin_refusal_replays_the_interpreter_the_receipt_recorded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2029,7 +2066,8 @@ def test_a_registration_that_exists_without_a_skill_is_refreshed_too(
 
     invocations = [command for command, _cwd in calls if "agent-install" in command]
     assert invocations == [[sys.executable, "-m", "agentic_hil", "agent-install", "--agent", "claude-code", "--force", "--json"]]
-    assert result["summary"].endswith("The MCP registration was rewritten for Claude Code, so restart Claude Code to load it.")
+    assert "Claude Code has this server registered, so restart it to load the new release." in result["summary"]
+    assert result["summary"].endswith("The MCP registration was rewritten for Claude Code, so that restart is also what picks up the launcher this upgrade resolved.")
 
 
 def test_naming_an_agent_narrows_the_refresh_and_never_widens_it(
@@ -2487,6 +2525,36 @@ def test_a_linux_host_reads_its_process_table_out_of_proc(
     assert process_working_directory(99) is None
 
 
+def test_the_step_before_a_reinstall_is_the_one_this_host_actually_needs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pin refusal opened with a step about Windows on a Linux bench.
+
+    "which on Windows means deleting it, and that delete fails while the MCP
+    server the host started is still running out of it" is true of one host and
+    of no other, and printing it everywhere sent an operator to close sessions
+    over a failure their machine does not have. The step is chosen by the host,
+    in the catalogue, because which reader a step is for is part of what the
+    step says.
+    """
+    from agentic_hil.knowledge import reinstall_first_step, remediation_fields
+
+    monkeypatch.setattr("agentic_hil.knowledge._host_locks_running_files", lambda: True)
+    windows = reinstall_first_step()
+    monkeypatch.setattr("agentic_hil.knowledge._host_locks_running_files", lambda: False)
+    posix = reinstall_first_step()
+
+    assert "Close the agent host first" in windows
+    assert "deleting it" in windows
+    assert "can be run with a server up" in posix
+    assert "deleting" not in posix
+    assert "Windows" not in posix
+    # And it is the step the refusal actually carries, in first place, on
+    # whichever host the suite is running on.
+    assert remediation_fields("upgrade_blocked_by_pin")["remediation"][0] == reinstall_first_step()
+    assert remediation_fields("upgrade_blocked_by_recorded_option")["remediation"][0] == reinstall_first_step()
+
+
 def test_an_operator_upgrade_runs_while_servers_are_up_and_names_them_for_the_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2665,6 +2733,8 @@ def test_an_upgrade_with_a_registered_agent_host_and_no_live_server_still_asks_f
 
     assert "restart_required_by" not in result
     assert result["restart_required"] is True
+    # Named, not described: the advice says which host has it registered.
+    assert "opencode has this server registered, so restart it to load the new release." in result["summary"]
 
 
 def test_an_upgrade_with_nothing_running_out_of_it_says_nothing_about_restarting_processes(
