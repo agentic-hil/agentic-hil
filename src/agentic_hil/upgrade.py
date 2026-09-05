@@ -220,31 +220,41 @@ def _pinned_version(install_result: JsonObject) -> str | None:
     return match.group(1) if match else None
 
 
-def _pin_holds_nothing_back(install_result: JsonObject, current_version: str) -> bool:
-    """Whether the recorded pin names the release that is already installed.
+def _pin_holds_nothing_back(install_result: JsonObject, current_version: str, manager: str, command: list[str]) -> bool:
+    """Whether the recorded pin names the newest release, holding nothing back.
 
-    Two facts, both of them already in the answer this run got back: the manager
-    put the requirement to the index and came back with nothing to upgrade, and
-    the version its hint names is the version this installation is running. A pin
-    that names what is installed, on a resolution that found nothing to move to,
-    is a record of how the installation was made and not something standing
-    between the operator and a release.
+    Three facts, and the third is the one that carries weight. The manager put
+    the requirement to the index and came back with nothing to upgrade; the
+    version its hint names is the version this installation is running; and an
+    independent resolution that ignores the pin agrees there is nothing newer to
+    install. Only the last of those establishes currency, because the first two
+    are what *every* exact-pinned installation shows whether or not a newer
+    release exists: `uv tool upgrade` resolves under the pin, so its `Nothing to
+    upgrade` is the pin agreeing with itself, and the pin naming the installed
+    version says where the installation is, not that it is the newest. Reading
+    those two as proof of currency reported a stale pin -- one below a release the
+    index offers -- as `already_current` and exit 0 (round 1, finding 1). The
+    unpinned resolution is what tells the pin at the newest release from the pin
+    below one.
 
-    Reporting that as `upgrade_blocked_by_pin` with exit 1 was the defect: on a
-    machine pinned to the current release, `agentic-hil upgrade` refused every
-    time and a provisioning script that runs it read a failure over an
-    installation that was exactly where it should be (#450). What is left for the
-    refusal is a pin that does hold a release back: one the manager names beside
-    a resolution that did produce something, or one recorded at a version other
-    than the installed one, and those keep the reinstall line they always had.
+    Reporting a pin at the newest release as `upgrade_blocked_by_pin` with exit 1
+    was the other defect: on a machine pinned to the current release,
+    `agentic-hil upgrade` refused every time and a provisioning script that runs
+    it read a failure over an installation that was exactly where it should be
+    (#450). So the note is kept for that case and the refusal for the one it hides
+    behind.
 
-    A hint whose version this cannot read falls to the refusal as well. Saying
-    "the pin names the installed release" needs the pin's version, and inventing
-    it from the installed one would make the claim true by construction.
+    Anything short of the independent resolution confirming currency falls to the
+    refusal: a hint whose version this cannot read, a resolution the manager could
+    not be asked (pipx, or a `uv` that answered unreadably), or one that names a
+    newer release. Currency this cannot establish is a pin left reported as a
+    block, which is the safe direction to fall.
     """
     if _NOTHING_TO_UPGRADE not in _manager_output(install_result).lower():
         return False
-    return _pinned_version(install_result) == current_version
+    if _pinned_version(install_result) != current_version:
+        return False
+    return _installed_release_is_current(manager, command) is True
 
 
 def _unpinned_reinstall_command(manager: str, command: list[str]) -> str | None:
@@ -1366,6 +1376,61 @@ def _would_install_nothing(manager: str, command: list[str]) -> tuple[bool, Json
     return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower(), resolution, certificates
 
 
+def _unpinned_resolution_query(manager: str, command: list[str]) -> list[str] | None:
+    """An index resolution that ignores the recorded pin, or None where there is none.
+
+    The pin branch needs the one fact its own manager will not give it: whether
+    the release this installation is pinned to is the newest the index offers. A
+    `uv tool upgrade` reads the requirement it recorded and resolves under the
+    pin, so `Nothing to upgrade` from it is the pin agreeing with itself and says
+    nothing about a newer release. The question has to be put without the pin, and
+    for a `uv`-managed installation `uv pip` against this very interpreter is what
+    puts it: `--upgrade` makes it resolve the newest rather than accept what is
+    already satisfied, and `--dry-run` keeps it from touching the environment. The
+    interpreter is `sys.executable`, which for a `uv tool` installation is the
+    tool environment's own Python, so the resolution is asked about the very
+    environment the pin holds.
+
+    None for pipx, whose upgrade path can also carry a pin but which publishes no
+    resolver this can drive without risking the environment it is asking about; a
+    pin it cannot get an independent answer for stays reported as a block, which
+    is the safe direction to fall.
+    """
+    if manager == "uv" and command[1:3] == ["tool", "upgrade"]:
+        return [command[0], "pip", "install", "--python", sys.executable, "--upgrade", "--dry-run", _upgrade_requirement()]
+    return None
+
+
+def _installed_release_is_current(manager: str, command: list[str]) -> bool | None:
+    """Whether an unpinned resolution would install nothing over what is here.
+
+    True when the newest release the index offers is the one already installed,
+    False when it would install a newer one, and None when the question could not
+    be put to this manager or its answer could not be read. Only True turns a pin
+    refusal into the note that the pin holds nothing back; both False and None
+    leave the pin reported as the block it may be.
+
+    Asked through `_manager_run`, so it meets the same one-shot certificate retry
+    the install and the pre-flight resolution do: behind a TLS-intercepting proxy
+    the question fails the way every index request does, comes back unreadable,
+    and falls to None -- the safe direction -- rather than being read as a
+    currency it could not establish. `_UV_PIP_NO_CHANGES` is the prose `uv pip
+    install --dry-run` prints when the environment already satisfies the newest
+    requirement; a wording that stops matching reads as False, which keeps the pin
+    reported as a block.
+    """
+    query = _unpinned_resolution_query(manager, command)
+    if query is None:
+        return None
+    try:
+        answered, resolution, _certificates = _manager_run(manager, query)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if answered.returncode != 0:
+        return None
+    return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower()
+
+
 def _nothing_to_install(
     tool: str,
     manager: str,
@@ -1601,7 +1666,7 @@ def _upgrade_changed_nothing(
     }
     reinstall_command = _unpinned_reinstall_command(manager, command)
     pinned = reinstall_command is not None and _manager_reports_exact_pin(install_result)
-    if pinned and not _pin_holds_nothing_back(install_result, current_version):
+    if pinned and not _pin_holds_nothing_back(install_result, current_version, manager, command):
         return {
             **base,
             "error_type": "upgrade_blocked_by_pin",
@@ -1876,7 +1941,10 @@ def _upgrade_permission_denied(config: AgenticHILConfig) -> JsonObject:
             "Upgrading this installation is denied by permissions.allow_upgrade in the authoritative configuration. "
             "Nothing was changed, and this server still runs the version it started with."
         ),
-        "permission": "allow_upgrade",
+        # The dotted key `agentic-hil grant` takes, not the bare `allow_upgrade`
+        # that `resolve_permission_key` rejects; the short name stays only as the
+        # scope the catalogue is looked up by below (round 1, finding 3).
+        "permission": "permissions.allow_upgrade",
         "running_version": __version__,
         "restart_required": False,
         "path": config.config_path,

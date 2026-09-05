@@ -1350,6 +1350,68 @@ def test_check_plan_without_a_configuration_says_so_and_checks_loadability(
     assert result["summary"] == "All 1 test plan(s) load through the reactor's loader."
 
 
+def test_check_plan_strict_fails_when_the_configuration_is_present_but_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A present-but-broken bench file is not the no-configuration case.
+
+    `check-plan --strict` is the preflight for this bench, so it must not report
+    that every plan loads and exit 0 when the configuration whose device names it
+    would compare against cannot be read. Only `config_file_not_found` is the
+    tolerated no-bench case; a malformed, unreadable, noncanonical or
+    wrong-workspace file fails the strict check (round 1, finding 2)."""
+    workspace = (tmp_path / "workspace").resolve()
+    config_path = write_authoritative_config(workspace, monkeypatch, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')
+    # Present (so not config_file_not_found) but will not load.
+    config_path.write_text("workspace_root: [unterminated\n", encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    plan = workspace / "good.testconfig.yaml"
+    plan.write_text("version: 3\nname: good\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--strict", "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert result["ok"] is False
+    assert result["strict"] is True
+    assert result["configuration"]["ok"] is False
+    assert result["configuration"]["error_type"] != "config_file_not_found"
+    # The plan itself still loads; the failure is the unreadable bench, and no
+    # device comparison could be made against it.
+    assert result["plans"][0]["ok"] is True
+    assert "unconfigured_devices" not in result["plans"][0]
+    assert "could not be loaded" in result["summary"]
+
+
+def test_check_plan_without_strict_reports_an_invalid_configuration_but_still_checks_loadability(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Without --strict the job is loadability, which a broken bench does not stop.
+
+    It exits 0, and the configuration failure is reported in the `configuration`
+    block rather than folded into the exit code: the difference from strict mode
+    is the exit, not the reporting (round 1, finding 2)."""
+    workspace = (tmp_path / "workspace").resolve()
+    config_path = write_authoritative_config(workspace, monkeypatch, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')
+    config_path.write_text("workspace_root: [unterminated\n", encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    plan = workspace / "good.testconfig.yaml"
+    plan.write_text("version: 3\nname: good\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert result["ok"] is True
+    assert result["configuration"]["ok"] is False
+    assert result["configuration"]["error_type"] != "config_file_not_found"
+    assert result["plans"][0]["ok"] is True
+
+
 def test_check_plan_reports_a_refused_plan_before_any_device_finding(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

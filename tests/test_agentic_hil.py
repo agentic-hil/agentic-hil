@@ -711,8 +711,16 @@ def _upgrade_reporting(
     command: list[str],
     installed: subprocess.CompletedProcess[str],
     version_after: str,
+    resolution: subprocess.CompletedProcess[str] | None = None,
 ) -> list[list[str]]:
-    """Drive one upgrade with a fixed manager outcome and a fixed resulting version."""
+    """Drive one upgrade with a fixed manager outcome and a fixed resulting version.
+
+    `resolution` answers the unpinned `--dry-run` currency query the pin branch
+    runs through `_installed_release_is_current`. Only a pin naming the installed
+    version reaches it; left None, that query gets the same `installed` outcome as
+    the upgrade, which -- carrying no `Would make no changes` -- the currency check
+    reads as 'not the newest' and the pin stays reported as a block.
+    """
     calls: list[list[str]] = []
 
     def run(invoked: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -721,6 +729,8 @@ def _upgrade_reporting(
             return subprocess.CompletedProcess(invoked, 0, f"{version_after}\n", "")
         if "skill-install" in invoked:
             return subprocess.CompletedProcess(invoked, 0, '{"ok": true}\n', "")
+        if "--dry-run" in invoked and resolution is not None:
+            return resolution
         return installed
 
     monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", lambda: (manager, command))
@@ -829,10 +839,14 @@ def test_a_pin_at_the_release_that_is_installed_is_a_note_and_exits_zero(
     upgrade` nested inside it. The outcome was that the installation is current,
     and a script running `agentic-hil upgrade` unconditionally read a failure.
 
-    The pin still reaches the operator, because somebody who wants later releases
-    picked up automatically has to clear it: same `pinned_version`, same
-    `reinstall_command`, same extras. What goes is the error type and the exit
-    code, which claimed a release was being withheld when none was.
+    The note is reported only once an independent, unpinned resolution confirms
+    the installed release is the newest the index offers -- here `Would make no
+    changes` -- because the manager's own pin-bound `Nothing to upgrade` is true of
+    a stale pin too (round 1, finding 1). The pin still reaches the operator,
+    because somebody who wants later releases picked up automatically has to clear
+    it: same `pinned_version`, same `reinstall_command`, same extras. What goes is
+    the error type and the exit code, which claimed a release was being withheld
+    when none was.
     """
     monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
     calls = _upgrade_reporting(
@@ -841,6 +855,7 @@ def test_a_pin_at_the_release_that_is_installed_is_a_note_and_exits_zero(
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
         installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
 
     result = upgrade_installation(["opencode"])
@@ -855,6 +870,8 @@ def test_a_pin_at_the_release_that_is_installed_is_a_note_and_exits_zero(
     assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
     assert result["installed_extras"] == ["can"]
     assert "note rather than as a refusal" in result["summary"]
+    # An unpinned currency resolution was run and is what let the note stand.
+    assert any("--dry-run" in call for call in calls)
     # Nothing was replaced, so nothing is refreshed out of it.
     assert not any("skill-install" in call for call in calls)
 
@@ -870,20 +887,22 @@ def test_the_pinned_installation_that_exits_zero_exits_zero_at_the_command_line(
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
         installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
 
     assert entrypoint(["upgrade", "--json"]) == 0
 
 
-def test_a_pin_below_a_release_the_index_offers_is_still_refused(
+def test_a_pin_naming_a_version_other_than_the_installed_one_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The refusal, reserved for the pin that costs the operator something.
+    """The first guard on the note: the pin must name the version that is installed.
 
-    Same hint, and it names a version other than the one installed, so the pin is
-    not a record of where this installation is: it is what is keeping it there.
-    That is the case `upgrade_blocked_by_pin` was written for and it keeps the
-    error type, the exit code and the reinstall line.
+    The hint names a version other than the one this installation runs, so the pin
+    is not a record of where the installation is, and the note that a pin holds
+    nothing back cannot be made about it whatever the index says. It keeps the
+    error type, the exit code and the reinstall line, and it never reaches the
+    currency resolution, which is why none is supplied here.
     """
     monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
     _upgrade_reporting(
@@ -900,6 +919,43 @@ def test_a_pin_below_a_release_the_index_offers_is_still_refused(
     assert result["error_type"] == "upgrade_blocked_by_pin"
     assert result["pinned_version"] == "0.7.1"
     assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert entrypoint(["upgrade", "--json"]) == 1
+
+
+def test_a_stale_pin_at_the_installed_release_is_refused_when_the_index_offers_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real stale-pin state, which the manager's own output cannot show (round 1, finding 1).
+
+    Previous, installed and pinned are all one release, and `uv tool upgrade` --
+    which resolves under the pin -- says `Nothing to upgrade` and names that same
+    version in its hint. Both halves the earlier code read as currency are present,
+    and they are present on every pinned installation whether or not a newer
+    release exists; an installation genuinely below the latest looks exactly like
+    one pinned at it. The independent unpinned resolution is what tells them apart:
+    here it would install `9.9.9`, so the pin is holding a release back and keeps
+    the refusal rather than being reported as `already_current` and exit 0.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    calls = _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=subprocess.CompletedProcess([], 0, "Resolved 8 packages in 12ms\nWould install agentic-hil==9.9.9\n", ""),
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert "already_current" not in result
+    # Previous, installed and pinned are the one release; the newer one is only in
+    # the independent resolution, which is what earns the refusal.
+    assert result["previous_version"] == result["version"] == result["pinned_version"] == __version__
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert any("--dry-run" in call for call in calls)
     assert entrypoint(["upgrade", "--json"]) == 1
 
 

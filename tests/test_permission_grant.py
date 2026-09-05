@@ -337,7 +337,7 @@ def test_the_waiver_is_not_reachable_with_an_agents_provenance(tmp_path: Path, m
     )
 
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == CONFIG_PERMISSIONS_RIGHT
+    assert refused["permission"] == f"permissions.{CONFIG_PERMISSIONS_RIGHT}"
     assert document_of(path)["can_buses"]["dut"]["permissions"]["allow_write"] is False
 
 

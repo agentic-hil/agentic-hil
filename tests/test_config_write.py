@@ -153,7 +153,7 @@ def test_the_description_grant_alone_opens_the_description_and_nothing_else(tmp_
         # And every key it calls locked really is, naming the grant that is missing.
         locked = tools.call(PROJECT_CONFIG_SET, changes(*((entry["key"], False) for entry in described["locked_keys"])))
         assert locked["error_type"] == "permission_denied"
-        assert locked["permission"] == CONFIG_PERMISSIONS_RIGHT
+        assert locked["permission"] == f"permissions.{CONFIG_PERMISSIONS_RIGHT}"
         assert locked["denied_keys"] == sorted(entry["key"] for entry in described["locked_keys"])
     finally:
         tools.close()
@@ -206,7 +206,7 @@ def test_a_reserved_looking_entry_id_is_writable_on_the_description_grant_alone(
     finally:
         tools.close()
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == CONFIG_PERMISSIONS_RIGHT
+    assert refused["permission"] == f"permissions.{CONFIG_PERMISSIONS_RIGHT}"
 
 
 def test_the_permissions_grant_alone_opens_the_permissions_and_nothing_else(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -223,7 +223,7 @@ def test_the_permissions_grant_alone_opens_the_permissions_and_nothing_else(tmp_
 
         refused = tools.call(PROJECT_CONFIG_SET, changes(("debuggers.dut.probe_id", "066AFF49")))
         assert refused["error_type"] == "permission_denied"
-        assert refused["permission"] == CONFIG_DESCRIPTION_RIGHT
+        assert refused["permission"] == f"permissions.{CONFIG_DESCRIPTION_RIGHT}"
         assert refused["denied_keys"] == ["debuggers.dut.probe_id"]
     finally:
         tools.close()
@@ -246,7 +246,7 @@ def test_neither_grant_leaves_nothing_open_and_says_which_grant_would_open_what(
         }
 
         refused = tools.call(PROJECT_CONFIG_SET, changes(("target.name", "renamed")))
-        assert refused["permission"] == CONFIG_DESCRIPTION_RIGHT
+        assert refused["permission"] == f"permissions.{CONFIG_DESCRIPTION_RIGHT}"
         assert refused["permission_key"] == f"permissions.{CONFIG_DESCRIPTION_RIGHT}"
         assert refused["path"] == str(path)
     finally:
@@ -278,7 +278,7 @@ def test_the_description_grant_cannot_widen_a_permission_directly(tmp_path: Path
         tools.close()
 
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == CONFIG_PERMISSIONS_RIGHT
+    assert refused["permission"] == f"permissions.{CONFIG_PERMISSIONS_RIGHT}"
     assert refused["denied_keys"] == [key]
     assert path.read_bytes() == before
 
@@ -354,7 +354,7 @@ def test_the_boundary_holds_even_when_the_key_model_is_wrong(tmp_path: Path, mon
     refused = project_config_set(workspace, load_authoritative_config(workspace), [{"key": mislabelled.key, "value": True}])
 
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == CONFIG_PERMISSIONS_RIGHT
+    assert refused["permission"] == f"permissions.{CONFIG_PERMISSIONS_RIGHT}"
     assert refused["denied_keys"] == ["debuggers.dut.permissions.allow_flash"]
     assert path.read_bytes() == before
 
@@ -1115,7 +1115,7 @@ def test_the_debug_stack_stays_shut_without_the_description_grant(tmp_path: Path
 
     assert locked["debuggers.dut.type"]["right"] == CONFIG_DESCRIPTION_RIGHT
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == CONFIG_DESCRIPTION_RIGHT
+    assert refused["permission"] == f"permissions.{CONFIG_DESCRIPTION_RIGHT}"
     assert refused["denied_keys"] == ["debuggers.dut.type"]
     assert path.read_bytes() == before, "nothing changed"
 
@@ -1419,7 +1419,7 @@ def test_the_gdb_key_stays_shut_without_the_description_grant(tmp_path: Path, mo
 
     assert locked["debug.gdb_executable"]["right"] == CONFIG_DESCRIPTION_RIGHT
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == CONFIG_DESCRIPTION_RIGHT
+    assert refused["permission"] == f"permissions.{CONFIG_DESCRIPTION_RIGHT}"
     assert refused["denied_keys"] == ["debug.gdb_executable"]
     assert path.read_bytes() == before, "nothing changed"
 
@@ -1448,7 +1448,7 @@ def test_the_debug_section_is_split_across_both_rights(tmp_path: Path, monkeypat
     assert locked["debug.gdb_executable"]["right"] == CONFIG_DESCRIPTION_RIGHT
     assert narrowed["ok"] is True, narrowed
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == CONFIG_DESCRIPTION_RIGHT
+    assert refused["permission"] == f"permissions.{CONFIG_DESCRIPTION_RIGHT}"
     assert document_of(path)["debug"]["gdb_executable"] is None
 
 
@@ -1629,7 +1629,7 @@ def test_the_false_only_rule_does_not_reach_the_command_line(tmp_path: Path, mon
         via="cli:test",
     )
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == CONFIG_PERMISSIONS_RIGHT
+    assert refused["permission"] == f"permissions.{CONFIG_PERMISSIONS_RIGHT}"
 
 
 # ---------------------------------------------------------------------------
@@ -1694,7 +1694,7 @@ def test_a_denied_section_grant_is_explained_as_the_permission_it_is(tmp_path: P
         for key in ("artifacts.allow_upload", "debug.allow_all_symbols"):
             refused = tools.call(PROJECT_CONFIG_SET, changes((key, False)))
             assert refused["error_type"] == "permission_denied", refused
-            assert refused["permission"] == CONFIG_PERMISSIONS_RIGHT
+            assert refused["permission"] == f"permissions.{CONFIG_PERMISSIONS_RIGHT}"
             assert refused["denied_keys"] == [key]
             # And the advice it carries is the catalogue's, for this exact grant.
             assert refused["remediation"] == remediation_fields("permission_denied", CONFIG_PERMISSIONS_RIGHT)["remediation"]

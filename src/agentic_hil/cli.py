@@ -3477,11 +3477,18 @@ def check_plan(plans: list[str], *, strict: bool = False) -> JsonObject:
             checked.append(entry)
     refused = [entry["plan"] for entry in checked if not entry["ok"]]
     findings = [entry for entry in checked if entry.get("unconfigured_devices")]
-    ok = not refused and not (strict and findings)
+    # A present-but-broken configuration is not the no-configuration case. Strict
+    # mode is the preflight for this bench, and it cannot compare a plan's device
+    # names against a file it could not read: a malformed, unreadable, noncanonical
+    # or wrong-workspace configuration leaves the comparison undone, so under
+    # --strict it fails the command rather than reporting that every plan loads and
+    # exiting 0 over the check the caller asked for (round 1, finding 2).
+    config_unreadable = _configuration_unreadable(configuration)
+    ok = not refused and not (strict and findings) and not (strict and config_unreadable)
     return {
         "ok": ok,
         "tool": "check_plan",
-        "summary": _check_plan_summary(checked, refused, findings, strict=strict),
+        "summary": _check_plan_summary(checked, refused, findings, configuration, strict=strict),
         "strict": strict,
         "configuration": configuration,
         "plans": checked,
@@ -3493,16 +3500,32 @@ def _plan_check_configuration(work_dir: str) -> tuple[AgenticHILConfig | None, J
 
     Not having one is an ordinary answer here rather than a refusal: this command
     is the check a job runs before a bench is involved, and it was specified to
-    need no configuration. So the loader's own refusal is reported as the reason
+    need no configuration. So `config_file_not_found` is reported as the reason
     the device names were not compared, and the plans are still checked.
+
+    A configuration that is present but will not load is a different fact: it is a
+    bench whose file is malformed, unreadable, noncanonical or bound to another
+    workspace, not a workspace with no bench. The comparison still cannot happen,
+    but the reason is not "there is nothing to compare against", and `check_plan`
+    treats it as a failure under --strict rather than as the tolerated
+    no-configuration case (round 1, finding 2).
     """
     try:
         config = load_authoritative_config(Path(work_dir))
     except ConfigError as error:
+        if error.error_type == "config_file_not_found":
+            return None, {
+                "ok": False,
+                "error_type": error.error_type,
+                "summary": f"{error.summary} No device names were compared against a configuration; the plans were checked for loadability only.",
+            }
         return None, {
             "ok": False,
             "error_type": error.error_type,
-            "summary": f"{error.summary} No device names were compared against a configuration; the plans were checked for loadability only.",
+            "summary": (
+                f"{error.summary} This workspace has a configuration that could not be loaded, so no device names were "
+                "compared; the plans were checked for loadability only."
+            ),
         }
     return config, {
         "ok": True,
@@ -3513,9 +3536,27 @@ def _plan_check_configuration(work_dir: str) -> tuple[AgenticHILConfig | None, J
     }
 
 
-def _check_plan_summary(checked: list[JsonObject], refused: list[object], findings: list[JsonObject], *, strict: bool) -> str:
+def _configuration_unreadable(configuration: JsonObject) -> bool:
+    """Whether a configuration is present but could not be loaded.
+
+    True for every configuration-loading failure except `config_file_not_found`,
+    which is the one this command tolerates as the hosted-simulator case with no
+    bench at all. A malformed, unreadable, noncanonical or wrong-workspace file is
+    a bench whose configuration is broken, and strict plan checking fails on it
+    (round 1, finding 2).
+    """
+    return not configuration.get("ok", False) and configuration.get("error_type") != "config_file_not_found"
+
+
+def _check_plan_summary(checked: list[JsonObject], refused: list[object], findings: list[JsonObject], configuration: JsonObject, *, strict: bool) -> str:
     if refused:
         return f"{len(refused)} of {len(checked)} test plan(s) would be refused by the reactor: {', '.join(str(name) for name in refused)}."
+    if strict and _configuration_unreadable(configuration):
+        return (
+            f"All {len(checked)} test plan(s) load through the reactor's loader, but this workspace's configuration "
+            f"could not be loaded ({configuration.get('error_type')}), so --strict could not compare their device names "
+            "against it and fails."
+        )
     if not findings:
         return f"All {len(checked)} test plan(s) load through the reactor's loader."
     names = ", ".join(sorted({str(name) for entry in findings for name in entry["unconfigured_devices"]}))

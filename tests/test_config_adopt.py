@@ -874,7 +874,7 @@ def test_without_the_description_grant_the_agent_gets_the_values_and_not_the_wri
 
     assert refused["ok"] is False
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == CONFIG_DESCRIPTION_RIGHT
+    assert refused["permission"] == f"permissions.{CONFIG_DESCRIPTION_RIGHT}"
     assert refused["applied"] is False
     assert {item["key"]: item["value"] for item in refused["carried"]}["debuggers.dut.probe_id"] == PROBE_SERIAL
     assert refused["write"]["tool"] == PROJECT_CONFIG_SET

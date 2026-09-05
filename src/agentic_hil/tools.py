@@ -3434,15 +3434,21 @@ def _generated_next_steps(config: AgenticHILConfig, *, created: bool, narrowed: 
 
 
 def _config_write_denied(existing: AgenticHILConfig, target_path: Path) -> JsonObject:
+    # The canonical dotted key goes straight into `tool_error`, which is the one
+    # place the summary and the next step are built for a permission refusal: the
+    # summary names the key, and the next step is the exact `agentic-hil grant`
+    # line. The short `allow_config_write` that `resolve_permission_key` rejects
+    # never reaches the `permission` field, so this refusal advertises the key a
+    # caller can act on like every other one does (round 1, finding 3).
     result = tool_error(
         PROJECT_CONFIG_CREATE,
         "permission_denied",
-        "Writing this project's configuration is denied by permissions.allow_config_write in the configuration itself. "
+        "Writing this project's configuration is denied by the authoritative configuration itself. "
         "This server may read it and not change it, and only a person editing that file can change that.",
+        "permissions.allow_config_write",
     )
     return {
         **result,
-        "permission": "allow_config_write",
         "reason": "config_write_denied",
         "workspace_root": existing.workspace_root,
         "path": str(target_path),

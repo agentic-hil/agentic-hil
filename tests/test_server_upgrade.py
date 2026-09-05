@@ -35,6 +35,7 @@ from conftest import write_authoritative_config, write_config
 
 from agentic_hil import __version__
 from agentic_hil.config import load_config
+from agentic_hil.configwrite import resolve_permission_key
 from agentic_hil.contracts import MCP_TOOL_NAMES, MCP_TOOLS, TOOL_ANNOTATIONS, validate_tool_arguments
 from agentic_hil.knowledge import ERROR_CATALOGUE
 from agentic_hil.tools import AgenticHILToolService
@@ -132,7 +133,10 @@ def test_the_configuration_can_close_this_tool_and_the_refusal_names_the_key(
 
     assert refused["ok"] is False
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == "allow_upgrade"
+    # The dotted key `agentic-hil grant` and `resolve_permission_key` take, not
+    # the bare `allow_upgrade` the latter rejects (round 1, finding 3).
+    assert refused["permission"] == "permissions.allow_upgrade"
+    assert resolve_permission_key(refused["permission"])[0] is not None
     assert refused["running_version"] == __version__
     assert refused["side_effect_status"] == "not_started"
     assert refused["hardware_state"] == "unchanged"

@@ -612,7 +612,13 @@ def _permission_denied(tool: str, right: str, keys: list[str], path: Path) -> Js
             f"configuration is denied by permissions.{right} in the configuration itself. This server may read it and "
             "not change it there, and only a person editing that file can change that."
         ),
-        "permission": right,
+        # The dotted key `agentic-hil grant` and `resolve_permission_key` take,
+        # under the `permission` name every refusal on this server advertises.
+        # `permission_key` is the older spelling of the same fact and is kept
+        # beside it rather than moved, because it is already published; the bare
+        # `right` stays only as the scope the catalogue is looked up by below
+        # (round 1, finding 3).
+        "permission": _right_key(right),
         "permission_key": _right_key(right),
         "reason": "config_write_denied",
         "denied_keys": sorted(keys),
