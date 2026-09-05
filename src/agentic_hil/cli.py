@@ -104,6 +104,7 @@ from agentic_hil.test_reactor import (
     UartRunner,
     flatten_steps,
     load_test_config,
+    unconfigured_devices,
 )
 from agentic_hil.tools import (
     AgenticHILToolService,
@@ -497,9 +498,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_plan_parser = subparsers.add_parser(
         "check-plan",
-        help="load each named test plan through the reactor's own loader and say whether it holds, without a configuration and without touching hardware: the same duplicate-key rejection, non-finite-number rejection and plan-version feature gates the bench would apply, so a plan this accepts is one the reactor can load. Exit is nonzero if any plan is refused. This is the loadability check a hosted simulator job runs; a schema-only reader passes plans the reactor then refuses",
+        help=(
+            "load each named test plan through the reactor's own loader and say whether it holds, without touching "
+            "hardware: the same duplicate-key rejection, non-finite-number rejection and plan-version feature gates "
+            "the bench would apply, so a plan this accepts is one the reactor can load. Where this workspace has a "
+            "configuration, it also reports which device names a plan uses that the configuration does not declare, "
+            "which is the other thing the bench refuses a plan for; where it has none, it says so and checks "
+            "loadability alone. Exit is nonzero if any plan is refused. This is the pre-flight check a hosted "
+            "simulator job runs; a schema-only reader passes plans the reactor then refuses"
+        ),
     )
     check_plan_parser.add_argument("plans", nargs="+", metavar="PLAN", help="one or more test plan paths inside this workspace")
+    check_plan_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit nonzero for a plan naming a device this workspace's configuration does not declare, instead of reporting it as a finding. For the job that means this bench: a repository holding plans for other benches has findings that are not defects",
+    )
 
     mcp_config_parser = subparsers.add_parser("mcp-config", help="print or write project .mcp.json for MCP client discovery")
     mcp_config_parser.add_argument("--output", default=None)
@@ -607,7 +621,7 @@ def dispatch(args: argparse.Namespace) -> JsonObject | int | None:
     if args.command == "test-schema":
         return test_schema(args.output, args.force)
     if args.command == "check-plan":
-        return check_plan(args.plans)
+        return check_plan(args.plans, strict=args.strict)
     if args.command == "mcp-config":
         return mcp_config(args.output, args.force)
     if args.command == "skill-install":
@@ -3413,7 +3427,7 @@ def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
 test_schema.__test__ = False  # type: ignore[attr-defined] - keep pytest from collecting the CLI helper
 
 
-def check_plan(plans: list[str]) -> JsonObject:
+def check_plan(plans: list[str], *, strict: bool = False) -> JsonObject:
     """Load each plan through the reactor's own loader and report whether it holds.
 
     The hosted simulator job's one job is to establish that every plan in the
@@ -3424,15 +3438,30 @@ def check_plan(plans: list[str]) -> JsonObject:
     `load_test_config`, the same function the reactor loads a plan with, which is
     the whole of that guarantee: the duplicate-key rejection, the non-finite
     number rejection, the plan-version supersession and the feature gates, in one
-    place rather than reimplemented in a workflow. It loads no configuration and
-    touches no hardware; the workspace is this working directory, which is the
-    checkout the simulator runs in and the root a plan must stay inside.
+    place rather than reimplemented in a workflow. It touches no hardware; the
+    workspace is this working directory, which is the checkout the simulator runs
+    in and the root a plan must stay inside.
+
+    Where this workspace has a configuration, the check goes one step further and
+    says which device names a plan uses that the configuration does not declare.
+    That is the other thing the bench refuses a plan for, it is the same file
+    `workspace_root` is already read from, and a plan naming `dut_uart2` where
+    the bench has `dut_uart` used to pass here and be refused as
+    `test_config_invalid` at the first step of the run. It is a finding rather
+    than a failure: a repository holds plans for benches other than the one this
+    checkout happens to sit on, and a check that failed on those would be a check
+    people stop running. `--strict` is for the job that does mean this bench.
+
+    Where there is no configuration, nothing is compared and the result says so.
+    A plan is checked for loadability exactly as before, which is what a hosted
+    simulator with no bench at all can establish.
 
     A red plan does not stop the ones after it: every plan is reported, so one
     run names all of them rather than the first to fail, and `ok` is false when
     any was refused so the command exits nonzero.
     """
     work_dir = str(Path.cwd())
+    config, configuration = _plan_check_configuration(work_dir)
     checked: list[JsonObject] = []
     for plan in plans:
         try:
@@ -3441,15 +3470,60 @@ def check_plan(plans: list[str]) -> JsonObject:
             detail = error.to_dict()
             checked.append({"plan": plan, "ok": False, "error_type": detail.get("error_type"), "summary": detail.get("summary")})
         else:
-            checked.append({"plan": plan, "ok": True, "name": loaded.name, "steps": sum(1 for _ in flatten_steps(loaded.steps))})
+            entry: JsonObject = {"plan": plan, "ok": True, "name": loaded.name, "steps": sum(1 for _ in flatten_steps(loaded.steps))}
+            missing = [] if config is None else unconfigured_devices(config, loaded)
+            if missing:
+                entry["unconfigured_devices"] = missing
+            checked.append(entry)
     refused = [entry["plan"] for entry in checked if not entry["ok"]]
-    ok = not refused
-    summary = (
-        f"All {len(checked)} test plan(s) load through the reactor's loader."
-        if ok
-        else f"{len(refused)} of {len(checked)} test plan(s) would be refused by the reactor: {', '.join(str(name) for name in refused)}."
+    findings = [entry for entry in checked if entry.get("unconfigured_devices")]
+    ok = not refused and not (strict and findings)
+    return {
+        "ok": ok,
+        "tool": "check_plan",
+        "summary": _check_plan_summary(checked, refused, findings, strict=strict),
+        "strict": strict,
+        "configuration": configuration,
+        "plans": checked,
+    }
+
+
+def _plan_check_configuration(work_dir: str) -> tuple[AgenticHILConfig | None, JsonObject]:
+    """This workspace's configuration and what to say about having it, or not.
+
+    Not having one is an ordinary answer here rather than a refusal: this command
+    is the check a job runs before a bench is involved, and it was specified to
+    need no configuration. So the loader's own refusal is reported as the reason
+    the device names were not compared, and the plans are still checked.
+    """
+    try:
+        config = load_authoritative_config(Path(work_dir))
+    except ConfigError as error:
+        return None, {
+            "ok": False,
+            "error_type": error.error_type,
+            "summary": f"{error.summary} No device names were compared against a configuration; the plans were checked for loadability only.",
+        }
+    return config, {
+        "ok": True,
+        "summary": "This workspace's configuration was read, so each plan's device names were compared against what it declares.",
+        "debuggers": sorted(config.debuggers),
+        "com_ports": sorted(config.com_ports),
+        "can_buses": sorted(config.can_buses),
+    }
+
+
+def _check_plan_summary(checked: list[JsonObject], refused: list[object], findings: list[JsonObject], *, strict: bool) -> str:
+    if refused:
+        return f"{len(refused)} of {len(checked)} test plan(s) would be refused by the reactor: {', '.join(str(name) for name in refused)}."
+    if not findings:
+        return f"All {len(checked)} test plan(s) load through the reactor's loader."
+    names = ", ".join(sorted({str(name) for entry in findings for name in entry["unconfigured_devices"]}))
+    verdict = "and --strict makes that a failure" if strict else "which --strict makes a failure"
+    return (
+        f"All {len(checked)} test plan(s) load through the reactor's loader, and {len(findings)} of them name "
+        f"device(s) this workspace's configuration does not declare ({names}), {verdict}."
     )
-    return {"ok": ok, "tool": "check_plan", "summary": summary, "plans": checked}
 
 
 check_plan.__test__ = False  # type: ignore[attr-defined] - keep pytest from collecting the CLI helper

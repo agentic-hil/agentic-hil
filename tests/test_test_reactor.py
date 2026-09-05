@@ -1237,6 +1237,162 @@ def test_check_plan_renders_a_refusal_for_a_person(monkeypatch: pytest.MonkeyPat
     assert "v1.testconfig.yaml" in printed
 
 
+def _bench_with_one_uart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A workspace whose configuration declares `dut` and `dut_uart` and no more."""
+    workspace = (tmp_path / "workspace").resolve()
+    write_authoritative_config(workspace, monkeypatch, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
+def test_check_plan_names_the_devices_the_configuration_does_not_declare(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """#453: it passed a plan the bench refuses at its first step.
+
+    The plan loads, so `check-plan` said all plans load, and `test-reactor` then
+    refused the same file as `test_config_invalid` because the step names a port
+    the configuration does not have. The command already reads that
+    configuration far enough to enforce `workspace_root`, and a pre-flight check
+    that misses the most common plan defect is a pre-flight check nobody is
+    served by."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "typo.testconfig.yaml"
+    plan.write_text(
+        "version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n  - {device: dut_uart, action: uart_open}\n",
+        encoding="utf-8",
+    )
+
+    exit_code = entrypoint(["check-plan", str(plan), "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    # A finding, not a failure: a repository holds plans for other benches too.
+    assert exit_code == 0
+    assert result["ok"] is True
+    assert result["plans"][0]["unconfigured_devices"] == ["dut_uart2"]
+    assert "dut_uart2" in result["summary"]
+    assert result["configuration"]["ok"] is True
+    assert result["configuration"]["com_ports"] == ["dut_uart"]
+
+
+def test_check_plan_strict_makes_that_finding_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The job that does mean this bench asks for the nonzero exit."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "typo.testconfig.yaml"
+    plan.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--strict", "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert result["ok"] is False
+    assert result["strict"] is True
+    assert result["plans"][0]["unconfigured_devices"] == ["dut_uart2"]
+
+
+def test_check_plan_says_nothing_about_devices_a_plan_gets_right(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A plan whose names the configuration declares is green either way.
+
+    Every kind is exercised, and `--strict` changes nothing about a plan with
+    nothing to report."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "good.testconfig.yaml"
+    plan.write_text(
+        "version: 3\nname: good\nsteps:\n  - {device: dut, action: reset}\n  - {device: dut_uart, action: uart_open}\n",
+        encoding="utf-8",
+    )
+
+    exit_code = entrypoint(["check-plan", str(plan), "--strict", "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert result["ok"] is True
+    assert "unconfigured_devices" not in result["plans"][0]
+    assert result["summary"] == "All 1 test plan(s) load through the reactor's loader."
+
+
+def test_check_plan_without_a_configuration_says_so_and_checks_loadability(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The hosted simulator has no bench at all, and this is its whole job.
+
+    Nothing is compared, the result says why, and a plan naming a device nobody
+    declared is still reported as loading, because on a workspace with no
+    configuration that is the entire truth available."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "no-config"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-config"))
+    monkeypatch.delenv("AGENTIC_HIL_CONFIG", raising=False)
+    plan = tmp_path / "typo.testconfig.yaml"
+    plan.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan), "--strict", "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert result["ok"] is True
+    assert result["configuration"]["ok"] is False
+    assert result["configuration"]["error_type"] == "config_file_not_found"
+    assert "loadability only" in result["configuration"]["summary"]
+    assert "unconfigured_devices" not in result["plans"][0]
+    assert result["summary"] == "All 1 test plan(s) load through the reactor's loader."
+
+
+def test_check_plan_reports_a_refused_plan_before_any_device_finding(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A plan that does not load has nothing to compare device names against.
+
+    The refusal is the answer for that plan, and the finding on its neighbour
+    does not change what the run exits with, which was already nonzero."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    broken = workspace / "dupe.testconfig.yaml"
+    broken.write_text("version: 3\nname: one\nname: two\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+    typo = workspace / "typo.testconfig.yaml"
+    typo.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(broken), str(typo), "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert result["plans"][0]["ok"] is False
+    assert "unconfigured_devices" not in result["plans"][0]
+    assert result["plans"][1]["unconfigured_devices"] == ["dut_uart2"]
+    assert "would be refused by the reactor" in result["summary"]
+
+
+def test_check_plan_names_an_undeclared_device_for_a_person_too(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The operator reading the CI log gets the name, not a machine document."""
+    workspace = _bench_with_one_uart(tmp_path, monkeypatch)
+    plan = workspace / "typo.testconfig.yaml"
+    plan.write_text("version: 3\nname: typo\nsteps:\n  - {device: dut_uart2, action: uart_open}\n", encoding="utf-8")
+
+    exit_code = entrypoint(["check-plan", str(plan)])
+
+    assert exit_code == 0
+    printed = " ".join(capsys.readouterr().out.split())
+    assert "dut_uart2" in printed
+    assert "--strict" in printed
+
+
 def test_a_run_names_the_per_run_report_copy_the_next_run_will_not_overwrite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

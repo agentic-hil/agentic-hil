@@ -3398,6 +3398,43 @@ def declared_devices(config: AgenticHILConfig, test_config: TestConfig) -> list[
     return plan_devices(config, test_config).lock_keys
 
 
+def unconfigured_devices(config: AgenticHILConfig, test_config: TestConfig) -> list[str]:
+    """The device names this plan uses that this configuration does not declare.
+
+    The other half of `plan_devices`, which leaves such a name out because there
+    is nothing to lock: what a run does with one is refuse the plan at preflight
+    with a message about the name, and what a pre-flight check does with one is
+    say so before a board is involved at all.
+
+    A name is looked up in the section of every kind that serves the step's
+    action, because a `device:` means whichever section declares it and an
+    action several kinds serve (`delay` is on all of them) does not say which.
+    Declared in any of them is declared. Named in the order the plan first uses
+    them, once each, so the finding reads as a list of names to fix rather than
+    as one entry per step that mentions them.
+
+    Deliberately not `undeclared_devices`, which is the run-time question of a
+    call reaching past what its own plan declared. This one is about the plan
+    and the configuration disagreeing before anything runs."""
+    missing: list[str] = []
+    for step in flatten_steps(test_config.steps):
+        for name, claimants in _step_device_names(config, step).items():
+            if name in missing or any(name in claimant.config_entries(config) for claimant in claimants):
+                continue
+            missing.append(name)
+    return missing
+
+
+def _step_device_names(config: AgenticHILConfig, step: TestStep) -> dict[str, list[type[StepDevice]]]:
+    """The config entry this step names, per kind that could serve it."""
+    names: dict[str, list[type[StepDevice]]] = {}
+    for device_class in step_device_classes(step.action):
+        name = device_class.step_config_id(config, step)
+        if name is not None:
+            names.setdefault(name, []).append(device_class)
+    return names
+
+
 def step_tool_arguments(config: AgenticHILConfig, step: TestStep) -> list[tuple[str, JsonObject]]:
     """The plan-supplied tool calls a step will make, as (tool, arguments).
 
