@@ -146,10 +146,14 @@ def test_the_interlock_and_the_generated_default_name_the_same_permissions() -> 
     that builds the refusal. If a flag joins that list without joining
     `EXCLUSIVE_FLASH_PERMISSIONS`, generation keeps writing it true and the bench
     stops flashing, which is the defect, exactly, and this is the assertion that
-    would have caught it before it shipped."""
+    would have caught it before it shipped.
+
+    The call is `_exclusive_permission_denied` since #443, which builds the
+    summary and the `permission` field the refusal carries out of the same two
+    literals; the flag is still written where the gate is."""
     refused: set[str] = set()
     for source in sorted(BACKENDS.glob("*.py")):
-        refused.update(re.findall(r'exclusive_permission_summary\(\s*"Flashing",\s*"(allow_[a-z_]+)"', source.read_text(encoding="utf-8")))
+        refused.update(re.findall(r'_exclusive_permission_denied\(\s*"flash_firmware",\s*"Flashing",\s*"(allow_[a-z_]+)"', source.read_text(encoding="utf-8")))
 
     assert refused, "no backend flash gate was found; this test is not reading the interlock any more"
     assert refused == set(EXCLUSIVE_FLASH_PERMISSIONS)

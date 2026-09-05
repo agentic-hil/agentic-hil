@@ -33,6 +33,9 @@ from agentic_hil.knowledge import (
     LISTEN_ONLY_MODE_ERROR,
     LISTEN_ONLY_UNCONFIRMED_ERROR,
     LISTEN_ONLY_UNSUPPORTED_ERROR,
+    permission_denied_fields,
+    permission_denied_summary,
+    permission_key,
     remediation_fields,
 )
 from agentic_hil.process import (
@@ -214,9 +217,9 @@ class CanBusService:
             return self._write_report(bus)
         bus_permissions = bus["bus_config"].permissions
         if not self.config.can_read_allowed(bus["bus_config"]) and not bus_permissions.allow_write:
-            return self._write_report(self._permission_denied("can_session_start", "Reading and writing this CAN bus are disabled by the authoritative config.", bus_id))
+            return self._write_report(self._permission_denied("can_session_start", "Reading and writing this CAN bus are disabled by the authoritative config.", bus_id, "allow_read"))
         if clear_rx_queue and not self.config.can_read_allowed(bus["bus_config"]):
-            return self._write_report(self._permission_denied("can_session_start", "Clearing this CAN bus receive queue requires permissions.allow_read on the bus.", bus_id))
+            return self._write_report(self._permission_denied("can_session_start", "Clearing this CAN bus receive queue requires permissions.allow_read on the bus.", bus_id, "allow_read"))
         existing = self.sessions.get(bus_id)
         if existing and self._session_is_active(existing):
             if clear_rx_queue:
@@ -372,7 +375,7 @@ class CanBusService:
         if mode is not None:
             return self._write_report(mode)
         if not bus["bus_config"].permissions.allow_write:
-            return self._write_report(self._permission_denied("can_send", "Writing to this CAN bus is disabled by the authoritative config.", bus_id))
+            return self._write_report(self._permission_denied("can_send", "Writing to this CAN bus is disabled by the authoritative config.", bus_id, "allow_write"))
         session_result = self._active_session(bus_id, "can_send")
         if not session_result["ok"]:
             return self._write_report(session_result)
@@ -402,7 +405,7 @@ class CanBusService:
         if not bus["ok"]:
             return self._write_report(bus)
         if not self.config.can_read_allowed(bus["bus_config"]):
-            return self._write_report(self._permission_denied("can_read", "Reading this CAN bus is disabled by the authoritative config.", bus_id))
+            return self._write_report(self._permission_denied("can_read", "Reading this CAN bus is disabled by the authoritative config.", bus_id, "allow_read"))
         session_result = self._active_session(bus_id, "can_read")
         if not session_result["ok"]:
             return self._write_report(session_result)
@@ -618,10 +621,21 @@ class CanBusService:
             return write_report(self.config, {**written, **lease.status(), "ok": False, "cleanup_required": True, "summary": "CAN lease release remained unconfirmed."})
         return recommit_report_with_status(self.config, written, lease.status())
 
-    def _permission_denied(self, tool: str, summary: str, bus_id: str | None = None) -> JsonObject:
+    def _permission_denied(self, tool: str, summary: str, bus_id: str | None = None, permission: str | None = None) -> JsonObject:
+        """A refusal one permission caused, carrying which one and what to do.
+
+        `permission` is the dotted key the file uses and `agentic-hil grant`
+        takes, built off the entry's own name. It is named in the summary as
+        well as carried as a field, because an agent asked to report the
+        permission it was denied reads the summary out (#443)."""
         result: JsonObject = {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
         if bus_id:
             result["bus_id"] = bus_id
+        if permission:
+            key = permission_key("can_buses", bus_id, permission)
+            result["summary"] = permission_denied_summary(summary, key)
+            result.update(permission_denied_fields(key))
+            result.update(remediation_fields("permission_denied", permission=key))
         return result
 
 

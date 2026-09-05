@@ -467,9 +467,19 @@ def _remediation(result: JsonObject, *, command_line: bool = False) -> tuple[lis
     if steps or avoid:
         return (_command_line_order(result, steps) if command_line else steps), avoid
     error_type = _error_type(result) or None
+    # The one substitution the catalogue cannot make for itself: which permission
+    # a refusal is about is a fact about this refusal. Passed in so the advice
+    # names the key the reader has to move rather than the generic shape of one
+    # (#443), and so an entry written around that key declines to answer for a
+    # `permission_denied` that names none.
+    permission = result.get("permission")
     for key in _REMEDY_SCOPE_KEYS:
         scope = result.get(key)
-        catalogue = remediation_fields(error_type, scope if isinstance(scope, str) else None)
+        catalogue = remediation_fields(
+            error_type,
+            scope if isinstance(scope, str) else None,
+            permission=permission if isinstance(permission, str) and permission else None,
+        )
         if catalogue:
             found = _strings(catalogue.get("remediation"))
             return (_command_line_order(result, found) if command_line else found), _strings(catalogue.get("do_not"))

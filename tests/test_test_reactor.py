@@ -1884,7 +1884,7 @@ steps:
     assert result["ok"] is False
     assert result["failed_step"] == 2
     assert result["validation_error"]["field"] == "steps[1].action"
-    assert result["validation_error"]["permission"] == "allow_write"
+    assert result["validation_error"]["permission"] == "can_buses.dut_can.permissions.allow_write"
     assert result["steps"] == []
     assert service.calls == []
 
@@ -2422,10 +2422,66 @@ def test_reset_step_is_refused_without_the_reset_permission(tmp_path: Path) -> N
     assert result["error_type"] == "test_config_invalid"
     assert result["validation_error"]["field"] == "steps[1].action"
     # Named, so the operator is sent to the grant and not to the bench.
-    assert result["validation_error"]["summary"] == "Target reset is disabled for this debugger by the authoritative config."
+    assert result["validation_error"]["summary"] == (
+        "Target reset is disabled for this debugger by the authoritative config. "
+        "The permission is `debuggers.dut.permissions.allow_reset` and it is false."
+    )
+    assert result["validation_error"]["permission"] == "debuggers.dut.permissions.allow_reset"
+    assert "agentic-hil grant debuggers.dut.permissions.allow_reset" in result["validation_error"]["next_step"]
     # Refused before the run, so the flash the plan would have done never happened.
     assert result["steps"] == []
     assert service.calls == []
+
+
+def test_a_denied_permission_is_named_at_the_top_level_and_in_the_advice(tmp_path: Path) -> None:
+    """#443: the key an operator has to move, where each reader looks for it.
+
+    A plan refused after `agentic-hil revoke debuggers.dut.permissions.allow_reset`
+    said "Target reset is disabled for this debugger by the authoritative
+    config" and the string `allow_reset` stood nowhere in the document. An agent
+    told to name the permission it was denied could not comply, and an operator
+    had nothing to paste. Three readers, three places: the field a caller
+    parses, the summary an agent reads out, and the line the operator runs.
+    """
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: reset}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    key = "debuggers.dut.permissions.allow_reset"
+    # The top level, so a caller reading the result's own fields finds it
+    # without descending into the validation error.
+    assert result["permission"] == key
+    assert result["validation_error"]["permission"] == key
+    assert result["validation_error"]["summary"].endswith(f"The permission is `{key}` and it is false.")
+    next_step = result["validation_error"]["next_step"]
+    assert f"name the permission that is denied, `{key}`," in next_step
+    assert f"agentic-hil grant {key}" in next_step
+    # Named as the operator's own command, at the operator's own shell: an agent
+    # reading this must not take it as a route it may run itself.
+    assert "The operator opens exactly that key at their own shell" in next_step
+
+
+def test_a_permission_that_blocks_by_being_granted_is_not_answered_with_a_grant(tmp_path: Path) -> None:
+    """#443: the same field, the opposite direction, and the opposite advice.
+
+    `allow_mass_erase` refuses flashing by being *true*. An operator told only
+    that a permission refused this reaches for the grant, which is the one move
+    that keeps flashing refused, so the advice this refusal carries has to be
+    the one that closes the key.
+    """
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_mass_erase": True})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: flash, image_path: build/app.elf}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    key = "debuggers.dut.permissions.allow_mass_erase"
+    assert result["permission"] == key
+    assert result["validation_error"]["permission_granted"] is True
+    assert result["validation_error"]["summary"].endswith(f"The permission is `{key}` and it is true.")
+    next_step = result["validation_error"]["next_step"]
+    assert f"agentic-hil revoke {key}" in next_step
+    assert f"agentic-hil grant {key}" not in next_step
 
 
 def test_reset_step_is_refused_while_a_debug_session_is_open(tmp_path: Path) -> None:
@@ -3533,8 +3589,11 @@ steps:
     assert result["ok"] is False
     refusal = result["validation_error"]
     assert refusal["field"] == "steps[1].action"
-    assert refusal["summary"] == "Writing to this COM port is disabled by the authoritative config."
-    assert refusal["permission"] == "allow_write"
+    assert refusal["summary"] == (
+        "Writing to this COM port is disabled by the authoritative config. "
+        "The permission is `com_ports.dut_uart.permissions.allow_write` and it is false."
+    )
+    assert refusal["permission"] == "com_ports.dut_uart.permissions.allow_write"
     assert service.calls == []
 
 
@@ -5144,8 +5203,11 @@ steps:
     refusal = result["validation_error"]
     assert refusal["field"] == "steps[1].action"
     assert refusal["action"] == "read_symbol"
-    assert refusal["summary"] == "Reading target memory requires allow_probe on this debugger."
-    assert refusal["permission"] == "allow_probe"
+    assert refusal["summary"] == (
+        "Reading target memory requires allow_probe on this debugger. "
+        "The permission is `debuggers.dut.permissions.allow_probe` and it is false."
+    )
+    assert refusal["permission"] == "debuggers.dut.permissions.allow_probe"
     # No step ran: the flash the plan led with never reached the service.
     assert result["steps"] == []
     assert service.calls == []
@@ -5178,8 +5240,11 @@ steps:
     refusal = result["validation_error"]
     assert refusal["field"] == "steps[1].action"
     assert refusal["action"] == "dump_memory"
-    assert refusal["summary"] == "Reading target memory requires allow_probe on this debugger."
-    assert refusal["permission"] == "allow_probe"
+    assert refusal["summary"] == (
+        "Reading target memory requires allow_probe on this debugger. "
+        "The permission is `debuggers.dut.permissions.allow_probe` and it is false."
+    )
+    assert refusal["permission"] == "debuggers.dut.permissions.allow_probe"
     assert result["steps"] == []
     assert service.calls == []
 

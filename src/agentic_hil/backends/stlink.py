@@ -40,7 +40,14 @@ from agentic_hil.config import (
     safe_write_text,
 )
 from agentic_hil.gdbmi import read_intel_hex_file
-from agentic_hil.knowledge import exclusive_permission_summary, remediation_fields
+from agentic_hil.knowledge import (
+    exclusive_permission_fields,
+    exclusive_permission_summary,
+    permission_denied_fields,
+    permission_denied_summary,
+    permission_key,
+    remediation_fields,
+)
 from agentic_hil.report import (
     classify_failure_report,
     logs_directory,
@@ -273,7 +280,7 @@ class STLinkBackend:
     def list_probes(self) -> JsonObject:
         tool = "debugger_probes_list"
         if not self.config.probe_allowed():
-            return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.")
+            return self._permission_denied(tool, "Debugger probe discovery is disabled by the authoritative config.", self._permission_key("allow_probe"))
         resolved = self._resolve_executable()
         if not resolved["ok"]:
             return {"tool": tool, **resolved}
@@ -309,7 +316,7 @@ class STLinkBackend:
 
     def probe_target(self) -> JsonObject:
         if not self.config.probe_allowed():
-            return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.")
+            return self._permission_denied("probe_target", "Probing is disabled by the authoritative config.", self._permission_key("allow_probe"))
         result = self._run_stlink("probe_target", self._connection_args("HOTPLUG"))
         if result.get("ok"):
             result["target_detected"] = True
@@ -318,11 +325,11 @@ class STLinkBackend:
 
     def flash_firmware(self, artifact: JsonObject, reset_after_flash: bool = False) -> JsonObject:
         if not self.config.debugger.permissions.allow_flash:
-            return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.")
+            return self._permission_denied("flash_firmware", "Flashing is disabled by the authoritative config.", self._permission_key("allow_flash"))
         if self.config.debugger.permissions.allow_raw_debugger_commands:
-            return self._permission_denied("flash_firmware", exclusive_permission_summary("Flashing", "allow_raw_debugger_commands", self.config.debugger_id))
+            return self._exclusive_permission_denied("flash_firmware", "Flashing", "allow_raw_debugger_commands")
         if self.config.debugger.permissions.allow_mass_erase:
-            return self._permission_denied("flash_firmware", exclusive_permission_summary("Flashing", "allow_mass_erase", self.config.debugger_id))
+            return self._exclusive_permission_denied("flash_firmware", "Flashing", "allow_mass_erase")
 
         artifact_path = str(artifact["resolved_path"])
         write_args = ["-w", artifact_path]
@@ -421,7 +428,7 @@ class STLinkBackend:
         """
         tool = "debug_symbol_value"
         if not self.config.probe_allowed():
-            return self._permission_denied(tool, "Symbol reads require allow_probe in the authoritative config.")
+            return self._permission_denied(tool, "Symbol reads require allow_probe in the authoritative config.", self._permission_key("allow_probe"))
         validated = validate_debug_symbol(self.config, self.backend_name, tool, symbol)
         if not validated["ok"]:
             return validated
@@ -485,7 +492,7 @@ class STLinkBackend:
         """
         tool = "debug_dump_symbol_ihex"
         if not self.config.probe_allowed():
-            return self._permission_denied(tool, "Symbol dumps require allow_probe in the authoritative config.")
+            return self._permission_denied(tool, "Symbol dumps require allow_probe in the authoritative config.", self._permission_key("allow_probe"))
         validated = validate_debug_symbol(self.config, self.backend_name, tool, symbol)
         if not validated["ok"]:
             return validated
@@ -742,8 +749,38 @@ class STLinkBackend:
     def _finish_log_audit(self, result: JsonObject, error: Exception | None) -> JsonObject:
         return mark_audit_failure(result, error) if error is not None else result
 
-    def _permission_denied(self, tool: str, summary: str) -> JsonObject:
-        return {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
+    def _permission_denied(self, tool: str, summary: str, permission: str | None = None) -> JsonObject:
+        """A refusal one permission caused, carrying which one and what to do.
+
+        `permission` is the dotted key the file uses and `agentic-hil grant`
+        takes, built off the bound entry's own name. Named in the summary as
+        well as carried as a field: an agent asked to report the permission it
+        was denied reads the summary out (#443)."""
+        result: JsonObject = {"ok": False, "tool": tool, "error_type": "permission_denied", "summary": summary}
+        if permission:
+            result["summary"] = permission_denied_summary(summary, permission)
+            result.update(permission_denied_fields(permission))
+            result.update(remediation_fields("permission_denied", permission=permission))
+        return result
+
+    def _permission_key(self, key: str) -> str:
+        return permission_key("debuggers", self.config.debugger_id, key)
+
+    def _exclusive_permission_denied(self, tool: str, action: str, blocking: str) -> JsonObject:
+        """The other direction: a permission that is granted and blocks this.
+
+        Its own helper because the advice is the opposite one. The unscoped
+        `permission_denied` entry says the operator opens the key; here the key
+        is already open and opening it is what an operator must not be sent to
+        do, so the scoped entry travels on the result rather than being looked
+        up later off an `error_type` the two cases share."""
+        return {
+            "ok": False,
+            "tool": tool,
+            "error_type": "permission_denied",
+            "summary": exclusive_permission_summary(action, blocking, self.config.debugger_id),
+            **exclusive_permission_fields(blocking, self.config.debugger_id),
+        }
 
     def _unsupported_debug_tool(self, tool: str) -> JsonObject:
         return debug_session_unsupported(self.backend_name, tool)

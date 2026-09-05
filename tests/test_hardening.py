@@ -4773,8 +4773,14 @@ def test_debug_load_refusal_names_the_permission_that_fired(tmp_path: Path) -> N
         service.close()
 
     assert result["ok"] is False
-    assert result["validation_error"]["permission"] == "allow_mass_erase"
+    # The whole key, in the spelling the file uses and `agentic-hil revoke`
+    # takes, and the direction it has to move: this flag is true and closing it
+    # is the fix, so the refusal must not read as a missing grant (#443).
+    assert result["validation_error"]["permission"] == "debuggers.dut.permissions.allow_mass_erase"
+    assert result["validation_error"]["permission_granted"] is True
     assert "mass erase" in result["validation_error"]["summary"]
+    assert "`debuggers.dut.permissions.allow_mass_erase` and it is true" in result["validation_error"]["summary"]
+    assert "agentic-hil revoke debuggers.dut.permissions.allow_mass_erase" in result["validation_error"]["next_step"]
 
 
 def test_artifact_outside_the_workspace_is_refused_with_the_real_reason(tmp_path: Path) -> None:

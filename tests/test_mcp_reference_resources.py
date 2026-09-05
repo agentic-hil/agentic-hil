@@ -44,6 +44,7 @@ from agentic_hil.knowledge import (
     LEASE_LIFECYCLE_URI,
     MCP_RESOURCE_TEMPLATES,
     MCP_RESOURCES,
+    PERMISSION_KEY_PLACEHOLDER,
     PLAN_COMPARATOR_EXAMPLE,
     PLAN_FEATURE_VERSION_KEY,
     PLAN_MINIMAL_EXAMPLE,
@@ -835,7 +836,10 @@ def test_the_remediation_in_a_result_is_the_remediation_the_reference_serves(
     for key in ERROR_CATALOGUE:
         error_type, _, scope = key.partition(":")
         served = by_key[(error_type, scope or None)]
-        inline = remediation_fields(error_type, scope or None)
+        # The one entry whose steps are written around a key the catalogue
+        # cannot know supplies it here as the generic shape, which is exactly
+        # what the reference serves a reader who has met no refusal yet (#443).
+        inline = remediation_fields(error_type, scope or None, permission=PERMISSION_KEY_PLACEHOLDER)
 
         assert served["remediation"] == inline["remediation"], key
         assert served.get("do_not") == inline.get("do_not"), key

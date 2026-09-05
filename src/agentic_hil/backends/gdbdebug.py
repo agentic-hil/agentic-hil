@@ -35,9 +35,14 @@ from agentic_hil.gdbmi import (
     write_intel_hex_file,
 )
 from agentic_hil.knowledge import (
+    ALLOW_ALL_SYMBOLS_PERMISSION,
     GDB_AUTODETECTED_MISSING_SCOPE,
     GDB_NOT_CONFIGURED_SCOPE,
+    exclusive_permission_fields,
     exclusive_permission_summary,
+    permission_denied_fields,
+    permission_denied_summary,
+    permission_key,
     remediation_fields,
 )
 from agentic_hil.process import spawn_managed_process, terminate_process_tree
@@ -417,7 +422,8 @@ class GdbDebugSessions:
                 "tool": tool,
                 "backend": self.backend_name,
                 "error_type": "permission_denied",
-                "summary": "File and line breakpoints require debug.allow_all_symbols.",
+                "summary": permission_denied_summary("File and line breakpoints require debug.allow_all_symbols.", ALLOW_ALL_SYMBOLS_PERMISSION),
+                **permission_denied_fields(ALLOW_ALL_SYMBOLS_PERMISSION),
             })
         response = self._gdb_command(session, f"-break-insert {mi_string(normalized['gdb_location'])}")
         backend_id = mi_field(response.line, "number")
@@ -517,6 +523,7 @@ class GdbDebugSessions:
             return self._report(self._permission_denied(
                 tool,
                 "Resuming target execution requires allow_debug_execution in the authoritative config.",
+                self._permission_key("allow_debug_execution"),
                 remediation_scope="allow_debug_execution",
             ))
         self._refresh_session_stop(session)
@@ -733,23 +740,53 @@ class GdbDebugSessions:
     def _start_permission(self, tool: str, mode: str) -> JsonObject:
         permissions = self.config.debugger.permissions
         if not self.config.probe_allowed():
-            return self._permission_denied(tool, "Debug sessions require allow_probe in the authoritative config.")
+            return self._permission_denied(tool, "Debug sessions require allow_probe in the authoritative config.", self._permission_key("allow_probe"))
         if mode != "attach" and not permissions.allow_reset:
-            return self._permission_denied(tool, f"Debug session mode '{mode}' requires allow_reset in the authoritative config.")
+            return self._permission_denied(tool, f"Debug session mode '{mode}' requires allow_reset in the authoritative config.", self._permission_key("allow_reset"))
         if permissions.allow_raw_debugger_commands:
-            return self._permission_denied(tool, exclusive_permission_summary("A debug session", "allow_raw_debugger_commands", self.config.debugger_id))
+            return self._exclusive_permission_denied(tool, "A debug session", "allow_raw_debugger_commands")
         if mode == "load":
             if not permissions.allow_flash:
-                return self._permission_denied(tool, "Debug session mode 'load' requires allow_flash in the authoritative config.")
+                return self._permission_denied(tool, "Debug session mode 'load' requires allow_flash in the authoritative config.", self._permission_key("allow_flash"))
             if permissions.allow_mass_erase:
-                return self._permission_denied(tool, exclusive_permission_summary("Debug session mode 'load'", "allow_mass_erase", self.config.debugger_id))
+                return self._exclusive_permission_denied(tool, "Debug session mode 'load'", "allow_mass_erase")
         return {"ok": True}
 
-    def _permission_denied(self, tool: str, summary: str, *, remediation_scope: str | None = None) -> JsonObject:
+    def _permission_denied(self, tool: str, summary: str, permission: str | None = None, *, remediation_scope: str | None = None) -> JsonObject:
+        """A refusal one permission caused, carrying which one and what to do.
+
+        `permission` is the dotted key the file uses and `agentic-hil grant`
+        takes, built off the bound entry's own name; it is named in the summary
+        as well as carried as a field, because an agent asked to report the
+        permission it was denied reads the summary out (#443).
+
+        `remediation_scope` still picks a more specific catalogue entry where
+        one exists; the unscoped entry answers for the rest, which before this
+        was no answer at all."""
         result = {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "permission_denied", "summary": summary}
-        if remediation_scope is not None:
-            result.update(remediation_fields("permission_denied", remediation_scope))
+        if permission:
+            result["summary"] = permission_denied_summary(summary, permission)
+            result.update(permission_denied_fields(permission))
+        result.update(remediation_fields("permission_denied", remediation_scope, permission=permission))
         return result
+
+    def _permission_key(self, key: str) -> str:
+        return permission_key("debuggers", self.config.debugger_id, key)
+
+    def _exclusive_permission_denied(self, tool: str, action: str, blocking: str) -> JsonObject:
+        """The other direction: a permission that is granted and blocks this.
+
+        Its own helper because the advice is the opposite one, and the two cases
+        share an `error_type`, so the scoped entry has to travel on the result
+        rather than be looked up off that error type later."""
+        return {
+            "ok": False,
+            "tool": tool,
+            "backend": self.backend_name,
+            "error_type": "permission_denied",
+            "summary": exclusive_permission_summary(action, blocking, self.config.debugger_id),
+            **exclusive_permission_fields(blocking, self.config.debugger_id),
+        }
 
     def _resolve_gdb(self) -> JsonObject:
         return resolve_gdb_executable(self.config, self.backend_name)

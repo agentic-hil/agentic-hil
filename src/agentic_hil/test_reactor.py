@@ -37,8 +37,19 @@ from agentic_hil.devices import (
     debugger_device,
     uart_device,
 )
+from agentic_hil.knowledge import (
+    ALLOW_ALL_SYMBOLS_PERMISSION,
+    EXCLUSIVE_PERMISSION_SCOPE,
+    LISTEN_ONLY_MODE_ERROR,
+    exclusive_permission_fields,
+    permission_denied_fields,
+    permission_denied_summary,
+    permission_granted_summary,
+    permission_key,
+    plan_schema_document,
+    remediation_fields,
+)
 from agentic_hil.knowledge import DEFAULT_TEST_CONFIG_PATH as DEFAULT_TEST_CONFIG_PATH
-from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR, plan_schema_document, remediation_fields
 from agentic_hil.knowledge import PLAN_FEATURE_VERSION_KEY as PLAN_FEATURE_VERSION_KEY
 from agentic_hil.knowledge import TEST_CONFIG_SCHEMA_RESOURCE as TEST_CONFIG_SCHEMA_RESOURCE
 from agentic_hil.report import audit_errors, overall_success
@@ -1481,7 +1492,7 @@ class SessionDevice(StepDevice):
     @classmethod
     def preflight(cls, reactor: TestReactor, location: StepLocation, step: TestStep, state: PlanState) -> JsonObject | None:
         name = str(cls.step_config_id(reactor.config, step))
-        refusal = cls.permission_refusal(reactor, location, step, cls.config_entries(reactor.config)[name])
+        refusal = cls.permission_refusal(reactor, location, step, cls.config_entries(reactor.config)[name], name)
         if refusal is not None:
             return refusal
         key = (cls.kind, name)
@@ -1498,8 +1509,12 @@ class SessionDevice(StepDevice):
         return None
 
     @classmethod
-    def permission_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, entry: Any) -> JsonObject | None:
-        """Refuse a step this entry's own permissions do not allow."""
+    def permission_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, entry: Any, name: str) -> JsonObject | None:
+        """Refuse a step this entry's own permissions do not allow.
+
+        `name` is the entry's own name in the configuration, which with
+        `config_section` is what makes the refusal able to print the key the
+        operator's `agentic-hil grant` takes rather than a bare flag (#443)."""
         return None
 
     def open_session(self, step: TestStep) -> JsonObject:
@@ -1662,15 +1677,15 @@ class UartRunner(SessionDevice):
     # --- plan time -------------------------------------------------------
 
     @classmethod
-    def permission_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, entry: Any) -> JsonObject | None:
+    def permission_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, entry: Any, name: str) -> JsonObject | None:
         # The open is asked about reading, and that covers every action that only
         # listens: each of them requires a session this plan opened, so a port
         # the config will not let a plan read is refused before any of them.
         # Writing is its own grant and its own refusal, named where it applies.
         if step.action == cls.open_action and not reactor.config.com_read_allowed(entry):
-            return preflight_error(location, step, "action", "Reading this COM port is disabled by the authoritative config.")
+            return permission_preflight_error(location, step, "action", "Reading this COM port is disabled by the authoritative config.", cls.config_section, name, "allow_read")
         if step.action == "uart_write" and not entry.permissions.allow_write:
-            return preflight_error(location, step, "action", "Writing to this COM port is disabled by the authoritative config.", {"permission": "allow_write"})
+            return permission_preflight_error(location, step, "action", "Writing to this COM port is disabled by the authoritative config.", cls.config_section, name, "allow_write")
         return None
 
     @classmethod
@@ -2005,20 +2020,20 @@ class CanRunner(SessionDevice):
         return super().preflight(reactor, location, step, state)
 
     @classmethod
-    def permission_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, entry: Any) -> JsonObject | None:
+    def permission_refusal(cls, reactor: TestReactor, location: StepLocation, step: TestStep, entry: Any, name: str) -> JsonObject | None:
         readable = reactor.config.can_read_allowed(entry)
         if step.action == cls.open_action:
             if not readable and not entry.permissions.allow_write:
-                return preflight_error(location, step, "action", "Reading and writing this CAN bus are disabled by the authoritative config.")
+                return permission_preflight_error(location, step, "action", "Reading and writing this CAN bus are disabled by the authoritative config.", cls.config_section, name, "allow_read")
             if step.arguments.get("clear_rx_queue", True) and not readable:
-                return preflight_error(location, step, "clear_rx_queue", "Clearing this CAN bus receive queue requires permissions.allow_read on the bus.", {"permission": "allow_read"})
+                return permission_preflight_error(location, step, "clear_rx_queue", "Clearing this CAN bus receive queue requires permissions.allow_read on the bus.", cls.config_section, name, "allow_read")
             return None
         if step.action == "can_read" and not readable:
-            return preflight_error(location, step, "action", "Reading this CAN bus is disabled by the authoritative config.", {"permission": "allow_read"})
+            return permission_preflight_error(location, step, "action", "Reading this CAN bus is disabled by the authoritative config.", cls.config_section, name, "allow_read")
         if step.action != "can_send":
             return None
         if not entry.permissions.allow_write:
-            return preflight_error(location, step, "action", "Writing to this CAN bus is disabled by the authoritative config.", {"permission": "allow_write"})
+            return permission_preflight_error(location, step, "action", "Writing to this CAN bus is disabled by the authoritative config.", cls.config_section, name, "allow_write")
         if entry.listen_only:
             # `listen_only: true` is not an obstacle standing in the way of the
             # send: it is the claim that observing this bus sends nothing, which
@@ -2402,13 +2417,13 @@ class DebuggerRunner(StepDevice):
             if state.debug_session is not None:
                 return preflight_error(location, step, "action", "Firmware cannot be flashed while a debug session is active.", {"debug_session_debugger": state.debug_session})
             if not permissions.allow_flash:
-                return preflight_error(location, step, "action", "Flashing is disabled for this debugger by the authoritative config.")
+                return permission_preflight_error(location, step, "action", "Flashing is disabled for this debugger by the authoritative config.", cls.config_section, debugger_id, "allow_flash")
             if step.arguments.get("reset_after_flash", False) and not permissions.allow_reset:
-                return preflight_error(location, step, "reset_after_flash", "Post-flash reset is disabled for this debugger by the authoritative config.")
+                return permission_preflight_error(location, step, "reset_after_flash", "Post-flash reset is disabled for this debugger by the authoritative config.", cls.config_section, debugger_id, "allow_reset")
             if permissions.allow_raw_debugger_commands:
-                return preflight_error(location, step, "action", "Flashing is disabled while this debugger allows raw debugger commands.", {"permission": "allow_raw_debugger_commands"})
+                return exclusive_permission_preflight_error(location, step, "action", "Flashing is disabled while this debugger allows raw debugger commands.", debugger_id, "allow_raw_debugger_commands")
             if permissions.allow_mass_erase:
-                return preflight_error(location, step, "action", "Flashing is disabled while this debugger allows mass erase.", {"permission": "allow_mass_erase"})
+                return exclusive_permission_preflight_error(location, step, "action", "Flashing is disabled while this debugger allows mass erase.", debugger_id, "allow_mass_erase")
             return cls._artifact_refusal(reactor, location, step, require_elf=False)
 
         if step.action == "reset":
@@ -2423,7 +2438,7 @@ class DebuggerRunner(StepDevice):
             if state.debug_session is not None:
                 return preflight_error(location, step, "action", "The target cannot be reset while a debug session is active.", {"debug_session_debugger": state.debug_session})
             if not permissions.allow_reset:
-                return preflight_error(location, step, "action", "Target reset is disabled for this debugger by the authoritative config.")
+                return permission_preflight_error(location, step, "action", "Target reset is disabled for this debugger by the authoritative config.", cls.config_section, debugger_id, "allow_reset")
             return None
 
         # Whether this step is one the probe it names answers with no debug
@@ -2441,15 +2456,15 @@ class DebuggerRunner(StepDevice):
             # never reached. Name the flag that actually fired rather than
             # pointing at a permission the config plainly shows as false.
             if not config.probe_allowed(debugger):
-                return preflight_error(location, step, "action", "Debug sessions require allow_probe on this debugger.", {"permission": "allow_probe"})
+                return permission_preflight_error(location, step, "action", "Debug sessions require allow_probe on this debugger.", cls.config_section, debugger_id, "allow_probe")
             if permissions.allow_raw_debugger_commands:
-                return preflight_error(location, step, "action", "Debug sessions are disabled while this debugger allows raw debugger commands.", {"permission": "allow_raw_debugger_commands"})
+                return exclusive_permission_preflight_error(location, step, "action", "Debug sessions are disabled while this debugger allows raw debugger commands.", debugger_id, "allow_raw_debugger_commands")
             if mode != "attach" and not permissions.allow_reset:
-                return preflight_error(location, step, "mode", f"Debug mode '{mode}' requires allow_reset on this debugger.", {"permission": "allow_reset"})
+                return permission_preflight_error(location, step, "mode", f"Debug mode '{mode}' requires allow_reset on this debugger.", cls.config_section, debugger_id, "allow_reset")
             if mode == "load" and not permissions.allow_flash:
-                return preflight_error(location, step, "mode", "Debug load mode requires allow_flash on this debugger.", {"permission": "allow_flash"})
+                return permission_preflight_error(location, step, "mode", "Debug load mode requires allow_flash on this debugger.", cls.config_section, debugger_id, "allow_flash")
             if mode == "load" and permissions.allow_mass_erase:
-                return preflight_error(location, step, "mode", "Debug load mode is disabled while this debugger allows mass erase.", {"permission": "allow_mass_erase"})
+                return exclusive_permission_preflight_error(location, step, "mode", "Debug load mode is disabled while this debugger allows mass erase.", debugger_id, "allow_mass_erase")
             artifact_error = cls._artifact_refusal(reactor, location, step, require_elf=True)
             if artifact_error is not None:
                 return artifact_error
@@ -2472,7 +2487,7 @@ class DebuggerRunner(StepDevice):
             # run should never have reached. probe_allowed(), not the raw flag,
             # so a read-free (version 2) bench that grants reads by exclusivity
             # still admits the step.
-            return preflight_error(location, step, "action", "Reading target memory requires allow_probe on this debugger.", {"permission": "allow_probe"})
+            return permission_preflight_error(location, step, "action", "Reading target memory requires allow_probe on this debugger.", cls.config_section, debugger_id, "allow_probe")
         if not without_session:
             if state.debug_session is None:
                 return preflight_error(location, step, "action", "A debug session must be started before this action.")
@@ -2486,10 +2501,16 @@ class DebuggerRunner(StepDevice):
             # flag is: the backend's own refusal is never reached because this
             # runs first, so pointing at a permission the config plainly shows
             # as false is the only diagnosis the operator gets.
-            return preflight_error(location, step, "action", "Resuming target execution requires allow_debug_execution on this debugger.", {"permission": "allow_debug_execution"})
+            return permission_preflight_error(location, step, "action", "Resuming target execution requires allow_debug_execution on this debugger.", cls.config_section, debugger_id, "allow_debug_execution")
         symbol = breakpoint_symbol(step.arguments.get("location")) if step.action == "run_until_breakpoint" else step.arguments.get("symbol")
         if symbol is None and not config.debug.allow_all_symbols:
-            return preflight_error(location, step, "location", "File/line breakpoints require debug.allow_all_symbols.")
+            return preflight_error(
+                location,
+                step,
+                "location",
+                permission_denied_summary("File/line breakpoints require debug.allow_all_symbols.", ALLOW_ALL_SYMBOLS_PERMISSION),
+                permission_denied_fields(ALLOW_ALL_SYMBOLS_PERMISSION),
+            )
         if symbol is not None and not symbol_allowed(config, str(symbol)):
             field_name = "location" if step.action == "run_until_breakpoint" else "symbol"
             return preflight_error(location, step, field_name, "Symbol is not allowed by the authoritative debug config.", {"symbol": symbol})
@@ -3041,6 +3062,16 @@ class TestReactor:
             # other refusing surface in this package merges these fields, and
             # this one, which is where a plan author lands, did not.
             refused_as = str(validation_error.get("error_type") or "test_config_invalid")
+            # A permission refusal names its key at the top level too, not only
+            # inside `validation_error`: a caller reading the result's own fields
+            # is the caller that has to report which permission was denied, and
+            # the catalogue's advice is written around that key, so the lookup
+            # gets it as well. `permission_granted` says which direction the key
+            # has to move, so an exclusivity refusal is not answered with the
+            # advice that opens the very flag blocking it (#443).
+            permission = validation_error.get("permission")
+            permission = permission if isinstance(permission, str) and permission else None
+            scope = EXCLUSIVE_PERMISSION_SCOPE if validation_error.get("permission_granted") else None
             result: JsonObject = {
                 "ok": False,
                 "tool": "test_reactor",
@@ -3048,12 +3079,13 @@ class TestReactor:
                 "test_config_path": test_config.path,
                 **plan_digest_field(test_config),
                 "error_type": refused_as,
+                **({"permission": permission} if permission else {}),
                 "validation_error": validation_error,
                 "steps": [],
                 "cleanup": [],
                 "cleanup_ok": True,
                 "summary": "Test reactor configuration failed semantic validation; no steps were executed.",
-                **remediation_fields(refused_as),
+                **remediation_fields(refused_as, scope, permission=permission),
             }
             if "step" in validation_error:
                 result["failed_step"] = validation_error["step"]
@@ -3356,6 +3388,63 @@ def preflight_error(location: StepLocation, step: TestStep, field: str, summary:
         "summary": summary,
         **(details or {}),
     }
+
+
+def permission_preflight_error(
+    location: StepLocation,
+    step: TestStep,
+    field: str,
+    summary: str,
+    section: str,
+    name: str | None,
+    key: str,
+    details: JsonObject | None = None,
+) -> JsonObject:
+    """A step refused because the entry it names does not grant it.
+
+    The key travels three ways, because three readers need it in three places: as
+    the `permission` field a caller parses, inside the summary an agent reads out
+    when it is told to report the permission it was denied, and inside
+    `next_step`, where the operator finds the one line that opens it. Before
+    this, a plan refused after `agentic-hil revoke debuggers.dut.permissions.allow_reset`
+    said "Target reset is disabled for this debugger by the authoritative
+    config" and the string `allow_reset` appeared nowhere in the document at all
+    (#443).
+    """
+    permission = permission_key(section, name, key)
+    return preflight_error(
+        location,
+        step,
+        field,
+        permission_denied_summary(summary, permission),
+        {**permission_denied_fields(permission), **(details or {})},
+    )
+
+
+def exclusive_permission_preflight_error(
+    location: StepLocation,
+    step: TestStep,
+    field: str,
+    summary: str,
+    debugger_id: str | None,
+    blocking: str,
+) -> JsonObject:
+    """A step refused because a permission the entry *does* grant blocks it.
+
+    The same key, the opposite direction. `permission_granted` says which of the
+    two this is, so the advice that reaches the reader is the one that closes the
+    key rather than the one that opens it: an operator sent to grant
+    `allow_mass_erase` here would be making the refusal permanent.
+    """
+    fields = exclusive_permission_fields(blocking, debugger_id)
+    permission = str(fields["permission"])
+    return preflight_error(
+        location,
+        step,
+        field,
+        permission_granted_summary(summary, permission),
+        {"permission": permission, "permission_granted": True, "next_step": fields["next_step"]},
+    )
 
 
 def exception_result(tool: str, error_type: str, summary: str, error: BaseException) -> JsonObject:

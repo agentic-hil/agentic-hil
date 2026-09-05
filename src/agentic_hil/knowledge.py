@@ -216,6 +216,125 @@ def recovery_operator_command(quarantine_id: str | None) -> str:
     return f"agentic-hil recover --confirm-safe-state --quarantine-id {quarantine_id or '<id>'}"
 
 
+# The dotted path one permission is named by, everywhere a refusal is about one.
+# `agentic-hil grant` and `agentic-hil revoke` take exactly this spelling, and
+# `project_config_describe` reports it, so a refusal that carries it hands the
+# operator something to paste rather than a flag name they have to place in a
+# file themselves. The short spelling the two commands also accept
+# (`debuggers.dut.allow_reset`) is deliberately not what a refusal prints: it is
+# a convenience for somebody typing, and a refusal is read by somebody who does
+# not yet know which section the entry is in.
+#
+# `<name>` stands in where the entry has no name to give, which on this surface
+# means an unbound debugger. Half a key is still better than none: it says which
+# section and which flag, and leaves one blank.
+PERMISSION_KEY_PLACEHOLDER = "<section>.<name>.permissions.<key>"
+# The two grants that sit directly on a section instead of under a named
+# entry's `permissions:` block. They have no `<section>.<name>` half at all,
+# so each of these is the whole key, and it is the spelling `agentic-hil grant`
+# takes for them.
+ALLOW_ALL_SYMBOLS_PERMISSION = "debug.allow_all_symbols"
+ARTIFACT_UPLOAD_PERMISSION = "artifacts.allow_upload"
+
+
+def permission_key(section: str, name: str | None, key: str) -> str:
+    """The dotted path `agentic-hil grant` takes for one entry's permission."""
+    return f"{section}.{name or '<name>'}.permissions.{key}"
+
+
+def permission_denied_summary(summary: str, permission: str) -> str:
+    """``summary`` with the key that is closed named in it.
+
+    The sentence a person reads first has to carry the key, not only the
+    document's fields: an agent told to name the permission it was refused on
+    reads the summary out, and a summary that says "disabled by the
+    authoritative config" names nothing anybody can act on (#443).
+    """
+    return f"{summary} The permission is `{permission}` and it is false."
+
+
+def permission_granted_summary(summary: str, permission: str) -> str:
+    """``summary`` with the key that is *open* named in it.
+
+    The exclusivity half. Saying only that a permission is involved would send
+    the reader to the grant, which for these is the one move that keeps the
+    action refused, so the value is stated with the key.
+    """
+    return f"{summary} The permission is `{permission}` and it is true."
+
+
+def permission_denied_next_step(permission: str | None = None) -> str:
+    """What to do about a refusal one permission caused, for either reader.
+
+    Deliberately no verb phrase the caller itself can act on. An earlier wording
+    said "ask the operator to change the authoritative config" and a small model
+    rewrote the config itself to grant `allow_flash`; a caller refused here once
+    diagnosed correctly through the other tools and then flashed the board with
+    `st-flash`. So the instruction stays "report it and stop", and what changes
+    with the key in hand is that the report can name the permission and the
+    operator has the line to paste.
+
+    One text for every surface. The command it names is the operator's, at the
+    operator's own shell, and saying so is what keeps naming it from reading as
+    a route this caller may take: `agentic-hil grant` is reachable from no tool
+    on this server.
+    """
+    named = f", `{permission}`," if permission else ""
+    grant = (
+        f" The operator opens exactly that key at their own shell with `{CONFIG_GRANT_COMMAND} {permission}`, which "
+        "leaves every other key in the file alone; nothing on this surface opens it."
+        if permission
+        else ""
+    )
+    return (
+        f"This refusal is the answer to the request. Report it and name the permission that is denied{named} then "
+        "stop. You must not enable it: the authoritative configuration belongs to the operator and only the operator "
+        "may edit it. You must not carry out the action another way either: a debugger, serial device or CAN adapter "
+        f"driven outside Agentic HIL defeats the policy this refusal enforces.{grant}"
+    )
+
+
+def permission_denied_fields(permission: str | None) -> JsonObject:
+    """The key a permission refusal is about, and the one move it leaves open.
+
+    Merged into a refusal by every surface that raises one, so the field and the
+    sentence never come apart. Empty for a refusal that cannot name a single
+    key, because a `permission` field naming the wrong one is worse than none.
+    """
+    if not permission:
+        return {}
+    return {"permission": permission, "next_step": permission_denied_next_step(permission)}
+
+
+# The scope for the other kind of permission refusal: one a *granted* key
+# causes. `permission_denied` unscoped says a key is false and the operator
+# opens it; these say a key is true and the operator closes it, and handing the
+# unscoped advice to one of them would send an operator to grant the very flag
+# that is blocking them.
+EXCLUSIVE_PERMISSION_SCOPE = "exclusive"
+
+
+def exclusive_permission_fields(blocking: str, debugger_id: str | None) -> JsonObject:
+    """The key an exclusivity refusal is about, and the direction it has to move.
+
+    Same `permission` field as every other refusal on this surface, so a caller
+    reads one key wherever the answer came from. The advice is the scoped
+    entry's, not the unscoped one's, and it is carried on the result rather than
+    looked up later: the two cases are one `error_type` and a renderer asking
+    the catalogue by error type alone cannot tell them apart.
+    """
+    key = permission_key("debuggers", debugger_id, blocking)
+    return {
+        "permission": key,
+        "next_step": (
+            f"This refusal is the answer to the request. Report it and name `{key}`, which is true and is what blocks "
+            f"this, then stop. The operator closes exactly that key from their own shell with `{CONFIG_REVOKE_COMMAND} "
+            f"{key}`; no tool on this server is behind that flag, so closing it takes nothing away."
+        ),
+        **remediation_fields("permission_denied", EXCLUSIVE_PERMISSION_SCOPE, permission=key),
+    }
+
+
 def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | None) -> str:
     """Why an action is refused by a permission that is *granted*, and the fix.
 
@@ -227,7 +346,7 @@ def exclusive_permission_summary(action: str, blocking: str, debugger_id: str | 
     policies" on its own reads as an arbitrary interlock, and an operator who
     takes it that way reaches for the flag it names, which is the one move that
     keeps flashing refused."""
-    entry = f"debuggers.{debugger_id or '<name>'}.permissions.{blocking}"
+    entry = permission_key("debuggers", debugger_id, blocking)
     return (
         f"{action} is disabled while {blocking.removeprefix('allow_')} is allowed on this probe: it acts on flash "
         f"outside the path this server validates, so while it is allowed a flash report's claim about what is on the "
@@ -331,7 +450,15 @@ def _substitutions() -> dict[str, str]:
         "safe_user_config": safe_user_config_suggestion(),
         "reopen_command": CONFIG_REOPEN_COMMAND,
         "grant_command": CONFIG_GRANT_COMMAND,
+        "revoke_command": CONFIG_REVOKE_COMMAND,
         "test_plan_reference": TEST_PLAN_URI,
+        # The key a `permission_denied` entry is about, which the catalogue
+        # cannot know: it is a fact about the refusal in hand, not about this
+        # host. The generic shape stands where no refusal is being rendered (the
+        # MCP error reference, which serves the entry to a reader who has not
+        # met one yet), and `remediation_fields(permission=...)` replaces it with
+        # the actual key when a result carries one (#443).
+        "permission": PERMISSION_KEY_PLACEHOLDER,
     }
 
 
@@ -821,6 +948,69 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "Do not drive GDB, OpenOCD or another debugger outside Agentic HIL to send the continue yourself. That "
             "reaches the exact target state this refusal withholds, outside the audit trail that would have recorded "
             "it.",
+        ),
+    ),
+    # The unscoped entry the four above fall back to, and the one every device
+    # permission lands on: a probe's `allow_reset`, a port's `allow_write`, a
+    # bus's `allow_read`. It carries `{permission}`, which is not a fact about
+    # this host and so not one `_substitutions()` can supply; the refusal in hand
+    # supplies it through `remediation_fields(permission=...)`, and the generic
+    # shape stands where the entry is read on its own. Until this existed, the
+    # most common refusal on the whole surface answered with no advice at all
+    # and named no key, so an agent told to report the permission it was denied
+    # had nothing to report and an operator had nothing to paste (#443).
+    "permission_denied": ErrorRemedy(
+        meaning=(
+            "The authoritative configuration does not grant this action on this entry, so nothing was locked, opened "
+            "or driven and there is nothing to clean up. `permission` names the key, in the spelling the file uses "
+            "and the operator's commands take: `{permission}`. This is a decision somebody made about this bench, not "
+            "a fault in it and not a state that clears itself, so the same call refused now is refused on every "
+            "retry until an operator moves that key."
+        ),
+        remediation=(
+            "Report the refusal and name `{permission}`, the key it is about. That is the whole of what this surface "
+            "can do about it, and it is what makes the refusal actionable for whoever owns the bench.",
+            "The operator opens exactly that key from their own shell with `{grant_command} {permission}`. It leaves "
+            "every other key in the file alone, which is what separates it from `{reopen_command}`, and it is "
+            "reachable from no tool on this server.",
+            "`project_config_describe` says which permissions this entry does grant right now, so the part of the "
+            "task that is possible is not abandoned along with the part that is not.",
+        ),
+        do_not=(
+            "Do not edit the authoritative configuration to grant it. `project_config_set` writes only `false` into a "
+            "permission, whatever else it may write, and a file edited with your own tools is the exact move the "
+            "host deny rules `agentic-hil setup` installs exist to stop.",
+            "Do not carry the action out another way. A debugger, serial device or CAN adapter driven outside "
+            "Agentic HIL reaches the same hardware with the policy and the audit trail both stepped around, and that "
+            "is what this refusal is for.",
+            "Do not run `{reopen_command}` to get past it. That rewrites the whole file from hardware discovery, so "
+            "it takes every other narrowing, the baudrate, the `resource_id`, the `state_root` and the artifact roots "
+            "with it: a reset, not a repair.",
+        ),
+    ),
+    f"permission_denied:{EXCLUSIVE_PERMISSION_SCOPE}": ErrorRemedy(
+        meaning=(
+            "The same `error_type` for the opposite state: `{permission}` is **true**, and this action is refused "
+            "because it is. `allow_raw_debugger_commands` and `allow_mass_erase` act on flash outside the path this "
+            "server validates, so while either is open a flash report's claim about what is on the device is not one "
+            "this server can stand behind, and validated flashing and unrestricted debugger access are mutually "
+            "exclusive policies rather than an arbitrary interlock. Nothing was sent to the target."
+        ),
+        remediation=(
+            "Report the refusal and name `{permission}`, the key that is open and is what blocks this. Naming the "
+            "wrong direction is the whole risk here: an operator told only that a permission refused this reaches "
+            "for the grant, which is the one move that keeps it refused.",
+            "The operator closes exactly that key from their own shell with `{revoke_command} {permission}`. No tool "
+            "on this server is behind that flag, so nothing becomes unavailable by closing it, and a generated "
+            "configuration leaves both of these false for this reason.",
+            "`project_config_describe` reports the key's current value, so whether this bench is in that state is "
+            "read rather than guessed at by trying the action again.",
+        ),
+        do_not=(
+            "Do not ask for `{permission}` to be granted, or treat it as the missing grant. It is already granted; "
+            "that is the refusal.",
+            "Do not flash or erase through the raw debugger the open flag allows. That is precisely the unvalidated "
+            "path whose existence made this refusal necessary.",
         ),
     ),
     RECOVERY_PHYSICAL_CHECK_ERROR: ErrorRemedy(
@@ -2203,21 +2393,43 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
 }
 
 
-def remediation_fields(error_type: str | None, scope: str | None = None) -> JsonObject:
+def remediation_fields(error_type: str | None, scope: str | None = None, *, permission: str | None = None) -> JsonObject:
     """The remediation fields for an error, or an empty object when none is known.
 
     Merge the result into a failing payload. Empty for every error_type the
     catalogue does not cover, so callers can apply it unconditionally without
     inventing advice for errors nobody has written a fix for.
+
+    ``permission`` is the one substitution the catalogue cannot supply itself:
+    the dotted key a `permission_denied` is about is a fact about the refusal in
+    hand. Given, it fills the `{permission}` placeholder in that entry's steps,
+    so the advice names the key the operator has to move; left out, the generic
+    shape stands and the entry still reads (#443).
     """
     remedy = lookup_remedy(error_type, scope)
-    if remedy is None:
+    if remedy is None or (permission is None and _needs_a_permission_key(remedy)):
         return {}
-    values = _substitutions()
+    values = {**_substitutions(), **({"permission": permission} if permission else {})}
     payload: JsonObject = {"remediation": [step.format(**values) for step in remedy.remediation]}
     if remedy.do_not:
         payload["do_not"] = [step.format(**values) for step in remedy.do_not]
     return payload
+
+
+def _needs_a_permission_key(remedy: ErrorRemedy) -> bool:
+    """Whether this entry's advice is about one named key and nothing else.
+
+    `permission_denied` is the one error_type two unlike refusals share. Most of
+    them are a key that is closed, and the entry tells the operator which key to
+    move. A few are not a key at all: a symbol outside `debug.allowed_symbols`,
+    a dump over `debug.max_dump_size_bytes`. Handing those the keyed entry would
+    tell an operator to grant a permission that has nothing to do with the
+    refusal, so an entry whose steps are written around `{permission}` answers
+    only for a refusal that supplies one. `catalogue_entry` is unaffected: a
+    reader browsing the error reference has met no refusal, and the generic
+    shape is what they are there to read.
+    """
+    return any("{permission}" in step for step in (*remedy.remediation, *remedy.do_not))
 
 
 def command_line_remediation(error_type: str | None, scope: str | None, steps: list[str]) -> list[str] | None:

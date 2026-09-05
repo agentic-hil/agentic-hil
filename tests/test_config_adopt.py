@@ -1833,7 +1833,10 @@ def test_a_version_one_configuration_that_denies_probing_is_not_read(tmp_path: P
 
     assert refused["ok"] is False
     assert refused["error_type"] == "permission_denied"
-    assert refused["permission"] == "allow_probe"
+    # `permission` carries the whole key now, the way every permission refusal
+    # on this surface does; `permission_key` is the older name for the same
+    # fact and still stands beside it (#443).
+    assert refused["permission"] == "debuggers.dut.permissions.allow_probe"
     assert refused["permission_key"] == "debuggers.dut.permissions.allow_probe"
     # The same answer the ordinary probe read gives on this file, which is the
     # whole point: one policy, not two.

@@ -85,6 +85,7 @@ from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
     CONFIG_NAMED_SECTIONS,
     CONFIG_SHAPE_URI,
+    permission_key,
     remediation_fields,
 )
 from agentic_hil.report import (
@@ -991,19 +992,23 @@ def _read_denied(existing: AgenticHILConfig, debugger_id: str, target_path: Path
             f"Reading debugger '{debugger_id}' is disabled by allow_probe in this version {existing.config_version} "
             "configuration, and carrying hardware in means reading it. Nothing was read and nothing was written."
         ),
-        "permission": "allow_probe",
-        "permission_key": f"debuggers.{debugger_id}.permissions.allow_probe",
+        # One key, under the name every permission refusal on this surface uses.
+        # `permission_key` is the older spelling of the same fact and is kept
+        # beside it rather than moved, because it is already published.
+        "permission": permission_key("debuggers", debugger_id, "allow_probe"),
+        "permission_key": permission_key("debuggers", debugger_id, "allow_probe"),
         "debugger_id": debugger_id,
         "config_version": existing.config_version,
         "path": str(target_path),
         "workspace_root": existing.workspace_root,
         "next_step": (
-            "This refusal is the answer to the request. Report it and name the permission that is denied, then stop. "
-            "You must not enable it, and you must not read the probe another way. Migrating this file to version 2 "
-            "(where reading needs no grant) is the operator's edit."
+            "This refusal is the answer to the request. Report it and name the permission that is denied, "
+            f"`{permission_key('debuggers', debugger_id, 'allow_probe')}`, then stop. You must not enable it, and you "
+            "must not read the probe another way. Migrating this file to version 2 (where reading needs no grant) is "
+            "the operator's edit."
         ),
         "reference": CONFIG_SHAPE_URI,
-        **remediation_fields("permission_denied"),
+        **remediation_fields("permission_denied", permission=permission_key("debuggers", debugger_id, "allow_probe")),
         **NOT_STARTED,
         "retry_safe": False,
     }

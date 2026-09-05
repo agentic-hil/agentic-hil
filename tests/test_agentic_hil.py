@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from conftest import (
+    DEFAULT_TEST_PERMISSIONS,
     FAKE_OPENOCD,
     FAKE_OPENOCD_NO_TARGET,
     FAKE_STLINK,
@@ -5547,6 +5548,49 @@ def test_a_refusal_says_what_to_do_and_what_not_to_do() -> None:
     assert "change the authoritative config" not in denied["next_step"]
     # Only refusals carry it; an ordinary error must not grow advice it cannot honour.
     assert "next_step" not in tool_error("flash_firmware", "artifact_validation_failed", "bad image")
+
+
+def test_a_permission_refusal_names_the_key_in_the_field_the_summary_and_the_next_step() -> None:
+    """#443: "report the permission that is denied" with no permission to report.
+
+    Over MCP the instruction to name the denied permission arrived with no key
+    anywhere in the payload, so a caller that followed it had nothing to say and
+    an operator reading the report had nothing to paste. The key now travels in
+    all three places a reader looks, and the grant line is named as the
+    operator's own, at the operator's own shell.
+    """
+    from agentic_hil.tools import tool_error
+
+    key = "debuggers.dut.permissions.allow_reset"
+    denied = tool_error("reset_target", "permission_denied", "Target reset is disabled by the authoritative config.", key)
+
+    assert denied["permission"] == key
+    assert denied["summary"].endswith(f"The permission is `{key}` and it is false.")
+    assert f"name the permission that is denied, `{key}`," in denied["next_step"]
+    assert f"agentic-hil grant {key}" in denied["next_step"]
+    # Still report-and-stop: the command is the operator's, and this surface
+    # cannot reach it at all.
+    assert "Report it and name the permission that is denied" in denied["next_step"]
+    assert "nothing on this surface opens it" in denied["next_step"]
+
+
+def test_the_reset_a_revoked_permission_refuses_names_that_permission(tmp_path: Path) -> None:
+    """#443, through the tool the battery run actually called.
+
+    `reset_target` after `agentic-hil revoke debuggers.dut.permissions.allow_reset`
+    answered `permission_denied` with no key in any field of the payload.
+    """
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    service = AgenticHILToolService(config)
+    try:
+        refused = mcp_tool_call(service, "reset_target", {"mode": "run"})
+    finally:
+        service.close()
+
+    assert refused["error_type"] == "permission_denied"
+    assert refused["permission"] == "debuggers.dut.permissions.allow_reset"
+    assert "debuggers.dut.permissions.allow_reset" in refused["summary"]
+    assert "agentic-hil grant debuggers.dut.permissions.allow_reset" in refused["next_step"]
 
 
 def test_gateway_tool_descriptions_name_what_they_replace() -> None:

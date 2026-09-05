@@ -416,6 +416,54 @@ def test_a_refusal_carrying_a_list_of_its_own_is_printed_in_the_order_it_carries
     assert "project_config_create" not in out
 
 
+def test_a_permission_refusal_prints_the_key_and_the_line_that_opens_it() -> None:
+    """#443: a refusal an operator can act on without opening the file.
+
+    The rendering is where the operator meets this, and it showed a sentence
+    about "the authoritative config" with no key in it and no command under it.
+    The key is in the summary, in the Details rows and inside the advice, and
+    the advice is the one that opens that key rather than the one that rewrites
+    the whole file.
+    """
+    key = "debuggers.dut.permissions.allow_reset"
+    refusal = {
+        "ok": False,
+        "tool": "reset_target",
+        "error_type": "permission_denied",
+        "summary": f"Target reset is disabled by the authoritative config. The permission is `{key}` and it is false.",
+        "permission": key,
+    }
+
+    out = _reflowed(_rendered(refusal, "test-reactor"))
+
+    assert "Refused: permission_denied" in out
+    assert f"permission {key}" in out
+    assert f"agentic-hil grant {key}" in out
+    # The generic shape must never reach a reader who has an actual key.
+    assert "<section>.<name>.permissions.<key>" not in out
+    # And the whole-file reset is named only as the thing this is not.
+    assert "agentic-hil grant" in out
+
+
+def test_a_permission_refusal_that_names_no_key_grows_no_advice_about_one() -> None:
+    """The other half of #443's rule: no key, no keyed advice.
+
+    `permission_denied` is one error_type over two unlike refusals. A dump over
+    `debug.max_dump_size_bytes` carries it and is not about a permission key at
+    all, and handing that reader "the operator opens exactly that key" with a
+    placeholder in it would be advice they cannot follow about a key that does
+    not exist.
+    """
+    out = _reflowed(_rendered(
+        {"ok": False, "tool": "debug_dump_symbol_ihex", "error_type": "permission_denied", "summary": "Symbol dump exceeds debug.max_dump_size_bytes."},
+        "test-reactor",
+    ))
+
+    assert "Refused: permission_denied" in out
+    assert "What to do" not in out
+    assert "<section>.<name>.permissions.<key>" not in out
+
+
 def test_a_refusal_the_catalogue_does_not_cover_invents_no_advice() -> None:
     bare = {"ok": False, "error_type": "no_such_error_anybody_wrote", "summary": "Something went wrong."}
     out = _rendered(bare, "doctor")
