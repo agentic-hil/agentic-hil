@@ -209,14 +209,18 @@ class _RecordedInstall(NamedTuple):
     distribution, each already spelled as the PEP 508 string a `--with` takes.
     `python` is the interpreter the install recorded, empty when it recorded
     none. `pin` is the version specifier recorded on this distribution itself,
-    empty when the requirement was recorded unpinned. `options` is
-    `[tool.options]` whole, because which of its keys matter is the reader's
-    question and not this one's.
+    exactly as the receipt spells it and empty when the requirement was recorded
+    unpinned; it is a record of how the installation was created and never the
+    judgement about what holds it back. `exact_pin` is the part of that record
+    which can hold a release back, empty for every specifier that cannot.
+    `options` is `[tool.options]` whole, because which of its keys matter is the
+    reader's question and not this one's.
     """
 
     with_requirements: tuple[str, ...]
     python: str
     pin: str
+    exact_pin: str
     options: JsonObject
 
 
@@ -311,7 +315,38 @@ def _recorded_install() -> _RecordedInstall:
         and isinstance(specifier := entry.get("specifier"), str)
         and specifier.strip()
     ]
-    return _RecordedInstall(beside, python.strip() if isinstance(python, str) else "", pins[0] if pins else "", options)
+    pin = pins[0] if pins else ""
+    return _RecordedInstall(beside, python.strip() if isinstance(python, str) else "", pin, _exact_pin(pin), options)
+
+
+# A recorded requirement that names one release and nothing else: `==` or `===`
+# on every clause, which is what `uv tool install "agentic-hil==0.21.2"` writes.
+# Deliberately not `>=`, `~=`, `<`, `>` or `!=`: those are floors and ceilings a
+# resolution moves inside, so they hold nothing back that the index would
+# otherwise have given.
+_EXACT_REQUIREMENT_CLAUSE = re.compile(r"^===?\s*[^\s,=!<>~]+$")
+
+
+def _exact_pin(specifier: str) -> str:
+    """The recorded specifier when it names one release, empty when it does not.
+
+    Only an exact requirement can keep an installation off a release the index
+    publishes. A floor cannot: `uv tool install "agentic-hil[can]>=0.21"`, which
+    is what AI_AGENT_QUICKSTART.md recommends, resolves to whatever the index
+    offers above that number, so reading it as a block refused
+    `agentic-hil upgrade` with `upgrade_blocked_by_recorded_option` and exit 1
+    on an installation whose own recorded requirement was holding nothing --
+    naming that floor as the cause, on a machine a provisioning script runs this
+    command on unconditionally.
+
+    Every clause has to be exact, so a `>=0.21,<0.22` range is a range whatever
+    the index does, and a specifier this cannot read at all is treated as a
+    floor: the safe direction here is the one that never invents a block.
+    """
+    clauses = [clause.strip() for clause in specifier.split(",") if clause.strip()]
+    if not clauses or not all(_EXACT_REQUIREMENT_CLAUSE.match(clause) for clause in clauses):
+        return ""
+    return specifier.strip()
 
 
 def _named_series(items: list[str]) -> str:
@@ -1786,8 +1821,14 @@ def _resolution_holds(recorded: _RecordedInstall) -> tuple[str, ...]:
     `uv tool` command that clears it. The only line that does is a fresh
     `uv tool install`, which records the installation again from what it is
     given.
+
+    The requirement counts only when it is exact. A recorded floor moves with
+    the index by design, so naming one here made the refusal say that an
+    installation's own `>=` was keeping it off a release, which is the opposite
+    of what a floor does; such a receipt now falls to the branch that says
+    nothing recorded explains it.
     """
-    holds = [f"the recorded requirement `agentic-hil{recorded.pin}`"] if recorded.pin else []
+    holds = [f"the recorded requirement `agentic-hil{recorded.exact_pin}`"] if recorded.exact_pin else []
     holds.extend(f"the recorded option `{key} = {recorded.options[key]}`" for key in _RESOLUTION_HOLDING_OPTIONS if recorded.options.get(key) not in (None, False))
     return tuple(holds)
 

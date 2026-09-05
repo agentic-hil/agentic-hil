@@ -1102,6 +1102,79 @@ def test_a_recorded_exact_requirement_is_read_off_the_receipt_as_well(
     assert result["error_type"] == "upgrade_blocked_by_recorded_option"
     assert result["held_back_by"] == ["the recorded requirement `agentic-hil==0.21.2`"]
     assert result["reinstall_command"] == 'uv tool install "agentic-hil@latest"'
+    assert result["ok"] is False
+
+
+@pytest.mark.parametrize(
+    "specifier",
+    [
+        pytest.param(">=0.21", id="the-floor-the-quickstart-recommends"),
+        pytest.param("~=0.21.0", id="a-compatible-release-clause"),
+        pytest.param("<1.0", id="a-ceiling"),
+        pytest.param(">=0.21,<0.22", id="a-range"),
+        pytest.param("!=0.21.1", id="an-exclusion"),
+    ],
+)
+def test_a_recorded_floor_is_never_reported_as_holding_a_release_back(
+    specifier: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reported defect: an installation's own `>=` was named as its blocker.
+
+    `uv tool install "agentic-hil[can]>=0.21"` is the line AI_AGENT_QUICKSTART.md
+    recommends, and uv records that specifier verbatim. Reading any recorded
+    specifier as a pin refused the upgrade `upgrade_blocked_by_recorded_option`
+    with exit 1 and `held_back_by` naming that floor, on every run where the index
+    published something the local resolution did not take -- against a
+    requirement that by construction moves with the index. A floor now falls to
+    the branch that states both numbers and invents no cause, which is `ok: true`
+    and exit 0.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        f'[tool]\nrequirements = [{{ name = "agentic-hil", specifier = "{specifier}" }}]\n',
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert "held_back_by" not in result
+    assert "already_current" not in result
+    assert result["newest_release"] == "9.9.9"
+    assert specifier not in result["summary"]
+    assert entrypoint(["upgrade", "--json"]) == 0
+
+
+def test_a_recorded_option_still_holds_a_release_back_beside_a_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The neighbouring behaviour a floor must not take with it.
+
+    `exclude-newer` holds a resolution wherever the requirement is a floor, an
+    exact pin or nothing at all, so a receipt carrying both is still refused and
+    still names the option -- and only the option, because the floor is not
+    holding anything.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        '[tool]\nrequirements = [{ name = "agentic-hil", specifier = ">=0.21" }]\n\n[tool.options]\nexclude-newer = "2026-09-01T00:00:00Z"\n',
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    result = upgrade_installation([])
+
+    assert result["error_type"] == "upgrade_blocked_by_recorded_option"
+    assert result["held_back_by"] == ["the recorded option `exclude-newer = 2026-09-01T00:00:00Z`"]
 
 
 def test_an_index_that_cannot_be_reached_takes_the_claim_away_rather_than_making_it(
