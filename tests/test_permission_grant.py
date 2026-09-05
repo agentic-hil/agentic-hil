@@ -756,3 +756,82 @@ def test_the_widening_refusal_now_names_the_surgical_way_back(tmp_path: Path, mo
     assert CONFIG_GRANT_COMMAND in remediation
     assert "agentic-hil init --force" in remediation
     assert CONFIG_REVOKE_COMMAND == "agentic-hil revoke"
+
+
+# ---------------------------------------------------------------------------
+# Which question the side-effect fields answer (#449).
+
+
+def test_a_write_that_happened_says_what_the_side_effect_fields_are_about(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`side_effect_committed: no` beside a file that moved is a trap.
+
+    The reported reading: `agentic-hil revoke` writes the key, reports it under
+    `changed` with `restart_required: yes`, and in the same result says
+    `side_effect_committed no` and `side_effect_status not_started`. A caller
+    reading those two to learn whether the file moved gets `no` after a
+    successful write. They are about hardware, which this command never touches,
+    and the result now says so and names the field that does answer the question.
+    """
+    workspace, path = bench(tmp_path, monkeypatch, device_permissions=dict.fromkeys(GRANT_SOURCES, True))
+
+    result = run(workspace, "revoke", "debuggers.dut.allow_reset")
+
+    assert result["ok"] is True, result
+    assert result["changed"] == [{"key": "debuggers.dut.permissions.allow_reset", "previous_value": True, "value": False}]
+    assert document_of(path)["debuggers"]["dut"]["permissions"]["allow_reset"] is False
+    summary = result["summary"]
+    assert "side_effect_committed" in summary
+    assert "describe hardware" in summary
+    assert "under `changed`" in summary
+
+
+def test_the_same_sentence_reaches_the_other_direction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Grant carries it too: the two commands report through one result builder."""
+    workspace, _ = bench(tmp_path, monkeypatch)
+
+    result = run(workspace, "grant", "can_buses.dut.allow_write")
+
+    assert result["ok"] is True, result
+    assert "side_effect_committed" in result["summary"]
+    assert "under `changed`" in result["summary"]
+
+
+def test_the_fields_themselves_report_exactly_as_every_other_writing_surface_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agreement, pinned: four surfaces write this file and answer alike.
+
+    `project_config_set` is the one an agent reaches, and a successful write
+    there reports the same three values for the same reason. Scoring them
+    differently on one of the four would leave a caller unable to read the field
+    at all, so the sentence above is the fix and these values are not.
+    """
+    workspace, _ = bench(tmp_path, monkeypatch, **{CONFIG_WRITE_RIGHT: True, CONFIG_DESCRIPTION_RIGHT: True})
+    granted = run(workspace, "grant", "can_buses.dut.allow_write")
+
+    tools = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        written = tools.call(PROJECT_CONFIG_SET, {"changes": [{"key": "com_ports.dut_uart.baudrate", "value": 460800}]})
+    finally:
+        tools.close()
+
+    assert written["ok"] is True, written
+    for field in ("side_effect_committed", "side_effect_status", "hardware_state"):
+        assert granted[field] == written[field]
+    assert granted["side_effect_committed"] is False
+    assert granted["side_effect_status"] == "not_started"
+    assert granted["hardware_state"] == "unchanged"
+
+
+def test_a_call_that_wrote_nothing_does_not_talk_about_a_write_it_did_not_make(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The no-op result is a different sentence and stays one.
+
+    Nothing was written there, so `side_effect_committed: no` misleads nobody and
+    a note about a file change would be describing one that did not happen.
+    """
+    workspace, _ = bench(tmp_path, monkeypatch, device_permissions=dict.fromkeys(GRANT_SOURCES, True))
+
+    result = run(workspace, "grant", "debuggers.dut.allow_reset")
+
+    assert result["ok"] is True, result
+    assert result["changed"] == []
+    assert "Nothing was written" in result["summary"]
+    assert "under `changed`" not in result["summary"]

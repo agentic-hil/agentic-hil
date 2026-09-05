@@ -140,6 +140,21 @@ ACTOR_PHRASES = {ACTOR_AGENT: "an agent", ACTOR_HUMAN: "a person"}
 CHANGE_MARKER_PREFIX = "# Changed by "
 NOT_STARTED: JsonObject = {"side_effect_committed": False, "side_effect_status": "not_started", "hardware_state": "unchanged"}
 
+# What the `NOT_STARTED` block above is about, in the words of a result that
+# carries it beside a write that did happen. Every surface that writes this
+# configuration reports the same way: the three fields answer "what did this call
+# do to the hardware", which for a configuration write is nothing, and the file
+# change is reported under `changed`. A caller reading `side_effect_committed` to
+# find out whether the file moved gets `no` after a successful `agentic-hil
+# revoke` and concludes it did not, which is the reading this sentence closes
+# (#449). Said rather than scored: making one of the four surfaces answer these
+# fields about a file would leave the other three answering about hardware, and a
+# field that means two things is worse than one that means one and says so.
+SIDE_EFFECT_SCOPE_NOTE = (
+    "`side_effect_committed`, `side_effect_status` and `hardware_state` on this result describe hardware, which this "
+    "command does not touch; the change it made to the configuration file is the one reported under `changed`."
+)
+
 
 # ---------------------------------------------------------------------------
 # Reading what is actually in a document.
@@ -1537,7 +1552,16 @@ def _permission_change_result(command: str, value: bool, written: JsonObject, un
             f"{len(changed)} permission(s) {verb} in {written.get('path')}"
             + (f"; {len(unchanged)} named permission(s) were already {str(value).lower()} and were not written" if unchanged else "")
             + ". Nothing else in the file was touched. A running MCP server does not re-read permissions, so restart it "
-            "before relying on this."
+            "before relying on this. "
+            # The write happened and `side_effect_committed` says no, which is a
+            # caller reading the wrong field for the question they are asking: on
+            # every surface here those two describe hardware, and this command
+            # touches none. `project_config_set`, `adopt-hardware --apply` and
+            # `init` all report a completed configuration write with the same
+            # `not_started` pair, so the answer is to say which question the pair
+            # answers rather than to make one surface out of four score it
+            # differently (#449).
+            + SIDE_EFFECT_SCOPE_NOTE
         ),
         "changed": changed,
         "unchanged": unchanged,
