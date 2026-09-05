@@ -508,29 +508,40 @@ def discover_attached_hardware(
                 **found_by,
             )
     elif not probe_ids:
-        # An empty reading. On STM32CubeProgrammer's own listing that is a
-        # definitive "no board attached"; on the USB serial inventory it is not,
-        # because a VCP-less ST-LINK/V2 publishes no port for the inventory to
-        # reach it through, so the summary names the blind spot rather than
-        # declaring the bench empty off a count that could not rule one out
-        # (round 1, finding 1). Either way nothing is bound.
-        return _discovery_failure(
-            "adapter_not_found",
-            (
-                "No ST-Link probe is attached."
-                if inventory_authoritative
-                else (
-                    "No ST-Link probe is visible in this host's USB serial inventory, which is not an authoritative "
-                    "count: it reaches an ST-Link only through the virtual COM port a V2-1 or a V3 publishes, so a "
-                    "standalone ST-LINK/V2 -- or any probe with no VCP -- could be attached and would not appear. Install "
-                    "STM32CubeProgrammer for an authoritative count, or name the board's serial as probe_id if you "
-                    "already know it."
-                )
-            ),
-            executable=executable,
-            com_ports=com_ports,
-            **found_by,
-        )
+        # An empty probe reading, and which "empty" it is decides the answer.
+        # STM32CubeProgrammer's own listing is an authoritative count, so an empty
+        # one is a definitive "no board attached": `adapter_not_found`, and `init`
+        # tells the operator to attach the bench. The USB serial inventory is not,
+        # because it reaches an ST-Link only through the virtual COM port a V2-1 or
+        # a V3 publishes:
+        #   * an ST-Link serial port that is visible but published no probe serial
+        #     is a real, addressable finding the operator can see, so it stays
+        #     `adapter_not_found` and the account names the port; but
+        #   * a reading with no ST-Link port at all cannot rule out a VCP-less
+        #     ST-LINK/V2 attached right now, so declaring the bench empty and
+        #     sending the operator to attach one would point them at hardware that
+        #     may already be there. It takes the same incomplete-inventory refusal
+        #     a sole visible probe does, so `init` writes an unbound placeholder
+        #     whose next step is not "attach the bench" and `project_config_create`
+        #     refuses rather than reporting an absent bench off a blind spot
+        #     (round 1, finding 1; round 2, finding 3).
+        if inventory_authoritative or listed.get("stlink_ports"):
+            return _discovery_failure(
+                "adapter_not_found",
+                (
+                    "No ST-Link probe is attached."
+                    if inventory_authoritative
+                    else (
+                        "This host's USB serial inventory shows an ST-Link serial port but read no probe serial off it "
+                        "to select, so there is no probe id to bind. Check the ST-Link is a genuine ST unit with its "
+                        "driver installed, or install STM32CubeProgrammer, which reads the serial off the probe itself."
+                    )
+                ),
+                executable=executable,
+                com_ports=com_ports,
+                **found_by,
+            )
+        return _incomplete_inventory_refusal([], executable=executable, com_ports=com_ports, **found_by)
     elif len(probe_ids) != 1:
         return _discovery_failure(
             "ambiguous_hardware",
@@ -1037,11 +1048,22 @@ def _incomplete_inventory_refusal(probe_ids: list[str], *, executable: str, com_
         f"-- could be attached {saw} and would not appear. Discovery will not bind a board off a reading that cannot rule "
         "out another one."
     )
-    next_step = (
-        "Name the intended board's serial as probe_id -- `agentic-hil adopt-hardware --probe-id <serial>` binds it, and "
-        "`agentic-hil debugger-probes` and `agentic-hil com-ports` show every serial this host can see -- or install "
-        "STM32CubeProgrammer for an authoritative probe count."
-    )
+    if probe_ids:
+        next_step = (
+            "Name the intended board's serial as probe_id -- `agentic-hil adopt-hardware --probe-id <serial>` binds it, and "
+            "`agentic-hil debugger-probes` and `agentic-hil com-ports` show every serial this host can see -- or install "
+            "STM32CubeProgrammer for an authoritative probe count."
+        )
+    else:
+        # Nothing was visible to name, and a serial this inventory did not see is
+        # one `select_probe_id` cannot match, so pointing at `--probe-id` here would
+        # be a dead end. An authoritative count comes from the vendor CLI, or from a
+        # probe that publishes a VCP the inventory can reach.
+        next_step = (
+            "This host's USB serial inventory saw no ST-Link at all and cannot reach one that publishes no virtual COM "
+            "port, so there is no visible serial to name as probe_id. Install STM32CubeProgrammer for an authoritative "
+            "probe count, or attach a probe that publishes a virtual COM port, then run this again."
+        )
     return _discovery_failure(
         "probe_inventory_incomplete",
         summary,

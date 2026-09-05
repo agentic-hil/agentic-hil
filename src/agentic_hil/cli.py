@@ -2302,14 +2302,27 @@ def _placeholder_next_step(discovery: JsonObject) -> str:
             f"`hardware_discovery.probes`. Adoption then fills in {_ADOPT_FILLS}."
         )
     elif error_type == "probe_inventory_incomplete":
-        remedy = (
-            "STM32CubeProgrammer is not installed, so probes are read from this host's USB serial inventory, which "
-            "reaches an ST-Link only through its virtual COM port and so cannot rule out a VCP-less ST-LINK/V2 attached "
-            "beside what it saw; discovery will not choose a board off it. Name the one this project is about with "
-            "`agentic-hil adopt-hardware --probe-id <serial>` -- the serials this host can see are under "
-            "`hardware_discovery.probes` and from `agentic-hil debugger-probes` -- or install STM32CubeProgrammer for an "
-            f"authoritative count. Adoption then fills in {_ADOPT_FILLS}."
-        )
+        if discovery.get("probes"):
+            remedy = (
+                "STM32CubeProgrammer is not installed, so probes are read from this host's USB serial inventory, which "
+                "reaches an ST-Link only through its virtual COM port and so cannot rule out a VCP-less ST-LINK/V2 "
+                "attached beside what it saw; discovery will not choose a board off it. Name the one this project is "
+                "about with `agentic-hil adopt-hardware --probe-id <serial>` -- the serials this host can see are under "
+                "`hardware_discovery.probes` and from `agentic-hil debugger-probes` -- or install STM32CubeProgrammer "
+                f"for an authoritative count. Adoption then fills in {_ADOPT_FILLS}."
+            )
+        else:
+            # Nothing was visible to name here, so `--probe-id <serial>` has no
+            # serial to take; the empty reading still is not an absent bench,
+            # because the inventory cannot see a VCP-less ST-LINK/V2. So this does
+            # not say "attach the bench" either (round 2, finding 3).
+            remedy = (
+                "STM32CubeProgrammer is not installed, so probes are read from this host's USB serial inventory, which "
+                "reaches an ST-Link only through its virtual COM port and saw none here; that does not rule out a "
+                "VCP-less ST-LINK/V2 attached right now, so no absent bench is reported. Install STM32CubeProgrammer for "
+                "an authoritative count, or attach a probe that publishes a virtual COM port, then run "
+                f"`agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
+            )
     elif error_type == "target_not_detected":
         remedy = (
             "The ST-Link answered but named no target, so check the board is powered and wired to the probe, "

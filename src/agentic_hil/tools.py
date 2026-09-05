@@ -2638,6 +2638,41 @@ def _generated_config_header(document: JsonObject) -> str:
     return GENERATED_CONFIG_HEADER_OPENING + middle + GENERATED_CONFIG_HEADER_CLOSING
 
 
+def _create_discovery_next_step(discovery: JsonObject, current: AgenticHILConfig | None) -> str:
+    """The way forward a failed generation hands back, usable from where the caller is.
+
+    Discovery's own `next_step` is right wherever it points at a command that can
+    run from here. The one place it does not is `probe_inventory_incomplete` on a
+    workspace with no configuration yet: that refusal offers `agentic-hil
+    adopt-hardware --probe-id <serial>`, but `adopt-hardware` begins by loading the
+    authoritative configuration, and an unprovisioned workspace has none, so
+    following it lands on `config_file_not_found` and, over MCP, redirects straight
+    back to this tool -- a loop rather than a step (review round 2, finding 2). A
+    workspace that already has a file (a placeholder an earlier `init` wrote) can
+    adopt into it, so its refusal's own next step stands. Only the unprovisioned
+    case is rewritten to the operator sequence that actually reaches a bound bench:
+    write the placeholder with `agentic-hil init`, then bind the intended board into
+    it, or install the vendor CLI for an authoritative count.
+    """
+    if current is None and discovery.get("error_type") == "probe_inventory_incomplete":
+        if discovery.get("probes"):
+            return (
+                "This workspace has no configuration yet, so `agentic-hil adopt-hardware` has nothing to adopt into and "
+                "would report `config_file_not_found`. Ask the operator to run `agentic-hil init`, which writes an "
+                "unbound placeholder from this same read, and then `agentic-hil adopt-hardware --probe-id <serial>` to "
+                "bind the board this project is about -- the serials this host can see are under `probes` and from "
+                "`agentic-hil debugger-probes`. Or ask them to install STM32CubeProgrammer for an authoritative probe "
+                "count and call this tool again. Nothing was written."
+            )
+        return (
+            "This workspace has no configuration yet, and this host's USB serial inventory saw no ST-Link to name, so "
+            "there is no serial to bind. Ask the operator to install STM32CubeProgrammer for an authoritative probe "
+            "count, or to attach a probe that publishes a virtual COM port, then call this tool again. Nothing was "
+            "written."
+        )
+    return str(discovery.get("next_step") or "Attach exactly one supported probe and target, then call this tool again. Nothing was written.")
+
+
 def project_config_create(
     workspace: Path,
     existing: AgenticHILConfig | None,
@@ -2720,7 +2755,7 @@ def _project_config_create(
                 # probe another process is holding aborts the read from inside
                 # `before_connect`, and telling that caller to attach a probe
                 # would be advice about the one thing that is not the problem.
-                "next_step": str(discovery.get("next_step") or "Attach exactly one supported probe and target, then call this tool again. Nothing was written."),
+                "next_step": _create_discovery_next_step(discovery, current),
             }
         # Decided from where the file is going, so the two roots this call writes
         # cannot disagree about the profile they are both describing (#387).
@@ -2883,6 +2918,30 @@ def generation_locks(*, frontend: str = "mcp") -> Iterator[BenchMutex]:
         bench.release_all()
 
 
+def _generation_probe_id(current: AgenticHILConfig | None) -> str | None:
+    """The bound probe serial a regeneration reads, when the file names exactly one.
+
+    Generation reads a single board, and when the configuration being regenerated
+    already binds one debugger to a probe serial, that serial is the operator's own
+    selection recorded in the authoritative file. Handing it to discovery turns the
+    read into an explicit selection rather than an inference off the USB serial
+    inventory, so an OpenOCD-only host regenerates the already-bound entry instead
+    of refusing it `probe_inventory_incomplete` for a count it could not prove
+    complete (review round 2, finding 1). This is the generation analogue of what
+    `project_config_adopt_hardware` already does with `configured_probe_id`.
+
+    Returned only when there is exactly one configured debugger and it names a
+    probe: an unbound placeholder leaves the read unbound as before, and a bench of
+    several debuggers is one a single-board read would not resolve unambiguously,
+    so neither carries a selection here. A serial the inventory cannot see is still
+    refused by discovery's own `select_probe_id`, so this only ever narrows a read
+    to the operator's recorded board; it never invents one."""
+    if current is None or len(current.debuggers) != 1:
+        return None
+    (entry,) = current.debuggers.values()
+    return entry.probe_id
+
+
 def discover_for_generation(
     current: AgenticHILConfig | None,
     coordinator: HardwareCoordinator | None,
@@ -2966,8 +3025,17 @@ def discover_for_generation(
     """
     if current is None:
         # No third answer here: the caller handed the None and already holds a
-        # better reason than this function could invent for it.
+        # better reason than this function could invent for it. Nothing is bound
+        # yet either, so there is no configured probe to carry into the read.
         return (*_discover_without_policy(tool=tool, frontend=frontend, profile=profile), None)
+    # The board this file already binds, when it binds exactly one, carried into
+    # discovery as an explicit selection. Regeneration reads a single board, and a
+    # file that names one probe recorded the operator's own choice; passing it lets
+    # an OpenOCD-only host regenerate the bound entry instead of refusing it
+    # `probe_inventory_incomplete` off a USB inventory that cannot rule out a second
+    # probe. Absent (unprovisioned, unbound, or more than one debugger) it stays
+    # None and the incomplete-inventory refusal holds (review round 2, finding 1).
+    bound_probe = _generation_probe_id(current)
     unusable = generation_audit_barrier(current)
     if unusable is not None:
         # The configuration loads and its `state_root` is the broken thing that a
@@ -3007,11 +3075,11 @@ def discover_for_generation(
         # in) the read still refuses a live holder; it just does not span the
         # write, which is the pre-existing behaviour.
         aliases = configured_device_resources(current)
-        return (*_discover_without_policy(tool=tool, frontend=frontend, resources=aliases, bench=generation_bench, profile=profile), unusable.error_type)
+        return (*_discover_without_policy(tool=tool, frontend=frontend, resources=aliases, bench=generation_bench, profile=profile, probe_id=bound_probe), unusable.error_type)
     if coordinator is None:
         owned = HardwareCoordinator(current, frontend=frontend)
         try:
-            discovery, refusal = _discover_under_lease(current, owned, tool=tool, reason_prefix=reason_prefix, profile=profile)
+            discovery, refusal = _discover_under_lease(current, owned, tool=tool, reason_prefix=reason_prefix, profile=profile, probe_id=bound_probe)
         finally:
             # Closing hands back the project lock and leaves any incident this
             # read raised persisted, so the next owner adopts it rather than
@@ -3023,7 +3091,7 @@ def discover_for_generation(
         if refusal is None and cleanup_error is not None:
             return {}, _lock_cleanup_refusal(cleanup_error, tool), None
         return discovery, refusal, None
-    return (*_discover_under_lease(current, coordinator, tool=tool, reason_prefix=reason_prefix, profile=profile), None)
+    return (*_discover_under_lease(current, coordinator, tool=tool, reason_prefix=reason_prefix, profile=profile, probe_id=bound_probe), None)
 
 
 def generation_audit_barrier(current: AgenticHILConfig) -> ConfigError | None:
@@ -3083,7 +3151,7 @@ def _regeneration_moves_state_root(current: AgenticHILConfig) -> bool:
     return os.path.normcase(str(replacement)) != os.path.normcase(str(current.state_root))
 
 
-def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] | None = None, bench: BenchMutex | None = None, profile: JsonObject | None = None) -> tuple[JsonObject, JsonObject | None]:
+def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] | None = None, bench: BenchMutex | None = None, profile: JsonObject | None = None, probe_id: str | None = None) -> tuple[JsonObject, JsonObject | None]:
     """Bootstrap discovery with machine-wide physical exclusion but no lease.
 
     Two callers, and both read the board with no `state_root` to record a lease
@@ -3125,6 +3193,14 @@ def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] |
     and the replacement, and releases only once that is done (review round 1,
     finding 2).
 
+    ``probe_id`` is the operator-controlled selection a regeneration carries, when
+    the file being rewritten already binds one probe. Passing it makes the read an
+    explicit selection rather than an inference off the USB serial inventory, so an
+    OpenOCD-only host regenerates the bound entry instead of refusing it
+    `probe_inventory_incomplete` off a count that could not rule out a second probe
+    (review round 2, finding 1). None on the first `init`/`project_config_create`
+    of a workspace, which binds nothing yet.
+
     Returns the discovery and, when a lock refused, the refusal that is the whole
     answer. A refusal from `before_connect` is surfaced as that refusal rather
     than as the discovery result: `discover_attached_hardware` would otherwise
@@ -3154,7 +3230,7 @@ def _discover_without_policy(*, tool: str, frontend: str, resources: list[str] |
                 return refusal
             return None
 
-        discovery = discover_attached_hardware(before_connect=before_connect, profile=profile)
+        discovery = discover_attached_hardware(probe_id=probe_id, before_connect=before_connect, profile=profile)
         if refused:
             return {}, refused
         return discovery, None
@@ -3203,7 +3279,7 @@ def _lock_cleanup_refusal(error: Exception, tool: str) -> JsonObject:
     }
 
 
-def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator, *, tool: str, reason_prefix: str, profile: JsonObject | None = None) -> tuple[JsonObject, JsonObject | None]:
+def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordinator, *, tool: str, reason_prefix: str, profile: JsonObject | None = None, probe_id: str | None = None) -> tuple[JsonObject, JsonObject | None]:
     resources = [key for name in current.debuggers for key in configured_probe_resource(current, name)]
     return discover_under_hardware_lease(
         current,
@@ -3211,6 +3287,7 @@ def _discover_under_lease(current: AgenticHILConfig, coordinator: HardwareCoordi
         tool=tool,
         reason_prefix=reason_prefix,
         resources=resources,
+        probe_id=probe_id,
         profile=profile,
     )
 

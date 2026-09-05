@@ -47,6 +47,7 @@ from agentic_hil.coordination import DEBUGGER_DISCOVERY_RESOURCE
 from agentic_hil.devices import config_devices, debugger_device, uart_device
 from agentic_hil.knowledge import (
     DEBUGGER_BACKENDS_URI,
+    ERRORS_URI,
     EXCLUSIVE_FLASH_PERMISSIONS,
     read_resource,
     remediation_fields,
@@ -2214,6 +2215,146 @@ def test_project_config_create_refuses_to_bind_a_probe_off_an_incomplete_count(t
     with pytest.raises(ConfigError) as unwritten:
         load_authoritative_config(workspace)
     assert unwritten.value.error_type == "config_file_not_found"
+
+
+def test_project_config_create_regenerates_an_already_bound_openocd_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bound probe is the operator's own selection, and regeneration reads it (round 2, finding 1).
+
+    The ordinary Linux/OpenOCD flow binds a probe once: `init` writes an unbound
+    placeholder, and `agentic-hil adopt-hardware --probe-id` records the operator's
+    chosen serial. A later `project_config_create` reads the board through the same
+    USB serial inventory, which is still not an authoritative count -- but the file
+    already names the board, so generation carries that serial into discovery as
+    the explicit selection it is, rather than refusing `probe_inventory_incomplete`
+    off a count it cannot prove complete. Without this the ordinary bench dead-ended
+    on the very flow that had just bound it."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+
+    def openocd_reads_the_target(command: list[str], cwd: str, timeout_s: float) -> CompletedCommand:
+        return CompletedCommand(OPENOCD_TARGETS_OUTPUT, "", 0, False, False)
+
+    # Bind the probe the way an operator does: placeholder first, then adopt the
+    # serial the inventory shows.
+    _linux_openocd_host(monkeypatch, ports=[])
+    assert init_config()["ok"] is True
+    assert load_authoritative_config(workspace).debuggers["dut"].probe_id is None
+    _linux_openocd_host(monkeypatch, spawn=openocd_reads_the_target)
+    assert adopt_hardware(com_port_id="dut_uart", probe_id="066AFF303435554157113106")["ok"] is True
+    bound = load_authoritative_config(workspace)
+    assert bound.debuggers["dut"].probe_id == "066AFF303435554157113106"
+
+    # Regenerate against exactly the one visible probe. Before the fix this refused
+    # `probe_inventory_incomplete`; the bound serial is now the explicit selection.
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP], spawn=openocd_reads_the_target)
+    result = project_config_create(workspace, bound)
+
+    assert result["ok"] is True, result
+    assert load_authoritative_config(workspace).debuggers["dut"].probe_id == "066AFF303435554157113106"
+
+
+def test_the_unprovisioned_create_refusal_points_past_the_adopt_that_would_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The way out of an unprovisioned OpenOCD bootstrap has to be one that can run (round 2, finding 2).
+
+    A first `project_config_create` on a Linux/OpenOCD host refuses
+    `probe_inventory_incomplete` and writes no file. Pointing that refusal straight
+    at `agentic-hil adopt-hardware --probe-id` is a dead end: adoption loads the
+    authoritative configuration first, and an unprovisioned workspace has none, so
+    it answers `config_file_not_found` and, over MCP, redirects back to this same
+    tool. So the unprovisioned refusal names the sequence that reaches a bound
+    bench: write the placeholder with `agentic-hil init`, then adopt into it."""
+    workspace = tmp_path / "server"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
+
+    result = project_config_create(workspace, None)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "probe_inventory_incomplete"
+    # The sequence names `init` before `adopt-hardware`, so the operator is not
+    # sent to a command that cannot run without a file first.
+    assert "agentic-hil init" in result["next_step"]
+    assert "adopt-hardware --probe-id" in result["next_step"]
+    # `init` (which writes the file) comes before the `adopt-hardware --probe-id`
+    # that fills it, so the two steps run in an order that resolves the loop.
+    assert result["next_step"].index("agentic-hil init") < result["next_step"].index("adopt-hardware --probe-id")
+    # Nothing was written.
+    with pytest.raises(ConfigError) as unwritten:
+        load_authoritative_config(workspace)
+    assert unwritten.value.error_type == "config_file_not_found"
+
+
+def test_an_empty_usb_inventory_is_a_blind_spot_not_an_absent_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty serial inventory cannot rule out a VCP-less probe, so it is not "no bench" (round 2, finding 3).
+
+    The USB serial inventory reaches an ST-Link only through the virtual COM port a
+    V2-1 or a V3 publishes, so a reading that turns up no ST-Link at all is a blind
+    spot rather than proof no probe is attached: a standalone ST-LINK/V2 could be
+    plugged in right now. So discovery refuses `probe_inventory_incomplete` rather
+    than `adapter_not_found`, and `init`'s first next step does not tell the
+    operator to attach a bench that may already be there."""
+    workspace = tmp_path / "starter"
+    workspace.mkdir()
+    (workspace / PROJECT_PROFILE).write_text(yaml.safe_dump(STARTER_PROFILE), encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    _linux_openocd_host(monkeypatch, ports=[])
+
+    # Discovery on its own refuses the incomplete count rather than declaring the
+    # bench empty, and there is no visible serial to name.
+    discovery = discover_attached_hardware(profile=STARTER_PROFILE)
+    assert discovery["ok"] is False, discovery
+    assert discovery["error_type"] == "probe_inventory_incomplete"
+    assert discovery["probes"] == []
+    assert "adopt-hardware --probe-id" not in discovery["next_step"]
+    assert "STM32CubeProgrammer" in discovery["next_step"]
+
+    # And `init` writes the placeholder whose first next step is not "attach a bench".
+    result = init_config()
+    assert result["ok"] is True, result
+    assert result["hardware_discovery"]["error_type"] == "probe_inventory_incomplete"
+    assert "Attach the bench" not in result["next_steps"][0]
+    assert load_authoritative_config(workspace).debuggers["dut"].probe_id is None
+
+
+def test_the_incomplete_inventory_error_is_in_the_reference_contract() -> None:
+    """A public refusal carries the way forward the errors resource promises (round 2, finding 4).
+
+    `probe_inventory_incomplete` is returned publicly by `project_config_create`
+    and `agentic-hil init`, so like every other public `error_type` it has a
+    catalogue entry: a meaning, an ordered fix and the wrong fix, reachable both as
+    the remediation fields a refusal merges in and as its own reference resource."""
+    fields = remediation_fields("probe_inventory_incomplete")
+    assert fields["remediation"], fields
+    assert fields["do_not"], fields
+
+    served = read_resource(f"{ERRORS_URI}/probe_inventory_incomplete")
+    assert served is not None
+    entry = json.loads(str(served["text"]))
+    assert entry["error_type"] == "probe_inventory_incomplete"
+    assert entry["meaning"].strip()
+    fix = " ".join(entry["remediation"])
+    assert "adopt-hardware --probe-id" in fix
+    assert "STM32CubeProgrammer" in fix
+    assert any("adapter_not_found" in step or "absent bench" in step for step in entry["do_not"])
+
+
+def test_the_bootstrap_discovery_reference_states_the_explicit_selection_rule() -> None:
+    """The reference an agent consults has to describe the refusal it will meet (round 2, finding 4).
+
+    The USB serial inventory path produces an OpenOCD entry only on an explicit
+    selection, never off the incomplete count alone. An agent that reads this
+    resource before it reads a generated file has to find that stated, rather than
+    meeting `probe_inventory_incomplete` at the tool with nothing to explain it."""
+    served = read_resource(DEBUGGER_BACKENDS_URI)
+    assert served is not None
+    rule = json.loads(str(served["text"]))["bootstrap_discovery"]
+    incomplete = rule["usb_serial_inventory_is_not_a_complete_count"]
+    assert "probe_inventory_incomplete" in incomplete
+    assert "complete: false" in incomplete
+    assert "probe_id" in incomplete
 
 
 def test_an_enumerated_stlink_is_never_reported_as_an_absent_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
