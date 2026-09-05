@@ -1340,7 +1340,12 @@ def test_a_recorded_exact_requirement_is_read_off_the_receipt_as_well(
     assert result["error_type"] == "upgrade_blocked_by_recorded_option"
     assert result["held_back_by"] == ["the recorded requirement `agentic-hil==0.21.2`"]
     assert result["reinstall_command"] == 'uv tool install "agentic-hil@latest"'
+    # The one path this refusal is reserved for: an exact requirement, on the
+    # unpinned route, demonstrably keeping an older release in place. It is a
+    # refusal, so it exits non-zero, and the pinned route's withdrawn note is
+    # not one and does not.
     assert result["ok"] is False
+    assert entrypoint(["upgrade", "--json"]) == 1
 
 
 @pytest.mark.parametrize(
