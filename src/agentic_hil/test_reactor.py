@@ -2926,22 +2926,36 @@ class TestReactor:
             self._advance(index, step, top_level=top_level)
             record: JsonObject = {"index": index, "route": step.route, "action": step.action}
             records.append(record)
-            if step.action == REPEAT_ACTION:
-                inner = self.execute_repeat(step, record)
-                if inner is not None:
-                    return StepOutcome(index, inner.failure)
-                continue
-            failure = self.execute_recorded_step(step, record)
-            if failure is not None:
-                return StepOutcome(index, failure)
-            if record["result"].get("stop_requested") is True:
-                # The step ended early because a stop was asked for. Read off
-                # the step's own result rather than by asking again, so this is
-                # true of the plan's last step too: a wait cut short is a run
-                # that was stopped, and asking only before a step would have
-                # called it a completed plan because there was no next step to
-                # ask before.
-                return StepOutcome(index, None)
+            # Every step is timed here, by the one thing that sees every step.
+            # A duration used to be whatever the tool underneath happened to
+            # report, which is `elapsed_ms` from the debugger backends and
+            # nothing at all from a serial line or a bus, so a run's evidence
+            # carried a number for `flash` and `reset` and an empty cell for
+            # `uart_open` and `uart_read`. Measured around the whole step rather
+            # than around the tool call, which is what a step row means, and in
+            # `finally` so a step that failed, raised or was stopped is timed
+            # like one that passed: how long the failing step took is the row a
+            # reader looks at first.
+            started = time.monotonic()
+            try:
+                if step.action == REPEAT_ACTION:
+                    inner = self.execute_repeat(step, record)
+                    if inner is not None:
+                        return StepOutcome(index, inner.failure)
+                    continue
+                failure = self.execute_recorded_step(step, record)
+                if failure is not None:
+                    return StepOutcome(index, failure)
+                if record["result"].get("stop_requested") is True:
+                    # The step ended early because a stop was asked for. Read off
+                    # the step's own result rather than by asking again, so this is
+                    # true of the plan's last step too: a wait cut short is a run
+                    # that was stopped, and asking only before a step would have
+                    # called it a completed plan because there was no next step to
+                    # ask before.
+                    return StepOutcome(index, None)
+            finally:
+                record["elapsed_ms"] = int(round((time.monotonic() - started) * 1000))
         return None
 
     def _advance(self, index: int, step: TestStep, *, top_level: bool) -> None:

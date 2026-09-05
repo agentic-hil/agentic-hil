@@ -682,12 +682,30 @@ def _steps_section(report: JsonObject, text: Callable[[object], str]) -> list[st
     lines = ["| # | Route | Action | Result | Elapsed (ms) |", "| --- | --- | --- | --- | --- |"]
     for record in records:
         result = record.get("result") if isinstance(record.get("result"), dict) else {}
-        elapsed = result.get("elapsed_ms")
         lines.append(
             f"| {record.get('index', '')} | {text(record.get('route') or '-')} | {text(record.get('action') or '-')} | "
-            f"{'fail' if result_failed(result) else 'pass'} | {elapsed if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) else ''} |"
+            f"{'fail' if result_failed(result) else 'pass'} | {_step_elapsed_ms(record, result)} |"
         )
     return [*lines, ""]
+
+
+def _step_elapsed_ms(record: JsonObject, result: JsonObject) -> str:
+    """How long this step took, as the report recorded it.
+
+    The step's own measurement first. The reactor times every step it runs, so
+    that is the one number every row can have: reading the *tool's* duration
+    instead gave a figure for `flash` and `reset`, which the debugger backends
+    report, and an empty cell for a serial line, a bus and a repeat block, which
+    do not.
+
+    The tool's own is still read, for a report written before the reactor timed
+    its steps. This command exists to be pointed at a report file, and a file
+    written by an earlier version is exactly what it will be pointed at.
+    """
+    for elapsed in (record.get("elapsed_ms"), result.get("elapsed_ms")):
+        if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+            return str(elapsed)
+    return ""
 
 
 def _failure_section(report: JsonObject, text: Callable[[object], str]) -> list[str]:

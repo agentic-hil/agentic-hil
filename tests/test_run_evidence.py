@@ -235,6 +235,41 @@ def test_a_failed_report_carries_the_failing_step_its_error_type_and_the_recover
     assert "recovered" in document
 
 
+def test_every_step_row_carries_its_elapsed_time(tmp_path: Path) -> None:
+    """#455: the column was empty for every step that is not the debugger's.
+
+    The reactor times each step it runs and writes that on the step's record.
+    Reading the *tool's* duration instead gave a number for `flash` and `reset`,
+    which the debugger backends report, and nothing at all for a serial line,
+    which is most of what a plan does."""
+    write_logs(tmp_path)
+    report = green_report(tmp_path)
+    for record, elapsed in zip(report["steps"], (1624, 12, 380), strict=True):
+        record["elapsed_ms"] = elapsed
+    # The COM steps carry no duration of their own, which is what left the cells
+    # empty; only the record has one.
+    assert "elapsed_ms" not in report["steps"][1]["result"]
+
+    _result, _summary, document = evidence(tmp_path, report)
+
+    assert "| 1 | dut | flash | pass | 1624 |" in document
+    assert "| 2 | dut_uart | uart_open | pass | 12 |" in document
+    assert "| 3 | dut_uart | uart_read | pass | 380 |" in document
+    assert "|  |" not in document
+
+
+def test_a_report_written_before_the_steps_were_timed_still_reads(tmp_path: Path) -> None:
+    """This command is pointed at a report file, and a file is older than the
+    code reading it. Where the record has no duration, the tool's own is what
+    the row has always shown, and it still is."""
+    write_logs(tmp_path)
+
+    _result, _summary, document = evidence(tmp_path, green_report(tmp_path))
+
+    assert "| 1 | dut | flash | pass | 1500 |" in document
+    assert "| 2 | dut_uart | uart_open | pass |  |" in document
+
+
 def test_a_refused_report_produces_the_same_three_outputs_with_outcome_refused(tmp_path: Path) -> None:
     write_logs(tmp_path)
 

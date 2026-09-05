@@ -963,6 +963,55 @@ def test_reactor_converts_step_exception_to_structured_failure(tmp_path: Path) -
     assert result["steps"][0]["result"]["exception_type"] == "OSError"
 
 
+def test_every_step_record_carries_how_long_the_step_took(tmp_path: Path) -> None:
+    """#455: only the debugger's steps had a duration, so only they had a row.
+
+    `elapsed_ms` came from whatever tool the step called, and the debugger
+    backends are the only ones that report one. So a run's evidence carried a
+    number for `flash` and an empty cell for the serial steps around it, which
+    is most of what a plan does. The reactor sees every step, so it is what
+    times them, block steps included."""
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    plan_path = write_test_config(
+        tmp_path,
+        """version: 4
+steps:
+  - {device: dut, action: flash, image_path: build/app.elf}
+  - {device: dut_uart, action: uart_open}
+  - {action: repeat, count: 2, steps: [{device: dut_uart, action: uart_read}]}
+  - {device: dut_uart, action: uart_close}
+""",
+    )
+    service = RecordingService(uart_reads=[b"ready\n", b"ready\n"])
+
+    result = TestReactor(config, service).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is True, result
+    assert [record["action"] for record in result["steps"]] == ["flash", "uart_open", "repeat", "uart_close"]
+    for record in result["steps"]:
+        elapsed = record["elapsed_ms"]
+        assert isinstance(elapsed, int) and not isinstance(elapsed, bool), record
+        assert elapsed >= 0, record
+    # The steps inside a block are steps, and they are timed by the same pass.
+    for nested in result["steps"][2]["iterations"][0]["steps"]:
+        assert isinstance(nested["elapsed_ms"], int)
+
+
+def test_a_step_that_failed_is_timed_like_one_that_passed(tmp_path: Path) -> None:
+    """How long the failing step took is the row a reader looks at first.
+
+    It is measured around the step rather than around the tool call, so a step
+    that raised before any result existed has one too."""
+    config = load_config(str(write_config(tmp_path)))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: flash, image_path: build/app.elf}\n")
+
+    result = TestReactor(config, RecordingService(raise_flash=True)).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["failed_step"] == 1
+    assert isinstance(result["steps"][0]["elapsed_ms"], int)
+
+
 def test_reactor_treats_audit_failure_as_failed_step(tmp_path: Path) -> None:
     config = load_config(
         str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')),
