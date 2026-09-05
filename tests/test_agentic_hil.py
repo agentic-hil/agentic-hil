@@ -1390,20 +1390,79 @@ def test_the_index_reader_answers_only_what_the_payload_states(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One request, and anything it cannot read is None rather than a guess."""
-
-    class _Response:
-        def read(self, _limit: int | None = None) -> bytes:
-            return payload
-
-        def __enter__(self) -> _Response:
-            return self
-
-        def __exit__(self, *_exception: object) -> None:
-            return None
-
-    monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: _Response())
+    monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: _FakeIndexResponse(payload))
 
     assert read_the_release_index() == expected
+
+
+class _FakeIndexResponse:
+    """A response that hands its body out in pieces, the way a socket does.
+
+    `per_read` bytes at a time, and an empty bytes object once the body is
+    exhausted, which is how a stream says it has ended. `clock_step` is what one
+    read costs on the fake clock, so a trickling endpoint is a response with a
+    small `per_read` and a step of its own.
+    """
+
+    def __init__(self, body: bytes, *, per_read: int | None = None, clock_step: float = 0.0) -> None:
+        self._body = body
+        self._per_read = per_read
+        self._clock_step = clock_step
+        self.reads = 0
+        self.elapsed = 0.0
+
+    def read(self, limit: int) -> bytes:
+        self.reads += 1
+        self.elapsed += self._clock_step
+        taken = self._body[: min(limit, self._per_read or limit)]
+        self._body = self._body[len(taken) :]
+        return taken
+
+    def __enter__(self) -> _FakeIndexResponse:
+        return self
+
+    def __exit__(self, *_exception: object) -> None:
+        return None
+
+
+def test_an_index_that_trickles_bytes_is_read_as_silence_once_the_deadline_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`timeout=` is a socket timeout, and a byte at a time resets it forever.
+
+    `response.read(limit)` loops inside the socket until the limit or the end of
+    the stream, so an endpoint that sends one byte every few seconds held
+    `agentic-hil upgrade` and the `server_upgrade` MCP tool for as long as it
+    liked, against a comment promising a short request. The body is read in
+    bounded pieces against a monotonic clock now, and a deadline that passes is
+    the answer an unreachable index gives.
+    """
+    response = _FakeIndexResponse(b'{"info": {"version": "1.2.3"}}' + b" " * 4096, per_read=1, clock_step=1.0)
+    monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: response)
+    monkeypatch.setattr("agentic_hil.upgrade.monotonic", lambda: response.elapsed)
+
+    assert read_the_release_index() is None
+    # It kept reading while the budget lasted, and stopped on the budget rather
+    # than on the byte limit: ten one-byte reads, not the eight million the size
+    # cap allows and not the single read that would take one byte for the body.
+    assert 1 < response.reads < 100
+    assert response.elapsed >= 10.0
+
+
+def test_an_index_that_answers_in_several_pieces_is_still_read_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neighbouring direction: a chunked answer inside the budget is an answer.
+
+    A real payload arrives in more than one read, and a reader that took the
+    first piece for the whole body would report every index as unparseable.
+    """
+    response = _FakeIndexResponse(b'{"info": {"version": "1.2.3"}}', per_read=4, clock_step=0.001)
+    monkeypatch.setattr("agentic_hil.upgrade.urlopen", lambda _request, timeout=None: response)
+    monkeypatch.setattr("agentic_hil.upgrade.monotonic", lambda: response.elapsed)
+
+    assert read_the_release_index() == "1.2.3"
+    assert response.reads > 1
 
 
 def test_an_index_that_does_not_answer_is_not_an_error_the_upgrade_carries(

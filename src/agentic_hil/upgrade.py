@@ -72,6 +72,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from http.client import HTTPException
 from pathlib import Path
+from time import monotonic
 from typing import NamedTuple
 from urllib.request import Request, urlopen
 
@@ -1895,6 +1896,18 @@ _RELEASE_INDEX_URL = "https://pypi.org/pypi/agentic-hil/json"
 # sentence: a bench on a slow link gets the unchecked wording rather than a
 # command that hangs.
 _RELEASE_INDEX_TIMEOUT_S = 5.0
+# The whole request's budget, against a monotonic clock, because the timeout
+# above is a socket timeout and not a wall clock: it bounds how long one read
+# may wait for the next byte, and an endpoint that sends one byte every second
+# resets it every second. So `agentic-hil upgrade` and the `server_upgrade` MCP
+# tool could sit here far past five seconds against a slow or hostile endpoint,
+# for a sentence. The read is bounded by this instead, and a deadline that
+# passes is the same answer as an index that said nothing.
+_RELEASE_INDEX_DEADLINE_S = 10.0
+# How much is asked for per read. Small enough that the deadline is checked
+# often on a trickling connection, large enough that the real payload arrives in
+# a few passes.
+_RELEASE_INDEX_CHUNK_BYTES = 65_536
 # A payload larger than this is not an answer this reads; it is truncated and
 # fails to parse, which lands on the same "could not be checked" wording.
 _RELEASE_INDEX_MAX_BYTES = 8_000_000
@@ -1911,19 +1924,59 @@ def _newest_released_version() -> str | None:
     """What the index publishes as the newest release, or None when it did not answer.
 
     One request, and every failure is the same answer: a bench behind a proxy,
-    an air-gapped machine and an index whose payload changed shape all mean that
-    this result may not say what the newest release is. The seam a test replaces
-    is this function, so no test of the upgrade reaches the network.
+    an air-gapped machine, an index whose payload changed shape and one that
+    answers too slowly all mean that this result may not say what the newest
+    release is. The seam a test replaces is this function, so no test of the
+    upgrade reaches the network.
+
+    The deadline is taken before the request rather than after the connection,
+    because the connection is part of what can be slow.
     """
     request = Request(_RELEASE_INDEX_URL, headers={"Accept": "application/json", "User-Agent": f"agentic-hil/{__version__}"})
+    deadline = monotonic() + _RELEASE_INDEX_DEADLINE_S
     try:
         with urlopen(request, timeout=_RELEASE_INDEX_TIMEOUT_S) as response:
-            payload = json.loads(response.read(_RELEASE_INDEX_MAX_BYTES).decode("utf-8"))
+            body = _index_payload_within(response, deadline)
+        if body is None:
+            return None
+        payload = json.loads(body.decode("utf-8"))
     except (OSError, ValueError, HTTPException):
         return None
     info = payload.get("info") if isinstance(payload, dict) else None
     newest = info.get("version") if isinstance(info, dict) else None
     return newest.strip() if isinstance(newest, str) and newest.strip() else None
+
+
+def _index_payload_within(response: object, deadline: float) -> bytes | None:
+    """The response body, in bounded reads, or None once the deadline has passed.
+
+    `urlopen(..., timeout=)` is a socket timeout: it bounds the wait for the
+    next byte and starts again with every byte that arrives. A single
+    `response.read(limit)` therefore loops inside the socket until the limit or
+    the end of the stream, so an endpoint trickling a byte at a time held
+    `agentic-hil upgrade` and the `server_upgrade` MCP tool for as long as it
+    liked, against a comment promising five seconds.
+
+    Reading a chunk at a time against a monotonic clock is what bounds it: the
+    deadline is checked before every read, and one that has passed is reported
+    the way an unreachable index is, because that is what the caller does with
+    both. A partial body is thrown away rather than parsed, since half a payload
+    is not a smaller answer.
+    """
+    read = getattr(response, "read", None)
+    if not callable(read):
+        return None
+    chunks: list[bytes] = []
+    remaining = _RELEASE_INDEX_MAX_BYTES
+    while remaining > 0:
+        if monotonic() >= deadline:
+            return None
+        chunk = read(min(_RELEASE_INDEX_CHUNK_BYTES, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def _release_ordering_key(version: str) -> tuple[int, int, int, int, int] | None:
