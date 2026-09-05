@@ -264,10 +264,16 @@ def entrypoint(argv: list[str] | None = None) -> int:
     try:
         result = dispatch(args)
     except ConfigError as error:
-        emit_result(error.to_dict(), command, human=human)
+        if command in PROTOCOL_COMMANDS:
+            emit_protocol_error(error.to_dict(), command)
+        else:
+            emit_result(error.to_dict(), command, human=human)
         return 1
     except CoordinationError as error:
-        emit_result(error.result, command, human=human)
+        if command in PROTOCOL_COMMANDS:
+            emit_protocol_error(error.result, command)
+        else:
+            emit_result(error.result, command, human=human)
         return 1
     if isinstance(result, int):
         return result
@@ -329,6 +335,21 @@ def emit_result(result: JsonObject, command: str | None, *, human: bool) -> bool
         return True
     write_rendered(sys.stdout, render_result(redacted, command))
     return False
+
+
+def emit_protocol_error(result: JsonObject, command: str | None) -> None:
+    """Keep a startup refusal off a protocol command's stdout stream.
+
+    A protocol process owns stdout for framed messages, so a refusal raised
+    before the server can start must be visible on stderr instead of going
+    through the ordinary machine sink. Redaction still runs before the result
+    leaves the process; if it cannot vouch for the document, only the safe
+    refusal is written.
+    """
+    redacted = redact_sensitive(result)
+    if not isinstance(redacted, dict):
+        redacted = redaction_unavailable(command)
+    sys.stderr.write(json.dumps(redacted, indent=2) + "\n")
 
 
 def redaction_unavailable(command: str | None) -> JsonObject:

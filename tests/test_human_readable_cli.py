@@ -282,6 +282,33 @@ def test_the_protocol_streams_are_never_rendered() -> None:
         assert cli.human_readable_output(command, json_requested=False) is False
 
 
+@pytest.mark.parametrize(
+    ("command", "extra_args"),
+    [("mcp-stdio", []), ("com-stdio", ["--port", "dut"])],
+)
+def test_a_protocol_startup_refusal_is_written_to_stderr(
+    monkeypatch: pytest.MonkeyPatch, command: str, extra_args: list[str]
+) -> None:
+    def refuse(args: argparse.Namespace) -> None:
+        raise cli.ConfigError(
+            "config_invalid",
+            "The authoritative configuration could not be loaded.",
+            {"field": "debuggers.dut.type"},
+        )
+
+    monkeypatch.setattr(cli, "dispatch", refuse)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    monkeypatch.setattr("sys.stdout", stdout)
+    monkeypatch.setattr("sys.stderr", stderr)
+
+    assert cli.entrypoint([command, *extra_args]) == 1
+    assert stdout.getvalue() == ""
+    refusal = json.loads(stderr.getvalue())
+    assert refusal["error_type"] == "config_invalid"
+    assert refusal["field"] == "debuggers.dut.type"
+
+
 def test_a_refusal_asked_for_as_a_document_is_still_the_document_it_was(monkeypatch: pytest.MonkeyPatch) -> None:
     def refuse(args: argparse.Namespace) -> None:
         raise cli.ConfigError("config_file_not_found", "No authoritative Agentic HIL configuration was found.", {"field": "workspace_root"})
