@@ -6593,10 +6593,45 @@ def test_openocd_probe_listing_reads_the_hosts_usb_inventory(tmp_path: Path, mon
     # The port the id was read out of, so an empty listing beside a visible
     # ST-Link cannot be reported as "no probe attached".
     assert result["stlink_ports"][0]["device"] == NUCLEO_VCP_PORT["device"]
-    # A probe was seen on the serial bus, so this is an authoritative answer
-    # rather than the blind empty reading a VCP-less bus would give.
-    assert result["complete"] is True
+    # Finding a probe does not make the count authoritative: the enumeration
+    # still sees an ST-Link only through its VCP, so a VCP-less probe beside this
+    # one would be missed. The listing is reported incomplete either way.
+    assert result["complete"] is False
     # Nothing was said to a board to answer this.
+    assert result["target_contacted"] is False
+    assert result["hardware_state"] == "unchanged"
+
+
+def test_openocd_probe_listing_is_never_authoritative_on_a_serial_bus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A VCP-backed probe does not close the blind spot (round 1, finding 1).
+
+    The serial inventory reaches an ST-Link only through the virtual COM port a
+    V2-1 or a V3 publishes. On a mixed bench -- one V2-1/V3 exposing a VCP and
+    one standalone ST-LINK/V2 that exposes none -- the second probe is invisible
+    to `serial.tools.list_ports.comports()` and so cannot be put in this
+    inventory at all. The one that is seen must therefore not be reported as a
+    finished count: `complete` stays false and the summary says the listing is
+    not necessarily every probe connected, so a caller never treats `len(probes)`
+    as authoritative and misses the probe this enumeration could not observe.
+    """
+    monkeypatch.setattr(
+        "agentic_hil.backends.openocd.list_available_com_ports",
+        lambda tool: {"ok": True, "tool": tool, "ports": [NUCLEO_VCP_PORT]},
+    )
+    service = AgenticHILToolService(load_config(str(write_config(tmp_path))))
+    try:
+        result = mcp_tool_call(service, "debugger_probes_list")
+    finally:
+        service.close()
+
+    # The visible VCP-backed probe is listed...
+    assert result["ok"] is True, result
+    assert result["probes"] == [{"probe_id": NUCLEO_VCP_PORT["serial_number"]}]
+    # ...but the count is not authoritative, because a VCP-less probe beside it
+    # would never enter the inventory this reads.
+    assert result["complete"] is False
+    assert "not necessarily every probe connected" in result["summary"]
+    assert "ST-LINK/V2" in result["summary"]
     assert result["target_contacted"] is False
     assert result["hardware_state"] == "unchanged"
 

@@ -73,7 +73,7 @@
         3
       ],
       "default": 1,
-      "description": "Which rules this file is read under; all three are read, so no file already on disk has to move. Absent means version 1: reading is gated by allow_probe and allow_read, which is how every file written before that release behaves and keeps behaving. Version 2 has no read permission at all; migrating means removing those keys and setting version: 2 in one edit. Version 3 additionally requires every com_ports entry to say which hardware it is - a serial_number, a resource_id, a /dev/serial/by-id/... device name, or an explicit identity_source naming what identifies it instead. `agentic-hil adopt-hardware --apply` fills that in from the attached adapter and is run before the version is raised. A new file should say 3."
+      "description": "Which rules this file is read under; all three are read, so no file already on disk has to move. Absent means version 1: reading is gated by allow_probe and allow_read, which is how every file written before that release behaves and keeps behaving. Version 2 has no read permission at all; migrating means removing those keys and setting version: 2 in one edit. Version 3 additionally requires every com_ports entry to say which hardware it is - a serial_number, a resource_id, a /dev/serial/by-id/... device name, or an explicit identity_source naming what identifies it instead. `agentic-hil adopt-hardware` fills that in from the attached adapter and is run before the version is raised. A new file should say 3."
     },
     "workspace_root": {
       "type": "string",
@@ -382,7 +382,7 @@
         "properties": {
           "device": {
             "type": ["string", "null"],
-            "description": "How the port is opened. On Linux prefer the stable /dev/serial/by-id/... symlink, which names the vendor, the product and the device's own serial number: /dev/ttyACM0 is an enumeration order, so attaching a second adapter can hand one board the name the other had. Windows has no openable stable name (COMn is all there is), so name the port there and let serial_number carry the identity. Null or absent declares the port by name without binding it to a device yet, which is what `agentic-hil init` writes for a project profile's ports when no bench was attached; nothing opens such an entry, and every call that names it is refused as com_port_not_bound until `agentic-hil adopt-hardware --apply` or an operator names the device."
+            "description": "How the port is opened. On Linux prefer the stable /dev/serial/by-id/... symlink, which names the vendor, the product and the device's own serial number: /dev/ttyACM0 is an enumeration order, so attaching a second adapter can hand one board the name the other had. Windows has no openable stable name (COMn is all there is), so name the port there and let serial_number carry the identity. Null or absent declares the port by name without binding it to a device yet, which is what `agentic-hil init` writes for a project profile's ports when no bench was attached; nothing opens such an entry, and every call that names it is refused as com_port_not_bound until `agentic-hil adopt-hardware` or an operator names the device."
           },
           "baudrate": {
             "type": "integer",
@@ -479,7 +479,7 @@
               null
             ],
             "default": null,
-            "description": "Which key of this entry says which hardware it is, written down. It grants nothing and identifies nothing on its own: a value that disagrees with the entry's own keys is refused at load, so it can only ever repeat what serial_number, resource_id and vid/pid already say. What it buys is a file in which \"identified by a type, because this adapter publishes no serial number\" and \"nobody got round to it\" are different sentences - which is why version 3 requires it on any entry carrying no serial_number, no resource_id and no /dev/serial/by-id/... device name. `vid_pid` (or `vid`/`pid`) is the deliberate exception for an adapter that publishes USB ids but no serial; `device` states that this port is identified by its kernel name and nothing else. `agentic-hil adopt-hardware --apply` writes whichever the attached adapter turns out to justify."
+            "description": "Which key of this entry says which hardware it is, written down. It grants nothing and identifies nothing on its own: a value that disagrees with the entry's own keys is refused at load, so it can only ever repeat what serial_number, resource_id and vid/pid already say. What it buys is a file in which \"identified by a type, because this adapter publishes no serial number\" and \"nobody got round to it\" are different sentences - which is why version 3 requires it on any entry carrying no serial_number, no resource_id and no /dev/serial/by-id/... device name. `vid_pid` (or `vid`/`pid`) is the deliberate exception for an adapter that publishes USB ids but no serial; `device` states that this port is identified by its kernel name and nothing else. `agentic-hil adopt-hardware` writes whichever the attached adapter turns out to justify."
           },
           "permissions": {
             "$ref": "#/$defs/io_permissions"

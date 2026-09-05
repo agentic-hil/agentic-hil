@@ -1490,7 +1490,7 @@ DEFAULT_CONFIG_TEMPLATE = """# Version 3, which is two things.
 # to state deliberately that a kernel name like COM7 or /dev/ttyACM0 is all this
 # port has. That name is an enumeration order rather than a board, so attaching a
 # second adapter can hand one entry the other's port; under this version the file
-# has to have said so. `agentic-hil adopt-hardware --apply` fills it in from the
+# has to have said so. `agentic-hil adopt-hardware` fills it in from the
 # attached board. Versions 1 and 2 are unchanged and still load.
 version: 3
 
@@ -3637,7 +3637,7 @@ def reject_read_permissions(raw: JsonObject, config_path: str, version: int) -> 
 # The command that fills a serial port entry's identity in from the attached
 # adapter, written once so the refusal below, the schema and the documentation
 # cannot come to name different commands.
-ADOPT_HARDWARE_COMMAND = "agentic-hil adopt-hardware --apply"
+ADOPT_HARDWARE_COMMAND = "agentic-hil adopt-hardware"
 # The rule version 3 adds, in one sentence. Quoted verbatim by the refusal, so
 # what a reader is told and what the loader does are the same text.
 COM_PORT_IDENTITY_RULE = (

@@ -1042,6 +1042,13 @@ class StepDevice:
     # operator's to write and this kind's refusals never send a reader to
     # adoption to have them filled in.
     adoption_fills_entries: ClassVar[bool] = True
+    # The `adopt-hardware` selector that names this kind's entry, `--debugger` or
+    # `--com-port`. It has to be on the command, not left off: once a freshly
+    # declared entry sits beside the ones already there, adoption has several to
+    # choose between and refuses an unnamed debugger or cannot pick the new COM
+    # entry, so a bare `adopt-hardware` would not perform the fill the refusal
+    # advertises. Empty for a kind adoption does not fill.
+    adopt_select_flag: ClassVar[str] = ""
     # Every action this kind serves, collected from the `@step_action`
     # decorations on the methods that implement them. Derived, never written:
     # `step_actions` is the action → schema projection ACTION_SCHEMAS is built
@@ -1136,12 +1143,21 @@ class StepDevice:
         """How a declared-but-empty entry of this kind gets the hardware behind
         it, once the reader has decided this bench is meant to carry it.
 
+        The command names the entry it should fill. Declaring `name` puts it
+        beside the entries the bench already had, so a bare `adopt-hardware` faces
+        several and either refuses an unnamed debugger or cannot pick the new COM
+        entry; `--debugger <name>` / `--com-port <name>` is what actually performs
+        the fill this text promises.
+
         Only the kinds `adopt-hardware` reads off the board are sent to it; a CAN
         bus has no adoption half, so its adapter and channel are written by hand
         rather than the reader being told a command will fill them and finding it
         cannot."""
         if cls.adoption_fills_entries:
-            return f"With the board attached, `{ADOPT_HARDWARE_COMMAND}` then fills that entry's hardware in."
+            return (
+                f"With the board attached, `{ADOPT_HARDWARE_COMMAND} {cls.adopt_select_flag} {name}` then fills "
+                f"`{cls.config_section}.{name}`'s hardware in from what it reads off the board."
+            )
         return (
             f"Adoption has no CAN half, so fill `{cls.config_section}.{name}`'s adapter and channel in yourself; "
             "no command reads them off the board for you."
@@ -1458,6 +1474,7 @@ class UartRunner(SessionDevice):
     configured_field: ClassVar[str] = "configured_com_ports"
     unknown_name_summary: ClassVar[str] = "Test step references a COM port that is not in the authoritative config."
     config_section: ClassVar[str] = "com_ports"
+    adopt_select_flag: ClassVar[str] = "--com-port"
     # The two ways a v2 `uart_expect` says what to wait for, as its schema names
     # them. Exactly one appears on a step; the key is also the one the result
     # reports under, so `expected_text` and `expected_pattern` say which kind of
@@ -1506,9 +1523,9 @@ class UartRunner(SessionDevice):
                 "port_id": name,
                 "unbound_key": f"com_ports.{name}.device",
                 "next_step": (
-                    f"Plug the board in and run `{ADOPT_HARDWARE_COMMAND}`, which fills `com_ports.{name}.device` in "
-                    "from the attached hardware, or name the device yourself. `agentic-hil com-ports` lists what this "
-                    "host has."
+                    f"Plug the board in and run `{ADOPT_HARDWARE_COMMAND} {cls.adopt_select_flag} {name}`, which fills "
+                    f"`com_ports.{name}.device` in from the attached hardware, or name the device yourself. "
+                    "`agentic-hil com-ports` lists what this host has."
                 ),
             },
         )
@@ -2074,6 +2091,7 @@ class DebuggerRunner(StepDevice):
     configured_field: ClassVar[str] = "configured_debuggers"
     unknown_name_summary: ClassVar[str] = "Test step references a debugger that is not in the authoritative config."
     config_section: ClassVar[str] = "debuggers"
+    adopt_select_flag: ClassVar[str] = "--debugger"
     # A debug session closes before any serial line or CAN bus this plan opened.
     cleanup_order: ClassVar[int] = 0
     # This kind's own typed-debug actions: the session's lifecycle, the two reads

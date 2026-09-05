@@ -309,7 +309,7 @@ Fix: run `agentic-hil com-ports`, have the operator add only the approved projec
 
 Linux permission note: if opening the device fails with a permission error, the user typically needs membership in the `dialout` (Debian/Ubuntu) or `uucp` (Arch) group, or a udev rule for the adapter. This is the one setup step that may genuinely need an administrator once; Agentic HIL itself never needs admin rights.
 
-`com_port_not_bound` is the separate case: the port is configured, and its `device` is empty because `agentic-hil init` wrote the project profile's ports without a bench attached. The plan or the call is right and the file is not filled in, so plug the board in and run `agentic-hil adopt-hardware --apply`, which writes the device together with the adapter's serial number and USB ids. Do not delete the entry; that turns a precise refusal back into `com_port_not_configured`.
+`com_port_not_bound` is the separate case: the port is configured, and its `device` is empty because `agentic-hil init` wrote the project profile's ports without a bench attached. The plan or the call is right and the file is not filled in, so plug the board in and run `agentic-hil adopt-hardware --com-port <name>` (the `<name>` the refusal gave under `port_id`), which writes the device together with the adapter's serial number and USB ids. Do not delete the entry; that turns a precise refusal back into `com_port_not_configured`.
 
 ## 11a. The COM Port Moved To Another Board
 
@@ -334,14 +334,14 @@ An entry that names no hardware is not checked at all, and neither is one whose 
 
 ### `config_invalid` on a `com_ports` entry under `version: 3`
 
-Symptom: a configuration that loaded yesterday refuses to load after `version:` was raised to `3`, naming a `com_ports` entry and `agentic-hil adopt-hardware --apply`.
+Symptom: a configuration that loaded yesterday refuses to load after `version:` was raised to `3`, naming a `com_ports` entry and `agentic-hil adopt-hardware`.
 
 What it means: that entry is identified by its device name alone (`COM7`, `/dev/ttyACM0`), which is an enumeration order rather than a board. Version 3 is the version under which that is not enough. The loader cannot ask the machine whether this particular adapter has a serial number to write down, because a configuration is read on hosts with nothing attached, so the file has to carry the answer.
 
 Fix, in this order, because `adopt-hardware` loads this configuration and therefore needs it to load:
 
 1. Put `version:` back to `2`.
-2. Attach the boards and run `agentic-hil adopt-hardware --apply` (add `--com-port <id>` on a bench with several ports). It writes `serial_number`, `vid` and `pid` from each adapter, and writes `identity_source` where the adapter turns out to publish no serial of its own.
+2. Attach the boards and run `agentic-hil adopt-hardware` (add `--com-port <id>` on a bench with several ports). It writes `serial_number`, `vid` and `pid` from each adapter, and writes `identity_source` where the adapter turns out to publish no serial of its own.
 3. Set `version: 3`.
 
 By hand instead: add `serial_number` with the adapter's USB serial, or `identity_source: vid_pid` beside `vid` and `pid`, or `identity_source: device` to state deliberately that a kernel name is all this port has. A declaration that disagrees with the entry's own keys (`identity_source: serial_number` on an entry carrying no serial) is refused too: it records which key carries the identity and does not create one.
@@ -443,7 +443,7 @@ A plan is one document and the authoritative configuration is another, and this 
 
 Every one of those carries `next_step`, which is the same answer written for the case in front of you, with the name of the key and the command in it. The result also carries the catalogue's `remediation` and `do_not`, the same text `agentic-hil://reference/errors/test_config_invalid` serves.
 
-`init --force` is a reset rather than a repair: it regenerates the whole file from the project profile and the attached hardware, and it takes every narrowed permission, baudrate, `resource_id` and artifact root with it. It names what it reopened in its own result. On a bench whose sections are already there and simply not filled in, `agentic-hil adopt-hardware --apply` is the smaller move and keeps everything else.
+`init --force` is a reset rather than a repair: it regenerates the whole file from the project profile and the attached hardware, and it takes every narrowed permission, baudrate, `resource_id` and artifact root with it. It names what it reopened in its own result. On a bench whose sections are already there and simply not filled in, `agentic-hil adopt-hardware` is the smaller move and keeps everything else; name the entry it should fill with `--debugger <name>` or `--com-port <name>` when the bench declares more than one.
 
 Not this: adding a `com_ports`, `can_buses` or `debuggers` entry so that a plan loads. A plan naming a device this bench does not have was written for another bench, and an entry invented to satisfy it points a stimulus at whatever hardware answers to that name. Correct the plan, or bind the bench the plan is for.
 

@@ -11,7 +11,7 @@ from agentic_hil.backends.gdbdebug import decode_symbol_value
 from agentic_hil.cli import build_parser, entrypoint
 from agentic_hil.config import ConfigError, load_config
 from agentic_hil.knowledge import LISTEN_ONLY_MODE_ERROR
-from agentic_hil.test_reactor import TestReactor, load_test_config, merge_result_status
+from agentic_hil.test_reactor import DebuggerRunner, TestReactor, UartRunner, load_test_config, merge_result_status
 from agentic_hil.tools import AgenticHILToolService
 
 
@@ -167,6 +167,19 @@ def write_test_config(tmp_path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def adopt_argv(next_step: str) -> list[str]:
+    """The `agentic-hil adopt-hardware ...` command a next step names, as argv.
+
+    The advertised repair has to be one the CLI actually accepts: a reader who
+    copies it must not land on `unrecognized arguments` and exit 2, which is what
+    `adopt-hardware --apply` did (round 1, finding 2). So the tests parse the
+    emitted command against the real parser rather than only matching substrings.
+    """
+    match = re.search(r"`agentic-hil (adopt-hardware[^`]*)`", next_step)
+    assert match is not None, f"no adopt-hardware command found in: {next_step}"
+    return match.group(1).split()
 
 
 def test_reactor_flattens_and_deduplicates_all_audit_errors() -> None:
@@ -458,7 +471,14 @@ def test_a_step_naming_a_port_this_bench_does_not_have_points_at_the_ones_it_doe
     next_step = validation["next_step"]
     assert "console" in next_step
     assert "`com_ports.dut_uart`" in next_step
-    assert "adopt-hardware" in next_step
+    # The advertised fill command names the entry it fills and parses on the real
+    # CLI. A bare `adopt-hardware` could not pick a freshly declared COM entry
+    # sitting beside `console`, and `--apply` is not a flag at all (round 1,
+    # finding 2), so the emitted argv is exercised rather than substring-matched.
+    parsed = build_parser().parse_args(adopt_argv(next_step))
+    assert parsed.command == "adopt-hardware"
+    assert parsed.com_port == "dut_uart"
+    assert "--apply" not in next_step
     # The empty-section instruction is the wrong one here and must not appear.
     assert "init --force" not in next_step
     assert service.calls == []
@@ -481,7 +501,48 @@ def test_a_step_naming_a_debugger_this_bench_does_not_have_answers_the_same_way(
     assert "`debuggers`" in next_step
     assert "`debuggers.typo`" in next_step
     assert "dut" in next_step
+    # The debugger fill command names the entry with `--debugger` and parses on
+    # the real CLI: with `dut` already declared, a bare `adopt-hardware` refuses
+    # an unnamed debugger (round 1, finding 2).
+    parsed = build_parser().parse_args(adopt_argv(next_step))
+    assert parsed.command == "adopt-hardware"
+    assert parsed.debugger == "typo"
+    assert "--apply" not in next_step
     assert service.calls == []
+
+
+def test_the_declared_entry_fill_command_selects_the_new_entry_on_a_multi_entry_bench() -> None:
+    """The emitted command performs the fill it advertises (round 1, finding 2).
+
+    `entry_fill_step` runs in the branch where the bench already declares entries
+    and the operator has just declared the missing one beside them. Adoption then
+    faces several entries, so its selection refuses an unnamed debugger and
+    resolves an unnamed COM port to nothing. This parses the argv each kind emits
+    and runs adoption's own selection on the multi-entry document, to prove the
+    named flag lands on the freshly declared entry where the bare command could
+    not.
+    """
+    from agentic_hil.adopt import _choose_com_port, _choose_debugger
+
+    # A debugger that already had `dut`, with `newprobe` just declared beside it.
+    debugger_doc = {"debuggers": {"dut": {"type": "openocd"}, "newprobe": {"type": "openocd"}}}
+    debugger_argv = adopt_argv(DebuggerRunner.entry_fill_step("newprobe"))
+    debugger_parsed = build_parser().parse_args(debugger_argv)
+    assert debugger_parsed.debugger == "newprobe"
+    # The flag lands adoption on exactly the declared entry...
+    assert _choose_debugger(debugger_doc, debugger_parsed.debugger) == ("newprobe", debugger_doc["debuggers"]["newprobe"])
+    # ...where the bare command (no --debugger) is refused as ambiguous.
+    bare_debugger = _choose_debugger(debugger_doc, None)
+    assert isinstance(bare_debugger, dict) and bare_debugger["ok"] is False
+
+    # The same for a COM port declared beside `console`.
+    com_doc = {"com_ports": {"console": {"device": "COM7"}, "new_uart": {}}}
+    com_argv = adopt_argv(UartRunner.entry_fill_step("new_uart"))
+    com_parsed = build_parser().parse_args(com_argv)
+    assert com_parsed.com_port == "new_uart"
+    assert _choose_com_port(com_doc, com_parsed.com_port, ()) == ("new_uart", com_doc["com_ports"]["new_uart"])
+    # The bare command with several ports and no name resolves to nothing to fill.
+    assert _choose_com_port(com_doc, None, ()) == (None, None)
 
 
 def test_troubleshooting_has_a_section_for_the_refusal_a_first_plan_hits() -> None:
@@ -500,7 +561,10 @@ def test_troubleshooting_has_a_section_for_the_refusal_a_first_plan_hits() -> No
     section = page.split(heading, 1)[1].split("\n## ", 1)[0]
     # The three routes out, the same three the refusal's own `next_step` names.
     assert "agentic-hil init --force" in section
-    assert "agentic-hil adopt-hardware --apply" in section
+    assert "agentic-hil adopt-hardware" in section
+    # The CLI has no --apply flag; adoption applies by default. The section must
+    # not send a reader to a command that exits 2 at argument parsing.
+    assert "adopt-hardware --apply" not in section
     assert "configured_com_ports" in section
     # And the field a reader is told to read first, which is where the concrete
     # answer for their case is.

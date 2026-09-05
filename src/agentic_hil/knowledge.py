@@ -1128,7 +1128,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "mistake that was not there."
         ),
         remediation=(
-            "Plug the board in and run `agentic-hil adopt-hardware --apply`. It fills `com_ports.<name>.device` in "
+            "Plug the board in and run `agentic-hil adopt-hardware`. It fills `com_ports.<name>.device` in "
             "from the attached hardware, together with the serial number and USB ids that make the name checkable, "
             "and it fills in the probe and the toolchain path in the same call.",
             "If the port is not the probe's own virtual COM port, run `agentic-hil com-ports` to see what this host "
@@ -1183,7 +1183,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "A step naming a device the configuration does not declare is corrected in the plan: `device:` has to be "
             "one of the names the refusal lists under the `configured_*` key for that kind.",
             "A bench that genuinely has no such entry is filled in rather than argued with. With the board attached, "
-            "`agentic-hil adopt-hardware --apply` fills a declared debugger or COM-port entry's hardware in; adoption "
+            "`agentic-hil adopt-hardware` fills a declared debugger or COM-port entry's hardware in; adoption "
             "has no CAN half, so a `can_buses` entry's adapter and channel are written by hand. Where the section is "
             "empty because `agentic-hil init` ran with no bench attached, `agentic-hil init --force` from the project "
             "root writes the file again from the project profile and the hardware it finds. `--force` replaces the "
@@ -3298,7 +3298,7 @@ com_ports:
     # /dev/serial/by-id/... device name: COM7 is an enumeration order, so it can
     # come to mean the other adapter. An adapter that publishes no serial says so
     # instead, with identity_source: vid_pid, or identity_source: device when it
-    # publishes nothing at all. `agentic-hil adopt-hardware --apply` writes it.
+    # publishes nothing at all. `agentic-hil adopt-hardware` writes it.
     serial_number: "066AFF495451885087171450"
     vid: 1155                   # the type, which is what makes the serial mean a unit
     pid: 14155
@@ -3617,7 +3617,7 @@ A third thing *describes* the hardware contact and guards nothing. Every tool in
 |---|---|
 | what is locked | the physical device: `physical:<resource_id>`, `probe:<serial>`, `probe-exe:<executable>`, `com:serial:<serial_number>`, `com:<device>`, `can:<adapter>:<channel>` |
 | case | a name for hardware (`resource_id`, a probe serial, a port's `serial_number`, a CAN channel) folds case on every platform, because `0669FF` and `0669ff` are one unit wherever the bench runs. A host path (a debugger executable, a serial device) folds the way its own filesystem does, so `COM7` and `com7` are one port on Windows while `/dev/ttyACM0` and `/dev/ttyacm0` are two on Linux. Two entries whose `resource_id` values differ only in case are refused at config load rather than merged |
-| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order (attaching a second adapter can hand one entry another board), so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so, and from `version: 3` on that warning is a property of the file instead: such an entry must declare what identifies it with `identity_source` or the configuration is refused at load, naming `agentic-hil adopt-hardware --apply`. `vid`/`pid` sit beside the serial and name the device *type* rather than a unit, so they are never a lock key: a USB serial is unique only within its vendor, so a serial matching under a foreign vid/pid is refused too, and an adapter that publishes no serial at all is compared on the type alone, which separates a CH340 from an ST-Link and not one CH340 from another, and `identity_source: vid_pid` says exactly that. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all (no serial backend, not enumerated exactly once, no serial reported, or no USB ids reported where the entry names them) is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
+| a serial port's identity | `com_ports.<name>.serial_number` is the adapter's USB serial and is what the lock follows; `device` is only how the port is opened. Without it the key falls back to the device name, which is an enumeration order (attaching a second adapter can hand one entry another board), so an entry that names neither a `serial_number` nor a `resource_id` carries an `identity_warning` saying so, and from `version: 3` on that warning is a property of the file instead: such an entry must declare what identifies it with `identity_source` or the configuration is refused at load, naming `agentic-hil adopt-hardware`. `vid`/`pid` sit beside the serial and name the device *type* rather than a unit, so they are never a lock key: a USB serial is unique only within its vendor, so a serial matching under a foreign vid/pid is refused too, and an adapter that publishes no serial at all is compared on the type alone, which separates a CH340 from an ST-Link and not one CH340 from another, and `identity_source: vid_pid` says exactly that. An entry that *does* name hardware is opened on one ground only: the attached device is `confirmed` to be the board it names. A port that has come to be a different board is refused with `com_port_identity_mismatch`; a port whose identity cannot be checked at all (no serial backend, not enumerated exactly once, no serial reported, or no USB ids reported where the entry names them) is refused with `com_port_identity_unverified`, because a check that could not run does not prove the name still leads to its board. Both refuse before the port is opened and are retry-safe. An entry that names no hardware is opened as `not_declared`, unverified by design |
 | where | `~/.agentic-hil/device-locks`, one agreed place per machine, never under `state_root`: a lock kept per configuration is not a bench lock |
 | how long | the whole run, from the declaration to its end; the lease each call takes borrows that hold |
 | what may be touched | only what the test description declares; anything else is refused with `undeclared_device` |

@@ -83,7 +83,7 @@ VOLATILE_SERIAL_DEVICE_WARNING = (
 UNBOUND_SERIAL_DEVICE_WARNING = (
     "This COM port names no device yet, so nothing can be opened on it. The entry exists because the project "
     "declared this port by name, baudrate and permissions before any bench was attached; run `agentic-hil "
-    "adopt-hardware --apply` with the board plugged in to fill the device in from the hardware, or set "
+    "adopt-hardware` with the board plugged in to fill the device in from the hardware, or set "
     "`com_ports.<name>.device` yourself. `agentic-hil com-ports` lists what this host has."
 )
 
