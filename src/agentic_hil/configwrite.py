@@ -65,6 +65,7 @@ surface moves: the ratchet there is what it was.
 from __future__ import annotations
 
 import os
+import sys
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,7 +130,20 @@ PROJECT_CONFIG_DESCRIBE = "project_config_describe"
 # their own shell is theirs.
 ACTOR_AGENT = "agent"
 ACTOR_HUMAN = "human"
-ACTOR_PHRASES = {ACTOR_AGENT: "an agent", ACTOR_HUMAN: "a person"}
+# What the file records when the write came through a command and this process
+# has no evidence that a person typed it. The command line is the operator's
+# surface by design, which is what `ACTOR_HUMAN` above authorizes, and a shell
+# script, a CI step and a provisioning tool run exactly the same command with
+# nobody at it. `a person changed this` in a policy file's own header is a claim
+# about who is accountable for a narrowing, and this process cannot make it out
+# of an argument list. The surface can be stated either way, so it is what
+# stands when the terminal does not answer.
+ACTOR_COMMAND_LINE = "cli"
+ACTOR_PHRASES = {ACTOR_AGENT: "an agent", ACTOR_HUMAN: "a person", ACTOR_COMMAND_LINE: "the command line"}
+# The `via` prefix that says the write came through a typed command. `via` is
+# already the surface (`cli:grant`, `mcp:project_config_set`), so this reads the
+# fact rather than adding a second way to say it.
+CLI_SURFACE_PREFIX = "cli:"
 
 # One comment line, rewritten rather than appended, so a file changed a hundred
 # times does not grow a hundred lines of banner. It sits in the header because
@@ -444,6 +458,48 @@ def _marked_header(text: str, timestamp: str, actor: str, via: str) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def recorded_actor(actor: str, via: str) -> str:
+    """What this write may claim about who made it.
+
+    Not what it is authorized as. ``ACTOR_HUMAN`` on the command line is an
+    authority: it is the surface `agentic-hil init --force` already runs under,
+    it waives the description grant and it is not held to the false-only
+    direction, and none of that changes here. What changes is what goes into the
+    file, which is a different question with a different standard of proof: a
+    provenance line is read later, by somebody deciding who narrowed a
+    permission and whether to trust the header above it.
+
+    The command line is the operator's surface and it is also a shell script, a
+    CI step and a provisioning run, and this process cannot tell those apart by
+    the arguments it was given. An interactive terminal is the one piece of
+    evidence it does have for a person being there. Where that is absent the
+    surface stands alone, which is the whole of what is known: `cli`, beside a
+    `via` that already says which command it was.
+
+    The agent's own writes are untouched. `mcp:project_config_set` is an agent
+    by construction, and nothing about a terminal is evidence about that.
+    """
+    if actor != ACTOR_HUMAN or not via.startswith(CLI_SURFACE_PREFIX):
+        return actor
+    return ACTOR_HUMAN if _at_an_interactive_terminal() else ACTOR_COMMAND_LINE
+
+
+def _at_an_interactive_terminal() -> bool:
+    """Whether somebody is typing at this process, as far as it can tell.
+
+    `stdin` rather than `stdout`, because output is redirected by people who are
+    very much there and input is not. Every way of not having one answers false:
+    a closed or detached stream (`None` under a windowed interpreter), a stream
+    that has been replaced by something without the method, and a handle the
+    platform refuses to classify. A refused answer is not a person.
+    """
+    stream = getattr(sys, "stdin", None)
+    try:
+        return bool(stream is not None and stream.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -776,8 +832,14 @@ def _project_config_set(
             return _permission_denied(PROJECT_CONFIG_SET, CONFIG_DESCRIPTION_RIGHT, [item["key"] for item in applied], target_path)
 
         timestamp = _utc_now()
-        _record_provenance(updated, [str(item["key"]) for item in applied], timestamp, actor, via)
-        text = _marked_header(previous_text, timestamp, actor, via) + yaml.safe_dump(updated, sort_keys=False, allow_unicode=False)
+        # What the file says it was changed by, which is not always what the
+        # change was authorized as: `actor` decided every check above it, and
+        # what a written line may claim is bounded by what this process can
+        # actually know. Both places take the same value, so the header and
+        # `provenance` cannot say different things about one write.
+        recorded = recorded_actor(actor, via)
+        _record_provenance(updated, [str(item["key"]) for item in applied], timestamp, recorded, via)
+        text = _marked_header(previous_text, timestamp, recorded, via) + yaml.safe_dump(updated, sort_keys=False, allow_unicode=False)
 
         # 3. Validate, then replace. write_generated_config loads the new text
         #    from a temporary file first, so a change that would not load never
@@ -1857,6 +1919,7 @@ def _describe_next_steps(rights: dict[str, bool], writable: list[JsonObject], op
 
 __all__ = [
     "ACTOR_AGENT",
+    "ACTOR_COMMAND_LINE",
     "ACTOR_HUMAN",
     "GRANTING_PATH",
     "PERMISSION_COMMAND_VALUES",
@@ -1874,6 +1937,7 @@ __all__ = [
     "permission_widening",
     "project_config_describe",
     "project_config_set",
+    "recorded_actor",
     "resolve_permission_key",
     "set_permission",
 ]

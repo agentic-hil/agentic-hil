@@ -61,7 +61,7 @@ from agentic_hil.config import (
     skeleton_debugger_scripts,
 )
 from agentic_hil.configstate import STATE_UNREADABLE
-from agentic_hil.configwrite import ACTOR_HUMAN, PROJECT_CONFIG_SET
+from agentic_hil.configwrite import ACTOR_COMMAND_LINE, PROJECT_CONFIG_SET
 from agentic_hil.coordination import (
     DEBUGGER_READONLY_TARGET_STATE_REASON,
     RECOVERY_ACTION_VIA,
@@ -471,7 +471,10 @@ def test_setup_without_a_board_then_plugging_it_in_reaches_a_green_doctor(tmp_pa
     }
     filled = document_of(path)
     assert filled["debuggers"]["dut"]["probe_id"] == PROBE_SERIAL
-    assert filled["provenance"]["last_modified_by"] == ACTOR_HUMAN
+    # Recorded as the surface it came through: adoption runs under the
+    # operator's authority, and with no terminal answering, that a person ran it
+    # is not something this process can state.
+    assert filled["provenance"]["last_modified_by"] == ACTOR_COMMAND_LINE
     assert filled["provenance"]["last_modified_via"] == "cli:adopt-hardware"
     # No grant was needed and none moved. The skeleton names every project
     # permission granted, and they are still exactly what it named: this path

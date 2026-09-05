@@ -169,8 +169,15 @@ def test_the_change_is_reported_with_the_value_it_replaced(tmp_path: Path, monke
     assert any("project_config_reload_description" in step for step in result["next_steps"])
 
 
-def test_the_write_is_recorded_as_a_persons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provenance like any other write, with `human` as the actor."""
+def test_the_write_is_recorded_as_the_surface_it_came_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#452: it said a person had been here, and nothing here knew that.
+
+    The command is the operator's surface by design and it is also what a shell
+    script, a CI step and a provisioning tool run, with the same arguments and
+    nobody at the keyboard. `a person changed this` in a policy file's own
+    header is read later by somebody deciding who narrowed a permission, and it
+    was written out of an argument list. What is known is the surface, and that
+    is what stands."""
     workspace, path = bench(tmp_path, monkeypatch, device_permissions=dict.fromkeys(GRANT_SOURCES, True))
     assert document_of(path)["debuggers"]["dut"]["permissions"]["allow_mass_erase"] is True
 
@@ -178,13 +185,72 @@ def test_the_write_is_recorded_as_a_persons(tmp_path: Path, monkeypatch: pytest.
 
     assert result["ok"] is True, result
     provenance = document_of(path)["provenance"]
-    assert provenance["last_modified_by"] == "human"
+    assert provenance["last_modified_by"] == "cli"
     assert provenance["last_modified_via"] == "cli:revoke"
     assert provenance["last_modified_keys"] == ["debuggers.dut.permissions.allow_mass_erase"]
     assert provenance["modification_count"] == 1
     # `created_by` answers who wrote the file, which a change does not alter.
     assert provenance["created_by"] == PROVENANCE["created_by"]
+    header = path.read_text(encoding="utf-8")
+    assert "# Changed by the command line through cli:revoke" in header
+    assert "a person" not in header
+
+
+def test_a_terminal_is_what_lets_the_file_say_a_person_was_here(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one piece of evidence this process has, and it is enough.
+
+    Nothing is withheld from an operator at their own shell: with a terminal
+    answering, the write says what it always said."""
+    workspace, path = bench(tmp_path, monkeypatch, device_permissions=dict.fromkeys(GRANT_SOURCES, True))
+    monkeypatch.setattr("agentic_hil.configwrite._at_an_interactive_terminal", lambda: True)
+
+    assert run(workspace, "revoke", "debuggers.dut.allow_mass_erase")["ok"] is True
+
+    assert document_of(path)["provenance"]["last_modified_by"] == "human"
     assert "# Changed by a person through cli:revoke" in path.read_text(encoding="utf-8")
+
+
+def test_a_terminal_that_will_not_answer_is_not_a_person(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stream with no answer, or none at all, is the absence of evidence.
+
+    `stdin` is closed under a detached service and replaced by every harness
+    that captures it, and asking a handle the platform will not classify raises
+    rather than answering. None of those is somebody typing."""
+    from agentic_hil.configwrite import _at_an_interactive_terminal
+
+    class Refuses:
+        def isatty(self) -> bool:
+            raise ValueError("I/O operation on closed file")
+
+    monkeypatch.setattr("sys.stdin", Refuses())
+    assert _at_an_interactive_terminal() is False
+    monkeypatch.setattr("sys.stdin", None)
+    assert _at_an_interactive_terminal() is False
+    monkeypatch.setattr("sys.stdin", object())
+    assert _at_an_interactive_terminal() is False
+
+
+def test_the_agents_own_writes_are_recorded_exactly_as_they_were(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A terminal says nothing about who is on the other end of MCP.
+
+    `project_config_set` over MCP is an agent by construction, and this is the
+    surface the whole ratchet is decided against, so nothing about it moves."""
+    from agentic_hil.configwrite import project_config_set
+
+    workspace, path = bench(tmp_path, monkeypatch, **{CONFIG_PERMISSIONS_RIGHT: True}, device_permissions=dict.fromkeys(GRANT_SOURCES, True))
+
+    written = project_config_set(
+        workspace,
+        load_authoritative_config(workspace),
+        [{"key": "debuggers.dut.permissions.allow_mass_erase", "value": False}],
+        open_holds=None,
+    )
+
+    assert written["ok"] is True, written
+    provenance = document_of(path)["provenance"]
+    assert provenance["last_modified_by"] == "agent"
+    assert provenance["last_modified_via"] == "mcp:project_config_set"
+    assert "# Changed by an agent through mcp:project_config_set" in path.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

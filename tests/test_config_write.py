@@ -1603,7 +1603,11 @@ def test_the_false_only_rule_does_not_reach_the_command_line(tmp_path: Path, mon
 
     assert widened["ok"] is True, widened
     assert document_of(path)["debuggers"]["dut"]["permissions"]["allow_flash"] is True
-    assert document_of(path)["provenance"]["last_modified_by"] == "human"
+    # The authority is `human` and what the file records is what this process
+    # could tell, which with no terminal answering is the surface alone. The two
+    # are separate questions; `via` names the command either way.
+    assert document_of(path)["provenance"]["last_modified_by"] == "cli"
+    assert document_of(path)["provenance"]["last_modified_via"] == "cli:test"
 
     # The grant itself is not waived for them: a bench that closed the
     # permissions half is closed to the command line too.
