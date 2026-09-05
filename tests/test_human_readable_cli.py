@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -689,6 +690,135 @@ def test_the_outcome_word_does_not_depend_on_who_is_reading() -> None:
     it."""
     assert render_result(PLAN_FAILED).startswith("Failed: comparator_unmet")
     assert render_result(PLAN_REFUSED).startswith("Refused: test_config_invalid")
+
+
+# ---------------------------------------------------------------------------
+# One catalogue, two vocabularies.
+
+
+def _unknown_probe_refusal() -> dict:
+    """The refusal `agentic-hil adopt-hardware --probe-id <unknown>` produces."""
+    return {
+        "ok": False,
+        "tool": "project_config_adopt_hardware",
+        "error_type": "adapter_not_found",
+        "backend": "openocd",
+        "summary": "No debug probe with that unique ID is attached.",
+        **remediation_fields("adapter_not_found", "openocd"),
+    }
+
+
+def test_the_cli_rendering_names_the_command_the_reader_can_type() -> None:
+    """#451: the shell reader was sent to a name their shell does not have.
+
+    One catalogue serves the agent and the operator, and its step reads "call
+    debugger_probes_list". That is the right name over MCP and nothing at all in
+    a terminal, where the same read is `agentic-hil debugger-probes`."""
+    at_a_shell = _reflowed(_rendered(_unknown_probe_refusal(), "adopt-hardware"))
+
+    assert "1. Call `agentic-hil debugger-probes` to see what the host enumerates." in at_a_shell
+    assert "debugger_probes_list" not in at_a_shell
+    # The rest of the entry is the same text in the same order: this renames a
+    # move, it does not choose different advice.
+    assert "Connect the probe" in at_a_shell
+    assert "`debuggers.<name>.probe_id`" in at_a_shell
+
+
+def test_the_document_keeps_the_tool_name_the_agent_calls() -> None:
+    """No command was typed, so nobody is at a shell and the tool is the answer."""
+    as_a_document = _reflowed(render_result(_unknown_probe_refusal()))
+
+    assert "1. Call debugger_probes_list to see what the host enumerates." in as_a_document
+    assert "agentic-hil debugger-probes" not in as_a_document
+
+
+def test_a_step_about_the_mcp_surface_keeps_its_tool_name() -> None:
+    """A step that names the surface is not advice a reader translates.
+
+    Rewriting the tool in it would leave a sentence saying "over MCP" about a
+    shell command, which is a route neither reader has. The two steps below are
+    the same tool in the same document, and only the one that is not about a
+    surface is renamed."""
+    refusal = {
+        "ok": False,
+        "error_type": "adapter_not_found",
+        "summary": "No probe answered.",
+        "remediation": [
+            "Over MCP, debugger_probes_list is how an agent asks the same question.",
+            "Call debugger_probes_list to see what the host enumerates.",
+        ],
+    }
+    out = _reflowed(_rendered(refusal, "doctor"))
+
+    assert "1. Over MCP, debugger_probes_list is how an agent asks the same question." in out
+    assert "2. Call `agentic-hil debugger-probes` to see what the host enumerates." in out
+
+
+def test_the_refusal_that_answers_both_readers_still_answers_both() -> None:
+    """`config_file_not_found` carries one ordering per reader out of the same
+    steps, and the operator's own route stands first in theirs. Neither the
+    ordering nor the surface each step names is touched by the renaming."""
+    at_a_shell = _reflowed(_rendered(_missing_configuration_refusal(), "doctor"))
+
+    assert "2. Over MCP, call `project_config_create` once." in at_a_shell
+    assert "1. At a shell, run `agentic-hil init` from the project root" in at_a_shell
+
+
+def test_every_tool_the_catalogue_recommends_has_a_reading_for_both_surfaces() -> None:
+    """The guard that makes the mapping stay true.
+
+    A step that starts naming a tool is a step somebody has to have decided
+    about: either the command line runs the same move under its own name, or the
+    name stands on both surfaces because there is nothing else to call it. The
+    third state, a tool nobody classified, is the bug this closes, and it is
+    invisible at the surface: the reader is simply sent to a name that is not
+    there."""
+    from agentic_hil.contracts import MCP_TOOL_NAMES
+    from agentic_hil.humanize import _CLI_COMMANDS, _TOOLS_KEEPING_THEIR_NAME
+    from agentic_hil.knowledge import ERROR_CATALOGUE
+
+    classified = set(_CLI_COMMANDS) | _TOOLS_KEEPING_THEIR_NAME
+    assert not set(_CLI_COMMANDS) & _TOOLS_KEEPING_THEIR_NAME
+    assert classified <= set(MCP_TOOL_NAMES), classified - set(MCP_TOOL_NAMES)
+
+    recommended = {
+        name
+        for remedy in ERROR_CATALOGUE.values()
+        for text in (*remedy.remediation, *remedy.do_not, *remedy.cli_remediation)
+        for name in re.findall(r"[a-z][a-z0-9_]*", text)
+        if name in set(MCP_TOOL_NAMES)
+    }
+    assert recommended, "no catalogue step names a tool any more; this guard is not reading the catalogue"
+    assert recommended <= classified, recommended - classified
+
+
+def test_every_command_the_mapping_names_is_one_this_program_has() -> None:
+    """A spelling nobody can type is worse than the tool name it replaced."""
+    from agentic_hil.humanize import _CLI_COMMANDS
+
+    parser = cli.build_parser()
+    subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    for tool, command in _CLI_COMMANDS.items():
+        program, subcommand = command.split(" ", 1)
+        assert program == "agentic-hil", tool
+        assert subcommand in subparsers.choices, f"{tool} is spelled as `{command}`, which this program does not have"
+
+
+def test_a_tool_name_inside_a_longer_word_is_not_rewritten() -> None:
+    """The substitution is over whole names, not over substrings.
+
+    A caller's own step is printed as the caller wrote it, and a word that
+    merely contains a tool name is a word, not a recommendation."""
+    refusal = {
+        "ok": False,
+        "error_type": "adapter_not_found",
+        "summary": "No probe answered.",
+        "remediation": ["The debugger_probes_listing in the log says what was seen.", "Call debugger_probes_list."],
+    }
+    out = _reflowed(_rendered(refusal, "doctor"))
+
+    assert "The debugger_probes_listing in the log" in out
+    assert "Call `agentic-hil debugger-probes`." in out
 
 
 def test_a_refusal_shows_the_failing_tools_own_words_and_not_only_the_facts_around_them() -> None:

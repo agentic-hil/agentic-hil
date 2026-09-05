@@ -21,6 +21,7 @@ comes back as something readable rather than as a wall of braces.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import textwrap
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -461,6 +462,92 @@ def _tail(result: JsonObject) -> list[str]:
 # to ask about the same entry or they answer out of two.
 _REMEDY_SCOPE_KEYS = ("field", "backend", "adapter", "permission", "tool")
 
+# What a person at a shell types to do what a tool does. One catalogue serves
+# both surfaces, so a step reading "call debugger_probes_list" is right for the
+# agent and names something that does not exist in an operator's shell. The
+# document is untouched: this is the rendering saying the same move in the
+# reader's own vocabulary, and only where the two are the same move with the
+# same inputs. A command with arguments the tool does not take, or a tool with
+# arguments the command does not take, is not an entry here.
+_CLI_COMMANDS = {
+    "debugger_probes_list": "agentic-hil debugger-probes",
+    "project_config_adopt_hardware": "agentic-hil adopt-hardware",
+    "server_upgrade": "agentic-hil upgrade",
+    "test_reactor_run": "agentic-hil test-reactor",
+    "test_reactor_status": "agentic-hil test-reactor-status",
+    "test_reactor_stop": "agentic-hil test-reactor-stop",
+}
+
+# Every other tool this project's remediation names, and none of them is
+# rewritten. Three reasons, and each name here has one of them:
+#
+# * the hardware and session tools, the report readers and `bench_run_*`: an
+#   agent's vocabulary with no command line behind it at all. A step naming one
+#   is telling an agent what to do next, and there is nothing else to call it.
+# * `project_config_set`, `project_config_describe` and
+#   `project_config_reload_description`: the command line has `grant`, `revoke`
+#   and `config-reload`, and not one of them is the same move. `grant` writes
+#   one named permission, `config-reload` reports what a running server would
+#   take from the file and reloads nothing.
+# * `project_config_create` and `hardware_recover`: a command exists
+#   (`agentic-hil init`, `agentic-hil recover`) and the catalogue already names
+#   it where it means it. `config_file_not_found` carries one ordering per
+#   reader and the shell reader's opens with `agentic-hil init`;
+#   `unsafe_configured_path` names both spellings in one sentence on purpose;
+#   and the `hardware_recover` step is about `operator_statement`, which is a
+#   tool argument the command does not have.
+#
+# The guard over this file reads both collections together: a tool the catalogue
+# starts recommending has to be put in one of them, so nobody has to notice.
+_TOOLS_KEEPING_THEIR_NAME = frozenset({
+    "bench_run_start",
+    "bench_run_status",
+    "bench_run_stop",
+    "can_buses_list",
+    "can_read",
+    "can_send",
+    "can_session_stop",
+    "classify_last_error",
+    "com_session_stop",
+    "debug_continue",
+    "debug_dump_symbol_ihex",
+    "debug_get_stop_reason",
+    "debug_stop_session",
+    "debug_symbol_info",
+    "debug_symbol_value",
+    "debugger_info",
+    "flash_firmware",
+    "get_last_report",
+    "hardware_recover",
+    "probe_target",
+    "project_config_create",
+    "project_config_describe",
+    "project_config_reload_description",
+    "project_config_set",
+    "reset_target",
+})
+
+# The tool name as it is written in prose, with or without the backticks the
+# catalogue puts around it, and never as part of a longer identifier.
+_TOOL_MENTION = re.compile(r"`?\b(" + "|".join(sorted(_CLI_COMMANDS)) + r")\b`?")
+
+
+def _in_the_readers_words(step: str) -> str:
+    """One remediation step, with every tool name it recommends spelled as the
+    command that does it.
+
+    A step that names the MCP surface is left exactly as it is. Those steps are
+    not advice a reader translates: they say which surface the move is on, and
+    `config_file_not_found` carries one for each reader in the same entry, so
+    rewriting the agent's step into the operator's command would leave a
+    sentence that says "over MCP" about a shell command.
+    """
+    return step if "MCP" in step else _TOOL_MENTION.sub(lambda match: f"`{_CLI_COMMANDS[match.group(1)]}`", step)
+
+
+def _for_the_reader(steps: Sequence[str], command_line: bool) -> list[str]:
+    return [_in_the_readers_words(step) for step in steps] if command_line else list(steps)
+
 
 def _command_line_order(result: JsonObject, steps: Sequence[str]) -> list[str]:
     """The catalogue's ordering for a person at a shell, where it has one.
@@ -487,15 +574,24 @@ def _remediation(result: JsonObject, *, command_line: bool = False) -> tuple[lis
     `permission_denied` from a tool surface, say -- carries neither, and the
     catalogue still knows the answer, so it is looked up rather than left out.
 
-    `command_line` says a person typed a command to get here, which for a
-    refusal whose readers have different first moves decides which of the
-    catalogue's two orderings is printed. It changes no step and drops none:
-    `command_line_remediation` reorders the entry's own steps or declines.
+    `command_line` says a person typed a command to get here, and it decides two
+    things: which of the catalogue's two orderings is printed, for a refusal
+    whose readers have different first moves, and whether a tool this project
+    also ships a command for is named as that command. It changes no step and
+    drops none: `command_line_remediation` reorders the entry's own steps or
+    declines, and the rewriting is one name for another name for one move.
+
+    The rewriting is last, after the ordering, because the ordering is the
+    catalogue's own and is matched against the catalogue's own text: a step
+    already translated would no longer be one of the entry's, and
+    `command_line_remediation` would decline to order a list it could not
+    recognise.
     """
     steps = _strings(result.get("remediation"))
     avoid = _strings(result.get("do_not"))
     if steps or avoid:
-        return (_command_line_order(result, steps) if command_line else steps), avoid
+        ordered = _command_line_order(result, steps) if command_line else steps
+        return _for_the_reader(ordered, command_line), _for_the_reader(avoid, command_line)
     error_type = _error_type(result) or None
     # The one substitution the catalogue cannot make for itself: which permission
     # a refusal is about is a fact about this refusal. Passed in so the advice
@@ -512,7 +608,8 @@ def _remediation(result: JsonObject, *, command_line: bool = False) -> tuple[lis
         )
         if catalogue:
             found = _strings(catalogue.get("remediation"))
-            return (_command_line_order(result, found) if command_line else found), _strings(catalogue.get("do_not"))
+            ordered = _command_line_order(result, found) if command_line else found
+            return _for_the_reader(ordered, command_line), _for_the_reader(_strings(catalogue.get("do_not")), command_line)
     return [], []
 
 
