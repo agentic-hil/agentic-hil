@@ -780,6 +780,161 @@ def test_upgrade_blocked_by_an_exact_pin_names_the_pin_and_keeps_the_extras(
     assert any("agentic-hil@latest" in step for step in result["do_not"])
 
 
+def _uv_tool_receipt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> Path:
+    """A uv tool environment whose receipt says `body`, with this process inside it.
+
+    The receipt sits inside the tool environment, so pointing `sys.prefix` at a
+    directory shaped like one is the whole of what the reader needs: nothing
+    runs `uv`, and the operator's own installation is never read.
+    """
+    environment = tmp_path / "uv" / "tools" / "agentic-hil"
+    environment.mkdir(parents=True)
+    (environment / "uv-receipt.toml").write_text(body, encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    return environment
+
+
+_RECEIPT_WITH_PYTEST = """
+[tool]
+requirements = [
+    { name = "agentic-hil", extras = ["can"] },
+    { name = "pytest", specifier = "==9.1.1" },
+]
+entrypoints = [
+    { name = "agentic-hil", install-path = "/bench/.local/bin/agentic-hil" },
+]
+"""
+
+
+def test_the_pin_refusal_keeps_the_with_packages_uv_recorded_beside_this_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reported defect: the promised repair uninstalled what the operator added.
+
+    A uv installation pinned to an exact version and carrying `--with pytest`
+    was told `reinstall_command  uv tool install "agentic-hil[can]@latest"`,
+    which "clears the pin and keeps the installation's extras". Run verbatim, uv
+    answered `Uninstalled 5 packages`, pytest among them. The receipt records
+    every `--with` package, so the line carries each one back and the result
+    names them beside `installed_extras` rather than leaving the loss to be
+    discovered by the next test run.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["reinstall_command"] == 'uv tool install --with "pytest==9.1.1" "agentic-hil[can]@latest"'
+    assert result["with_packages"] == ["pytest==9.1.1"]
+    assert result["installed_extras"] == ["can"]
+    # In words, on the line an operator reads first: what running uv's own hint
+    # instead of this one costs them.
+    assert "pytest==9.1.1" in result["summary"]
+    assert "it removes" in result["summary"]
+    assert 'uv tool install "agentic-hil@latest"' in result["summary"]
+
+
+def test_the_pin_refusal_replays_the_interpreter_the_receipt_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A recorded `--python` is part of the installation, so the line carries it.
+
+    `[tool.options]` is where uv keeps it, and a reinstall without it resolves
+    an interpreter of uv's own choosing, which is a different installation
+    wearing the same name.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        '[tool]\nrequirements = [{ name = "agentic-hil" }]\n\n[tool.options]\npython = "3.12"\n',
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["reinstall_command"] == 'uv tool install --python "3.12" "agentic-hil@latest"'
+    assert result["recorded_python"] == "3.12"
+    assert "with_packages" not in result
+    assert "the interpreter 3.12 this installation was created with" in result["summary"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('[tool]\nrequirements = [{ name = "agentic-hil" }]\n', id="nothing-recorded-beside-it"),
+        pytest.param('[tool]\nrequirements = [{ name = "agentic-hil" }, { name = "x", git = "https://x" }]\n', id="a-source-this-cannot-respell"),
+        pytest.param("this is not toml at all\n", id="a-receipt-that-does-not-parse"),
+    ],
+)
+def test_a_receipt_with_nothing_to_replay_leaves_the_reinstall_line_as_it_was(
+    body: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The neighbouring behaviour, unchanged, including where the receipt is unreadable.
+
+    A requirement recorded as a git, url or path source does not rebuild into
+    the PEP 508 string a `--with` takes, so replaying it would hand the operator
+    a line that installs something else. It is left out rather than guessed at,
+    and the line stays the one this command always printed.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, body)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert "with_packages" not in result
+    assert "recorded_python" not in result
+    assert "[can]" in result["summary"]
+
+
+def test_no_receipt_is_read_for_an_installation_uv_tool_does_not_own(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A pipx or pip prefix has no uv receipt, and a file that sits there is not one.
+
+    The reader is gated on the manager that owns this installation rather than
+    on the file being present, so a leftover `uv-receipt.toml` in an environment
+    uv does not manage never shapes a command for a manager that would not take
+    it.
+    """
+    from agentic_hil.upgrade import _recorded_install, _uv_receipt
+
+    environment = tmp_path / "pipx" / "venvs" / "agentic-hil"
+    environment.mkdir(parents=True)
+    (environment / "uv-receipt.toml").write_text(_RECEIPT_WITH_PYTEST, encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", str(environment))
+
+    assert _uv_receipt() is None
+    assert _recorded_install().with_requirements == ()
+
+
 def test_upgrade_that_finds_nothing_newer_succeeds_without_asking_for_a_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -874,6 +1029,39 @@ def test_a_pin_at_the_release_that_is_installed_is_a_note_and_exits_zero(
     assert any("--dry-run" in call for call in calls)
     # Nothing was replaced, so nothing is refreshed out of it.
     assert not any("skill-install" in call for call in calls)
+
+
+def test_the_pin_note_carries_the_with_packages_the_same_line_replays(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The note prints the same `reinstall_command`, so it owes the same account.
+
+    An installation pinned to the release it is already running is told the line
+    that clears the pin all the same, and that line replays every `--with`
+    package uv recorded. Naming those only on the refusal would leave the reader
+    of the note, who follows uv's bare hint instead, losing exactly what the
+    refusal warns about, from a result that had the receipt in front of it.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert "note rather than as a refusal" in result["summary"]
+    assert result["with_packages"] == ["pytest==9.1.1"]
+    assert result["reinstall_command"] == 'uv tool install --with "pytest==9.1.1" "agentic-hil[can]@latest"'
+    assert "pytest==9.1.1" in result["summary"]
 
 
 def test_the_pinned_installation_that_exits_zero_exits_zero_at_the_command_line(

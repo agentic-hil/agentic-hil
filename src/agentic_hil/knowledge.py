@@ -746,10 +746,13 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "it, and that delete fails while the MCP server the host started is still running out of it. `agentic-hil "
             "upgrade` moves the launcher on PATH out of the manager's way before it runs; a reinstall typed by hand "
             "has nothing of the kind, and the delete it starts with is the step that fails.",
-            "Run the command in `reinstall_command` on this result. It is the one that clears the pin *and* keeps this "
-            "installation's extras: `installed_extras` says which ones were found, and reinstalling without them "
-            "removes what they installed. On a bench with `can`, that silently takes CAN support away. The hint `uv` "
-            "prints names the bare distribution and would do exactly that, so use ours and not that one.",
+            "Run the command in `reinstall_command` on this result. It is the one that clears the pin *and* rebuilds "
+            "this installation as it stands: `installed_extras` says which extras were found, `with_packages` names "
+            "every package `uv`'s own receipt records as installed alongside this one, and `recorded_python` names the "
+            "interpreter the install recorded when it recorded one. Reinstalling without any of them removes it: on a "
+            "bench with `can` that silently takes CAN support away, and on one created with `--with pytest` it "
+            "uninstalls pytest. The hint `uv` prints names the bare distribution and would do exactly that, so use "
+            "ours and not that one.",
             "Then run `agentic-hil --version` to confirm the number moved, and start the agent host, which loads the "
             "new server. Nothing was restarted or reloaded by this attempt; there is nothing new to load yet.",
             "Later upgrades work normally: the reinstall records an unpinned requirement, so `agentic-hil upgrade` "
@@ -758,9 +761,10 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         do_not=(
             "Do not report this as an upgrade, and do not ask the operator to restart anything on the strength of it. "
             "The installation still runs the version it ran before, with that version's behaviour and its refusals.",
-            "Do not run `uv tool install agentic-hil@latest` from `uv`'s own hint. It names the distribution without "
-            "extras, and `uv` records the requirement literally, so it uninstalls whatever `[can]` or `[pyocd]` "
-            "brought in.",
+            "Do not run `uv tool install agentic-hil@latest` from `uv`'s own hint. It names the distribution alone, "
+            "and `uv` records the requirement literally, so it uninstalls whatever `[can]` or `[pyocd]` brought in "
+            "and every package the receipt records beside it: a bench installed with `--with pytest` loses pytest, "
+            "and `Uninstalled 5 packages` is the only notice it gets.",
             "Do not have Agentic HIL rewrite the installation on the operator's behalf, and do not reach for "
             "`--force` to make the pinned upgrade take. Which version a machine runs is the operator's decision; a "
             "pin can be deliberate, and an upgrade that replaces an installation nobody asked it to replace is a "
