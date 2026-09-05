@@ -979,6 +979,53 @@ def test_a_receipt_with_nothing_to_replay_leaves_the_reinstall_line_as_it_was(
     assert "[can]" in result["summary"]
 
 
+@pytest.mark.parametrize(
+    ("extras", "receipt", "expected"),
+    [
+        pytest.param(
+            ("can",),
+            _RECEIPT_WITH_PYTEST,
+            "it removes the [can] extra and everything it installed and the package uv's receipt records beside it (pytest==9.1.1).",
+            id="one-extra-and-one-recorded-package",
+        ),
+        pytest.param(
+            ("can", "pyocd"),
+            '[tool]\nrequirements = [{ name = "agentic-hil" }, { name = "pytest" }, { name = "ruff" }]\n',
+            "it removes the [can], [pyocd] extras and everything they installed and the packages uv's receipt records beside it (pytest, ruff).",
+            id="two-extras-and-two-recorded-packages",
+        ),
+    ],
+)
+def test_the_sentence_about_uvs_bare_hint_reads_as_a_sentence(
+    extras: tuple[str, ...],
+    receipt: str,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Measured on a bench, on the ordinary one-extra one-package installation.
+
+    "it removes the [can] extra and everything they installed and pytest": one
+    extra with a plural pronoun pointing back at it, and a package name arriving
+    at the end of a series with nothing saying what it is. Each loss is a phrase
+    that has to read on its own, because they are joined into a series.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, receipt)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: extras)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    summary = str(upgrade_installation([])["summary"])
+
+    assert expected in summary
+    assert "everything they installed and pytest" not in summary
+
+
 def test_the_rendered_pin_note_prints_the_line_it_tells_the_reader_to_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

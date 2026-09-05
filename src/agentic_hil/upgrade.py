@@ -655,13 +655,22 @@ def _plain_line_would_remove(installed_extras: tuple[str, ...], recorded: _Recor
     which extras, which recorded packages, which interpreter, by name. Empty
     where there is nothing to lose, so a plain installation is not handed a
     warning about a difference it does not have.
+
+    Each loss is a phrase that reads on its own, because they are joined into a
+    series and one that needs the phrase before it to be understood comes apart
+    there. Measured on a bench, on the ordinary one-extra one-package
+    installation: "it removes the [can] extra and everything they installed and
+    pytest", where "they" has one extra to refer back to and "pytest" arrives
+    with nothing saying what it is.
     """
     losses: list[str] = []
     if installed_extras:
         named = ", ".join(f"[{extra}]" for extra in installed_extras)
-        losses.append(f"the {named} {'extra' if len(installed_extras) == 1 else 'extras'} and everything they installed")
+        one_extra = len(installed_extras) == 1
+        losses.append(f"the {named} {'extra' if one_extra else 'extras'} and everything {'it' if one_extra else 'they'} installed")
     if recorded.with_requirements:
-        losses.append(f"{', '.join(recorded.with_requirements)}, which uv's receipt records as installed alongside it")
+        one_package = len(recorded.with_requirements) == 1
+        losses.append(f"the {'package' if one_package else 'packages'} uv's receipt records beside it ({', '.join(recorded.with_requirements)})")
     if recorded.python:
         losses.append(f"the interpreter {recorded.python} this installation was created with")
     if not losses:
