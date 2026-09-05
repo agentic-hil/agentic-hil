@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Changed
+
+- The board-free job in the shipped CI examples is named `check-plan`, after the command it runs, and neither the examples nor `check-plan`'s own help calls it a simulator any more: the job installs the pinned release and loads every plan through the reactor's own loader, it runs no firmware and it models no electrical behaviour, so the word promised an emulation the product has never contained, beside comments and results that already said the job establishes nothing electrical. `examples/ci/github-actions.yml` and `examples/ci/gitlab-ci.yml` rename the job, and on GitLab the stage it runs in, so a copied file names it after what it does; their header comments and `docs/ci-examples.md` now state that a green run of it says nothing about a board and everything about the plans, and the `check-plan` help and docstrings say board-free or without a bench where they said hosted simulator. Nothing a job runs, refuses, pins or uploads changes, and the command keeps every option, output field and exit code it had. (#471)
+
 ## [0.21.4] - 2026-09-05
 
 ### Changed
