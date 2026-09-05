@@ -353,6 +353,55 @@ def test_test_plan_must_remain_inside_workspace(tmp_path: Path) -> None:
     assert rejected.value.details["workspace_root"] == str(workspace.resolve())
 
 
+def test_the_workspace_boundary_refusal_carries_only_the_move_that_fixes_it(tmp_path: Path) -> None:
+    """#448: it printed the remediation for a different error.
+
+    The loader refuses this before the file is opened, so the plan's contents
+    are not what is wrong with it. The unscoped `test_config_invalid` entry is
+    about contents: device names, `adopt-hardware`, `init --force`, plan schema
+    versions and two `com_ports` warnings. A reader who mistyped one path was
+    handed all of it.
+    """
+    from agentic_hil.knowledge import remediation_fields
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    plan = tmp_path / "outside.yaml"
+    plan.write_text("version: 2\nsteps:\n  - {port_id: dut_uart, action: uart_open}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as rejected:
+        load_test_config(str(plan), str(workspace))
+    refusal = rejected.value.to_dict()
+
+    assert refusal["remediation"] == remediation_fields("test_config_invalid", "workspace_root")["remediation"]
+    assert len(refusal["remediation"]) == 1
+    # The root to move it under is named as a path, which no standing catalogue
+    # text can do.
+    assert refusal["next_step"] == f"Move the plan under {workspace.resolve()} and name it by a path that resolves there."
+    # And none of the advice for a plan whose contents are wrong.
+    advice = " ".join([*refusal["remediation"], *refusal["do_not"]])
+    for absent in ("adopt-hardware", "init --force", "com_ports", "can_buses", "version:"):
+        assert absent not in advice, absent
+
+
+def test_a_plan_the_schema_rejects_still_gets_the_advice_about_its_contents(tmp_path: Path) -> None:
+    """The scoping moved one refusal and left the rest of them alone.
+
+    A plan inside the workspace that does not hold is the case the unscoped
+    entry was written for, and it still answers there, in full."""
+    from agentic_hil.knowledge import remediation_fields
+
+    path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {port_id: dut_uart, action: no_such_action}\n")
+
+    with pytest.raises(ConfigError) as rejected:
+        load_test_config(str(path), str(tmp_path))
+    refusal = rejected.value.to_dict()
+
+    assert refusal["error_type"] == "test_config_invalid"
+    assert refusal["remediation"] == remediation_fields("test_config_invalid")["remediation"]
+    assert len(refusal["remediation"]) > 1
+
+
 def test_reactor_schema_rejects_traversal_breakpoint_file(tmp_path: Path) -> None:
     path = write_test_config(
         tmp_path,

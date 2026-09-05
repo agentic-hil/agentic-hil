@@ -1422,6 +1422,33 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "narrowed on purpose is exactly the bench where that costs the most.",
         ),
     ),
+    # The one `test_config_invalid` that is not about the plan's contents at all.
+    # It is raised by the loader before a single byte of the file is read, so
+    # every step the unscoped entry above offers is about a document nothing has
+    # looked at: it sent a reader who typed one path to check device names, run
+    # adoption and compare plan versions. This entry is scoped on the field the
+    # refusal names so that the reader gets the move that fixes it and nothing
+    # else.
+    "test_config_invalid:workspace_root": ErrorRemedy(
+        meaning=(
+            "The plan path resolves outside the workspace this configuration binds. `path` is where it resolved to, "
+            "symlinks followed, and `workspace_root` is the boundary it has to be inside. The file was never opened: "
+            "nothing was parsed, nothing was locked and no hardware was reached, so this says nothing about whether "
+            "the plan itself is valid.\n\n"
+            "A relative path is resolved against `workspace_root` rather than against the process's working "
+            "directory, which is what makes one plan path mean the same thing to the tool, to the command line and to "
+            "a detached worker. A path that leaves the root, `..` and a symlink out of it included, is refused here."
+        ),
+        remediation=(
+            "Move the plan inside the workspace root this refusal names under `workspace_root` and run it again by a "
+            "path that resolves there; `next_step` names that root. Nothing else about the bench is involved and "
+            "nothing needs recovering: the file was not opened.",
+        ),
+        do_not=(
+            "Do not repoint `workspace_root` at the plan. That key is what this configuration authorizes, and widening "
+            "it to admit one file admits everything else under the new root to every plan this bench runs.",
+        ),
+    ),
     "run_already_active": ErrorRemedy(
         meaning="This owner already holds an open run, and a run declares its devices once, up front.",
         remediation=(

@@ -630,10 +630,23 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
     lexical_path = absolute_without_symlinks(requested if requested.is_absolute() else base / requested)
     path = lexical_path
     if not is_path_within_frozen(path, base):
+        # Scoped on `workspace_root`, which is the whole of what is wrong here.
+        # The unscoped `test_config_invalid` entry explains a plan the schema
+        # rejected or a plan naming a device this bench does not have, and it
+        # answered this refusal too: five steps about device names, adoption and
+        # plan versions, and two about `com_ports` entries, none of which is
+        # about a path. The scoped entry beside it is the one move that fixes
+        # this, and `next_step` names the root to move the plan under, which is
+        # the one fact no standing text can carry.
         raise ConfigError(
             "test_config_invalid",
             "Test plan must remain inside the configured workspace.",
-            {"path": str(path), "workspace_root": str(base)},
+            {
+                "path": str(path),
+                "workspace_root": str(base),
+                "field": "workspace_root",
+                "next_step": f"Move the plan under {base} and name it by a path that resolves there.",
+            },
         )
     try:
         raw_bytes = safe_read_bytes(path, workspace=base)
