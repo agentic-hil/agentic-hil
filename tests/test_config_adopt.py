@@ -282,6 +282,15 @@ def test_a_value_a_person_set_is_reported_and_never_replaced(tmp_path: Path, mon
     # The disagreement is named in what the caller is told to do next, so it
     # cannot be read as "everything is fine now".
     assert any("kept" in step for step in applied["next_steps"])
+    # And the comparison says why the configured value is the one kept, which
+    # for this key is not "somebody set it": the configured name is a part and
+    # the discovered one is the family a target script covers (#442).
+    assert "family rather than a part" in kept["target.controller"]["reason"]
+    assert "adoption keeps it" in kept["target.controller"]["reason"]
+    # Every other compared key keeps the general reason, which is the whole of
+    # what is true about it.
+    assert "somebody set it" in kept["com_ports.dut_uart.device"]["reason"]
+    assert "family" not in kept["com_ports.dut_uart.device"]["reason"]
 
 
 def test_a_different_attached_board_is_refused_whole_rather_than_partly_carried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

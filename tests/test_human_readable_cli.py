@@ -1091,3 +1091,86 @@ def test_a_probe_listing_refused_on_an_adapter_nothing_enumerates_says_which_scr
 
     assert "not_supported" in out
     assert "interface/jlink.cfg" in out
+
+
+# ---------------------------------------------------------------------------
+# The adoption plan a person reads before they let it write (#442).
+
+
+ADOPT_DRY_RUN = {
+    "ok": True,
+    "tool": "project_config_adopt_hardware",
+    "summary": "3 configuration key(s) would be filled in from the attached hardware.",
+    "applied": False,
+    "path": "/home/op/.config/agentic-hil/projects/blinky/config.yaml",
+    "debugger_id": "dut",
+    "com_port_id": "dut_uart",
+    "carried": [{"key": "debuggers.dut.probe_id", "value": "066AFF303435554157113106", "previous_value": None}],
+    "already_current": [{"key": "debug.gdb_executable", "value": "/usr/bin/arm-none-eabi-gdb"}],
+    "kept": [
+        {
+            "key": "target.controller",
+            "configured_value": "stm32f446ret6",
+            "discovered_value": "stm32f4x",
+            "reason": (
+                "`target.controller` names the part this project drives, and what a read of the board reports is the "
+                "target script that answered, which is a family rather than a part."
+            ),
+        }
+    ],
+}
+
+
+def test_the_plan_shows_the_two_values_it_compared_rather_than_two_blanks() -> None:
+    """Both values, the way the same plan's JSON carries them (#442).
+
+    The rendering read `configured` and `discovered`, which nothing writes: the
+    producer's names are `configured_value` and `discovered_value`. Every
+    comparison an operator came here to see therefore printed "configured not
+    set, attached not set" beside a JSON document holding both, which says a key
+    is empty while it holds the value that decided the comparison.
+    """
+    out = _reflowed(_rendered(ADOPT_DRY_RUN, "adopt-hardware"))
+
+    assert "target.controller configured stm32f446ret6, attached stm32f4x" in out
+    assert "not set" not in out
+
+
+def test_the_plan_says_which_of_the_two_values_adoption_keeps_and_why() -> None:
+    """Naming the survivor is the half an operator has to act on.
+
+    "Left alone" says a decision was taken. Which value it left standing, and on
+    what grounds, is what decides whether the operator edits the file or leaves
+    it, and both were dropped from the rendering while the JSON carried them.
+    """
+    out = _reflowed(_rendered(ADOPT_DRY_RUN, "adopt-hardware"))
+
+    assert "adoption keeps stm32f446ret6" in out
+    assert "family rather than a part" in out
+
+
+def test_the_plan_still_renders_the_boxes_the_comparison_is_not_in() -> None:
+    """The neighbouring sections are untouched by the row above them."""
+    out = _reflowed(_rendered(ADOPT_DRY_RUN, "adopt-hardware"))
+
+    assert "Would be filled in" in out
+    assert "debuggers.dut.probe_id 066AFF303435554157113106" in out
+    assert "Already match the attached hardware" in out
+    assert "debug.gdb_executable" in out
+
+
+def test_a_plan_written_under_the_older_field_names_still_shows_its_values() -> None:
+    """The two spellings the rendering used to read are still read.
+
+    They are not what this repository writes, and a document that carries them
+    must not be the one case that renders the blanks this defect was about.
+    """
+    older = {
+        **ADOPT_DRY_RUN,
+        "kept": [{"key": "target.controller", "configured": "stm32f446ret6", "discovered": "stm32f4x", "reason": "Somebody set it."}],
+    }
+
+    out = _reflowed(_rendered(older, "adopt-hardware"))
+
+    assert "target.controller configured stm32f446ret6, attached stm32f4x" in out
+    assert "not set" not in out

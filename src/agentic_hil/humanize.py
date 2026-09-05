@@ -342,6 +342,17 @@ def _entries(value: object) -> list[JsonObject]:
     return [dict(item) for item in value if isinstance(item, Mapping)] if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) else []
 
 
+def _named(entry: Mapping[str, object], *names: str) -> object:
+    """The first of these keys the entry actually carries, or None.
+
+    For a rendering that has to read a producer's field under more than one
+    spelling. `in` rather than a chain of `get` defaults, because a key that is
+    present and holds `None` is the absent value it says it is rather than a
+    reason to fall through to the next name.
+    """
+    return next((entry[name] for name in names if name in entry), None)
+
+
 def _strings(value: object) -> list[str]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [_flat(item) for item in value if isinstance(item, (str, int, float))]
@@ -1137,9 +1148,26 @@ def render_adopt_hardware(result: JsonObject) -> list[str]:
         lines.extend(_section("Already match the attached hardware", _bullets([str(item.get("key", "key")) for item in already])))
     kept = _entries(result.get("kept"))
     if kept:
+        # The names `adopt.py` writes are `configured_value` and
+        # `discovered_value`, and this read them under two spellings it never
+        # writes: every comparison a person came here to see rendered as
+        # "configured not set, attached not set" while the same plan's JSON
+        # carried both values, which told an operator a key was empty while it
+        # held the value that decided the comparison (#442). The older spellings
+        # stay in the lookup so a document written by another producer still
+        # renders its values rather than the same two blanks.
+        #
+        # The verdict is on the row as well as in the heading above it. "Left
+        # alone" says a decision was taken; which of the two values survives it
+        # is the thing the operator has to act on, and the entry's own `reason`
+        # says why that one, so it is printed rather than dropped.
         body: list[str] = []
         for item in kept:
-            body.extend(_fields([(str(item.get("key", "key")), f"configured {_scalar(item.get('configured', item.get('value')))}, attached {_scalar(item.get('discovered', item.get('attached')))}")]))
+            configured = _scalar(_named(item, "configured_value", "configured", "value"))
+            discovered = _scalar(_named(item, "discovered_value", "discovered", "attached"))
+            body.extend(_fields([(str(item.get("key", "key")), f"configured {configured}, attached {discovered}, adoption keeps {configured}")]))
+            body.extend(_wrap(item.get("reason", ""), indent=_INDENT * 2))
+            body.extend(_wrap(item.get("next_step", ""), indent=_INDENT * 2))
         lines.extend(_section("Left alone, because somebody set them", body))
     unavailable = _entries(result.get("unavailable"))
     if unavailable:

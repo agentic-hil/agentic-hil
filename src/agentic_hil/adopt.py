@@ -276,7 +276,40 @@ def _choose_com_port(document: JsonObject, requested: str | None, port_names: tu
 # The plan.
 
 
-def _propose(carried: list[JsonObject], already: list[JsonObject], kept: list[JsonObject], *, key: str, section: str, field: str, current: Any, value: Any) -> None:
+_KEPT_REASON = (
+    "This key holds a value that is neither empty nor the placeholder the skeleton writes, so somebody set it. "
+    "Adoption does not replace it."
+)
+
+# Why the configured controller wins over a discovered one, said where the
+# comparison is made rather than left for the reader to work out.
+# `target.controller` names the part this project drives; a read of the board
+# through OpenOCD names the target script that answered, which is a family
+# covering every part in it (`stm32f4x` for an `stm32f446ret6`). So a discovered
+# controller that differs from the configured one is the ordinary case on such a
+# bench and not a disagreement about which board is attached, and the general
+# "somebody set it" left an operator comparing two spellings with nothing saying
+# which of them is the more specific (#442).
+_KEPT_CONTROLLER_REASON = (
+    "`target.controller` names the part this project drives, and what a read of the board reports is the target "
+    "script that answered, which is a family rather than a part. The configured value is the more specific of the "
+    "two and was written by somebody holding the board, so adoption keeps it and a family name beside it is not a "
+    "disagreement about which board this is."
+)
+
+
+def _propose(
+    carried: list[JsonObject],
+    already: list[JsonObject],
+    kept: list[JsonObject],
+    *,
+    key: str,
+    section: str,
+    field: str,
+    current: Any,
+    value: Any,
+    kept_reason: str = _KEPT_REASON,
+) -> None:
     """Sort one field into carried, already current, or left alone."""
     if value is None or (isinstance(value, str) and not value.strip()):  # pragma: no cover - callers filter empty discoveries
         return
@@ -290,7 +323,7 @@ def _propose(carried: list[JsonObject], already: list[JsonObject], kept: list[Js
                 "key": key,
                 "configured_value": current,
                 "discovered_value": value,
-                "reason": "This key holds a value that is neither empty nor the placeholder the skeleton writes, so somebody set it. Adoption does not replace it.",
+                "reason": kept_reason,
             }
         )
 
@@ -552,7 +585,17 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
                 }
             )
     elif controller:
-        _propose(carried, already, kept, key="target.controller", section="target", field="controller", current=_mapping(document, "target").get("controller"), value=controller)
+        _propose(
+            carried,
+            already,
+            kept,
+            key="target.controller",
+            section="target",
+            field="controller",
+            current=_mapping(document, "target").get("controller"),
+            value=controller,
+            kept_reason=_KEPT_CONTROLLER_REASON,
+        )
 
     matched_port = discovery.get("com_port") if isinstance(discovery.get("com_port"), dict) else None
     device = port_device_name(matched_port) if matched_port and matched_port.get("device") else None
