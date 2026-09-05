@@ -5,9 +5,10 @@
 #
 # Two jobs, because there are two paths and a reader has to see both in one
 # file. `hardware` runs the plans on a runner that has the board attached.
-# `simulator` needs no bench, establishes nothing electrical, and checks that
-# the plans themselves are loadable: the cheapest place to find a broken plan
-# is here, and the most expensive is the bench.
+# `check-plan` needs no bench, runs no firmware and models no electrical
+# behaviour, so it establishes nothing electrical; what it checks is that the
+# plans themselves are loadable, and the cheapest place to find a broken plan
+# is here while the most expensive is the bench.
 #
 # What the runner has to provide before this pipeline can run at all is in
 # docs/ci-examples.md. Nothing here installs Agentic HIL on the bench, writes a
@@ -29,19 +30,19 @@ workflow:
     - if: $CI_COMMIT_BRANCH
 
 stages:
-  - simulate
+  - check-plan
   - hardware
 
 variables:
   # The exact release this pipeline is written against. The hardware job holds
   # the bench's own installation to it and stops when they disagree; the
-  # simulator job installs exactly it. No range, no `latest`, no git reference:
+  # check-plan job installs exactly it. No range, no `latest`, no git reference:
   # a version a resolver picked is a version nobody reviewed, and the two jobs
   # would stop being about the same code.
   AGENTIC_HIL_VERSION: "0.21.5"
 
-simulator:
-  stage: simulate
+check-plan:
+  stage: check-plan
   # No `image:` here on purpose. A runner with the docker executor has a
   # default image configured and a shell runner has none to give; either way
   # the image belongs to whoever runs the runner. If you do set one, pin it by

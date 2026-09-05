@@ -1178,7 +1178,7 @@ def test_cli_returns_failure_for_audit_failed_result(monkeypatch: pytest.MonkeyP
 
 
 def test_check_plan_accepts_a_loadable_plan(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
-    """The hosted simulator's happy path: a plan the reactor can load passes,
+    """The board-free job's happy path: a plan the reactor can load passes,
     with no configuration and no hardware."""
     monkeypatch.chdir(tmp_path)
     plan = tmp_path / "nominal.testconfig.yaml"
@@ -1382,7 +1382,7 @@ def test_check_plan_without_a_configuration_says_so_and_checks_loadability(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    """The hosted simulator has no bench at all, and this is its whole job.
+    """The board-free job has no bench at all, and this is its whole job.
 
     Nothing is compared, the result says why, and a plan naming a device nobody
     declared is still reported as loading, because on a workspace with no

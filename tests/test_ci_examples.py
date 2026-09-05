@@ -177,9 +177,9 @@ GITLAB = load(GITLAB_EXAMPLE)
 
 def test_both_examples_parse_into_the_jobs_they_promise() -> None:
     """Two paths, in one file each, so a reader sees the split without hunting."""
-    assert set(GITHUB["jobs"]) == {"hardware", "simulator"}
-    assert {"hardware", "simulator"} <= set(GITLAB)
-    assert GITLAB["stages"] == ["simulate", "hardware"]
+    assert set(GITHUB["jobs"]) == {"hardware", "check-plan"}
+    assert {"hardware", "check-plan"} <= set(GITLAB)
+    assert GITLAB["stages"] == ["check-plan", "hardware"]
 
 
 def test_the_pinned_version_is_the_release_the_examples_are_written_for() -> None:
@@ -263,7 +263,7 @@ def test_the_gitlab_hardware_job_reaches_the_bench_only_through_its_tags() -> No
     job = GITLAB["hardware"]
 
     assert job["tags"] == [BENCH_LABEL, BOARD_LABEL]
-    assert "tags" not in GITLAB["simulator"]
+    assert "tags" not in GITLAB["check-plan"]
 
 
 def test_the_gitlab_hardware_job_refuses_every_untrusted_source() -> None:
@@ -367,23 +367,23 @@ def test_the_evidence_is_uploaded_whatever_the_run_did() -> None:
     assert artifacts["reports"]["junit"].startswith("artifacts/junit-")
 
 
-def test_the_simulator_job_is_the_hosted_path_and_touches_no_bench() -> None:
+def test_the_check_plan_job_is_the_board_free_path_and_touches_no_bench() -> None:
     """The other half of the file: no board, so any runner, and a real check.
 
     The check is `check-plan`, which loads each plan through the reactor's own
     loader, not a schema-only reader that would pass a plan the reactor then
     refuses. And it is never `test-reactor`, which drives the board.
     """
-    simulator = GITHUB["jobs"]["simulator"]
+    board_free = GITHUB["jobs"]["check-plan"]
 
-    assert "self-hosted" not in simulator["runs-on"]
-    assert "concurrency" not in simulator
-    installed = " ".join(github_commands(GITHUB, "simulator"))
+    assert "self-hosted" not in board_free["runs-on"]
+    assert "concurrency" not in board_free
+    installed = " ".join(github_commands(GITHUB, "check-plan"))
     assert "agentic-hil check-plan" in installed
     assert "agentic-hil test-reactor" not in installed
-    gitlab_simulator = " ".join(gitlab_commands(GITLAB, "simulator"))
-    assert "agentic-hil check-plan" in gitlab_simulator
-    assert "agentic-hil test-reactor" not in gitlab_simulator
+    gitlab_board_free = " ".join(gitlab_commands(GITLAB, "check-plan"))
+    assert "agentic-hil check-plan" in gitlab_board_free
+    assert "agentic-hil test-reactor" not in gitlab_board_free
 
 
 def test_every_command_the_examples_invoke_is_one_this_build_defines() -> None:
@@ -415,9 +415,9 @@ def test_every_command_the_examples_invoke_is_one_this_build_defines() -> None:
     invoked = invoked_subcommands(
         [
             *github_commands(GITHUB, "hardware"),
-            *github_commands(GITHUB, "simulator"),
+            *github_commands(GITHUB, "check-plan"),
             *gitlab_commands(GITLAB, "hardware"),
-            *gitlab_commands(GITLAB, "simulator"),
+            *gitlab_commands(GITLAB, "check-plan"),
         ]
     )
 
@@ -464,9 +464,9 @@ def test_no_step_in_either_example_downloads_something_unpinned() -> None:
     """A bench executes what these lines say. Nothing here is decided by a clock."""
     commands = [
         *github_commands(GITHUB, "hardware"),
-        *github_commands(GITHUB, "simulator"),
+        *github_commands(GITHUB, "check-plan"),
         *gitlab_commands(GITLAB, "hardware"),
-        *gitlab_commands(GITLAB, "simulator"),
+        *gitlab_commands(GITLAB, "check-plan"),
     ]
 
     assert unpinned_downloads(commands) == []

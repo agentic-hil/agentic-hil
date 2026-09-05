@@ -5,7 +5,7 @@ runner is set up and the release they pin is published:
 
 - [`examples/ci/github-actions.yml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/ci/github-actions.yml):
   a GitHub Actions workflow with a hardware job on a self-hosted runner and a
-  simulator job on a hosted runner beside it.
+  board-free `check-plan` job on a hosted runner beside it.
 - [`examples/ci/gitlab-ci.yml`](https://github.com/agentic-hil/agentic-hil/blob/master/examples/ci/gitlab-ci.yml):
   the same two jobs for GitLab CI.
 
@@ -55,14 +55,15 @@ by the workflow, and none of it can be.
   Windows bench that is the shell Git for Windows installs, which the GitHub
   runner already selects for `shell: bash`.
 
-The hosted simulator job needs none of this. It installs the pinned release
+The hosted `check-plan` job needs none of this. It installs the pinned release
 from the package index and loads each plan through the reactor's own loader with
-`agentic-hil check-plan`, and that is the whole of it. That command is the
-loadability check the job exists for: it calls the same `load_test_config` the
-bench would, so a plan it accepts is one the reactor can load, where a
-schema-only reader would pass a plan using a key from a later plan version, or
-one with the duplicate keys the real loader refuses, and let the failure reach
-the bench.
+`agentic-hil check-plan`, and that is the whole of it: it runs no firmware and
+models no electrical behaviour, so a green run of it says nothing about a board
+and everything about the plans. That command is the loadability check the job
+exists for: it calls the same `load_test_config` the bench would, so a plan it
+accepts is one the reactor can load, where a schema-only reader would pass a
+plan using a key from a later plan version, or one with the duplicate keys the
+real loader refuses, and let the failure reach the bench.
 
 ## The version pin
 
@@ -87,22 +88,22 @@ That "builds toward" is why the caveat above says *once the release they pin is
 published*. On a release commit the release being cut is the one the examples
 pin, so the file a reader receives in that release pins a version already on the
 index. On `master` between releases the pin names the next release, which the
-index does not carry yet: copying the simulator job before that release exists
-installs nothing, and the previous release does not expose the commands these
-examples were written to show. Pinning the previous release instead would name a
-distribution a reader can install today but that rejects `check-plan` and
-`run-evidence` at argument parsing, which is the worse of the two. The publish
-workflow closes the loop rather than leaving it to trust: after PyPI accepts a
-release, `tools/verify_published_examples.py` installs exactly the pinned
-distribution and confirms its CLI reports that version and answers every command
-the examples invoke, so a release whose artifact does not match its own examples
-is an alarm on the release and not a stranger's failed copy.
+index does not carry yet: copying the `check-plan` job before that release
+exists installs nothing, and the previous release does not expose the commands
+these examples were written to show. Pinning the previous release instead would
+name a distribution a reader can install today but that rejects `check-plan`
+and `run-evidence` at argument parsing, which is the worse of the two. The
+publish workflow closes the loop rather than leaving it to trust: after PyPI
+accepts a release, `tools/verify_published_examples.py` installs exactly the
+pinned distribution and confirms its CLI reports that version and answers every
+command the examples invoke, so a release whose artifact does not match its own
+examples is an alarm on the release and not a stranger's failed copy.
 
 The same rule reaches everything else the jobs fetch. Actions are pinned by
 commit SHA with the tag they stood for in a trailing comment, not by tag. No
 step pipes a script from the network into a shell. If you give the GitLab
-simulator job an `image:`, pin it by digest, because a floating tag is the same
-unversioned download in another spelling.
+`check-plan` job an `image:`, pin it by digest, because a floating tag is the
+same unversioned download in another spelling.
 
 ## What the jobs leave behind
 
