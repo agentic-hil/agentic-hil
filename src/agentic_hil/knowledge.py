@@ -874,6 +874,44 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "already have.",
         ),
     ),
+    # The refusal a configuration that exists but does not load lands on, and
+    # the one that went out with nothing attached while every neighbour carried
+    # a way forward. It has two causes with opposite fixes and the refusal
+    # cannot always tell which it is looking at, so the entry names both and
+    # says which field separates them.
+    "config_invalid": ErrorRemedy(
+        meaning=(
+            "The authoritative configuration was found and read and does not match the schema this Agentic HIL "
+            "enforces, so nothing was loaded: no bench, no permission, no state directory. `field` is the dotted key "
+            "the refusal is about and `path` the file it is in. There are two ways to get here and they have opposite "
+            "fixes. One is a mistake in the file, and `rejected_fields` (the keys this schema does not define), "
+            "`allowed_fields` (the keys it does), `allowed_values` and `expected_type` are what locate it. The other "
+            "is that a newer Agentic HIL wrote this file: `written_by_release` says which release added the keys, "
+            "`installed_version` says what is running here, and the summary says so in words. Nothing was changed on "
+            "either route."
+        ),
+        remediation=(
+            "Read `written_by_release` first. When the refusal carries it, the file is not wrong and there is nothing "
+            "in it to correct: a newer Agentic HIL than the one reading it wrote those keys. Run `agentic-hil "
+            "upgrade` on this machine and start Agentic HIL again.",
+            "Otherwise fix the file at `field` in `path`. `rejected_fields` names the keys that were thrown out, "
+            "`allowed_fields` the keys that section accepts, and a misspelling is usually visible between the two. "
+            "`allowed_values` and `expected_type` do the same job where the key is right and what it holds is not.",
+            "`agentic-hil schema` prints the whole schema this installation validates against, which is the "
+            "authority on what a section may carry when the two field lists are not enough.",
+            "Nothing is loaded, so nothing needs recovering and no hardware was touched. Run `agentic-hil doctor` "
+            "once the file is corrected or the upgrade is done; it parses the file fresh and reports the next thing "
+            "that is wrong with it.",
+        ),
+        do_not=(
+            "Do not delete the offending keys to make a newer release's file load here. They are the policy that "
+            "release wrote, and dropping them silently narrows or widens a bench nobody reviewed; upgrade the "
+            "installation instead.",
+            "Do not write the configuration again from scratch to get past this. `agentic-hil init --force` replaces "
+            "the whole file, every narrowed permission included, so it throws away the operator's own decisions in "
+            "order to fix one key.",
+        ),
+    ),
     "permission_denied:allow_config_description_write": ErrorRemedy(
         meaning=(
             "A field-wise configuration change reached a description key (what the bench is), and "
