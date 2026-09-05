@@ -69,6 +69,18 @@ UV_PIP_RESOLUTION_TRUST_FAILURE = subprocess.CompletedProcess[str](
     "",
     "error: Failed to fetch: `https://pypi.org/simple/agentic-hil/`\n  Caused by: invalid peer certificate: UnknownIssuer",
 )
+# `uv tool upgrade` on an installation pinned to the release it is already
+# running: it resolves under the pin, finds nothing to move, and names that same
+# version in its hint. The independent unpinned currency probe is what tells this
+# pin (holding nothing back) from one below a newer release, and that probe meets
+# the same proxy the install does.
+UV_TOOL_PIN_AT_CURRENT = subprocess.CompletedProcess[str](
+    [],
+    0,
+    "Nothing to upgrade\n",
+    f"hint: `agentic-hil` is pinned to `{__version__}` (installed with an exact version pin); "
+    "reinstall with `uv tool install agentic-hil@latest` to upgrade to a new version.",
+)
 
 # What the reporting bench's uv said on 2026-08-20, verbatim from #326. The
 # decisive line is the last one, and it is at the bottom of a stack of five
@@ -413,6 +425,80 @@ def test_the_resolution_query_is_retried_and_the_already_current_guard_answers(m
     # in, the way the install path carries them under `install`.
     resolution = result["resolution"]
     assert "Would make no changes" in resolution["stderr"]
+    assert resolution["certificate_retry"]["first_attempt"]["stderr"] == UV_PIP_RESOLUTION_TRUST_FAILURE.stderr
+
+
+def test_the_exact_pin_currency_probe_carries_its_certificate_retry_when_it_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pin-at-current note met the proxy on its own query, and says so (round 1, finding 2).
+
+    A pin naming the installed release is reported as a note only once the
+    independent unpinned resolution confirms nothing newer exists, and that
+    resolution meets the same TLS-intercepting proxy every index request does.
+    When it fails once and the system-store retry then establishes currency, the
+    `already_current` result has to carry what that query met -- the same
+    certificate evidence the pip-shaped guard carries -- rather than the bare pin
+    fields it used to return with the resolution and its note discarded.
+
+    The install here is `uv tool upgrade`, which reports the pin cleanly, so the
+    only proxy this run met is the currency probe's; its account is the whole of
+    what reaches the result.
+    """
+    stub_manager(
+        monkeypatch,
+        answers=[UV_TOOL_PIN_AT_CURRENT],
+        command=UV_TOOL_UPGRADE,
+        resolutions=[UV_PIP_RESOLUTION_TRUST_FAILURE, UV_PIP_WOULD_MAKE_NO_CHANGES],
+        version_after=__version__,
+    )
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    # The pin holds nothing back: current, exit 0, reported as a note.
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert "error_type" not in result
+    # And the currency probe's proxy is on the result, in the same two lengths the
+    # guard uses, so the operator learns about it on the call that met it.
+    assert "TLS-intercepting proxy" in result["summary"]
+    assert result["certificates"] == "Retried once against this machine's own certificate store with UV_SYSTEM_CERTS=1, and that is the attempt that succeeded."
+    assert any("Export UV_SYSTEM_CERTS=1" in step for step in result["next_steps"])
+    # The unpinned resolution and both its attempts survive under `resolution`,
+    # rather than being dropped with the currency decision.
+    resolution = result["resolution"]
+    assert "Would make no changes" in resolution["stderr"]
+    assert resolution["certificate_retry"]["first_attempt"]["stderr"] == UV_PIP_RESOLUTION_TRUST_FAILURE.stderr
+
+
+def test_the_exact_pin_refusal_keeps_the_currency_probes_unrecovered_certificate_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the probe cannot get past the proxy, the block does not hide why (round 1, finding 2).
+
+    The currency probe failing behind the proxy leaves the release's currency
+    unestablished, which is the safe direction: the pin stays reported as a block.
+    But the reason it could not be established is the operator's to see -- a
+    generic `upgrade_blocked_by_pin` with no certificate evidence reads as a plain
+    pin when the truth is that the index could not be reached to check it. So the
+    resolution and its note ride on the refusal, both attempts' words included.
+    """
+    stub_manager(
+        monkeypatch,
+        answers=[UV_TOOL_PIN_AT_CURRENT],
+        command=UV_TOOL_UPGRADE,
+        resolutions=[UV_PIP_RESOLUTION_TRUST_FAILURE, UV_TRUST_FAILURE_AGAIN],
+        version_after=__version__,
+    )
+
+    result = replace_installation(tool=CLI_UPGRADE_TOOL)
+
+    # Currency could not be established, so the pin is still the block it may be.
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert "already_current" not in result
+    # The proxy the probe met is named rather than hidden behind the block.
+    assert "TLS-intercepting proxy" in result["summary"]
+    assert "the proxy's own CA is missing from this machine's store as well" in result["summary"]
+    assert any("Install the proxy's own CA" in step for step in result["next_steps"])
+    # And both the probe's attempts survive under `resolution`.
+    resolution = result["resolution"]
     assert resolution["certificate_retry"]["first_attempt"]["stderr"] == UV_PIP_RESOLUTION_TRUST_FAILURE.stderr
 
 

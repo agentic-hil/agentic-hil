@@ -220,7 +220,7 @@ def _pinned_version(install_result: JsonObject) -> str | None:
     return match.group(1) if match else None
 
 
-def _pin_holds_nothing_back(install_result: JsonObject, current_version: str, manager: str, command: list[str]) -> bool:
+def _pin_holds_nothing_back(install_result: JsonObject, current_version: str, manager: str, command: list[str]) -> tuple[bool, JsonObject | None, _CertificateNote]:
     """Whether the recorded pin names the newest release, holding nothing back.
 
     Three facts, and the third is the one that carries weight. The manager put
@@ -249,12 +249,19 @@ def _pin_holds_nothing_back(install_result: JsonObject, current_version: str, ma
     not be asked (pipx, or a `uv` that answered unreadably), or one that names a
     newer release. Currency this cannot establish is a pin left reported as a
     block, which is the safe direction to fall.
+
+    Returns the currency verdict together with the resolution the unpinned query
+    returned and the certificate note it earned, so the pin outcome carries what
+    that query met rather than dropping it (round 1, finding 2). The two guards
+    that reject a pin before the query runs return no resolution and an empty
+    note: nothing was asked, so there is nothing to carry.
     """
     if _NOTHING_TO_UPGRADE not in _manager_output(install_result).lower():
-        return False
+        return False, None, _CertificateNote("", {})
     if _pinned_version(install_result) != current_version:
-        return False
-    return _installed_release_is_current(manager, command) is True
+        return False, None, _CertificateNote("", {})
+    currency, resolution, note = _installed_release_is_current(manager, command)
+    return currency is True, resolution, note
 
 
 def _unpinned_reinstall_command(manager: str, command: list[str]) -> str | None:
@@ -1385,11 +1392,22 @@ def _unpinned_resolution_query(manager: str, command: list[str]) -> list[str] | 
     pin, so `Nothing to upgrade` from it is the pin agreeing with itself and says
     nothing about a newer release. The question has to be put without the pin, and
     for a `uv`-managed installation `uv pip` against this very interpreter is what
-    puts it: `--upgrade` makes it resolve the newest rather than accept what is
-    already satisfied, and `--dry-run` keeps it from touching the environment. The
+    puts it, and `--dry-run` keeps it from touching the environment. The
     interpreter is `sys.executable`, which for a `uv tool` installation is the
     tool environment's own Python, so the resolution is asked about the very
     environment the pin holds.
+
+    The upgrade is scoped to the one distribution the question is about, with
+    `--upgrade-package agentic-hil` rather than a global `--upgrade`. uv's global
+    `--upgrade` re-resolves the *whole* dependency set to the newest each allows,
+    so an installation already at the newest Agentic HIL release but carrying one
+    older-yet-compatible dependency had the dry run propose that dependency's
+    update, come back without `Would make no changes`, and be read as a pin below
+    a newer release -- refused as `upgrade_blocked_by_pin` over an Agentic HIL that
+    was exactly current (round 1, finding 1). Scoping the upgrade to `agentic-hil`
+    asks uv only whether *this* distribution has a newer release, leaves a stale
+    dependency where it is, and a newer Agentic HIL that needs a newer dependency
+    still moves both, which is a real upgrade and reads as one.
 
     None for pipx, whose upgrade path can also carry a pin but which publishes no
     resolver this can drive without risking the environment it is asking about; a
@@ -1397,38 +1415,48 @@ def _unpinned_resolution_query(manager: str, command: list[str]) -> list[str] | 
     is the safe direction to fall.
     """
     if manager == "uv" and command[1:3] == ["tool", "upgrade"]:
-        return [command[0], "pip", "install", "--python", sys.executable, "--upgrade", "--dry-run", _upgrade_requirement()]
+        return [command[0], "pip", "install", "--python", sys.executable, "--upgrade-package", "agentic-hil", "--dry-run", _upgrade_requirement()]
     return None
 
 
-def _installed_release_is_current(manager: str, command: list[str]) -> bool | None:
+def _installed_release_is_current(manager: str, command: list[str]) -> tuple[bool | None, JsonObject | None, _CertificateNote]:
     """Whether an unpinned resolution would install nothing over what is here.
 
-    True when the newest release the index offers is the one already installed,
-    False when it would install a newer one, and None when the question could not
-    be put to this manager or its answer could not be read. Only True turns a pin
-    refusal into the note that the pin holds nothing back; both False and None
-    leave the pin reported as the block it may be.
+    Three values: the currency decision, the resolution the manager returned, and
+    the certificate note that resolution earned. The decision is True when the
+    newest release the index offers is the one already installed, False when it
+    would install a newer one, and None when the question could not be put to this
+    manager or its answer could not be read. Only True turns a pin refusal into
+    the note that the pin holds nothing back; both False and None leave the pin
+    reported as the block it may be.
+
+    The resolution and the note travel with the decision rather than being
+    discarded, so the pin outcome the caller builds can carry what this query met
+    (round 1, finding 2). Behind a TLS-intercepting proxy the query fails the way
+    every index request does; if the one-shot certificate retry then establishes
+    currency, the `already_current` note it produces is what says so, and if it
+    does not, the same evidence rides on the `upgrade_blocked_by_pin` result
+    rather than being hidden behind it. A query that never ran -- the wrong
+    manager, an `OSError`, a timeout -- has no resolution and an empty note.
 
     Asked through `_manager_run`, so it meets the same one-shot certificate retry
-    the install and the pre-flight resolution do: behind a TLS-intercepting proxy
-    the question fails the way every index request does, comes back unreadable,
-    and falls to None -- the safe direction -- rather than being read as a
-    currency it could not establish. `_UV_PIP_NO_CHANGES` is the prose `uv pip
-    install --dry-run` prints when the environment already satisfies the newest
-    requirement; a wording that stops matching reads as False, which keeps the pin
-    reported as a block.
+    the install and the pre-flight resolution do: a question that fails the way
+    every index request does comes back unreadable and falls to None -- the safe
+    direction -- rather than being read as a currency it could not establish.
+    `_UV_PIP_NO_CHANGES` is the prose `uv pip install --dry-run` prints when the
+    environment already satisfies the newest requirement; a wording that stops
+    matching reads as False, which keeps the pin reported as a block.
     """
     query = _unpinned_resolution_query(manager, command)
     if query is None:
-        return None
+        return None, None, _CertificateNote("", {})
     try:
-        answered, resolution, _certificates = _manager_run(manager, query)
+        answered, resolution, certificates = _manager_run(manager, query)
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return None, None, _CertificateNote("", {})
     if answered.returncode != 0:
-        return None
-    return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower()
+        return None, resolution, certificates
+    return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower(), resolution, certificates
 
 
 def _nothing_to_install(
@@ -1666,45 +1694,63 @@ def _upgrade_changed_nothing(
     }
     reinstall_command = _unpinned_reinstall_command(manager, command)
     pinned = reinstall_command is not None and _manager_reports_exact_pin(install_result)
-    if pinned and not _pin_holds_nothing_back(install_result, current_version, manager, command):
-        return {
-            **base,
-            "error_type": "upgrade_blocked_by_pin",
-            "summary": (
-                f"Agentic HIL was not upgraded: {manager} holds this installation at an exact version pin, so it is "
-                f"still {current_version}. Nothing was changed. `reinstall_command` is the line that clears the pin "
-                f"and keeps the installed extras; running it is the operator's decision."
-            ),
-            "pinned_version": _pinned_version(install_result) or current_version,
-            "installed_extras": list(_installed_extras()),
-            "reinstall_command": reinstall_command,
-            **remediation_fields("upgrade_blocked_by_pin"),
-        }
+    # The unpinned currency query runs at most once, and both pin branches below
+    # read it: whether the pin holds anything back, the resolution it returned,
+    # and the certificate note it earned. The resolution and note are carried onto
+    # the outcome rather than dropped, so a query that met a proxy -- or failed to
+    # get past one -- is on the result the operator reads (round 1, finding 2). A
+    # non-pinned outcome never asks the query, so the note stays empty there.
+    holds_nothing_back, currency_resolution, currency_note = (
+        _pin_holds_nothing_back(install_result, current_version, manager, command) if pinned else (False, None, _CertificateNote("", {}))
+    )
+    currency_fields: JsonObject = {"resolution": currency_resolution} if currency_resolution is not None else {}
+    if pinned and not holds_nothing_back:
+        return _with_certificate_note(
+            {
+                **base,
+                "error_type": "upgrade_blocked_by_pin",
+                "summary": (
+                    f"Agentic HIL was not upgraded: {manager} holds this installation at an exact version pin, so it is "
+                    f"still {current_version}. Nothing was changed. `reinstall_command` is the line that clears the pin "
+                    f"and keeps the installed extras; running it is the operator's decision."
+                ),
+                "pinned_version": _pinned_version(install_result) or current_version,
+                "installed_extras": list(_installed_extras()),
+                "reinstall_command": reinstall_command,
+                **currency_fields,
+                **remediation_fields("upgrade_blocked_by_pin"),
+            },
+            currency_note,
+        )
     if pinned:
         # Current, and pinned to the release it is current at. Everything the
         # refusal above carried is carried here too, because an operator who
         # wants the next release picked up automatically still has to run that
         # line; what is not carried is the error type and the exit code, which
         # would say a wanted release was withheld when none was.
-        return {
-            **base,
-            "ok": True,
-            "summary": (
-                f"Agentic HIL is already at {current_version}, which is the version this installation is pinned to, "
-                f"and {manager} resolved nothing newer to install. The pin holds no release back while it names the "
-                f"one that is installed, so it is reported here as a note rather than as a refusal. No restart is "
-                f"needed. `reinstall_command` is the line that clears the pin and keeps the installed extras, for "
-                f"whenever later releases are to be picked up without it; running it is the operator's decision."
-            ),
-            "already_current": True,
-            # What the manager's hint named, which the guard above has just
-            # established is this version. Read off the hint rather than copied
-            # from `version`, so a wording this stops being able to read shows up
-            # as the refusal it falls to and never as a number invented here.
-            "pinned_version": _pinned_version(install_result),
-            "installed_extras": list(_installed_extras()),
-            "reinstall_command": reinstall_command,
-        }
+        return _with_certificate_note(
+            {
+                **base,
+                "ok": True,
+                "summary": (
+                    f"Agentic HIL is already at {current_version}, which is the version this installation is pinned to, "
+                    f"and {manager} resolved nothing newer to install. The pin holds no release back while it names the "
+                    f"one that is installed, so it is reported here as a note rather than as a refusal. No restart is "
+                    f"needed. `reinstall_command` is the line that clears the pin and keeps the installed extras, for "
+                    f"whenever later releases are to be picked up without it; running it is the operator's decision."
+                ),
+                "already_current": True,
+                # What the manager's hint named, which the guard above has just
+                # established is this version. Read off the hint rather than copied
+                # from `version`, so a wording this stops being able to read shows up
+                # as the refusal it falls to and never as a number invented here.
+                "pinned_version": _pinned_version(install_result),
+                "installed_extras": list(_installed_extras()),
+                "reinstall_command": reinstall_command,
+                **currency_fields,
+            },
+            currency_note,
+        )
     return {
         **base,
         "ok": True,

@@ -91,6 +91,7 @@ from agentic_hil.config import (
 from agentic_hil.configstate import config_stale, config_status, with_config_status
 from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
+    CONFIG_GRANT_COMMAND,
     CONFIG_KEY_RULES,
     CONFIG_NAMED_SECTIONS,
     CONFIG_PERMISSIONS_RIGHT,
@@ -610,7 +611,8 @@ def _permission_denied(tool: str, right: str, keys: list[str], path: Path) -> Js
         "summary": (
             f"Changing {'permissions in' if right == CONFIG_PERMISSIONS_RIGHT else 'the description of'} this project's "
             f"configuration is denied by permissions.{right} in the configuration itself. This server may read it and "
-            "not change it there, and only a person editing that file can change that."
+            f"not change it there; the operator opens exactly that key from their own shell with `{CONFIG_GRANT_COMMAND} "
+            f"{_right_key(right)}`, which is the one narrow way back."
         ),
         # The dotted key `agentic-hil grant` and `resolve_permission_key` take,
         # under the `permission` name every refusal on this server advertises.
@@ -624,10 +626,18 @@ def _permission_denied(tool: str, right: str, keys: list[str], path: Path) -> Js
         "denied_keys": sorted(keys),
         "path": str(path),
         "reference": CONFIG_SHAPE_URI,
+        # The exact operator command, not only "a person edits the file": the
+        # documented narrow recovery is the operator-only `agentic-hil grant`, and
+        # the scoped remediation this refusal carries tells the agent not to touch
+        # the file with its own tools. Saying "only the operator may edit it" while
+        # discouraging file edits in the same refusal left the actionable command
+        # unnamed (round 1, finding 3).
         "next_step": (
             "This refusal is the answer to the request. Report it, name the permission that is denied and the file "
-            f"that carries it, then stop. You must not enable it: {_right_key(right)} belongs to the operator and "
-            "only the operator may edit it. You must not reach the same change another way either."
+            f"that carries it, then stop. You must not enable it: {_right_key(right)} belongs to the operator, who "
+            f"opens exactly that key from their own shell with `{CONFIG_GRANT_COMMAND} {_right_key(right)}`, which "
+            "leaves every other key in the file alone. You must not reach the same change another way either, and you "
+            "must not edit the file yourself: the host deny rules exist for exactly that."
         ),
         **remediation_fields("permission_denied", right),
         **NOT_STARTED,

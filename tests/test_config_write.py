@@ -254,6 +254,49 @@ def test_neither_grant_leaves_nothing_open_and_says_which_grant_would_open_what(
     assert path.read_bytes() == before, "a refusal must not write anything"
 
 
+@pytest.mark.parametrize(
+    ("grants", "change", "right"),
+    [
+        ({}, ("target.name", "renamed"), CONFIG_DESCRIPTION_RIGHT),
+        ({CONFIG_DESCRIPTION_RIGHT: True}, ("debuggers.dut.permissions.allow_flash", True), CONFIG_PERMISSIONS_RIGHT),
+    ],
+)
+def test_a_config_write_refusal_hands_over_the_operators_grant_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grants: dict, change: tuple[str, Any], right: str
+) -> None:
+    """Both config-write refusals name the exact `agentic-hil grant` line (round 1, finding 3).
+
+    The documented narrow recovery for a closed config-write grant is the
+    operator-only `agentic-hil grant permissions.<key>`, and the same refusal's
+    own remediation tells the agent not to edit the file with its own tools. The
+    refusal used to say only that "a person edits the file", leaving the
+    actionable command unnamed while discouraging the one thing it did name. Both
+    the description-write and the permissions-write refusal now carry the exact
+    command in the sentence a person reads first and in the machine-facing next
+    step, so whichever a caller reports has the line to paste.
+    """
+    workspace, path = bench(tmp_path, monkeypatch, **grants)
+    before = path.read_bytes()
+    tools = service(workspace)
+    try:
+        refused = tools.call(PROJECT_CONFIG_SET, changes(change))
+    finally:
+        tools.close()
+
+    assert refused["error_type"] == "permission_denied"
+    assert refused["permission"] == f"permissions.{right}"
+    grant = f"agentic-hil grant permissions.{right}"
+    assert grant in refused["summary"]
+    assert grant in refused["next_step"]
+    # And it no longer offers editing the file as the way back, which the scoped
+    # remediation on the same refusal forbids the agent from doing.
+    assert "only a person editing that file can change that" not in refused["summary"]
+    # The scope-specific remediation is still the catalogue's, so naming the grant
+    # command did not cost the entry its scoped advice.
+    assert refused["remediation"] == remediation_fields("permission_denied", right)["remediation"]
+    assert path.read_bytes() == before, "a refusal must not write anything"
+
+
 # ---------------------------------------------------------------------------
 # The detour. This is the group the owner asked to see.
 

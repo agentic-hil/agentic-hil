@@ -959,6 +959,50 @@ def test_a_stale_pin_at_the_installed_release_is_refused_when_the_index_offers_m
     assert entrypoint(["upgrade", "--json"]) == 1
 
 
+def test_the_currency_probe_upgrades_only_agentic_hil_so_a_stale_dependency_is_no_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A current pin carrying one older-but-compatible dependency is not a block (round 1, finding 1).
+
+    `uv pip install --upgrade` re-resolves the *whole* dependency set to the newest
+    each constraint allows, so an installation already at the newest Agentic HIL
+    release but carrying an older compatible dependency had the dry run offer only
+    that dependency's update, come back without `Would make no changes`, and be
+    refused as `upgrade_blocked_by_pin` over an Agentic HIL that was exactly
+    current. The probe now scopes the upgrade to the one distribution the question
+    is about, `--upgrade-package agentic-hil`, so uv is asked whether *Agentic HIL*
+    has a newer release and a stale dependency is left where it is.
+
+    The stub answers the query with whatever is handed to it whatever the command,
+    so the guard against the regression is the command's own shape: a global
+    `--upgrade` is what re-resolved the dependency set, and it must not be what
+    runs. With the scoped probe answering `Would make no changes`, the pin at the
+    current release is the note it is rather than the refusal it was.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    calls = _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert "error_type" not in result
+    # The one query is scoped to the top-level distribution: `--upgrade-package
+    # agentic-hil`, never the global `--upgrade` that would re-resolve the whole
+    # set and let a stale dependency mask the pin's currency.
+    probe = next(call for call in calls if "--dry-run" in call)
+    assert "--upgrade-package" in probe
+    assert probe[probe.index("--upgrade-package") + 1] == "agentic-hil"
+    assert "--upgrade" not in probe
+
+
 def test_a_pin_the_manager_did_not_resolve_against_the_index_is_still_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
