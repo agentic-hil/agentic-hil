@@ -85,6 +85,50 @@ REFUSAL = {
     "do_not": ["Do not write the configuration into the repository."],
 }
 
+# The two documents `agentic-hil test-reactor` answers with when it does not
+# pass, field for field as `TestReactor.run` builds them. They differ in the one
+# way a reader cares about: the first ran its plan on the board and did not meet
+# its claim, the second never started.
+PLAN_FAILED = {
+    "ok": False,
+    "tool": "test_reactor",
+    "name": "blinky-smoke",
+    "test_config_path": "/home/op/work/blinky/tests/smoke.yaml",
+    "steps": [
+        {"index": 1, "route": "dut", "action": "flash", "result": {"ok": True, "tool": "flash_firmware", "summary": "Firmware flashed and verified.", "elapsed_ms": 1624}},
+        {"index": 2, "route": "dut_uart", "action": "uart_open", "result": {"ok": True, "tool": "com_session_start", "summary": "COM session started."}},
+        {
+            "index": 3,
+            "route": "dut_uart",
+            "action": "uart_read",
+            "result": {"ok": False, "tool": "test_reactor", "error_type": "comparator_unmet", "summary": "The comparator was not met before the step's timeout.", "port_id": "dut_uart"},
+        },
+    ],
+    "cleanup": [],
+    "cleanup_ok": True,
+    "cleanup_errors": [],
+    "failed_step": 3,
+    "step_error_type": "comparator_unmet",
+    "error_type": "comparator_unmet",
+    "summary": "Test reactor sequence failed.",
+}
+
+PLAN_REFUSED = {
+    "ok": False,
+    "tool": "test_reactor",
+    "name": "blinky-smoke",
+    "test_config_path": "/home/op/work/blinky/tests/smoke.yaml",
+    "error_type": "test_config_invalid",
+    "validation_error": {"step": 3, "field": "steps[2].port_id", "summary": "This step names a COM port the authoritative config does not declare."},
+    "steps": [],
+    "cleanup": [],
+    "cleanup_ok": True,
+    # A plan refused at preflight names the step whose text is wrong, so this
+    # field says nothing about whether anything ran.
+    "failed_step": 3,
+    "summary": "Test reactor configuration failed semantic validation; no steps were executed.",
+}
+
 DOCTOR = {
     "ok": False,
     "tool": "agentic_hil_doctor",
@@ -585,6 +629,66 @@ def test_a_refusal_the_catalogue_does_not_cover_invents_no_advice() -> None:
     assert out.startswith("Refused: no_such_error_anybody_wrote")
     assert "What to do" not in out
     assert "Something went wrong." in out
+
+
+def test_a_plan_that_ran_and_failed_its_claim_is_headed_by_its_outcome() -> None:
+    """#447: the deliberate red run read as a setup error.
+
+    The plan flashed the board, opened the port and read it, and its comparator
+    was not met. That is the test result the bench exists to produce, and it was
+    headed with the word this rendering reserves for a call that never happened.
+    """
+    out = _rendered(PLAN_FAILED, "test-reactor")
+
+    assert out.startswith("Failed: comparator_unmet")
+    assert not out.startswith("Refused")
+    # The heading is the only thing that moved: everything a reader acts on is
+    # still where it was.
+    assert "Test reactor sequence failed." in out
+    assert "uart_read" in out
+    assert "comparator was not met" in out
+
+
+def test_a_plan_refused_before_its_first_step_is_still_headed_refused() -> None:
+    """Nothing ran, so `Refused:` is exactly what happened.
+
+    It carries `failed_step` as well, naming the step whose text is wrong, and
+    that must not be read as a step that executed."""
+    out = _rendered(PLAN_REFUSED, "test-reactor")
+
+    assert out.startswith("Refused: test_config_invalid")
+    assert "no steps were executed" in out
+
+
+def test_a_call_that_left_something_behind_is_headed_by_its_outcome_too() -> None:
+    """One call rather than a run, and the same distinction.
+
+    A write that reached the board and then could not record itself is not a
+    refusal: the bench moved. `side_effect_committed` is where such a result
+    says so, and it is the only other thing this heading reads."""
+    committed = {
+        "ok": False,
+        "tool": "debug_set_breakpoint",
+        "error_type": "audit_broken",
+        "summary": "Breakpoint was set but its audit evidence could not be persisted.",
+        "side_effect_committed": True,
+        "cleanup_required": True,
+    }
+    not_started = {**committed, "side_effect_committed": False, "summary": "The breakpoint was refused before anything was written."}
+
+    assert _rendered(committed, "test-reactor").startswith("Failed: audit_broken")
+    assert _rendered(not_started, "test-reactor").startswith("Refused: audit_broken")
+
+
+def test_the_outcome_word_does_not_depend_on_who_is_reading() -> None:
+    """The document is one document, and the heading is about the run.
+
+    `command` says a person typed something, and it decides which of the
+    catalogue's orderings the remediation is printed in. What the result *is* is
+    not a property of the reader, so the heading is the same with and without
+    it."""
+    assert render_result(PLAN_FAILED).startswith("Failed: comparator_unmet")
+    assert render_result(PLAN_REFUSED).startswith("Refused: test_config_invalid")
 
 
 def test_a_refusal_shows_the_failing_tools_own_words_and_not_only_the_facts_around_them() -> None:

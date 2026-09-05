@@ -520,6 +520,32 @@ def _remediation(result: JsonObject, *, command_line: bool = False) -> tuple[lis
 # The refusal, and the generic fallback every command gets for free.
 
 
+def _work_was_done(result: Mapping[str, object]) -> bool:
+    """Whether this document is about a call that actually ran something.
+
+    A refusal is a statement that nothing happened: no step ran, nothing on the
+    bench moved, and the fix is the caller's before there is anything to read
+    about the hardware. A plan that flashed the board, opened the port, reset it,
+    read it and then did not meet its comparator is the opposite of that, and it
+    arrives here through the same door because it is `ok: false` and carries an
+    `error_type`. Heading it `Refused:` puts the word that means "your setup is
+    wrong" over the deliberate red run a starter project ships.
+
+    Two fields answer it, and both are about what the run did rather than about
+    what it concluded: a non-empty `steps` list, which the reactor writes one
+    record into per executed step and leaves empty for every plan refused at
+    preflight, and `side_effect_committed`, which a single call sets when it has
+    left something behind. `failed_step` is deliberately not one of them: a plan
+    refused at preflight carries it too, naming the step whose *text* is wrong,
+    so reading it as evidence of execution would call every schema error a failed
+    test run.
+    """
+    if result.get("side_effect_committed") is True:
+        return True
+    steps = result.get("steps")
+    return isinstance(steps, Sequence) and not isinstance(steps, (str, bytes)) and bool(steps)
+
+
 def render_refusal(result: JsonObject, command: str | None = None) -> list[str]:
     """A refusal, for whoever is reading it.
 
@@ -528,9 +554,14 @@ def render_refusal(result: JsonObject, command: str | None = None) -> list[str]:
     nothing about the refusal itself; the only thing it reaches is which of the
     catalogue's orderings the steps are printed in, for the refusals that carry
     one for each reader.
+
+    The heading is the run's own outcome word where the run had one. Everything
+    under it is identical either way: the same summary, the same details, the
+    same remediation, in the same order. Only the first word moves, because it
+    is the one a reader takes the whole document's meaning from.
     """
     error_type = _error_type(result)
-    lines = [f"Refused: {error_type}", ""]
+    lines = [f"{'Failed' if _work_was_done(result) else 'Refused'}: {error_type}", ""]
     lines.extend(_wrap(_summary(result) or "The command was refused.", indent=_INDENT))
     meaning = result.get("meaning")
     if isinstance(meaning, str) and meaning.strip():
