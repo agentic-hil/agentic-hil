@@ -71,10 +71,17 @@ def write_logs(workspace: Path) -> None:
 
 
 def config_in_force() -> dict:
+    """The block `agentic_hil.report.config_in_force` writes, spelled as it writes it.
+
+    `digest_algorithm` is the bare algorithm name and `digest` is the
+    algorithm-prefixed spelling `config_status` publishes. The fixture used to
+    say `sha256:` and bare hex, which no producer writes and which made the job
+    summary's doubled prefix invisible here (#466).
+    """
     return {
         "path": CONFIG_PATH,
-        "digest_algorithm": "sha256:",
-        "digest": "5f2c0f8ba2f6a2f7f5f6d4c3b2a1908877665544332211009988776655443322",
+        "digest_algorithm": "sha256",
+        "digest": "sha256:5f2c0f8ba2f6a2f7f5f6d4c3b2a1908877665544332211009988776655443322",
         "description_source": "config",
         "file_state": "unchanged",
         "diverged_from_file": False,
@@ -207,7 +214,7 @@ def test_a_green_report_produces_the_summary_shape_the_design_gives(tmp_path: Pa
     assert summary["firmware"] == {"repository": "acme/firmware", "commit": "a" * 40, "ref": "refs/heads/main"}
     assert summary["tools"]["agentic_hil"] and summary["tools"]["python"]
     assert summary["bench"]["config_digest"] == config_in_force()["digest"]
-    assert summary["bench"]["digest_algorithm"] == "sha256:"
+    assert summary["bench"]["digest_algorithm"] == "sha256"
     assert summary["bench"]["diverged_from_file"] is False
     assert summary["bench"]["runner"] == {"name": "bench-01", "labels": ["self-hosted", "agentic-hil"]}
     assert summary["bench"]["target"] == {"name": "nucleo-f446re", "controller": "stm32f446re"}
@@ -215,6 +222,43 @@ def test_a_green_report_produces_the_summary_shape_the_design_gives(tmp_path: Pa
     # too, and every name is the logical one the plan gave it.
     assert summary["bench"]["devices"] == {"debuggers": ["dut"], "com_ports": ["dut_uart"], "can_buses": ["dut_can"]}
     assert summary["run"] == {"cleanup_ok": True, "audit_ok": True}
+
+
+def test_the_job_summary_spells_the_configuration_digest_once(tmp_path: Path) -> None:
+    """#466: the row read `sha256sha256:5f2c...` and nothing could be compared to it.
+
+    `config_in_force.digest` already carries its algorithm and the row joined
+    `digest_algorithm` onto it anyway. This is the artifact a CI job posts as its
+    evidence, so the malformed digest is the one a reviewer holds against the
+    configuration."""
+    write_logs(tmp_path)
+
+    _result, summary, document = evidence(tmp_path, green_report(tmp_path))
+
+    digest = config_in_force()["digest"]
+    assert f"| Configuration digest | `{digest}` |" in document
+    assert "sha256sha256" not in document
+    # The summary document's own fields are untouched: both were right already,
+    # and the fix is the join the Markdown made out of them.
+    assert summary["bench"]["config_digest"] == digest
+    assert summary["bench"]["digest_algorithm"] == "sha256"
+
+
+def test_the_job_summary_prefixes_a_digest_that_carries_no_algorithm(tmp_path: Path) -> None:
+    """The other spelling, which the row must still print exactly once.
+
+    A report whose producer keeps the algorithm only in `digest_algorithm`
+    writes bare hex under `digest`, and the reviewer needs the same
+    `sha256:...` string out of either report (#466)."""
+    write_logs(tmp_path)
+    report = green_report(tmp_path)
+    bare_hex = "5f2c0f8ba2f6a2f7f5f6d4c3b2a1908877665544332211009988776655443322"
+    report["config_in_force"] = {**config_in_force(), "digest": bare_hex}
+
+    _result, _summary, document = evidence(tmp_path, report)
+
+    assert f"| Configuration digest | `sha256:{bare_hex}` |" in document
+    assert "sha256sha256" not in document
 
 
 def test_a_failed_report_carries_the_failing_step_its_error_type_and_the_recovery(tmp_path: Path) -> None:

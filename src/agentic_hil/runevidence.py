@@ -735,14 +735,32 @@ def _failure_section(report: JsonObject, text: Callable[[object], str]) -> list[
     ]
 
 
+def _config_digest(bench: Mapping[str, object]) -> str:
+    """The configuration digest as one algorithm-prefixed string, spelled once.
+
+    `config_in_force.digest` is the spelling `config_status` publishes, which
+    already carries its own algorithm (`sha256:4cdb...`), and this row joined
+    `digest_algorithm` onto it as though it were bare hex. Both fields are right
+    on their own; the join was not, and it published `sha256sha256:4cdb...` in
+    the one artifact a reviewer compares against the configuration (#466). A
+    digest that is bare hex, which is what a report carries when its producer
+    keeps the algorithm in the neighbouring field, still gets the prefix it is
+    missing, so one row serves both spellings and doubles neither.
+    """
+    digest = str(bench.get("config_digest") or "").strip()
+    algorithm = str(bench.get("digest_algorithm") or "").strip()
+    if not algorithm or digest.startswith(f"{algorithm}:"):
+        return digest
+    return f"{algorithm}:{digest}"
+
+
 def _bench_section(summary: JsonObject, text: Callable[[object], str]) -> list[str]:
     bench = summary.get("bench") if isinstance(summary.get("bench"), dict) else {}
     tools = summary.get("tools") if isinstance(summary.get("tools"), dict) else {}
     firmware = summary.get("firmware") if isinstance(summary.get("firmware"), dict) else {}
     rows: list[tuple[str, str]] = []
     if bench.get("config_digest"):
-        digest = f"{bench.get('digest_algorithm') or ''}{bench['config_digest']}".strip()
-        rows.append(("Configuration digest", f"`{text(digest)}`"))
+        rows.append(("Configuration digest", f"`{text(_config_digest(bench))}`"))
         rows.append(("Diverged from the file on disk", "yes" if bench.get("diverged_from_file") else "no"))
     target = bench.get("target") if isinstance(bench.get("target"), dict) else {}
     if target.get("name"):
