@@ -69,6 +69,7 @@ import subprocess
 import sys
 import sysconfig
 from contextlib import suppress
+from datetime import datetime, timezone
 from http.client import HTTPException
 from pathlib import Path
 from typing import NamedTuple
@@ -78,7 +79,7 @@ from agentic_hil import __version__
 from agentic_hil.config import ConfigError
 from agentic_hil.configwrite import NOT_STARTED
 from agentic_hil.knowledge import INSTALL_THE_PROXY_CA, remediation_fields
-from agentic_hil.process import ProcessImage, snapshot_process_images
+from agentic_hil.process import ProcessImage, filetime_epoch_seconds, process_working_directory, snapshot_process_images
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 # What the command line calls its own upgrade result, kept apart from the MCP
@@ -780,9 +781,16 @@ def _processes_holding_installation() -> list[JsonObject]:
     owes an operator, and it is not a reason to refuse an upgrade the operator
     typed.
 
-    Empty on every platform but Windows, and deliberately so. Elsewhere a
-    package manager unlinks the old files while the processes using them keep
-    reading their own copies, and the snapshot this reads has no answer there.
+    Empty on a host whose process table this cannot read, and empty is not the
+    same claim: a result carries the list only where there was one to take, so
+    "nothing is running out of this installation" is never said by a host that
+    could not have known.
+
+    Each entry carries what it takes to find the process again: the pid, the
+    image it runs, the directory it was started in, which for an MCP server is
+    the project its host opened it for, and when it started. The last two are
+    added only where the host answered them, so no entry carries a field that
+    had to be invented.
     """
     snapshot = snapshot_process_images()
     if snapshot is None:
@@ -792,11 +800,30 @@ def _processes_holding_installation() -> list[JsonObject]:
     scripts = _installation_console_scripts()
     excluded = _upgrading_process_and_its_launchers({entry.pid: entry for entry in snapshot}, owned_prefix, scripts)
     holders = [
-        {"pid": entry.pid, "image": entry.image}
+        {"pid": entry.pid, "image": entry.image, **_where_and_when(entry)}
         for entry in snapshot
         if entry.pid not in excluded and _belongs_to_installation(entry.image, owned_prefix, scripts)
     ]
     return sorted(holders, key=lambda holder: holder["pid"])
+
+
+def _where_and_when(entry: ProcessImage) -> JsonObject:
+    """One process's working directory and start time, each only where it is known.
+
+    A creation time this cannot turn into a date is left off rather than
+    rendered as whatever the conversion made of it. Both halves are optional for
+    the same reason: a field an operator reads as a fact about their machine has
+    to have come from their machine.
+    """
+    located: JsonObject = {}
+    directory = process_working_directory(entry.pid)
+    if directory:
+        located["working_directory"] = directory
+    started = filetime_epoch_seconds(entry.created_ns)
+    if started is not None:
+        with suppress(OSError, OverflowError, ValueError):
+            located["started_at"] = datetime.fromtimestamp(started, tz=timezone.utc).replace(microsecond=0).isoformat()
+    return located
 
 
 # ---------------------------------------------------------------------------
@@ -1708,6 +1735,7 @@ def _nothing_to_install(
     command: list[str],
     current_version: str,
     resolution: JsonObject | None,
+    still_running: list[JsonObject],
 ) -> JsonObject:
     """Nothing to install, answered before the installation could be put at risk.
 
@@ -1721,6 +1749,7 @@ def _nothing_to_install(
     there is goes through `_judged_against_the_index`, which is the only thing
     here that has asked.
     """
+    waiting = _nothing_new_to_load(still_running)
     return _judged_against_the_index(
         {
             "ok": True,
@@ -1728,8 +1757,9 @@ def _nothing_to_install(
             "already_current": True,
             "summary": (
                 f"Agentic HIL is at {current_version} and {manager} resolves nothing to install for this installation, "
-                f"so nothing was installed and no command that could replace it was run. No restart is needed."
-            ),
+                f"so nothing was installed and no command that could replace it was run."
+            )
+            + (f" {waiting['restart_notice']}" if waiting else " No restart is needed."),
             "manager": manager,
             "command": command,
             "install_skipped": True,
@@ -1738,6 +1768,7 @@ def _nothing_to_install(
             "version": current_version,
             **({"resolution": resolution} if resolution is not None else {}),
             "restart_required": False,
+            **waiting,
         },
         _newest_release(manager, command, current_version),
         manager,
@@ -1908,20 +1939,21 @@ def _upgrade_changed_nothing(
     previous_version: str,
     current_version: str,
     install_result: JsonObject,
+    still_running: list[JsonObject],
 ) -> JsonObject:
     """The two outcomes a package manager reports with the same exit code as success.
 
     `uv tool upgrade` returns 0 for "upgraded" and for "nothing to do" alike, so
     the return code cannot tell them apart and the version can: this is reached
-    only when the installation still runs the version it ran before. Both
-    answers here are `ok: false` with `restart_required: false`, because there is
-    nothing new to load -- the reported defect was the opposite pair, which sent
-    an operator to a restart that reloaded the same release and left them
-    believing they had moved.
+    only when the installation still runs the version it ran before. Neither
+    answer here claims an upgrade -- the reported defect was the opposite pair,
+    which sent an operator to a restart that reloaded the same release and left
+    them believing they had moved.
 
     Which of the two it is matters, because the next step differs: an
-    installation that is already current needs nothing, while one held at an
-    exact pin needs a reinstall the operator has to decide on and run.
+    installation that is already current needs nothing but a restart for the
+    servers that predate the last one, while one held at an exact pin needs a
+    reinstall the operator has to decide on and run.
     """
     base: JsonObject = {
         # Set per branch below: an installation that is already current is a
@@ -1960,12 +1992,15 @@ def _upgrade_changed_nothing(
             "reinstall_command": reinstall_command,
             **remediation_fields("upgrade_blocked_by_pin"),
         }
+    waiting = _nothing_new_to_load(still_running)
     return _judged_against_the_index(
         {
             **base,
             "ok": True,
-            "summary": f"Agentic HIL is at {current_version}; {manager} had nothing to replace. No restart is needed.",
+            "summary": f"Agentic HIL is at {current_version}; {manager} had nothing to replace."
+            + (f" {waiting['restart_notice']}" if waiting else " No restart is needed."),
             "already_current": True,
+            **waiting,
         },
         _newest_release(manager, command, current_version),
         manager,
@@ -1980,23 +2015,67 @@ def _still_running_the_previous_version(holders: list[JsonObject], previous_vers
     installation keeps the files it has mapped, goes on executing the release it
     imported, and stops doing so when the host that started it restarts, which
     is exactly what `restart_required` already means. So the operator is told
-    which hosts to restart and nothing else: pid and image, the same rendering
-    the old refusal used, plus the sentence that says why they still answer with
-    the old number.
+    which hosts to restart and nothing else: pid, image, the project directory
+    it was started in and when it started, plus the sentence that says why they
+    still answer with the old number.
 
-    Empty on the platform that has no such list, so a result gains these fields
-    only where they say something.
+    Empty where there is no such list, so a result gains these fields only where
+    they say something.
     """
     if not holders:
         return {}
-    named = "1 process" if len(holders) == 1 else f"{len(holders)} processes"
+    single = len(holders) == 1
+    named = "1 process" if single else f"{len(holders)} processes"
     return {
         "restart_required_by": holders[:_REPORTED_HOLDER_LIMIT],
         "restart_required_by_count": len(holders),
         "restart_notice": (
-            f"{named} started out of this installation before the swap and still runs {previous_version}; "
-            f"`restart_required_by` names each one by pid and image. Each goes on answering with {previous_version} "
+            f"{named} started out of this installation before the swap and still {'runs' if single else 'run'} "
+            f"{previous_version}: {_named_holders(holders)}. Each goes on answering with {previous_version} "
             f"until the host that started it restarts, and that restart is the whole of what is left to do."
+        ),
+    }
+
+
+def _named_holders(holders: list[JsonObject]) -> str:
+    """The running processes in one clause, so the summary names them and not a count.
+
+    The reported defect was a result that read the same with a live server and
+    with nothing running at all, and a count in a field is not what tells those
+    apart on the line a person reads first. Each is named by pid and by the
+    directory it was started in, which for an MCP server is the project its host
+    opened it for, and the list stops at the same limit the field does.
+    """
+    named = [
+        f"pid {holder['pid']}" + (f" in {holder['working_directory']}" if holder.get("working_directory") else "") + (f", started {holder['started_at']}" if holder.get("started_at") else "")
+        for holder in holders[:_REPORTED_HOLDER_LIMIT]
+    ]
+    rest = len(holders) - len(named)
+    return _named_series(named) + (f", and {rest} more under `restart_required_by`" if rest > 0 else "")
+
+
+def _nothing_new_to_load(holders: list[JsonObject]) -> JsonObject:
+    """The servers running out of an installation that nothing replaced.
+
+    The other half of the same reported defect: an installation that was already
+    current answered `restart_required: false` with a live server up, and that is
+    the case where a restart matters most. This call replaced nothing, so what
+    the running server imported is whatever was on disk when it started, and
+    nothing here can read that from outside. An earlier upgrade is exactly how a
+    server comes to be older than the installation it runs out of, so the
+    processes are named and the restart is asked for rather than ruled out.
+    """
+    if not holders:
+        return {}
+    named = "1 process is" if len(holders) == 1 else f"{len(holders)} processes are"
+    return {
+        "restart_required": True,
+        "restart_required_by": holders[:_REPORTED_HOLDER_LIMIT],
+        "restart_required_by_count": len(holders),
+        "restart_notice": (
+            f"{named} running out of this installation: {_named_holders(holders)}. Nothing was replaced by this call, "
+            f"so each of them still answers with the release it imported when it started, which is this one only if it "
+            f"started after the last upgrade. Restarting the host that started it is what makes that certain."
         ),
     }
 
@@ -2045,7 +2124,7 @@ def replace_installation(*, tool: str) -> JsonObject:
         # install runs next and meets the same network, and its own note is the
         # one that reports it; carrying this one there as well would put two
         # accounts of one proxy on a single result.
-        return _with_certificate_note(_nothing_to_install(tool, manager, command, previous_version, resolution), resolution_certificates)
+        return _with_certificate_note(_nothing_to_install(tool, manager, command, previous_version, resolution, still_running), resolution_certificates)
 
     # The launchers on PATH go out of the manager's way here and nowhere
     # earlier: an already-current run would have renamed the installation's own
@@ -2150,7 +2229,7 @@ def replace_installation(*, tool: str) -> JsonObject:
         )
 
     if current_version == previous_version:
-        return _with_unrecovered_launchers(_with_certificate_note(_upgrade_changed_nothing(tool, manager, command, previous_version, current_version, install_result), certificates), restore)
+        return _with_unrecovered_launchers(_with_certificate_note(_upgrade_changed_nothing(tool, manager, command, previous_version, current_version, install_result, still_running), certificates), restore)
 
     return _with_unrecovered_launchers(
         _with_certificate_note(
@@ -2165,7 +2244,13 @@ def replace_installation(*, tool: str) -> JsonObject:
                 "previous_version": previous_version,
                 "version": current_version,
                 "install": install_result,
-                "restart_required": True,
+                # What is left to restart, and nothing more: the servers found
+                # running out of this installation. A caller that knows about a
+                # host with the server registered raises it from there, which is
+                # the command line, because a registration is a file this module
+                # does not read. An upgrade on a machine with neither had been
+                # asking for a restart of nothing.
+                "restart_required": bool(still_running),
                 **({"superseded_entrypoints": superseded} if superseded else {}),
                 **_still_running_the_previous_version(still_running, previous_version),
             },
@@ -2348,6 +2433,11 @@ def _reported_as_running_code(result: JsonObject, config: AgenticHILConfig) -> J
         reported["extras_warning"] = extras
     if not result.get("upgraded_on_disk"):
         return reported
+    # This server is the running server, and it is the one process the list of
+    # them cannot contain: `_processes_holding_installation` excludes the process
+    # doing the upgrading, which over MCP is this one. So the restart is required
+    # here whatever that list found.
+    reported["restart_required"] = True
     # The summary is rewritten here rather than extended, so anything the shared
     # implementation put in it has to be carried over by name. `certificates` is
     # the one such sentence: an upgrade that only worked because it was retried

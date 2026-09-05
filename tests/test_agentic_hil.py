@@ -606,10 +606,13 @@ def test_upgrade_uses_running_python_and_refreshes_the_agent_it_had_set_up(
 
     assert result["ok"] is True
     assert result["version"] == "9.9.9"
+    # Nothing is running out of this installation here, and the restart is asked
+    # for because the refresh found an agent host with the server registered.
     assert result["restart_required"] is True
     # The one outcome that may claim an upgrade, and it says which two numbers
     # it moved between rather than asserting movement in the abstract.
-    assert result["summary"].startswith(f"Agentic HIL upgraded from {__version__} to 9.9.9; restart agent hosts to load the new MCP server.")
+    assert result["summary"].startswith(f"Agentic HIL upgraded from {__version__} to 9.9.9 on disk.")
+    assert "restart" in result["summary"]
     assert "error_type" not in result
     # The resolution query comes first and is not a command that could replace
     # anything; only then the manager, the import check, and the refresh.
@@ -1986,10 +1989,11 @@ def test_a_shared_prefix_counts_only_this_distributions_own_console_script(
 def test_nothing_is_reported_where_the_platform_replaces_a_running_executable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """POSIX unlinks the old file and lets the running process keep reading it.
+    """A host that cannot answer the question reports no list rather than an empty one.
 
-    The upgrade completes and nothing is lost, so a refusal there would block a
-    valid upgrade over a failure that platform does not have.
+    Empty and "cannot say" are different claims, and only the first is worth
+    printing. The upgrade completes either way and nothing is lost, so a refusal
+    there would block a valid upgrade over a failure that host does not have.
     """
     from agentic_hil.upgrade import _processes_holding_installation
 
@@ -1997,6 +2001,112 @@ def test_nothing_is_reported_where_the_platform_replaces_a_running_executable(
     monkeypatch.setattr("agentic_hil.upgrade.snapshot_process_images", lambda: None)
 
     assert _processes_holding_installation() == []
+
+
+def test_a_reported_process_carries_the_project_it_runs_in_and_when_it_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pid and image were all an operator got, and two servers look alike in them.
+
+    What tells one bench's MCP server from another's is the project its host
+    opened it for, which is the directory it was started in, and how long it has
+    been up. Both are read per process and both are left off where the host did
+    not answer, so no entry carries a field that had to be invented.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    server = _fake_process(400, 999, f"{_TOOL_ENV}/Scripts/python.exe", created_ns=134_330_660_430_000_000)
+    _watch_installation(monkeypatch, (*_UPGRADE_ITSELF, server))
+    monkeypatch.setattr("agentic_hil.upgrade.process_working_directory", lambda pid: "/projects/blinky" if pid == 400 else None)
+
+    assert _processes_holding_installation() == [
+        {
+            "pid": 400,
+            "image": f"{_TOOL_ENV}/Scripts/python.exe",
+            "working_directory": "/projects/blinky",
+            "started_at": "2026-09-05T07:14:03+00:00",
+        }
+    ]
+
+
+def test_a_creation_time_the_host_did_not_report_is_never_read_as_one() -> None:
+    """Zero is what both readers write when the platform answered with no time.
+
+    Converted as a FILETIME it is midnight on the first of January 1601, and a
+    result that printed that would be stating a fact about the operator's
+    machine that came from nowhere. Anything at or below the Unix epoch is the
+    same kind of value, because no process running right now started before
+    1970. The floor is what makes the two hosts agree: Windows raises on such a
+    number out of `fromtimestamp` and drops the field by accident, and Linux
+    converts it happily and prints 1601."""
+    from agentic_hil.process import filetime_epoch_seconds
+
+    assert filetime_epoch_seconds(0) is None
+    assert filetime_epoch_seconds(-1) is None
+    assert filetime_epoch_seconds(5) is None
+    assert filetime_epoch_seconds(11_644_473_600 * 10_000_000) is None
+    assert filetime_epoch_seconds(134_330_660_430_000_000) == pytest.approx(1788592443.0)
+
+
+def test_a_process_whose_host_answered_neither_carries_neither_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A creation time of zero is not a moment in 1601, and an unreadable cwd is not one."""
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    server = _fake_process(400, 999, f"{_TOOL_ENV}/Scripts/python.exe", created_ns=0)
+    _watch_installation(monkeypatch, (*_UPGRADE_ITSELF, server))
+    monkeypatch.setattr("agentic_hil.upgrade.process_working_directory", lambda _pid: None)
+
+    assert _processes_holding_installation() == [{"pid": 400, "image": f"{_TOOL_ENV}/Scripts/python.exe"}]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader needs the symlinks a POSIX host makes without privileges")
+def test_a_linux_host_reads_its_process_table_out_of_proc(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reader that lets a Linux bench name the servers running out of it.
+
+    Until this, the process table was a Windows-only answer, because the only
+    caller was asking whether a file could be replaced. Naming the processes
+    that keep the old copy is a question on every host, and the reported defect
+    was measured on a Linux bench: a live `agentic-hil mcp-stdio`, an upgrade
+    that swapped the environment underneath it, and a result with no field
+    saying so.
+
+    The entry that cannot be read is left out rather than guessed at, which is
+    the same rule the Windows reader applies to a process it cannot open.
+    """
+    from agentic_hil.process import process_working_directory, snapshot_process_images
+
+    proc = tmp_path / "proc"
+    project = tmp_path / "projects" / "blinky"
+    project.mkdir(parents=True)
+    interpreter = tmp_path / "tools" / "agentic-hil" / "bin" / "python3"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("", encoding="utf-8")
+    live = proc / "4242"
+    live.mkdir(parents=True)
+    (live / "exe").symlink_to(interpreter)
+    (live / "cwd").symlink_to(project)
+    (live / "status").write_text("Name:\t(python3) 3\nPPid:\t7\n", encoding="utf-8")
+    # A process whose executable this user may not read, and the non-numeric
+    # entries every /proc carries.
+    (proc / "99").mkdir()
+    (proc / "self").mkdir()
+    (proc / "uptime").write_text("1 1\n", encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+
+    snapshot = snapshot_process_images()
+
+    assert snapshot is not None
+    assert [(entry.pid, entry.parent_pid, entry.image) for entry in snapshot] == [(4242, 7, str(interpreter))]
+    # A creation time this can turn back into a date, taken from the process
+    # directory itself.
+    assert snapshot[0].created_ns > 0
+    assert process_working_directory(4242) == str(project)
+    assert process_working_directory(99) is None
 
 
 def test_an_operator_upgrade_runs_while_servers_are_up_and_names_them_for_the_restart(
@@ -2036,16 +2146,124 @@ def test_an_operator_upgrade_runs_while_servers_are_up_and_names_them_for_the_re
     assert result["restart_required_by_count"] == 1
     assert __version__ in result["restart_notice"]
     assert "until the host that started it restarts" in result["restart_notice"]
+    # And on the line a person reads first, which is what read the same with a
+    # live server and with nothing running at all.
+    assert "pid 4242" in result["summary"]
+
+
+_LIVE_SERVER = {
+    "pid": 4242,
+    "image": f"{_TOOL_ENV}/bin/python3",
+    "working_directory": "/projects/blinky",
+    "started_at": "2026-09-05T07:14:03+00:00",
+}
+
+
+def test_the_running_servers_are_named_by_project_and_start_time_not_only_by_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported defect: the result had no field naming a running server.
+
+    `agentic-hil upgrade` swapped the environment under a live
+    `agentic-hil mcp-stdio` and returned the same `restart_required: true` and
+    the same summary it returns with nothing running. Two servers on one machine
+    are told apart by the project each was started for, so the entry carries the
+    working directory and the start time beside the pid, and the summary names
+    them.
+    """
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["restart_required_by"] == [_LIVE_SERVER]
+    assert "pid 4242 in /projects/blinky, started 2026-09-05T07:14:03+00:00" in result["summary"]
+
+
+def test_a_live_server_asks_for_a_restart_even_where_nothing_was_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the defect: already current with a live server said false.
+
+    That is the case where the restart matters most. Nothing here replaced
+    anything, so the running server answers with whatever was on disk when it
+    started, and an earlier upgrade is exactly how it comes to be older than the
+    installation it runs out of. Nothing about it is refused or delayed.
+    """
+    _recording_manager(monkeypatch, answers={"resolution": PIP_WOULD_INSTALL_NOTHING})
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["install_skipped"] is True
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [_LIVE_SERVER]
+    assert "/projects/blinky" in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+
+
+def test_a_live_server_is_named_where_a_manager_ran_and_moved_nothing_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same, on the route where the manager runs and reports nothing to do."""
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        version_after=__version__,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["already_current"] is True
+    assert result["restart_required"] is True
+    assert result["restart_required_by_count"] == 1
+    assert "pid 4242" in result["summary"]
+
+
+def test_an_upgrade_with_a_registered_agent_host_and_no_live_server_still_asks_for_the_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host with the registration starts its server out of the new launcher.
+
+    Nothing is running right now, so the manager's own half of the question is
+    false; the refresh has just looked at every agent host and found one with
+    this server registered, which is the other half.
+    """
+    _place_agent_skill("opencode")
+    _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": MANAGER_INSTALLED,
+            "version": _version_answer("9.9.9"),
+            "agent-install": AGENT_INSTALL_DONE,
+        },
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert "restart_required_by" not in result
+    assert result["restart_required"] is True
 
 
 def test_an_upgrade_with_nothing_running_out_of_it_says_nothing_about_restarting_processes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The neighbouring case, unchanged: no holders, no list, no sentence.
+    """No holders and no host with the registration: no list, no sentence, no restart.
 
-    A field that appeared empty on every POSIX upgrade would be one more thing
-    to read on a result that has nothing to say, so it is absent rather than
-    empty."""
+    A field that appeared empty on every upgrade would be one more thing to read
+    on a result that has nothing to say, so it is absent rather than empty. The
+    request itself is now the same: `restart_required: true` used to be printed
+    identically on a machine where nothing was running and no agent host had the
+    server registered, which is a machine with nothing to restart."""
     _recording_manager(
         monkeypatch,
         answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
@@ -2054,10 +2272,11 @@ def test_an_upgrade_with_nothing_running_out_of_it_says_nothing_about_restarting
     result = upgrade_installation()
 
     assert result["upgraded_on_disk"] is True
-    assert result["restart_required"] is True
+    assert result["restart_required"] is False
     assert "restart_required_by" not in result
     assert "restart_required_by_count" not in result
     assert "restart_notice" not in result
+    assert "restart" not in result["summary"]
 
 
 # ---------------------------------------------------------------------------
