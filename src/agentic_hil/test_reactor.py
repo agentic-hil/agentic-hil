@@ -3117,7 +3117,7 @@ class TestReactor:
                 "steps": [],
                 "cleanup": [],
                 "cleanup_ok": True,
-                "summary": "Test reactor configuration failed semantic validation; no steps were executed.",
+                "summary": refused_plan_summary(refused_as, permission),
                 **remediation_fields(refused_as, scope, permission=permission),
             }
             if "step" in validation_error:
@@ -3527,6 +3527,33 @@ def exclusive_permission_preflight_error(
             "permission_granted": True,
             "next_step": fields["next_step"],
         },
+    )
+
+
+def refused_plan_summary(refused_as: str, permission: str | None) -> str:
+    """The one sentence a refused plan is read by, saying which refusal it was.
+
+    A run refused before its first step said "Test reactor configuration failed
+    semantic validation" whatever refused it, so a denied permission was
+    reported as a plan that would not validate. #443 and #444 had already put
+    the key and the `permission_denied` classification into every other field of
+    this result; the string a caller logs, and the one an agent reads out, still
+    carried the sentence from before them (#468). It now says who said no and
+    names the key, because sending the author of a valid plan to go and correct
+    it is the one wrong move this refusal can prompt.
+
+    The wording is deliberately neutral about which way the key has to move: a
+    permission refuses by being false and `allow_mass_erase` refuses by being
+    true, and `validation_error.next_step` is where that direction is settled.
+    Every other refusal keeps the sentence it had; a plan the schema or the
+    semantics rejected really is a plan to correct.
+    """
+    if refused_as != PERMISSION_DENIED_ERROR:
+        return "Test reactor configuration failed semantic validation; no steps were executed."
+    named = f" at the permission `{permission}`" if permission else ""
+    return (
+        f"This bench's policy refused the plan{named}, which is `{PERMISSION_DENIED_ERROR}` and not a fault in the "
+        "plan; no steps were executed."
     )
 
 

@@ -2867,6 +2867,61 @@ def test_a_denied_permission_is_a_permission_refusal_and_not_an_invalid_plan(tmp
     assert result["validation_error"]["field"] == "steps[0].action"
 
 
+def test_the_outermost_summary_of_a_permission_refusal_names_the_permission(tmp_path: Path) -> None:
+    """#468: the last field still speaking from before #443 and #444.
+
+    Those two put the key and the `permission_denied` classification into every
+    other part of this result, and the string a caller logs, and the one an agent
+    reads out, still said "Test reactor configuration failed semantic
+    validation". A caller that reads only that string was told to go and correct
+    a plan with nothing wrong with it, which is the one move this refusal must
+    not prompt.
+    """
+    from agentic_hil.humanize import render_result
+
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: reset}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    key = "debuggers.dut.permissions.allow_reset"
+    assert result["summary"] == (
+        f"This bench's policy refused the plan at the permission `{key}`, which is `permission_denied` and not a fault "
+        "in the plan; no steps were executed."
+    )
+    assert "semantic validation" not in result["summary"]
+    # The sentence reaches the reader who only ever sees the rendering, too.
+    assert result["summary"] in " ".join(render_result(result, "test-reactor").split())
+    # And the fields #443 and #444 settled are exactly as they were: the key at
+    # the top level, and the block that carries the direction and the command.
+    assert result["permission"] == key
+    assert result["error_type"] == "permission_denied"
+    assert result["step_error_type"] == "permission_denied"
+    assert result["validation_error"]["error_type"] == "permission_denied"
+    assert result["validation_error"]["permission"] == key
+    assert result["validation_error"]["summary"] == (
+        "Target reset is disabled for this debugger by the authoritative config. "
+        f"The permission is `{key}` and it is false."
+    )
+    assert f"agentic-hil grant {key}" in result["validation_error"]["next_step"]
+
+
+def test_a_plan_the_semantics_reject_keeps_the_summary_it_had(tmp_path: Path) -> None:
+    """The neighbour #468 must not move: a plan that really is wrong.
+
+    `test_config_invalid` means the document is the fault and the reader is
+    right to go and correct it, so that refusal keeps its sentence. Only the
+    refusal whose cause is the bench's policy stops borrowing it."""
+    config = load_config(str(write_config(tmp_path, com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n')))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {port_id: typo_uart, action: uart_open}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+
+    assert result["error_type"] == "test_config_invalid"
+    assert result["summary"] == "Test reactor configuration failed semantic validation; no steps were executed."
+    assert "permission" not in result
+
+
 def test_a_denied_permission_is_never_answered_with_a_regeneration(tmp_path: Path) -> None:
     """#444: `init --force` was offered as a way past a narrowed permission.
 
@@ -2925,6 +2980,12 @@ def test_a_permission_that_blocks_by_being_granted_is_not_answered_with_a_grant(
 
     key = "debuggers.dut.permissions.allow_mass_erase"
     assert result["permission"] == key
+    # The outermost summary names this key too, and stays neutral about which
+    # way it has to move: the direction is `validation_error`'s to settle (#468).
+    assert result["summary"] == (
+        f"This bench's policy refused the plan at the permission `{key}`, which is `permission_denied` and not a fault "
+        "in the plan; no steps were executed."
+    )
     assert result["validation_error"]["permission_granted"] is True
     assert result["validation_error"]["summary"].endswith(f"The permission is `{key}` and it is true.")
     next_step = result["validation_error"]["next_step"]
