@@ -680,9 +680,15 @@ def _proc_process_images() -> tuple[ProcessImage, ...]:
     ``/proc/<pid>/exe`` is the executable, and reading it is also the permission
     check: a process belonging to another user answers ``PermissionError``, which
     is the same "cannot be opened, so it is not ours" the Windows reader applies.
-    The start time is the process directory's own creation time, which Linux sets
-    when the process starts.
+    The start time comes out of ``/proc/<pid>/stat`` and ``/proc/stat``, never
+    out of the process directory's own timestamps: procfs stamps those inode
+    times when the entry is first looked up, so a server up for hours reported
+    itself as having started at the moment ``agentic-hil upgrade`` stat'ed it,
+    inside the very sentence that tells the operator whether that server predates
+    the last upgrade. Measured: a ``sleep 120`` started 6.26 seconds earlier
+    answered "created 0.0 s ago".
     """
+    boot_time = _boot_time_epoch_seconds()
     images: list[ProcessImage] = []
     for name in os.listdir(_PROC):
         if not name.isdigit():
@@ -690,18 +696,67 @@ def _proc_process_images() -> tuple[ProcessImage, ...]:
         pid = int(name)
         try:
             image = os.readlink(f"{_PROC}/{pid}/exe")
-            created = os.stat(f"{_PROC}/{pid}").st_ctime
         except OSError:
             continue
+        started = _proc_started_epoch_seconds(pid, boot_time)
         images.append(
             ProcessImage(
                 pid=pid,
                 parent_pid=_proc_parent_pid(pid),
                 image=image,
-                created_ns=int((created + _FILETIME_EPOCH_OFFSET_S) * _FILETIME_TICKS_PER_SECOND),
+                # Zero where the real start could not be read, which
+                # ``filetime_epoch_seconds`` drops rather than rendering: a
+                # start time an operator reads as a fact about their machine has
+                # to have come from their machine.
+                created_ns=int((started + _FILETIME_EPOCH_OFFSET_S) * _FILETIME_TICKS_PER_SECOND) if started is not None else 0,
             )
         )
     return tuple(images)
+
+
+def _boot_time_epoch_seconds() -> float | None:
+    """When this host booted, in Unix seconds, or None where that cannot be read.
+
+    ``/proc/stat``'s ``btime`` line, read once per snapshot rather than once per
+    process: every ``starttime`` below is an offset from it, so a table of two
+    hundred processes reads one file instead of two hundred.
+    """
+    try:
+        with open(f"{_PROC}/stat", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("btime "):
+                    return float(line.split(None, 1)[1].strip())
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _proc_started_epoch_seconds(pid: int, boot_time: float | None) -> float | None:
+    """When one process started, in Unix seconds, or None where that is unreadable.
+
+    Field 22 of ``/proc/<pid>/stat`` is ``starttime``, the clock ticks since boot
+    at which the process began, so boot time plus that is the moment it started
+    and it does not move for the life of the process.
+
+    Split on the last ``)`` rather than on whitespace, because field 2 is the
+    command name in parentheses and a program is free to have spaces and
+    parentheses in its own: a reader that splits the whole line gets the wrong
+    field for exactly the processes whose names are worth reading carefully,
+    which is the same rule ``_proc_parent_pid`` follows. After that split the
+    remaining fields begin at field 3, so ``starttime`` is index 19.
+    """
+    if boot_time is None:
+        return None
+    try:
+        with open(f"{_PROC}/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+            fields = handle.read().rsplit(")", 1)[1].split()
+        ticks = float(fields[19])
+        clock_ticks_per_second = os.sysconf("SC_CLK_TCK")
+    except (AttributeError, IndexError, OSError, ValueError):
+        return None
+    if clock_ticks_per_second <= 0:
+        return None
+    return boot_time + ticks / clock_ticks_per_second
 
 
 def _proc_parent_pid(pid: int) -> int:

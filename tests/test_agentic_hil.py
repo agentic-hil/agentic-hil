@@ -2494,7 +2494,7 @@ def test_a_linux_host_reads_its_process_table_out_of_proc(
     The entry that cannot be read is left out rather than guessed at, which is
     the same rule the Windows reader applies to a process it cannot open.
     """
-    from agentic_hil.process import process_working_directory, snapshot_process_images
+    from agentic_hil.process import filetime_epoch_seconds, process_working_directory, snapshot_process_images
 
     proc = tmp_path / "proc"
     project = tmp_path / "projects" / "blinky"
@@ -2507,6 +2507,12 @@ def test_a_linux_host_reads_its_process_table_out_of_proc(
     (live / "exe").symlink_to(interpreter)
     (live / "cwd").symlink_to(project)
     (live / "status").write_text("Name:\t(python3) 3\nPPid:\t7\n", encoding="utf-8")
+    # The two files the start time is read out of, shaped the way Linux writes
+    # them: a comm field carrying a space and a bracket of its own, so a reader
+    # that split the whole line on whitespace would take the wrong field, and
+    # 4200 clock ticks since boot as field 22.
+    (live / "stat").write_text(f"4242 (python3 (worker)) {' '.join(['0'] * 19)} 4200 0 0\n", encoding="utf-8")
+    (proc / "stat").write_text("cpu  1 2 3\nbtime 1700000000\nprocesses 12\n", encoding="utf-8")
     # A process whose executable this user may not read, and the non-numeric
     # entries every /proc carries.
     (proc / "99").mkdir()
@@ -2518,11 +2524,75 @@ def test_a_linux_host_reads_its_process_table_out_of_proc(
 
     assert snapshot is not None
     assert [(entry.pid, entry.parent_pid, entry.image) for entry in snapshot] == [(4242, 7, str(interpreter))]
-    # A creation time this can turn back into a date, taken from the process
-    # directory itself.
-    assert snapshot[0].created_ns > 0
+    # Boot time plus this process's own `starttime`, and not the moment /proc was
+    # first looked at.
+    assert filetime_epoch_seconds(snapshot[0].created_ns) == pytest.approx(1700000000 + 4200 / os.sysconf("SC_CLK_TCK"))
     assert process_working_directory(4242) == str(project)
     assert process_working_directory(99) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+def test_a_linux_start_time_is_when_the_process_started_and_not_when_it_was_looked_at() -> None:
+    """The reported defect: every process looked new the first time it was read.
+
+    procfs stamps a process directory's own inode times when the entry is first
+    looked up, so `os.stat(f"/proc/{pid}").st_ctime` answered "now" for a server
+    that had been up for hours, and `agentic-hil upgrade` printed that as
+    ", started <ISO>" inside the very sentence that tells the operator whether
+    that server predates the last upgrade. Measured before the fix: a `sleep 120`
+    started 6.26 seconds earlier reported a creation 0.0 seconds ago.
+
+    Against a real child, because the whole content of the fix is that the number
+    comes from the kernel's own record of when the process began rather than from
+    when this code first asked about it.
+    """
+    from agentic_hil.process import filetime_epoch_seconds, snapshot_process_images
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        started_at = time.time()
+        # Long enough that a lookup time and a start time cannot be mistaken for
+        # one another, and short enough to stay a unit test.
+        time.sleep(2.0)
+        snapshot = snapshot_process_images()
+        assert snapshot is not None
+        entry = next(image for image in snapshot if image.pid == child.pid)
+        reported = filetime_epoch_seconds(entry.created_ns)
+        assert reported is not None
+        assert reported == pytest.approx(started_at, abs=1.0)
+        assert time.time() - reported >= 1.5
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+def test_a_start_time_that_cannot_be_read_leaves_the_field_off_rather_than_inventing_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The neighbouring direction: no `btime`, no `stat`, no date on the result.
+
+    A /proc that answers neither is not a process that started in 1601. Zero is
+    what the reader writes, `filetime_epoch_seconds` drops it, and the entry
+    carries a pid and an image and nothing invented beside them.
+    """
+    from agentic_hil.process import snapshot_process_images
+
+    proc = tmp_path / "proc"
+    interpreter = tmp_path / "tools" / "agentic-hil" / "bin" / "python3"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("", encoding="utf-8")
+    live = proc / "4242"
+    live.mkdir(parents=True)
+    (live / "exe").symlink_to(interpreter)
+    (live / "status").write_text("Name:\tpython3\nPPid:\t7\n", encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+
+    snapshot = snapshot_process_images()
+
+    assert snapshot is not None
+    assert [(entry.pid, entry.created_ns) for entry in snapshot] == [(4242, 0)]
 
 
 def test_the_step_before_a_reinstall_is_the_one_this_host_actually_needs(
