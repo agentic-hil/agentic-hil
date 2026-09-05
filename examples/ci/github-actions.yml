@@ -31,7 +31,7 @@ env:
   # simulator job installs exactly it. No range, no `latest`, no git reference:
   # a version a resolver picked is a version nobody reviewed, and the two jobs
   # would stop being about the same code.
-  AGENTIC_HIL_VERSION: "0.21.4"
+  AGENTIC_HIL_VERSION: "0.21.5"
 
 jobs:
   hardware:
