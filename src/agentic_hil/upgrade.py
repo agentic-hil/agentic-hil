@@ -213,6 +213,9 @@ class _RecordedInstall(NamedTuple):
     unpinned; it is a record of how the installation was created and never the
     judgement about what holds it back. `exact_pin` is the part of that record
     which can hold a release back, empty for every specifier that cannot.
+    `not_replayed` are the recorded requirements a `--with` cannot carry, each
+    with the receipt member that stops it, so a line that rebuilds this
+    installation names what it leaves behind instead of dropping it in silence.
     `options` is `[tool.options]` whole, because which of its keys matter is the
     reader's question and not this one's.
     """
@@ -221,6 +224,7 @@ class _RecordedInstall(NamedTuple):
     python: str
     pin: str
     exact_pin: str
+    not_replayed: tuple[JsonObject, ...]
     options: JsonObject
 
 
@@ -276,23 +280,84 @@ def _receipt_section(receipt: JsonObject | None, key: str) -> object:
     return receipt.get(key)
 
 
-def _requirement_string(entry: JsonObject) -> str:
-    """One recorded requirement, back as the string a `--with` takes.
+# PEP 508, as much of it as a `--with` value is allowed to be: a distribution
+# name, optional extras, an optional version specifier set and an optional
+# environment marker. Written out here rather than taken from `packaging`,
+# which this distribution does not depend on at runtime and must not start
+# depending on for a line it prints.
+_REQUIREMENT_NAME_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+_VERSION_SPECIFIER_PATTERN = r"(?:===|==|!=|<=|>=|~=|<|>)\s*[A-Za-z0-9*+!._-]+"
+_REQUIREMENT_NAME_ONLY = re.compile(rf"^{_REQUIREMENT_NAME_PATTERN}$")
+_VERSION_SPECIFIER_SET = re.compile(rf"^\s*{_VERSION_SPECIFIER_PATTERN}(?:\s*,\s*{_VERSION_SPECIFIER_PATTERN})*\s*$")
+# One token of an environment marker: a bare word, a quoted literal with no
+# quote of its own inside it, a comparison operator, a bracket or a comma. A
+# marker made of nothing but these carries no character a shell reads, which is
+# what makes the rendered line safe to paste as well as a real requirement.
+_MARKER_TOKEN = re.compile(r"""\s*(?:[A-Za-z0-9_.+*-]+|'[^']*'|"[^"]*"|===|==|!=|<=|>=|~=|<|>|\(|\)|,)\s*""")
+# Which receipt members a `--with` can carry. Anything else is a source: a git,
+# url, path or editable requirement rebuilds into something other than what uv
+# recorded, and a `--with` that changed the requirement would be a different
+# installation wearing the same line.
+_REPLAYABLE_RECEIPT_KEYS = ("name", "extras", "specifier", "marker")
 
-    Empty for an entry this cannot spell as a plain name with extras and a
-    specifier: a git, url or path source rebuilds into something other than
-    what uv recorded, and a `--with` that changed the requirement would be a
-    different installation wearing the same line.
+
+def _valid_environment_marker(marker: str) -> bool:
+    """Whether a marker is made of marker tokens and nothing else.
+
+    Token by token from one end to the other rather than one regular expression
+    with a repeated group inside it, so a long unmatchable marker costs one pass
+    instead of an exponential search.
+    """
+    position = 0
+    while position < len(marker):
+        matched = _MARKER_TOKEN.match(marker, position)
+        if matched is None or matched.end() == position:
+            return False
+        position = matched.end()
+    return bool(marker.strip())
+
+
+def _requirement_string(entry: JsonObject) -> tuple[str, str]:
+    """One recorded requirement as a `--with` value, or the receipt key that stops it.
+
+    Exactly one half is filled: the string, or the name of the member that makes
+    the entry unspellable. Both a source and a member that is not the thing it
+    claims to be end up in the second, and the caller reports them under
+    `with_packages_not_replayed` rather than dropping them, because an entry that
+    vanished from a line whose own summary says it rebuilds the installation as
+    it stands is a package the operator loses without being told.
+
+    A `marker` is replayed rather than refused. uv writes one for
+    `--with "pytest; python_version>='3.10'"`, and that requirement is a `--with`
+    value exactly as it stands; leaving it out took the package off the
+    installation the line claimed to preserve.
+
+    Every part is checked against PEP 508 before it is rendered. A receipt is
+    the operator's own file and this is robustness rather than a privilege
+    boundary, but the line is meant to be pasted, and a recorded name of
+    `pytest" ; echo pwned #` produced exactly that inside the printed command.
     """
     name = entry.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return ""
-    if any(key not in {"name", "extras", "specifier"} for key in entry):
-        return ""
+    if not isinstance(name, str) or not _REQUIREMENT_NAME_ONLY.match(name.strip()):
+        return "", "name"
+    for key in entry:
+        if key not in _REPLAYABLE_RECEIPT_KEYS:
+            return "", str(key)
     extras = [item for item in entry.get("extras") or [] if isinstance(item, str) and item.strip()]
-    rendered = f"{name.strip()}[{','.join(sorted(extras))}]" if extras else name.strip()
+    if any(not _REQUIREMENT_NAME_ONLY.match(extra.strip()) for extra in extras):
+        return "", "extras"
+    rendered = f"{name.strip()}[{','.join(sorted(extra.strip() for extra in extras))}]" if extras else name.strip()
     specifier = entry.get("specifier")
-    return f"{rendered}{specifier.strip()}" if isinstance(specifier, str) and specifier.strip() else rendered
+    if isinstance(specifier, str) and specifier.strip():
+        if not _VERSION_SPECIFIER_SET.match(specifier):
+            return "", "specifier"
+        rendered = f"{rendered}{specifier.strip()}"
+    marker = entry.get("marker")
+    if isinstance(marker, str) and marker.strip():
+        if not _valid_environment_marker(marker):
+            return "", "marker"
+        rendered = f"{rendered}; {marker.strip()}"
+    return rendered, ""
 
 
 def _recorded_install() -> _RecordedInstall:
@@ -300,11 +365,21 @@ def _recorded_install() -> _RecordedInstall:
     receipt = _uv_receipt()
     recorded = _receipt_section(receipt, "requirements")
     entries = [entry for entry in recorded if isinstance(entry, dict)] if isinstance(recorded, list) else []
-    beside = tuple(
-        rendered
-        for entry in entries
-        if _canonical_requirement_name(str(entry.get("name") or "")) != "agentic-hil" and (rendered := _requirement_string(entry))
-    )
+    beside: list[str] = []
+    not_replayed: list[JsonObject] = []
+    for entry in entries:
+        if _canonical_requirement_name(str(entry.get("name") or "")) == "agentic-hil":
+            continue
+        rendered, stopped_by = _requirement_string(entry)
+        if rendered:
+            beside.append(rendered)
+        else:
+            not_replayed.append(
+                {
+                    "requirement": str(entry.get("name") or "").strip() or "an entry the receipt records with no name",
+                    "receipt_key": stopped_by,
+                }
+            )
     section = _receipt_section(receipt, "options")
     options: JsonObject = {str(key): value for key, value in section.items()} if isinstance(section, dict) else {}
     python = _recorded_python(receipt, options)
@@ -316,7 +391,7 @@ def _recorded_install() -> _RecordedInstall:
         and specifier.strip()
     ]
     pin = pins[0] if pins else ""
-    return _RecordedInstall(beside, python, pin, _exact_pin(pin), options)
+    return _RecordedInstall(tuple(beside), python, pin, _exact_pin(pin), tuple(not_replayed), options)
 
 
 def _recorded_python(receipt: JsonObject | None, options: JsonObject) -> str:
@@ -373,6 +448,16 @@ def _named_series(items: list[str]) -> str:
     return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
+def _sentences(*parts: str) -> str:
+    """One paragraph out of the parts that have something to say.
+
+    A summary assembled with `f"{a} {b}"` where `b` is conditionally empty leaves
+    a double space, or a trailing one, on every run that has nothing to put
+    there. Joining what is non-empty says the same thing and cannot.
+    """
+    return " ".join(part.strip() for part in parts if part and part.strip())
+
+
 def _installation_shape() -> tuple[tuple[str, ...], _RecordedInstall, JsonObject]:
     """What this installation is made of, and the fields that name it on a result.
 
@@ -388,6 +473,8 @@ def _installation_shape() -> tuple[tuple[str, ...], _RecordedInstall, JsonObject
         fields["with_packages"] = list(recorded.with_requirements)
     if recorded.python:
         fields["recorded_python"] = recorded.python
+    if recorded.not_replayed:
+        fields["with_packages_not_replayed"] = list(recorded.not_replayed)
     return installed_extras, recorded, fields
 
 
@@ -399,6 +486,26 @@ def _carried_by_the_reinstall(recorded: _RecordedInstall) -> str:
     if recorded.python:
         carried.append("the interpreter in `recorded_python`")
     return _named_series(carried)
+
+
+def _not_carried_by_the_reinstall(recorded: _RecordedInstall) -> str:
+    """What the line leaves behind, said out loud, or nothing where it leaves none.
+
+    A requirement recorded as a git, url or path source, or one whose recorded
+    parts are not a PEP 508 requirement, cannot be replayed as a `--with`
+    without changing what gets installed. Leaving it out is right; leaving it out
+    in silence, under a sentence promising the line rebuilds this installation as
+    it stands, is how an operator loses a package to a remediation.
+    """
+    if not recorded.not_replayed:
+        return ""
+    named = _named_series([f"`{entry['requirement']}` (recorded under `{entry['receipt_key']}`)" for entry in recorded.not_replayed])
+    plural = len(recorded.not_replayed) > 1
+    return (
+        f"It does not carry {named}: {'those requirements are' if plural else 'that requirement is'} recorded in a "
+        f"shape a `--with` cannot spell without installing something else, so running the line leaves "
+        f"{'them' if plural else 'it'} off. `with_packages_not_replayed` names {'each' if plural else 'it'}."
+    )
 
 
 # `uv tool upgrade` exits 0 when there was nothing it could do, and an exact
@@ -510,10 +617,32 @@ def _unpinned_reinstall_command(manager: str, command: list[str]) -> str | None:
         return f'pipx install --force "{requirement}"'
     if command[1:3] == ["tool", "upgrade"]:
         recorded = _recorded_install()
-        options = [f'--python "{recorded.python}"'] if recorded.python else []
-        options.extend(f'--with "{name}"' for name in recorded.with_requirements)
+        options = [f"--python {_shell_quoted(recorded.python)}"] if recorded.python else []
+        options.extend(f"--with {_shell_quoted(name)}" for name in recorded.with_requirements)
         return f'uv tool install {"".join(f"{option} " for option in options)}"{requirement}@latest"'
     return None
+
+
+def _shell_quoted(value: str) -> str:
+    """One receipt value, quoted for the shell this line is meant to be pasted into.
+
+    The values interpolated here come out of uv's receipt, and they were dropped
+    into a double-quoted slot with no quoting of their own: a recorded name of
+    `pytest" ; echo pwned #` rendered as
+    `uv tool install --with "pytest" ; echo pwned #" "agentic-hil@latest"`. The
+    receipt belongs to the operator, so this is robustness rather than a
+    privilege boundary, but the line exists to be pasted and a line that is not
+    the command it prints is worse than no line.
+
+    The same host split `empty_directory_removal_command` makes, and for the same
+    reason: the shell a Windows operator pastes into is PowerShell, where a
+    single-quoted string is literal and a doubled quote is the escape, and
+    everywhere else it is a POSIX shell, which is what `shlex.quote` is for.
+    """
+    if os.name == "nt":
+        literal = value.replace("'", "''")
+        return f"'{literal}'"
+    return shlex.quote(value)
 
 
 def _plain_line_would_remove(installed_extras: tuple[str, ...], recorded: _RecordedInstall) -> str:
@@ -1940,13 +2069,15 @@ def _judged_against_the_index(outcome: JsonObject, check: _NewestRelease, manage
         "held_back_by": list(check.holds),
         **shape,
         "reinstall_command": check.clearing_command,
-        "summary": (
-            f"{summary} The index publishes {check.version}, and this installation stays at {current_version} because "
-            f"its own receipt records {named}. {manager} reports that as nothing to do and offers no command that "
-            f"clears it. `reinstall_command` is the line that records this installation again without it, with "
-            f"{_carried_by_the_reinstall(recorded)}; running it is the operator's decision. "
-            f"{_plain_line_would_remove(installed_extras, recorded)}"
-        ).rstrip(),
+        "summary": _sentences(
+            summary,
+            f"The index publishes {check.version}, and this installation stays at {current_version} because its own "
+            f"receipt records {named}. {manager} reports that as nothing to do and offers no command that clears it. "
+            f"`reinstall_command` is the line that records this installation again without it, with "
+            f"{_carried_by_the_reinstall(recorded)}; running it is the operator's decision.",
+            _not_carried_by_the_reinstall(recorded),
+            _plain_line_would_remove(installed_extras, recorded),
+        ),
         **remediation_fields("upgrade_blocked_by_recorded_option"),
     }
 
@@ -2252,13 +2383,15 @@ def _upgrade_changed_nothing(
                 {
                     **base,
                     "error_type": "upgrade_blocked_by_pin",
-                    "summary": (
+                    "summary": _sentences(
                         f"Agentic HIL was not upgraded: {manager} holds this installation at an exact version pin, so it is "
-                        f"still {current_version}. Nothing was changed. {_restart_sentence(waiting)} `reinstall_command` is "
-                        f"the line that clears the pin and rebuilds this installation as it stands, with "
-                        f"{_carried_by_the_reinstall(recorded)}. "
-                        + (f"{loss} " if loss else "")
-                        + "Running it is the operator's decision."
+                        f"still {current_version}. Nothing was changed.",
+                        _restart_sentence(waiting),
+                        f"`reinstall_command` is the line that clears the pin and rebuilds this installation as it "
+                        f"stands, with {_carried_by_the_reinstall(recorded)}.",
+                        _not_carried_by_the_reinstall(recorded),
+                        loss,
+                        "Running it is the operator's decision.",
                     ),
                     "pinned_version": _pinned_version(install_result) or current_version,
                     # This outcome replaced nothing, exactly like the note below
@@ -2331,14 +2464,14 @@ def _upgrade_changed_nothing(
             f"`reinstall_command` is the line that clears the pin and rebuilds this installation as it stands, with "
             f"{_carried_by_the_reinstall(recorded)}, for whenever later releases are to be picked up without it."
         )
-        if loss:
-            sentences.append(loss)
+        sentences.append(_not_carried_by_the_reinstall(recorded))
+        sentences.append(loss)
         sentences.append("Running it is the operator's decision.")
         return _with_certificate_note(
             {
                 **base,
                 "ok": True,
-                "summary": " ".join(sentences),
+                "summary": _sentences(*sentences),
                 **({} if withdrawn else {"already_current": True}),
                 **waiting,
                 # What the manager's hint named, which the guard above has just

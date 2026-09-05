@@ -810,6 +810,18 @@ entrypoints = [
 """
 
 
+def _quoted(value: str) -> str:
+    """One receipt value as the shell of the host running this suite takes it.
+
+    The same split the printed line makes: PowerShell on Windows, where a
+    single-quoted string is literal, and `shlex.quote` everywhere else, which
+    leaves a value needing no quotes bare. Written out here rather than imported
+    so that the test states the expected shape and does not agree with the code
+    by construction.
+    """
+    return "'" + value.replace("'", "''") + "'" if os.name == "nt" else shlex.quote(value)
+
+
 def test_the_pin_refusal_keeps_the_with_packages_uv_recorded_beside_this_one(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -837,7 +849,7 @@ def test_the_pin_refusal_keeps_the_with_packages_uv_recorded_beside_this_one(
     result = upgrade_installation([])
 
     assert result["error_type"] == "upgrade_blocked_by_pin"
-    assert result["reinstall_command"] == 'uv tool install --with "pytest==9.1.1" "agentic-hil[can]@latest"'
+    assert result["reinstall_command"] == f'uv tool install --with {_quoted("pytest==9.1.1")} "agentic-hil[can]@latest"'
     assert result["with_packages"] == ["pytest==9.1.1"]
     assert result["installed_extras"] == ["can"]
     # In words, on the line an operator reads first: what running uv's own hint
@@ -923,7 +935,7 @@ def test_the_pin_refusal_replays_the_interpreter_the_receipt_recorded(
 
     result = upgrade_installation([])
 
-    assert result["reinstall_command"] == 'uv tool install --python "3.12" "agentic-hil@latest"'
+    assert result["reinstall_command"] == f'uv tool install --python {_quoted("3.12")} "agentic-hil@latest"'
     assert result["recorded_python"] == "3.12"
     assert "with_packages" not in result
     assert "the interpreter 3.12 this installation was created with" in result["summary"]
@@ -965,6 +977,93 @@ def test_a_receipt_with_nothing_to_replay_leaves_the_reinstall_line_as_it_was(
     assert "with_packages" not in result
     assert "recorded_python" not in result
     assert "[can]" in result["summary"]
+
+
+def test_a_recorded_marker_is_replayed_rather_than_dropped_in_silence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reported defect: `--with "pytest; python_version>='3.10'"` vanished.
+
+    uv writes a `marker` member for such a requirement, and the reader accepted
+    only `name`, `extras` and `specifier`, so the entry disappeared from
+    `reinstall_command` while the summary beside it said the line rebuilds the
+    installation as it stands. A marker is part of the requirement a `--with`
+    takes, so it is replayed, and the whole value is quoted for the shell the
+    line is pasted into rather than dropped into a double-quoted slot.
+    """
+    _uv_tool_receipt(
+        monkeypatch,
+        tmp_path,
+        '[tool]\nrequirements = [\n'
+        '  { name = "agentic-hil" },\n'
+        '  { name = "pytest", extras = ["testing"], specifier = ">=8,<9", marker = "python_version >= \'3.10\'" },\n'
+        "]\n",
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation([])
+
+    replayed = "pytest[testing]>=8,<9; python_version >= '3.10'"
+    assert result["with_packages"] == [replayed]
+    assert result["reinstall_command"] == f'uv tool install --with {_quoted(replayed)} "agentic-hil@latest"'
+    assert "with_packages_not_replayed" not in result
+
+
+@pytest.mark.parametrize(
+    ("entry", "requirement", "receipt_key"),
+    [
+        pytest.param('{ name = "x", git = "https://example.invalid/x" }', "x", "git", id="a-git-source"),
+        pytest.param('{ name = "x", url = "https://example.invalid/x.whl" }', "x", "url", id="a-url-source"),
+        pytest.param('{ name = "x", editable = true }', "x", "editable", id="an-editable-source"),
+        pytest.param('{ name = "pytest\\" ; echo pwned #" }', 'pytest" ; echo pwned #', "name", id="a-name-that-is-not-a-name"),
+        pytest.param('{ name = "pytest", specifier = "; echo pwned" }', "pytest", "specifier", id="a-specifier-that-is-not-one"),
+        pytest.param('{ name = "pytest", marker = "$(echo pwned)" }', "pytest", "marker", id="a-marker-that-is-not-one"),
+        pytest.param('{ name = "pytest", extras = ["a b"] }', "pytest", "extras", id="an-extra-that-is-not-a-name"),
+    ],
+)
+def test_a_requirement_the_line_cannot_replay_is_named_rather_than_dropped(
+    entry: str,
+    requirement: str,
+    receipt_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two defects with one answer: the silent drop, and the unquoted interpolation.
+
+    A recorded requirement that a `--with` cannot spell without installing
+    something else is still left out of the line, which is right. What was wrong
+    is that nothing said so, under a summary promising the line rebuilds this
+    installation as it stands, so the operator lost the package by following the
+    remediation. And a value that is not a requirement at all used to reach the
+    line as it stood: a recorded name of `pytest" ; echo pwned #` rendered as
+    `uv tool install --with "pytest" ; echo pwned #" "agentic-hil@latest"`.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, f'[tool]\nrequirements = [{{ name = "agentic-hil" }}, {entry}]\n')
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil@latest"'
+    assert "--with" not in result["reinstall_command"]
+    assert "echo pwned" not in result["reinstall_command"]
+    assert result["with_packages_not_replayed"] == [{"requirement": requirement, "receipt_key": receipt_key}]
+    assert "with_packages" not in result
+    assert requirement in result["summary"] and f"recorded under `{receipt_key}`" in result["summary"]
 
 
 def test_no_receipt_is_read_for_an_installation_uv_tool_does_not_own(
@@ -1407,7 +1506,7 @@ def test_the_pin_note_carries_the_with_packages_the_same_line_replays(
     assert result["already_current"] is True
     assert "note rather than as a refusal" in result["summary"]
     assert result["with_packages"] == ["pytest==9.1.1"]
-    assert result["reinstall_command"] == 'uv tool install --with "pytest==9.1.1" "agentic-hil[can]@latest"'
+    assert result["reinstall_command"] == f'uv tool install --with {_quoted("pytest==9.1.1")} "agentic-hil[can]@latest"'
     assert "pytest==9.1.1" in result["summary"]
 
 
