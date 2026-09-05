@@ -184,6 +184,130 @@ def _upgrade_requirement() -> str:
     return f"agentic-hil[{','.join(extras)}]" if extras else "agentic-hil"
 
 
+# ---------------------------------------------------------------------------
+# What uv recorded for this installation, read out of uv's own receipt.
+#
+# `uv tool install` writes `uv-receipt.toml` inside the environment it creates,
+# and that file is the whole of what a reinstall has to reproduce: the root
+# requirement with its extras, every `--with` package the operator added beside
+# it, and the options the install was given. This project's own installer has
+# read it since the refresh path was written (`uv_recorded_requirements` in
+# install.sh), and this is the same read for the same reason: a reinstall line
+# built from the distribution alone silently uninstalls whatever the receipt
+# records next to it. A pinned bench that followed such a line lost the pytest
+# it had installed with `--with`, from a remediation that promised to keep the
+# installation whole.
+
+
+class _RecordedInstall(NamedTuple):
+    """The parts of uv's receipt a reinstall line has to carry forward.
+
+    `with_requirements` are the recorded requirements other than this
+    distribution, each already spelled as the PEP 508 string a `--with` takes.
+    `python` is the interpreter the install recorded, empty when it recorded
+    none. `options` is `[tool.options]` whole, because which of its keys matter
+    is the reader's question and not this one's.
+    """
+
+    with_requirements: tuple[str, ...]
+    python: str
+    options: JsonObject
+
+
+def _canonical_requirement_name(name: str) -> str:
+    """A distribution name in the one spelling two records can be compared in."""
+    return re.sub(r"[-_.]+", "-", name.strip()).casefold()
+
+
+def _uv_receipt() -> JsonObject | None:
+    """uv's own record of how this tool was installed, or None where there is none.
+
+    Only for a `uv tool` installation, because no other manager writes one, and
+    read out of the environment rather than out of `uv tool dir`: the receipt
+    sits beside the environment this interpreter is running from, so `sys.prefix`
+    names it without a manager having to be found, run or waited for.
+
+    Every failure answers None, which is the same answer as "this is not a uv
+    tool installation": a receipt that cannot be read is a reinstall line that
+    keeps what it can name and nothing more, never a refusal and never a guess.
+    """
+    if owning_manager() != "uv-tool":
+        return None
+    try:
+        text = (Path(sys.prefix) / "uv-receipt.toml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    try:
+        import tomllib  # type: ignore[import-not-found]
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10 reads it through tomli
+        try:
+            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+        except ModuleNotFoundError:
+            return None
+    try:
+        loaded = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _receipt_section(receipt: JsonObject | None, key: str) -> object:
+    """One member of the receipt, whether uv nested it under `[tool]` or not.
+
+    uv writes `requirements` and `options` inside `[tool]`, and both spellings
+    are accepted because the one thing a reader of somebody else's file must not
+    do is fail on a layout that still says what it says.
+    """
+    if not receipt:
+        return None
+    tool = receipt.get("tool")
+    if isinstance(tool, dict) and key in tool:
+        return tool[key]
+    return receipt.get(key)
+
+
+def _requirement_string(entry: JsonObject) -> str:
+    """One recorded requirement, back as the string a `--with` takes.
+
+    Empty for an entry this cannot spell as a plain name with extras and a
+    specifier: a git, url or path source rebuilds into something other than
+    what uv recorded, and a `--with` that changed the requirement would be a
+    different installation wearing the same line.
+    """
+    name = entry.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return ""
+    if any(key not in {"name", "extras", "specifier"} for key in entry):
+        return ""
+    extras = [item for item in entry.get("extras") or [] if isinstance(item, str) and item.strip()]
+    rendered = f"{name.strip()}[{','.join(sorted(extras))}]" if extras else name.strip()
+    specifier = entry.get("specifier")
+    return f"{rendered}{specifier.strip()}" if isinstance(specifier, str) and specifier.strip() else rendered
+
+
+def _recorded_install() -> _RecordedInstall:
+    """Everything the receipt says about this installation that a reinstall owes it."""
+    receipt = _uv_receipt()
+    recorded = _receipt_section(receipt, "requirements")
+    entries = [entry for entry in recorded if isinstance(entry, dict)] if isinstance(recorded, list) else []
+    beside = tuple(
+        rendered
+        for entry in entries
+        if _canonical_requirement_name(str(entry.get("name") or "")) != "agentic-hil" and (rendered := _requirement_string(entry))
+    )
+    section = _receipt_section(receipt, "options")
+    options: JsonObject = {str(key): value for key, value in section.items()} if isinstance(section, dict) else {}
+    python = options.get("python")
+    return _RecordedInstall(beside, python.strip() if isinstance(python, str) else "", options)
+
+
+def _named_series(items: list[str]) -> str:
+    """A list of things in the shape a sentence reads them in."""
+    if len(items) < 2:
+        return items[0] if items else ""
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
 # `uv tool upgrade` exits 0 when there was nothing it could do, and an exact
 # version pin in the requirement it recorded is one of the ways there is
 # nothing to do. It writes the reason on stderr in prose, so the pin is read
@@ -225,13 +349,51 @@ def _unpinned_reinstall_command(manager: str, command: list[str]) -> str | None:
     records a requirement literally, so a reader who follows that hint loses
     whatever `[can]` or `[pyocd]` brought in -- on a bench with a CAN adapter,
     silently.
+
+    The extras are not the only thing such a line drops, which is what
+    `_recorded_install` is here for. `uv tool install --with pytest` records
+    pytest in the receipt beside the root requirement, and a reinstall that
+    names only the root uninstalls it: measured on a pinned bench, where this
+    command's own remediation removed the pytest the operator had added and
+    then reported that it had kept the installation whole. So every recorded
+    requirement is replayed as its own `--with`, and a recorded interpreter as
+    `--python`, exactly as the one-line installer's refresh path replays them.
     """
     requirement = _upgrade_requirement()
     if manager == "pipx":
         return f'pipx install --force "{requirement}"'
     if command[1:3] == ["tool", "upgrade"]:
-        return f'uv tool install "{requirement}@latest"'
+        recorded = _recorded_install()
+        options = [f'--python "{recorded.python}"'] if recorded.python else []
+        options.extend(f'--with "{name}"' for name in recorded.with_requirements)
+        return f'uv tool install {"".join(f"{option} " for option in options)}"{requirement}@latest"'
     return None
+
+
+def _plain_line_would_remove(installed_extras: tuple[str, ...], recorded: _RecordedInstall) -> str:
+    """What uv's own hint would take off this installation, in words, or nothing.
+
+    The pin refusal already carried `reinstall_command` and `installed_extras`,
+    and an operator still ran the bare line uv prints beside them, because
+    nothing on the result said what running it costs. So the cost is stated:
+    which extras, which recorded packages, which interpreter, by name. Empty
+    where there is nothing to lose, so a plain installation is not handed a
+    warning about a difference it does not have.
+    """
+    losses: list[str] = []
+    if installed_extras:
+        named = ", ".join(f"[{extra}]" for extra in installed_extras)
+        losses.append(f"the {named} {'extra' if len(installed_extras) == 1 else 'extras'} and everything they installed")
+    if recorded.with_requirements:
+        losses.append(f"{', '.join(recorded.with_requirements)}, which uv's receipt records as installed alongside it")
+    if recorded.python:
+        losses.append(f"the interpreter {recorded.python} this installation was created with")
+    if not losses:
+        return ""
+    return (
+        "Do not run the bare `uv tool install \"agentic-hil@latest\"` that uv's own hint names: it records the "
+        f"distribution alone, so it removes {_named_series(losses)}."
+    )
 
 
 def _user_site_installation() -> bool:
@@ -1561,16 +1723,28 @@ def _upgrade_changed_nothing(
     }
     reinstall_command = _unpinned_reinstall_command(manager, command)
     if reinstall_command is not None and _manager_reports_exact_pin(install_result):
+        installed_extras = _installed_extras()
+        recorded = _recorded_install()
+        carried = ["the extras in `installed_extras`"]
+        if recorded.with_requirements:
+            carried.append("the packages in `with_packages` that uv's receipt records beside it")
+        if recorded.python:
+            carried.append("the interpreter in `recorded_python`")
+        loss = _plain_line_would_remove(installed_extras, recorded)
         return {
             **base,
             "error_type": "upgrade_blocked_by_pin",
             "summary": (
                 f"Agentic HIL was not upgraded: {manager} holds this installation at an exact version pin, so it is "
                 f"still {current_version}. Nothing was changed. `reinstall_command` is the line that clears the pin "
-                f"and keeps the installed extras; running it is the operator's decision."
+                f"and rebuilds this installation as it stands, with {_named_series(carried)}. "
+                + (f"{loss} " if loss else "")
+                + "Running it is the operator's decision."
             ),
             "pinned_version": _pinned_version(install_result) or current_version,
-            "installed_extras": list(_installed_extras()),
+            "installed_extras": list(installed_extras),
+            **({"with_packages": list(recorded.with_requirements)} if recorded.with_requirements else {}),
+            **({"recorded_python": recorded.python} if recorded.python else {}),
             "reinstall_command": reinstall_command,
             **remediation_fields("upgrade_blocked_by_pin"),
         }
