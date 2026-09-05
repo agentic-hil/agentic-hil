@@ -1177,6 +1177,29 @@ def test_a_recorded_option_still_holds_a_release_back_beside_a_floor(
     assert result["held_back_by"] == ["the recorded option `exclude-newer = 2026-09-01T00:00:00Z`"]
 
 
+def test_an_installation_above_the_index_is_not_told_it_is_on_the_release_below_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same sentence on the unpinned path, where the bench actually met it.
+
+    A bench carrying the chain wheel, 0.21.4.dev0, against an index at 0.21.3
+    read "0.21.3 is the newest release the index publishes, and this
+    installation is on it". It is not on it; it is a build above it, and the
+    number in the sentence is the one release the machine is certainly not
+    running.
+    """
+    _nothing_to_upgrade(monkeypatch)
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "0.0.1")
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["newest_release"] == "0.0.1"
+    assert f"ahead of it at {__version__}" in result["summary"]
+    assert "this installation is on it" not in result["summary"]
+
+
 def test_an_index_that_cannot_be_reached_takes_the_claim_away_rather_than_making_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1385,9 +1408,15 @@ def test_the_pin_note_is_withdrawn_when_the_index_publishes_a_newer_release(
     at the newest release from a pin below one, and the index publishes a release
     above the one installed. A receipt carrying `exclude-newer` is one thing that
     produces exactly that pair: uv resolves through the recorded option and finds
-    nothing whatever the pin says. The note keeps its exit code, because nothing
-    was withheld from a run that asked for it, and loses the currency claim,
-    because the release that is out there is newer than the one here.
+    nothing whatever the pin says. The note keeps `ok` and its exit code, because
+    nothing was withheld from a run that asked for it, and loses the currency
+    claim, because the release that is out there is newer than the one here.
+
+    What it used to do instead was route the note through the refusal that
+    answers the unpinned path: `ok: false`, a `Refused:` heading and exit 1 over
+    an outcome whose own summary said "reported here as a note rather than as a
+    refusal", with the account of `reinstall_command` and the do-not-run warning
+    printed twice apiece because the second sentence was appended to the first.
     """
     _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_EXCLUDE_NEWER)
     monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
@@ -1404,13 +1433,110 @@ def test_the_pin_note_is_withdrawn_when_the_index_publishes_a_newer_release(
     result = upgrade_installation([])
 
     assert "already_current" not in result
-    assert result["error_type"] == "upgrade_blocked_by_recorded_option"
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert entrypoint(["upgrade", "--json"]) == 0
     assert result["newest_release"] == "9.9.9"
     assert result["held_back_by"] == ["the recorded option `exclude-newer = 2026-09-01T00:00:00Z`"]
     # The pin is still on the result: it is what the manager said, and it is read
     # off the hint rather than dropped because another check spoke last.
     assert result["pinned_version"] == __version__
     assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    # And the withdrawal is stated where a person reads it.
+    assert "9.9.9" in result["summary"] and "not the newest release there is" in result["summary"]
+    assert "exclude-newer" in result["summary"]
+
+
+def test_the_withdrawn_pin_note_carries_every_sentence_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The summary was two summaries, one appended to the other.
+
+    The index judgement ran over a finished sentence, so the reader of a
+    withdrawn note met two accounts of what `reinstall_command` rebuilds and two
+    copies of the warning about uv's own bare hint, on one screen. It is composed
+    from parts now: each sentence appears once, whichever way the index answered.
+    """
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST + '\n[tool.options]\nexclude-newer = "2026-09-01T00:00:00Z"\n')
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "9.9.9")
+
+    summary = str(upgrade_installation([])["summary"])
+
+    assert summary.count("Do not run the bare") == 1
+    assert summary.count("rebuilds this installation as it stands") == 1
+    assert summary.count("Running it is the operator's decision.") == 1
+    assert summary.count("`reinstall_command`") == 1
+    assert "No restart is needed." in summary
+    assert summary.count("No restart is needed.") == 1
+
+
+def test_a_pin_note_above_the_index_says_it_is_ahead_and_not_that_it_is_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bench measurement: 0.21.4.dev0 installed, 0.21.3 published.
+
+    "0.21.3 is the newest release the index publishes, and this installation is
+    on it" was hard-coded in the not-behind branch and is true only where the two
+    numbers are equal. A development build is a build ahead of the index, not a
+    build on it, and every bench running the chain wheel read the wrong sentence.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._newest_released_version", lambda: "0.0.1")
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert result["already_current"] is True
+    assert result["newest_release"] == "0.0.1"
+    assert f"this installation is ahead of it at {__version__}" in result["summary"]
+    assert "this installation is on it" not in result["summary"]
+
+
+@pytest.mark.parametrize(
+    ("installed", "expected"),
+    [
+        pytest.param("0.21.4.dev0", "which is a development build of the release that follows it", id="a-development-build"),
+        pytest.param("0.22.0", "which is not a release this index publishes", id="a-release-this-index-never-had"),
+    ],
+)
+def test_the_sentence_above_the_index_names_what_the_installed_build_actually_is(
+    installed: str,
+    expected: str,
+) -> None:
+    """Above the index has two causes and neither of them is a guess."""
+    from agentic_hil.upgrade import _index_agrees_sentence, _NewestRelease
+
+    sentence = _index_agrees_sentence(_NewestRelease("0.21.3", False, True, (), ""), installed)
+
+    assert expected in sentence
+    assert "is on it" not in sentence
+
+
+def test_the_sentence_at_the_index_is_still_the_one_that_says_on_it() -> None:
+    """The third of the three, unchanged: the two numbers are the same one."""
+    from agentic_hil.upgrade import _index_agrees_sentence, _NewestRelease
+
+    assert _index_agrees_sentence(_NewestRelease("0.21.3", False, False, (), ""), "0.21.3") == (
+        "0.21.3 is the newest release the index publishes, and this installation is on it."
+    )
 
 
 def test_the_refused_pin_names_the_release_the_index_publishes_beside_it(

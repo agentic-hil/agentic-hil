@@ -1803,13 +1803,17 @@ class _NewestRelease(NamedTuple):
     `version` is empty when the index could not be read or answered something
     this cannot order, and that is the one state where `already_current` may not
     be claimed in either direction. `behind` says the index publishes a release
-    newer than the one installed. `holds` names what the receipt records that
-    keeps a resolution here, and `clearing_command` is the line that records the
+    newer than the one installed, and `ahead` says the installation is above
+    everything the index publishes, which is a development build or a wheel that
+    never went to this index; both false together is the one case where the two
+    numbers are equal. `holds` names what the receipt records that keeps a
+    resolution here, and `clearing_command` is the line that records the
     installation again without it, both empty when nothing recorded explains it.
     """
 
     version: str
     behind: bool
+    ahead: bool
     holds: tuple[str, ...]
     clearing_command: str
 
@@ -1841,12 +1845,34 @@ def _newest_release(manager: str, command: list[str], current_version: str) -> _
     installed_key = _release_ordering_key(current_version)
     newest_key = _release_ordering_key(newest) if newest is not None else None
     if newest is None or newest_key is None or installed_key is None:
-        return _NewestRelease("", False, (), "")
+        return _NewestRelease("", False, False, (), "")
     if newest_key <= installed_key:
-        return _NewestRelease(newest, False, (), "")
+        return _NewestRelease(newest, False, newest_key < installed_key, (), "")
     holds = _resolution_holds(_recorded_install())
     clearing = (_unpinned_reinstall_command(manager, command) or "") if holds else ""
-    return _NewestRelease(newest, True, holds, clearing)
+    return _NewestRelease(newest, True, False, holds, clearing)
+
+
+def _index_agrees_sentence(check: _NewestRelease, current_version: str) -> str:
+    """What the index publishes, against an installation that is not behind it.
+
+    Two states were written as one. "and this installation is on it" was
+    hard-coded in the not-behind branch and is true only where the two numbers
+    are equal; measured on a bench carrying a development build against an index
+    still on the release below it, it said the installation was on a release it
+    was a build ahead of. A build above the index is named as what it is, and the
+    third state, an index that publishes something newer, is the held-back branch
+    below.
+    """
+    if not check.ahead:
+        return f"{check.version} is the newest release the index publishes, and this installation is on it."
+    development = _RELEASE_NUMBER.match(current_version.strip())
+    what = (
+        "which is a development build of the release that follows it"
+        if development is not None and development.group("serial") is not None
+        else "which is not a release this index publishes"
+    )
+    return f"{check.version} is the newest release the index publishes, and this installation is ahead of it at {current_version}, {what}."
 
 
 def _judged_against_the_index(outcome: JsonObject, check: _NewestRelease, manager: str, current_version: str) -> JsonObject:
@@ -1855,8 +1881,15 @@ def _judged_against_the_index(outcome: JsonObject, check: _NewestRelease, manage
     Four ends, and `already_current` survives exactly one of them. The claim is
     a statement about the whole index and the manager only ever spoke about this
     installation's own recorded resolution, so it is made here or not at all.
-    Nothing on any of these paths refuses anything: the manager has already run
-    or has already been asked, and every one of these is a report.
+
+    The two unpinned outcomes come through here, and only the last end refuses:
+    an installation whose own receipt records something that demonstrably keeps
+    it below a release the index publishes is the one case where the operator
+    asked for a release and did not get it. The pinned path composes its own
+    summary rather than having this one appended to it, because the sentences it
+    would gain are sentences it already carries: the pin note printed
+    `reinstall_command`'s account and the do-not-run warning twice, and did it
+    under a `Refused:` heading with exit 1 over an outcome that withheld nothing.
     """
     summary = str(outcome.get("summary", "")).rstrip()
     if not check.version:
@@ -1868,7 +1901,7 @@ def _judged_against_the_index(outcome: JsonObject, check: _NewestRelease, manage
             ),
         }
     if not check.behind:
-        return {**outcome, "newest_release": check.version, "summary": f"{summary} {check.version} is the newest release the index publishes, and this installation is on it."}
+        return {**outcome, "newest_release": check.version, "summary": f"{summary} {_index_agrees_sentence(check, current_version)}"}
     installed_extras, recorded, shape = _installation_shape()
     if not check.holds:
         return {
@@ -2232,42 +2265,78 @@ def _upgrade_changed_nothing(
         # wants the next release picked up automatically still has to run that
         # line; what is not carried is the error type and the exit code, which
         # would say a wanted release was withheld when none was.
-        note: JsonObject = {
-            **base,
-            "ok": True,
-            "summary": (
-                f"Agentic HIL is already at {current_version}, which is the version this installation is pinned to, "
-                f"and {manager} resolved nothing newer to install. The pin holds no release back while it names the "
-                f"one that is installed, so it is reported here as a note rather than as a refusal. "
-                + f"{_restart_sentence(waiting)} "
-                + f"`reinstall_command` is the line that clears the pin and rebuilds this installation as it stands, "
-                f"with {_carried_by_the_reinstall(recorded)}, for whenever later releases are to be picked up without "
-                f"it. "
-                + (f"{loss} " if loss else "")
-                + "Running it is the operator's decision."
-            ),
-            "already_current": True,
-            **waiting,
-            # What the manager's hint named, which the guard above has just
-            # established is this version. Read off the hint rather than copied
-            # from `version`, so a wording this stops being able to read shows up
-            # as the refusal it falls to and never as a number invented here.
-            "pinned_version": _pinned_version(install_result),
-            **shape,
-            "reinstall_command": reinstall_command,
-            **currency_fields,
-        }
-        if check.behind:
+        #
+        # The summary is composed from parts rather than appended to, and that is
+        # the whole of what went wrong before: the index judgement was run over a
+        # finished sentence, so the note printed the account of `reinstall_command`
+        # twice and the do-not-run warning twice, and it printed them under a
+        # `Refused:` heading with exit 1 while still saying "reported here as a
+        # note rather than as a refusal. No restart is needed." Each sentence is
+        # named once here, and which of the index sentences it gets is the only
+        # thing the index decides.
+        withdrawn = check.behind
+        sentences = [
+            f"Agentic HIL is at {current_version}, which is the version this installation is pinned to, and "
+            f"{manager} resolved nothing newer to install.",
+            "The pin holds no release back while it names the one that is installed, so it is reported here as a "
+            "note rather than as a refusal.",
+        ]
+        if withdrawn:
             # The two answers disagree: the unpinned resolution moved nothing in
             # this environment and the index publishes a release above the one
             # installed. Whatever explains it -- a recorded `exclude-newer`, an
             # index of the installation's own that has not got the release yet --
-            # this is not the newest release there is, so the note keeps its exit
-            # code and loses the claim, and `held_back_by` names what the receipt
-            # records. An installation is never called current while either check
-            # says otherwise.
-            return _with_certificate_note(_judged_against_the_index(note, check, manager, current_version), currency_note)
-        return _with_certificate_note({**note, **newest_release}, currency_note)
+            # this is not the newest release there is, so the note keeps `ok` and
+            # its exit code, because nothing was withheld from a run that asked for
+            # it, and loses the currency claim, because the release that is out
+            # there is newer than the one here. `held_back_by` names what the
+            # receipt records. An installation is never called current while
+            # either check says otherwise.
+            sentences.append(
+                (
+                    f"The index publishes {check.version}, which is newer, so this is not the newest release there is: "
+                    f"this installation stays at {current_version} because its own receipt records "
+                    f"{_named_series(list(check.holds))}, which {manager} reports as nothing to do and offers no command "
+                    f"that clears."
+                )
+                if check.holds
+                else (
+                    f"The index publishes {check.version}, which is newer, and {manager} still resolves nothing for "
+                    f"this installation, so this is not the newest release. What a resolution reaches is the "
+                    f"installation's own: the index it is pointed at, and whether {check.version} accepts this "
+                    f"interpreter."
+                )
+            )
+        elif check.version:
+            sentences.append(_index_agrees_sentence(check, current_version))
+        sentences.append(_restart_sentence(waiting))
+        sentences.append(
+            f"`reinstall_command` is the line that clears the pin and rebuilds this installation as it stands, with "
+            f"{_carried_by_the_reinstall(recorded)}, for whenever later releases are to be picked up without it."
+        )
+        if loss:
+            sentences.append(loss)
+        sentences.append("Running it is the operator's decision.")
+        return _with_certificate_note(
+            {
+                **base,
+                "ok": True,
+                "summary": " ".join(sentences),
+                **({} if withdrawn else {"already_current": True}),
+                **waiting,
+                # What the manager's hint named, which the guard above has just
+                # established is this version. Read off the hint rather than copied
+                # from `version`, so a wording this stops being able to read shows up
+                # as the refusal it falls to and never as a number invented here.
+                "pinned_version": _pinned_version(install_result),
+                **shape,
+                "reinstall_command": reinstall_command,
+                **newest_release,
+                **({"held_back_by": list(check.holds)} if withdrawn and check.holds else {}),
+                **currency_fields,
+            },
+            currency_note,
+        )
     return _judged_against_the_index(
         {
             **base,
