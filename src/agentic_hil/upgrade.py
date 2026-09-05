@@ -196,6 +196,15 @@ def _upgrade_requirement() -> str:
 _EXACT_PIN_MARKERS = ("is pinned to", "exact version pin")
 _PINNED_AT = re.compile(r"pinned to [`'\"]?([0-9][^`'\"\s,;)]*)")
 
+# The other half of what the manager says about a run that moved nothing: that
+# its resolution against the index produced no candidate to install. Read out of
+# the same prose as the pin hint above, because `uv tool upgrade` publishes no
+# machine-readable report either. A wording that stops matching leaves the pin
+# reported as a block, which is where this started and is the safe direction to
+# fall: it names a pin that may be holding nothing back, rather than passing over
+# one that is.
+_NOTHING_TO_UPGRADE = "nothing to upgrade"
+
 
 def _manager_output(install_result: JsonObject) -> str:
     return " ".join(str(install_result.get(stream, "")) for stream in ("stdout", "stderr"))
@@ -209,6 +218,33 @@ def _manager_reports_exact_pin(install_result: JsonObject) -> bool:
 def _pinned_version(install_result: JsonObject) -> str | None:
     match = _PINNED_AT.search(_manager_output(install_result))
     return match.group(1) if match else None
+
+
+def _pin_holds_nothing_back(install_result: JsonObject, current_version: str) -> bool:
+    """Whether the recorded pin names the release that is already installed.
+
+    Two facts, both of them already in the answer this run got back: the manager
+    put the requirement to the index and came back with nothing to upgrade, and
+    the version its hint names is the version this installation is running. A pin
+    that names what is installed, on a resolution that found nothing to move to,
+    is a record of how the installation was made and not something standing
+    between the operator and a release.
+
+    Reporting that as `upgrade_blocked_by_pin` with exit 1 was the defect: on a
+    machine pinned to the current release, `agentic-hil upgrade` refused every
+    time and a provisioning script that runs it read a failure over an
+    installation that was exactly where it should be (#450). What is left for the
+    refusal is a pin that does hold a release back: one the manager names beside
+    a resolution that did produce something, or one recorded at a version other
+    than the installed one, and those keep the reinstall line they always had.
+
+    A hint whose version this cannot read falls to the refusal as well. Saying
+    "the pin names the installed release" needs the pin's version, and inventing
+    it from the installed one would make the claim true by construction.
+    """
+    if _NOTHING_TO_UPGRADE not in _manager_output(install_result).lower():
+        return False
+    return _pinned_version(install_result) == current_version
 
 
 def _unpinned_reinstall_command(manager: str, command: list[str]) -> str | None:
@@ -1527,28 +1563,32 @@ def _upgrade_changed_nothing(
     current_version: str,
     install_result: JsonObject,
 ) -> JsonObject:
-    """The two outcomes a package manager reports with the same exit code as success.
+    """The outcomes a package manager reports with the same exit code as success.
 
     `uv tool upgrade` returns 0 for "upgraded" and for "nothing to do" alike, so
     the return code cannot tell them apart and the version can: this is reached
-    only when the installation still runs the version it ran before. Both
-    answers here are `ok: false` with `restart_required: false`, because there is
-    nothing new to load -- the reported defect was the opposite pair, which sent
-    an operator to a restart that reloaded the same release and left them
-    believing they had moved.
+    only when the installation still runs the version it ran before. Every answer
+    here has `restart_required: false`, because there is nothing new to load --
+    the reported defect was the opposite pair, which sent an operator to a
+    restart that reloaded the same release and left them believing they had
+    moved.
 
-    Which of the two it is matters, because the next step differs: an
-    installation that is already current needs nothing, while one held at an
-    exact pin needs a reinstall the operator has to decide on and run.
+    Which outcome it is matters, because the next step differs: an installation
+    that is already current needs nothing, and one held at a pin below a release
+    it could be running needs a reinstall the operator has to decide on and run.
+    An installation pinned to the release it is already on is the first of those
+    and reads like the second, so it is told apart from both: exit 0, and the pin
+    reported as the note it is.
     """
     base: JsonObject = {
         # Set per branch below: an installation that is already current is a
-        # success (nothing to do and nothing wrong), while one held at a pin is
-        # not, because the operator wanted a newer release and did not get it.
-        # Refusing both would make `agentic-hil upgrade` exit non-zero on every
-        # up-to-date machine, which breaks the provisioning scripts that run it
-        # unconditionally. The defect was claiming an upgrade that never
-        # happened, not reporting that there was none to make.
+        # success (nothing to do and nothing wrong), while one held at a pin below
+        # a release it could be running is not, because the operator wanted that
+        # release and did not get it. Refusing every pin made `agentic-hil
+        # upgrade` exit non-zero on a machine that was exactly current, which
+        # breaks the provisioning scripts that run it unconditionally. The defect
+        # was claiming an upgrade that never happened, not reporting that there
+        # was none to make.
         "ok": False,
         "tool": tool,
         "manager": manager,
@@ -1560,7 +1600,8 @@ def _upgrade_changed_nothing(
         "restart_required": False,
     }
     reinstall_command = _unpinned_reinstall_command(manager, command)
-    if reinstall_command is not None and _manager_reports_exact_pin(install_result):
+    pinned = reinstall_command is not None and _manager_reports_exact_pin(install_result)
+    if pinned and not _pin_holds_nothing_back(install_result, current_version):
         return {
             **base,
             "error_type": "upgrade_blocked_by_pin",
@@ -1573,6 +1614,31 @@ def _upgrade_changed_nothing(
             "installed_extras": list(_installed_extras()),
             "reinstall_command": reinstall_command,
             **remediation_fields("upgrade_blocked_by_pin"),
+        }
+    if pinned:
+        # Current, and pinned to the release it is current at. Everything the
+        # refusal above carried is carried here too, because an operator who
+        # wants the next release picked up automatically still has to run that
+        # line; what is not carried is the error type and the exit code, which
+        # would say a wanted release was withheld when none was.
+        return {
+            **base,
+            "ok": True,
+            "summary": (
+                f"Agentic HIL is already at {current_version}, which is the version this installation is pinned to, "
+                f"and {manager} resolved nothing newer to install. The pin holds no release back while it names the "
+                f"one that is installed, so it is reported here as a note rather than as a refusal. No restart is "
+                f"needed. `reinstall_command` is the line that clears the pin and keeps the installed extras, for "
+                f"whenever later releases are to be picked up without it; running it is the operator's decision."
+            ),
+            "already_current": True,
+            # What the manager's hint named, which the guard above has just
+            # established is this version. Read off the hint rather than copied
+            # from `version`, so a wording this stops being able to read shows up
+            # as the refusal it falls to and never as a number invented here.
+            "pinned_version": _pinned_version(install_result),
+            "installed_extras": list(_installed_extras()),
+            "reinstall_command": reinstall_command,
         }
     return {
         **base,

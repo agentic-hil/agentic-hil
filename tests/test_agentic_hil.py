@@ -807,6 +807,153 @@ def test_upgrade_that_finds_nothing_newer_succeeds_without_asking_for_a_restart(
     assert not any("skill-install" in call for call in calls)
 
 
+# The pair uv actually prints on an installation pinned to the release it is
+# already running: the resolution came back with nothing, and the hint names the
+# pin at the version that is installed. Both halves reach this code, and it took
+# only the second one.
+_UV_PIN_AT_CURRENT_HINT = (
+    f"hint: `agentic-hil` is pinned to `{__version__}` (installed with an exact version pin); "
+    "reinstall with `uv tool install agentic-hil@latest` to upgrade to a new version."
+)
+
+
+def test_a_pin_at_the_release_that_is_installed_is_a_note_and_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pin holding nothing back is not a blocked upgrade (#450).
+
+    The reported run: an installation pinned to the current release answered
+    `Refused: upgrade_blocked_by_pin` and exit 1, with `previous_version`,
+    `version` and `pinned_version` all the same number and uv's own `Nothing to
+    upgrade` nested inside it. The outcome was that the installation is current,
+    and a script running `agentic-hil upgrade` unconditionally read a failure.
+
+    The pin still reaches the operator, because somebody who wants later releases
+    picked up automatically has to clear it: same `pinned_version`, same
+    `reinstall_command`, same extras. What goes is the error type and the exit
+    code, which claimed a release was being withheld when none was.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    calls = _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert result["already_current"] is True
+    assert result["restart_required"] is False
+    assert result["version"] == __version__
+    # The pin is carried, and named as a note rather than as a block.
+    assert result["pinned_version"] == __version__
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert result["installed_extras"] == ["can"]
+    assert "note rather than as a refusal" in result["summary"]
+    # Nothing was replaced, so nothing is refreshed out of it.
+    assert not any("skill-install" in call for call in calls)
+
+
+def test_the_pinned_installation_that_exits_zero_exits_zero_at_the_command_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The half the reporter's script reads: the status, not the document."""
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+    )
+
+    assert entrypoint(["upgrade", "--json"]) == 0
+
+
+def test_a_pin_below_a_release_the_index_offers_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal, reserved for the pin that costs the operator something.
+
+    Same hint, and it names a version other than the one installed, so the pin is
+    not a record of where this installation is: it is what is keeping it there.
+    That is the case `upgrade_blocked_by_pin` was written for and it keeps the
+    error type, the exit code and the reinstall line.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["pinned_version"] == "0.7.1"
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert entrypoint(["upgrade", "--json"]) == 1
+
+
+def test_a_pin_the_manager_did_not_resolve_against_the_index_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both halves are needed, and the resolution is the one that carries weight.
+
+    The pin naming the installed version says where the installation is; it does
+    not say that nothing newer exists. What says that is the manager putting the
+    requirement to the index and coming back with nothing to upgrade. Without
+    that line in its output this run knows only that a pin is recorded, which is
+    the refusal's own case.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_PIN_AT_CURRENT_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["pinned_version"] == __version__
+
+
+def test_a_pin_whose_version_cannot_be_read_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saying the pin names the installed release needs the pin's version.
+
+    A hint whose wording this cannot parse leaves that unanswerable, and inventing
+    the number from the installed one would make the claim true whatever the pin
+    says. So an unreadable pin falls to the refusal, which is where it fell
+    before.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", tuple)
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", "hint: this tool was installed with an exact version pin."),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation(["opencode"])
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+
+
 # ---------------------------------------------------------------------------
 # Already current, decided before anything can be replaced.
 #
