@@ -25,7 +25,11 @@ import shutil
 import textwrap
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
-from agentic_hil.knowledge import command_line_remediation, remediation_fields
+from agentic_hil.knowledge import (
+    READ_VALIDATION_NEXT_STEP,
+    command_line_remediation,
+    remediation_fields,
+)
 from agentic_hil.report import conclusive_success
 from agentic_hil.types import JsonObject
 
@@ -99,6 +103,7 @@ def write_rendered(stream: object, text: str) -> None:
 
 def _render_lines(result: JsonObject, command: str | None) -> list[str]:
     result = _audit_errors_where_they_happened(result)
+    result = _one_error_type_answered_once(result)
     if _error_type(result):
         # A refusal is rendered the same way for every command: the error type
         # names it, the summary says what happened, and the catalogue says what
@@ -271,6 +276,31 @@ def _audit_errors_where_they_happened(result: JsonObject) -> JsonObject:
         return result
     elsewhere = {key: value for key, value in result.items() if key not in _AUDIT_ERROR_KEYS}
     return elsewhere if all(_holds(elsewhere, error) for error in errors) else result
+
+
+def _one_error_type_answered_once(result: JsonObject) -> JsonObject:
+    """Drop a nested finding's error type where it is the enclosing refusal's own.
+
+    A refused test plan carries the reason twice by design: `error_type` at the
+    top and the finding's own `error_type` inside `validation_error`, so a
+    caller reading either field gets one answer. Both derive their advice from
+    the same catalogue entry, so a rendering that asked twice printed the
+    identical numbered list and the identical `do_not` block one under the
+    other, which is the #387 defect in a second place.
+
+    Only a copy is dropped, and only the one furthest from what explains it: the
+    headline already names the type, `step_error_type` repeats it in the rows,
+    and a nested finding whose type differs from the enclosing refusal's is a
+    second fact and keeps its own advice. Nothing is taken out of the document,
+    which is rendered from a copy.
+    """
+    error_type = _error_type(result)
+    nested = result.get("validation_error")
+    if not error_type or not isinstance(nested, Mapping) or nested.get("error_type") != error_type:
+        return result
+    if _strings(nested.get("remediation")) or _strings(nested.get("do_not")):
+        return result
+    return {**result, "validation_error": {key: value for key, value in nested.items() if key != "error_type"}}
 
 
 def _holds(node: object, needle: JsonObject) -> bool:
@@ -508,10 +538,33 @@ def render_refusal(result: JsonObject, command: str | None = None) -> list[str]:
         lines.extend(_wrap(meaning, indent=_INDENT))
     lines.extend(_section("Details", _refusal_details(result)))
     steps, avoid = _remediation(result, command_line=command is not None)
+    steps = _without_absent_pointers(result, steps)
     lines.extend(_section("What to do", _numbered(steps)))
     lines.extend(_section("Do not", _bullets(avoid)))
     lines.extend(_tail(result))
     return lines
+
+
+def _without_absent_pointers(result: JsonObject, steps: Sequence[str]) -> list[str]:
+    """Drop advice that points at a field this refusal does not carry.
+
+    One step, exactly: `test_config_invalid` opens by sending the reader to
+    `validation_error.next_step`, which is the right first move for the refusal
+    that has one and an instruction to read nothing for the refusal that has
+    not. A plan refused for a session it never opened carries no such field, and
+    the line printed all the same.
+
+    This is the one thing a renderer may take out of a refusal, and it is not a
+    change to what the refusal says: the step is a pointer at a field, and the
+    field is not there. Everything else the catalogue writes is printed as
+    written, which is why the sentence is matched against the catalogue's own
+    constant rather than against a copy kept here.
+    """
+    validation_error = result.get("validation_error")
+    pointed_at = validation_error.get("next_step") if isinstance(validation_error, Mapping) else None
+    if isinstance(pointed_at, str) and pointed_at.strip():
+        return list(steps)
+    return [step for step in steps if step != READ_VALIDATION_NEXT_STEP]
 
 
 def _refusal_details(result: JsonObject) -> list[str]:
@@ -642,13 +695,25 @@ def _result_lines(value: Mapping[str, object], indent: str = _INDENT) -> list[st
 
 
 def _result_body(value: Mapping[str, object], indent: str) -> list[str]:
-    """Everything a nested result carries under its own opening sentence."""
+    """Everything a nested result carries under its own opening sentence.
+
+    Its `next_step` included, which is where the specific answer lives. A plan
+    refused for naming a COM port this bench does not have carries the exact
+    `agentic-hil adopt-hardware` line under `validation_error.next_step`, and
+    the rendering printed every other field of that object and dropped that one,
+    while the advice above it opened by telling the reader to go and read it
+    (#446). `_tail` prints the same field at the top level; this is the same
+    rule one level in, and it stands under the facts for the same reason.
+    """
     error_type = _error_type(value)
     lines = _fields([("error_type", error_type)], indent=indent) if error_type else []
     rows, bodies = _members({key: item for key, item in value.items() if key not in _HANDLED_EVERYWHERE})
     lines.extend(_fields(rows, indent=indent))
     for key, item in bodies:
         lines.extend(_member_lines(key, item, indent))
+    next_step = value.get("next_step")
+    if isinstance(next_step, str) and next_step.strip():
+        lines.extend(_wrap(next_step, indent=indent))
     if error_type:
         steps, avoid = _remediation(dict(value))
         lines.extend(_numbered(steps, indent=indent + _INDENT))

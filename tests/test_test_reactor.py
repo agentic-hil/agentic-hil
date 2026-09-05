@@ -2558,6 +2558,30 @@ def test_a_permission_that_blocks_by_being_granted_is_not_answered_with_a_grant(
     assert f"agentic-hil grant {key}" not in next_step
 
 
+def test_the_grant_line_a_refused_plan_carries_reaches_the_screen(tmp_path: Path) -> None:
+    """#446 over #443, end to end: the document and the rendering agree.
+
+    The battery run's operator saw `Target reset is disabled for this debugger
+    by the authoritative config.` and, under it, advice to read a field the
+    rendering did not print. The key and the line that opens it are in the
+    refusal now, and the rendering is where the operator meets them.
+    """
+    from agentic_hil.humanize import render_result
+
+    config = load_config(str(write_config(tmp_path, permissions={**DEFAULT_TEST_PERMISSIONS, "allow_reset": False})))
+    plan_path = write_test_config(tmp_path, "version: 2\nsteps:\n  - {debugger: dut, action: reset}\n")
+
+    result = TestReactor(config, RecordingService()).run(load_test_config(str(plan_path), str(tmp_path)))  # type: ignore[arg-type]
+    on_screen = " ".join(render_result(result, "test-reactor").split())
+
+    assert "Refused: permission_denied" in on_screen
+    assert "debuggers.dut.permissions.allow_reset" in on_screen
+    assert "agentic-hil grant debuggers.dut.permissions.allow_reset" in on_screen
+    # The validation error's own next step, which only it carries: the
+    # rendering printed every other member of that object and dropped this one.
+    assert "This refusal is the answer to the request." in on_screen
+
+
 def test_reset_step_is_refused_while_a_debug_session_is_open(tmp_path: Path) -> None:
     # `reset_target` is a one-shot and cannot take the lease a live debug session
     # holds, so this plan could only ever come back busy half way through.

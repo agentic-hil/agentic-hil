@@ -416,6 +416,121 @@ def test_a_refusal_carrying_a_list_of_its_own_is_printed_in_the_order_it_carries
     assert "project_config_create" not in out
 
 
+def _plan_refusal(validation_error: dict) -> dict:
+    """A plan refusal shaped the way the reactor builds one."""
+    from agentic_hil.knowledge import remediation_fields
+
+    return {
+        "ok": False,
+        "tool": "test_reactor",
+        "name": "nominal",
+        "error_type": "test_config_invalid",
+        "summary": "Test reactor configuration failed semantic validation; no steps were executed.",
+        "validation_error": validation_error,
+        "failed_step": validation_error.get("step"),
+        "steps": [],
+        **remediation_fields("test_config_invalid"),
+    }
+
+
+def test_the_specific_next_step_a_plan_refusal_carries_is_printed() -> None:
+    """#446: the advice said to read a field the rendering never printed.
+
+    Every reactor refusal opened with "Read next_step inside validation_error
+    first", and the rendering printed every other member of that object and
+    dropped that one. The one line naming the command that fixes this exact
+    plan was in the document and nowhere on the screen.
+    """
+    specific = "Add the port with `agentic-hil adopt-hardware --debugger dut --com-port dut_uart2`."
+    out = _reflowed(_rendered(
+        _plan_refusal({
+            "step": 3,
+            "field": "steps[2].port_id",
+            "summary": "Test step references a COM port that is not configured.",
+            "configured_com_ports": ["dut_uart"],
+            "next_step": specific,
+        }),
+        "test-reactor",
+    ))
+
+    assert specific in out
+    # And the pointer above it still stands, because the field it points at is
+    # there to be read.
+    assert "Read `next_step` inside `validation_error` first." in out
+
+
+def test_the_pointer_is_silent_when_there_is_no_field_to_point_at() -> None:
+    """#446, the other half: advice to read a field that does not exist.
+
+    A plan refused for a session it never opened carries no
+    `validation_error.next_step`, and the line telling the reader to read it
+    first printed all the same, as instruction number one.
+    """
+    out = _reflowed(_rendered(
+        _plan_refusal({
+            "step": 2,
+            "field": "steps[1].action",
+            "summary": "COM port session must be opened before this action.",
+        }),
+        "test-reactor",
+    ))
+
+    assert "Read `next_step` inside `validation_error` first." not in out
+    # Nothing else moves: the rest of the entry is printed as the catalogue
+    # writes it, and the numbering starts at the first step that is left.
+    assert "1. A step naming a device the configuration does not declare" in out
+    assert "COM port session must be opened before this action." in out
+
+
+def test_the_advice_a_plan_refusal_derives_twice_is_printed_once() -> None:
+    """#387's rule, in the second place a document names one reason twice.
+
+    A refused plan carries `error_type` at the top and the finding's own
+    `error_type` inside `validation_error`, so a caller reading either field
+    gets one answer. Both resolve to the same catalogue entry, and printing both
+    put the identical numbered list and the identical do_not block one under the
+    other. The nested facts still print; only the second copy of the advice goes.
+    """
+    refusal = _plan_refusal({
+        "step": 1,
+        "field": "steps[0].action",
+        "action": "reset",
+        "summary": "Target reset is disabled for this debugger by the authoritative config.",
+        "error_type": "test_config_invalid",
+    })
+
+    out = _rendered(refusal, "test-reactor")
+
+    first = _reflowed(out).count("A step naming a device the configuration does not declare")
+    assert first == 1, out
+    assert out.count("Do not raise the plan's `version:` to reach a step it refuses.") == 1, out
+    # The finding's own facts are untouched.
+    assert "steps[0].action" in out
+    assert "Target reset is disabled for this debugger by the authoritative config." in out
+
+
+def test_a_nested_finding_with_a_reason_of_its_own_keeps_its_own_advice() -> None:
+    """The other side: a second error type is a second fact, not a copy.
+
+    Only the duplicate goes. A finding whose type differs from the enclosing
+    refusal's explains something the headline does not, and dropping its advice
+    would lose the answer to it.
+    """
+    refusal = _plan_refusal({
+        "step": 1,
+        "field": "steps[0].wait_timeout_s",
+        "summary": "Name one of the two deadlines.",
+        "error_type": "invalid_argument",
+    })
+
+    out = _reflowed(_rendered(refusal, "test-reactor"))
+
+    assert "invalid_argument" in out
+    # Both entries reach the screen: the plan refusal's and the finding's.
+    assert "A step naming a device the configuration does not declare" in out
+    assert "Read `field` and `validator` together" in out
+
+
 def test_a_permission_refusal_prints_the_key_and_the_line_that_opens_it() -> None:
     """#443: a refusal an operator can act on without opening the file.
 

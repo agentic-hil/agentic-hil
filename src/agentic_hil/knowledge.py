@@ -529,6 +529,18 @@ _CONFIG_MISSING_REPORT_AND_ASK = (
     "missing."
 )
 
+# The one remediation step that is a pointer rather than an instruction. It is
+# worth its place only where the field it points at exists, and a plan refusal
+# that carries no `validation_error.next_step` printed it anyway, telling the
+# reader to read a field that was not there (#446). Named here so the rendering
+# can recognise the entry's own sentence rather than a copy of it: a renderer
+# matching a string it keeps itself would go quiet the day somebody reworded
+# this one, which is the failure nobody would notice.
+READ_VALIDATION_NEXT_STEP = (
+    "Read `next_step` inside `validation_error` first. It names the key that is wrong and the command or the "
+    "configuration field that fixes it; the steps below are the general form of the same three answers."
+)
+
 # Keys are "<error_type>" or "<error_type>:<scope>", where scope is the config
 # field the error names or the debugger backend that raised it. Lookup falls back
 # from the scoped key to the bare one, so a scope nobody wrote an entry for still
@@ -1379,8 +1391,7 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "as over MCP. Nothing here applies to one, and the regeneration named below least of all."
         ),
         remediation=(
-            "Read `next_step` inside `validation_error` first. It names the key that is wrong and the command or the "
-            "configuration field that fixes it; the steps below are the general form of the same three answers.",
+            READ_VALIDATION_NEXT_STEP,
             "A step naming a device the configuration does not declare is corrected in the plan: `device:` has to be "
             "one of the names the refusal lists under the `configured_*` key for that kind.",
             "A declared entry with no hardware behind it is filled in rather than argued with. With the board "
