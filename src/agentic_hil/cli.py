@@ -674,7 +674,20 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     extras_warning = None
     with suppress(ConfigError, OSError):
         extras_warning = missing_configured_extras(load_cli_authoritative_config(None))
-    summary = f"Agentic HIL upgraded from {previous_version} to {current_version}; restart agent hosts to load the new MCP server."
+    # Which hosts have this server registered, read off the refresh that has just
+    # looked at every one of them. A host with the registration starts a server
+    # out of the launcher this upgrade resolved, so it is the second half of the
+    # restart question; the first half is `restart_required` off the manager,
+    # which names the servers running right now. A machine with neither is asked
+    # to restart nothing, which is what the generic sentence used to do to it.
+    registered = [entry["agent"] for entry in refreshed if entry.get("registration") is True]
+    restart_required = bool(result.get("restart_required")) or bool(registered)
+    summary = f"Agentic HIL upgraded from {previous_version} to {current_version} on disk."
+    notice = result.get("restart_notice")
+    if isinstance(notice, str) and notice:
+        summary += f" {notice}"
+    elif restart_required:
+        summary += " Restart agent hosts to load the new MCP server."
     if rewritten:
         # An agent host reads its MCP registration at startup, so the agent
         # whose entry moved is the one that has to be restarted before it uses
@@ -700,6 +713,7 @@ def upgrade_installation(agents: list[str] | None = None) -> JsonObject:
     return {
         **result,
         **({"extras_warning": extras_warning} if extras_warning is not None else {}),
+        "restart_required": restart_required,
         "summary": summary,
         "refreshed": refreshed,
     }

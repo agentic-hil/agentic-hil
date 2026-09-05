@@ -936,7 +936,7 @@ def test_the_command_line_rewrites_the_summary_and_keeps_the_certificate_sentenc
     assert result["upgraded_on_disk"] is True
     # The command's own sentence still comes first and is unchanged; the
     # certificate clause is appended to it rather than replacing anything.
-    assert result["summary"].startswith(f"Agentic HIL upgraded from {__version__} to 9.9.9; restart agent hosts to load the new MCP server.")
+    assert result["summary"].startswith(f"Agentic HIL upgraded from {__version__} to 9.9.9 on disk.")
     assert result["summary"].endswith(result["certificates"])
     # And it is on the screen, above the step that would otherwise be advice
     # with no reason attached to it.
