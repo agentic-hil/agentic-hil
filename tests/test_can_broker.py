@@ -1473,6 +1473,34 @@ def test_a_second_session_on_a_shared_bus_is_refused_and_told_why(tmp_path: Path
         first.close()
 
 
+def test_a_second_session_on_a_single_owner_bus_is_refused_without_the_sharing_note(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour: the same refusal on a bus that declares no shares carries
+    none of the sharing vocabulary, because there is nothing shareable to be
+    truthful about. Same fake bridge, same two services, no `shares:`."""
+    from agentic_hil.config import load_authoritative_config
+
+    workspace = tmp_path / "project"
+    single_owner_yaml = shared_bus_yaml().split("    shares:\n")[0]
+    write_authoritative_config(workspace, monkeypatch, can_buses_yaml=single_owner_yaml)
+    config = load_authoritative_config(workspace)
+    assert not config.can_buses["bench"].shares
+    first = CanBusService(config)
+    second = CanBusService(config)
+    try:
+        opened = first.session_start("bench")
+        assert opened["ok"] is True, opened
+
+        refused = second.session_start("bench")
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_busy", refused
+        for key in ("shares_declared", "session_takes_whole_bus", "sharing_note"):
+            assert key not in refused, key
+    finally:
+        second.close()
+        first.close()
+
+
 def test_a_participant_argument_is_refused_by_the_schema_until_sharing_lands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The design document plans a participant vocabulary for `can_session_start`
     (Phase 2). An agent that read it and passes `participant` today is told the
