@@ -153,6 +153,13 @@ def start_stdin_reader(input_stream: BinaryIO) -> StdinReader:
                         continue
                     data = os.read(descriptor, STDIN_CHUNK_BYTES)
                 elif descriptor is not None:
+                    # The same poll on Windows, where `select` takes sockets
+                    # only. The read below is entered when the poll says a
+                    # byte or an EOF is there to collect, so a shutdown is
+                    # observed within the poll interval rather than when the
+                    # operator presses Enter or the pipe closes (#487).
+                    if not windows_stdin_ready(descriptor, STDIN_POLL_TIMEOUT_S):
+                        continue
                     data = os.read(descriptor, STDIN_CHUNK_BYTES)
                 else:
                     data = input_stream.read1(STDIN_CHUNK_BYTES) if hasattr(input_stream, "read1") else input_stream.read(STDIN_CHUNK_BYTES)
@@ -187,7 +194,18 @@ def stop_stdin_reader(reader: StdinReader, timeout_s: float) -> list[BaseExcepti
     reader.thread.join(timeout=min(0.05, timeout_s))
     if reader.thread.is_alive():
         try:
-            if reader.owns_fd:
+            if reader.owns_fd and os.name == "nt":
+                # Not the close. On Windows the C runtime serialises every call
+                # on a descriptor, so closing one under a read waits for that
+                # read to return, and the command that came here to end hung
+                # until the operator pressed Enter or the pipe closed (#487).
+                # The reader polls, so it is in a read only while something is
+                # there to collect or a console line is being typed; that read
+                # is cancelled here, and the reader closes its own descriptor
+                # as it unwinds. A read that cannot be cancelled is reported
+                # below as a thread that remained, never waited on.
+                cancel_windows_synchronous_io(reader.thread)
+            elif reader.owns_fd:
                 # The reader closes its own dup'd descriptor as it unwinds, so an
                 # already emptied slot here means the read is ending on its own,
                 # not that the stream was borrowed without a way to cancel it.
@@ -203,6 +221,82 @@ def stop_stdin_reader(reader: StdinReader, timeout_s: float) -> list[BaseExcepti
     if reader.thread.is_alive():
         errors.append(RuntimeError("COM stdio stdin reader remained blocked during shutdown."))
     return errors
+
+
+# GetFileType's answers for the handles a stdin can be, and the two answers
+# WaitForSingleObject gives that mean "not yet".
+_FILE_TYPE_CHAR = 0x0002
+_FILE_TYPE_PIPE = 0x0003
+_WAIT_TIMEOUT = 0x00000102
+_THREAD_TERMINATE = 0x0001
+
+
+def windows_stdin_ready(descriptor: int, timeout_s: float) -> bool:
+    """Whether a read on `descriptor` returns now, having waited at most `timeout_s`.
+
+    The Windows half of the reader's poll. POSIX asks `select`, which answers
+    for every kind of descriptor; Windows answers per kind. A pipe, which is
+    what a parent process or a shell redirection hands the bridge, is asked
+    with `PeekNamedPipe` how many bytes wait in it: nothing yet is a short
+    sleep and "not ready", a broken pipe is "ready" because the read that
+    follows returns the EOF the closed writer means. A character device, the
+    console, is waited on with `WaitForSingleObject`, which the console signals
+    when input records are there to read. Anything else is a file, and a read
+    of a file never blocks.
+    """
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    handle = wintypes.HANDLE(msvcrt.get_osfhandle(descriptor))
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel32.GetFileType.restype = wintypes.DWORD
+    file_type = kernel32.GetFileType(handle)
+    if file_type == _FILE_TYPE_PIPE:
+        kernel32.PeekNamedPipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)]
+        kernel32.PeekNamedPipe.restype = wintypes.BOOL
+        available = wintypes.DWORD(0)
+        if not kernel32.PeekNamedPipe(handle, None, 0, None, ctypes.byref(available), None) or available.value:
+            return True
+        time.sleep(timeout_s)
+        return False
+    if file_type == _FILE_TYPE_CHAR:
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        return kernel32.WaitForSingleObject(handle, int(timeout_s * 1000)) != _WAIT_TIMEOUT
+    return True
+
+
+def cancel_windows_synchronous_io(thread: threading.Thread) -> None:
+    """End the read `thread` is in, if it is in one, without touching its descriptor.
+
+    `CancelSynchronousIo` marks the pending synchronous I/O of one thread as
+    cancelled, and the read returns to the reader as an error it treats as its
+    end. Nothing is reported from here: a thread that was not in a read has
+    nothing to cancel and ends on the next poll, and one whose read could not
+    be cancelled is the thread the caller goes on to wait for and to report.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    native_id = thread.native_id
+    if native_id is None:
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenThread.restype = wintypes.HANDLE
+    kernel32.CancelSynchronousIo.argtypes = [wintypes.HANDLE]
+    kernel32.CancelSynchronousIo.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenThread(_THREAD_TERMINATE, False, native_id)
+    if not handle:
+        return
+    try:
+        kernel32.CancelSynchronousIo(handle)
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def close_owned_stdin_fd(owned_fd: list[int | None], lock: threading.Lock) -> None:

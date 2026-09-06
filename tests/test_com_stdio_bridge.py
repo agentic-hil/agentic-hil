@@ -332,6 +332,40 @@ def test_stdin_reader_stops_without_external_input_on_windows() -> None:
             os.close(read_fd)
 
 
+@pytest.mark.skipif(not WINDOWS, reason="the Windows reader branch; the POSIX poll is pinned in test_hardening")
+def test_stdin_reader_stop_ends_a_read_already_in_flight_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reader caught inside the read, not at the poll, is cancelled rather than waited for.
+
+    The poll keeps the reader out of `os.read` while nothing is there, so the
+    stop normally finds it between polls. The console can put it inside one
+    anyway: a key pressed without Enter signals the handle, the read starts
+    and returns only with the line. That read is forced here by a poll that
+    always says "ready" on a pipe nobody writes to, and the stop has to end it
+    without closing the descriptor under it, which is the wait #487 measured.
+    """
+    monkeypatch.setattr(comstdio, "windows_stdin_ready", lambda descriptor, timeout_s: True)
+    read_fd, write_fd = os.pipe()
+    reader = comstdio.start_stdin_reader(PipeStdin(read_fd))
+    try:
+        # Give the reader time to take its poll's word and enter the read.
+        time.sleep(0.2)
+        assert reader.thread.is_alive()
+        started = time.monotonic()
+        errors = comstdio.stop_stdin_reader(reader, 0.5)
+        elapsed = time.monotonic() - started
+
+        assert errors == [], errors
+        assert not reader.thread.is_alive()
+        assert elapsed < SHUTDOWN_CEILING_S, f"stop_stdin_reader waited {elapsed:.2f} s on a read in flight"
+        assert reader.owned_fd[0] is None, "the reader did not close its own descriptor on the way out"
+    finally:
+        with suppress(OSError):
+            os.close(write_fd)
+        reader.thread.join(timeout=WAIT_TIMEOUT_S)
+        with suppress(OSError):
+            os.close(read_fd)
+
+
 def test_com_stdio_ends_a_failed_session_without_waiting_on_stdin(tmp_path: Path, com_service) -> None:
     """The operator-visible rule on both platforms: a session that dies ends the command.
 
