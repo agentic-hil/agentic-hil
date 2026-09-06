@@ -12,7 +12,31 @@ OpenOCD runs before `init` and which nothing interrupts.
 The second is the spelling. `executable: openocd`, with nothing but the name, is
 how a Linux host that installed the distribution's package configures it, and
 the whole of the resolution happens when the configuration loads: the pinned
-path is the one PATH names, and the program that runs is that one.
+path is the one PATH names, and the program that runs is that one. `executable:
+null` on an entry that names its board is the same lookup with nothing
+written at all.
+
+Where the hang tests stood before any change, so their red is read for what it
+is. The deadline was enforced, the tree was signalled, the log recorded the
+timeout and the tool answered it; under `docker run --init` both hang tests
+pass on the code before this branch. What made them red as the job runs them
+is the reap's last question. This tier's pytest is PID 1 of its container, so
+the OpenOCD whose wrapper shell died in the same SIGKILL is adopted by pytest,
+which never waits for a process it did not start; the zombie keeps its process
+group, `killpg(pgid, 0)` keeps counting it, and the reap raised "Process group
+remained active after SIGKILL" out of `spawn_command` and again out of
+`service.close()`, before either test reached an assertion of its own. The
+doctor test ended the same way, with `doctor --json` writing nothing on stdout.
+Reproduced in twelve lines as PID 1: a shell around `sleep` in its own session,
+SIGKILL to the group, wait the shell; the grandchild is `State: Z` with
+`PPid: 1` and `killpg(pgid, 0)` still succeeds.
+
+The decision these tests hold is the product's, not the job's: a group whose
+remaining members are all zombies is an emptied group, and the tier runs as
+PID 1 on purpose, because that is the shape of `agentic-hil mcp-stdio` as a
+container's entrypoint with a debugger hanging under it. Adding `--init` to
+the job would turn the tier green and change nothing an operator gets, which
+is why the first test below asserts the pid.
 
 Recorded against the OpenOCD this image installs; the version line is asserted
 rather than noted, so the record cannot go stale silently.
@@ -103,6 +127,19 @@ def test_the_openocd_this_image_installs_is_the_one_these_tests_were_recorded_ag
     assert "Open On-Chip Debugger 0.12.0" in version.stdout + version.stderr, version.stdout + version.stderr
 
 
+def test_this_tier_is_the_first_process_of_its_container() -> None:
+    """The orphans a reap leaves are this process's own, and nobody else collects them.
+
+    The job runs pytest as PID 1 without an init, and the hang tests below are
+    only a test of the product's reap because of it: under an init the kernel
+    hands every orphan to something that waits for it, and a reap that counted
+    zombies as members would never be found out. A run of this tier under
+    `--init` fails here, by design, rather than passing the hang tests for a
+    reason the product had no part in.
+    """
+    assert os.getpid() == 1, f"this tier runs as PID 1 on purpose; pid {os.getpid()} means an init is reaping orphans in the product's place"
+
+
 def test_a_hanging_openocd_is_reaped_and_answers_timeout(tmp_path: Path) -> None:
     """The timeout contract against the real tool: the answer, the log, the process table."""
     from agentic_hil.config import load_config
@@ -154,6 +191,36 @@ def test_a_bare_openocd_name_pins_the_program_path_names_and_runs_it(tmp_path: P
     project = tmp_path / "project"
     project.mkdir()
     config_path = fixture_configuration(project, tmp_path / "config" / "config.yaml", tmp_path / "state", executable="openocd")
+    monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(config_path))
+    config = load_authoritative_config(project)
+
+    assert config.debugger.executable == shutil.which("openocd"), config.debugger.executable
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("probe_target")
+    finally:
+        service.close()
+    assert result["ok"] is False, json.dumps(result)
+    assert result["error_type"] != "debugger_not_found", json.dumps(result)
+    assert result.get("log_path"), json.dumps(result)
+    assert written_log(config, result)["command"].startswith(shutil.which("openocd")), written_log(config, result)["command"]
+
+
+def test_an_omitted_executable_runs_the_openocd_path_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`executable: null` on an entry that names its board: nobody wrote a path, and this image's OpenOCD is what runs.
+
+    The same claim as the bare name's, reached from the spelling `init` leaves
+    behind. What is asserted is the outcome: the pinned executable is the one
+    PATH names, the run is not `debugger_not_found`, and the log's command
+    starts with that path. Where the lookup happens, at load, is the code's
+    choice and is pinned in the unit tier.
+    """
+    from agentic_hil.config import load_authoritative_config
+    from agentic_hil.tools import AgenticHILToolService
+
+    project = tmp_path / "project"
+    project.mkdir()
+    config_path = fixture_configuration(project, tmp_path / "config" / "config.yaml", tmp_path / "state", executable="null")
     monkeypatch.setenv("AGENTIC_HIL_CONFIG", str(config_path))
     config = load_authoritative_config(project)
 

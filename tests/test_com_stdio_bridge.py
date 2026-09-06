@@ -340,6 +340,15 @@ def test_com_stdio_ends_a_failed_session_without_waiting_on_stdin(tmp_path: Path
     the refusal and exit 1 within its idle timeout, not when the operator
     presses Enter. Green on POSIX before any change; the Windows reader is what
     #487 measured at 6 s.
+
+    This test is stricter than the reader test above it, and on purpose. That
+    one accepts a stop that lets go of the read and names the thread it left
+    behind ("remained blocked"); this one requires `run_com_stdio` to return 1,
+    and `run_com_stdio` turns every error the stop reports into a
+    `RuntimeError("COM stdio cleanup failed: ...")`. So the Windows stop has to
+    end the reader, or stop reporting as a cleanup failure a thread it let go
+    of on purpose: either way the operator gets exit 1 inside the idle window,
+    not a traceback and not a wait.
     """
     com_service.read_refusal = {"ok": False, "tool": "com_stdio_read", "port_id": "dut", "error_type": "serial_read_failed", "summary": "COM port read failed."}
     config = load_com_config(tmp_path)
@@ -355,7 +364,10 @@ def test_com_stdio_ends_a_failed_session_without_waiting_on_stdin(tmp_path: Path
     watchdog.start()
     try:
         started = time.monotonic()
-        code, stdout, stderr = run_bridge(config, PipeStdin(read_fd))
+        try:
+            code, stdout, stderr = run_bridge(config, PipeStdin(read_fd))
+        except RuntimeError as error:
+            pytest.fail(f"run_com_stdio raised instead of exiting 1: {error}")
         elapsed = time.monotonic() - started
     finally:
         release.set()
