@@ -340,6 +340,39 @@ def config_stale(status: JsonObject) -> bool:
     return status.get("state") in STALE_STATES
 
 
+def written_config_status(config: AgenticHILConfig) -> JsonObject:
+    """The status after this process wrote the file it had loaded.
+
+    `config_status` compares the document a process loaded against the file on
+    disk, and after a successful write by that same process the two differ by
+    exactly the write. That is the outcome of the command and not a fault, so
+    the status keeps the facts (the state, both digests, that a running server
+    would have to be restarted) and carries none of the refusal a stale server
+    answers with: no `error_type`, no catalogue steps about reloading a server
+    this command line does not have. A `config_stale` block rendered under a
+    successful `agentic-hil grant` told the operator their server was wrong
+    when what had happened was the write they asked for (#504).
+    """
+    status = config_status(config)
+    if not config_stale(status):
+        return status
+    facts = {key: value for key, value in status.items() if key not in _STALE_REFUSAL_KEYS}
+    return {
+        **facts,
+        "summary": (
+            "The file on disk is the one this command wrote; `current_digest` names it and `loaded_digest` the "
+            "document this command read before writing. A running MCP server keeps enforcing the permissions it "
+            "parsed at startup until it is restarted, so `restart_required` is the fact to act on."
+        ),
+    }
+
+
+# What a stale-server status carries beyond its facts: the refusal fields a
+# tool answer merges so an agent can act on them, and the sentence written for
+# a server that is enforcing an older document.
+_STALE_REFUSAL_KEYS = frozenset({"error_type", "remediation", "do_not", "summary"})
+
+
 def with_config_status(result: JsonObject, status: JsonObject, *, prominent: bool = False) -> JsonObject:
     """Attach what this answer was decided by.
 
@@ -377,4 +410,5 @@ __all__ = [
     "config_status",
     "read_config_snapshot",
     "with_config_status",
+    "written_config_status",
 ]

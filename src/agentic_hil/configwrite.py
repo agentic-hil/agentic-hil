@@ -88,7 +88,7 @@ from agentic_hil.config import (
     secure_user_file_lock,
     write_generated_config,
 )
-from agentic_hil.configstate import config_stale, config_status, with_config_status
+from agentic_hil.configstate import config_stale, config_status, with_config_status, written_config_status
 from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
     CONFIG_GRANT_COMMAND,
@@ -1659,7 +1659,10 @@ def _permission_change_result(command: str, value: bool, written: JsonObject, un
         ],
         **NOT_STARTED,
         "cleanup_required": False,
-        "config_status": config_status(existing),
+        # Against the document this command loaded, which is what makes the
+        # state `changed` after every successful write: that is the write, not
+        # a stale server, and the status says so without a refusal in it.
+        "config_status": written_config_status(existing),
     }
 
 
