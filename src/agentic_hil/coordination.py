@@ -726,7 +726,28 @@ class HardwareCoordinator:
             bench_taken: list[str] = []
             try:
                 for resource in normalized:
-                    lock = self._acquire_lock(resource, normalized)
+                    try:
+                        lock = self._acquire_lock(resource, normalized)
+                    except CoordinationError as error:
+                        # #501: a second session on a resource THIS owner already
+                        # holds reaches here, because the project lock is already
+                        # this owner's and the per-resource lock is the first
+                        # collision. That lock cannot name a holder, so the refusal
+                        # blamed "another Agentic HIL process" with none named, and
+                        # the field that would say the holder is this very owner was
+                        # absent on exactly the path where it is true. The device
+                        # mutex does know the holder: where this owner's own bench
+                        # already holds the resource, answer the way the mutex would,
+                        # with the holder and holder_is_this_process. The condition
+                        # is this bench's own hold, not merely the same OS process:
+                        # two projects sharing one physical resource in one process
+                        # must still meet the anonymous resource_busy, and a genuine
+                        # cross-process collision (this bench holds nothing) is left
+                        # exactly as it was. The cross-process no-run case meets the
+                        # project lock first and never reaches this branch.
+                        if self.bench.holds(resource):
+                            raise CoordinationError({**self.bench.busy_result(resource), "resources": normalized}) from error
+                        raise
                     locks.append(lock)
                     stale = self._read_record(resource)
                     if stale is not None and stale.get("state") not in {None, "released"}:

@@ -83,6 +83,7 @@ def test_a_second_session_on_a_channel_this_process_holds_names_this_process(tmp
         assert refused["ok"] is False, refused
         assert refused["tool"] == "can_session_start", refused
         assert refused["bus_id"] == "bus_b", refused
+        assert refused["error_type"] == "device_busy", refused
         assert refused["retry_safe"] is True, refused
         assert refused["side_effect_committed"] is False, refused
         assert "another" not in refused["summary"], refused

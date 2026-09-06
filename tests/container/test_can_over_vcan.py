@@ -828,6 +828,10 @@ def test_a_second_session_on_a_channel_this_process_holds_names_this_process(tmp
         assert refused["ok"] is False, refused
         assert refused["tool"] == "can_session_start", refused
         assert refused["bus_id"] == "bus_b", refused
+        # The device mutex's own answer, chosen so the same channel-busy condition
+        # reads the same whether the holder is this process or another: device_busy
+        # with a holder, not the anonymous resource_busy the project lock gave.
+        assert refused["error_type"] == "device_busy", refused
         assert refused["retry_safe"] is True, refused
         assert refused["side_effect_committed"] is False, refused
         assert "another" not in refused["summary"], refused
@@ -867,6 +871,29 @@ def test_a_second_process_meeting_a_declared_run_is_told_which_process_holds_the
     assert refused["holder"]["label"] == "holding-the-bus", refused
     assert "holder_is_this_process" not in refused, refused
     assert str(holder.pid) in refused["summary"], refused
+
+
+def test_a_second_process_with_no_declared_run_still_meets_the_anonymous_project_lock(tmp_path: Path, vcan: str) -> None:
+    """The path #501's fix leaves untouched: cross-process, no run, no holder named.
+
+    Two servers on one configuration with neither declaring a run meet the
+    project's own coordination lock first, before any device mutex, and that lock
+    cannot name a holder. The answer is `resource_busy` with no `holder` and no
+    `holder_is_this_process`, exactly as before the #501 fix: that fix only names
+    a holder where the holder is this very process, which this cross-process case
+    is not. Pinned so the fix's blast radius is visible and bounded.
+    """
+    project, config = can_project(tmp_path, bus_entry("bus", vcan))
+
+    with live_server(project, config, client="holder") as holder, live_server(project, config, client="contender") as contender:
+        assert holder.call("can_session_start", {"bus_id": "bus"})["ok"] is True
+        refused = contender.call("can_session_start", {"bus_id": "bus"})
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "resource_busy", refused
+    assert refused["retry_safe"] is True and refused["side_effect_committed"] is False, refused
+    assert "holder" not in refused, refused
+    assert "holder_is_this_process" not in refused, refused
 
 
 # ---------------------------------------------------------------------------
