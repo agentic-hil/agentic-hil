@@ -195,21 +195,28 @@ function Test-UvManagesTool {
 
 function Get-UvRecordedRequirements {
     # The requirement set uv recorded for the tool it owns, as
-    # @{ Extras = <string[]>; Withs = <string[]> }, or $null when the
-    # reconstruction would change what uv recorded so the caller keeps to the
-    # upgrade that preserves it verbatim instead. That covers a missing, unreadable
-    # or empty receipt, a requirements array that never opened or never closed, a
-    # recorded tool option (an explicit `[tool.options]` index), a root carrying a
-    # pin or a git/path/url source rather than a plain name and extras, and any
-    # `--with` this must not rebuild (a marker, a url, a git/path source). uv writes
-    # `agentic-hil[can,pyocd] --with requests==2.32.5` into a receipt beside the
-    # tool environment as a TOML array of requirement objects, inline for a lone
-    # root requirement and one-per-line the moment a `--with` is added. Extras is
-    # the agentic-hil root's extras; Withs is every other recorded requirement
-    # rebuilt as a `--with` PEP 508 string (`name[extras]specifier`). Reading the
-    # whole set back is what lets a refresh add the extra THIS run asks for while
-    # keeping both a root extra an earlier install recorded and a `--with` it
-    # recorded; a bare `tool install agentic-hil[...]` drops the latter.
+    # @{ Extras = <string[]>; Withs = <string[]>; Python = <string> }, or $null
+    # when the reconstruction would change what uv recorded so the caller keeps
+    # to the upgrade that preserves it verbatim instead. That covers a missing,
+    # unreadable or empty receipt, a requirements array that never opened or
+    # never closed, a recorded tool option (an explicit `[tool.options]` index),
+    # a root carrying a pin or a git/path/url source rather than a plain name and
+    # extras, and any `--with` this must not rebuild (a marker, a url, a git/path
+    # source). uv writes `agentic-hil[can,pyocd] --with requests==2.32.5` into a
+    # receipt beside the tool environment as a TOML array of requirement objects,
+    # inline for a lone root requirement and one-per-line the moment a `--with`
+    # is added. Extras is the agentic-hil root's extras; Withs is every other
+    # recorded requirement rebuilt as a `--with` PEP 508 string
+    # (`name[extras]specifier`); Python is the interpreter `--python` recorded,
+    # which current uv writes as a `[tool]`-level `python` key and older uv wrote
+    # under `[tool.options]`, empty when none was recorded. Reading the whole set
+    # back is what lets a refresh add the extra THIS run asks for while keeping
+    # both a root extra an earlier install recorded and a `--with` it recorded; a
+    # bare `tool install agentic-hil[...]` drops the latter. The interpreter is
+    # replayed rather than refused for the same reason: a reinstall without
+    # `--python` rewrites the receipt without the key, so a reconstruction that
+    # dropped it erased the operator's choice with nothing said, and the
+    # preserving upgrade a refusal routes to cannot add the extra this run wants.
     $probe = Invoke-Captured -File 'uv' -Arguments @('tool', 'dir')
     if ($probe.ExitCode -ne 0) { return $null }
     $receipt = Join-Path (Join-Path $probe.Output.Trim() 'agentic-hil') 'uv-receipt.toml'
@@ -224,19 +231,31 @@ function Get-UvRecordedRequirements {
     }
     if ([string]::IsNullOrEmpty($text)) { return $null }
 
-    # A recorded tool option (an explicit index, a python pin) cannot be replayed
-    # by the reconstruction, which passes none, so a receipt that records any is
-    # refused and the caller keeps to the preserving upgrade. uv writes these under
-    # a `[tool.options]` table (or sub-table / array of tables) only when there are
+    # A recorded tool option (an explicit index) cannot be replayed by the
+    # reconstruction, which passes none, so a receipt that records any is refused
+    # and the caller keeps to the preserving upgrade. uv writes these under a
+    # `[tool.options]` table (or sub-table / array of tables) only when there are
     # some, so a bare header with no key before the next section is no options.
+    # The one key read out of that table rather than refused is `python`, the
+    # spelling older uv gave the interpreter; current uv writes it at the `[tool]`
+    # level, and it is read from either place. A `python` line inside the
+    # requirements array is not a thing uv writes, and the bracket walk below
+    # never reaches one, so a top-level match is the interpreter and nothing else.
+    $python = ''
     $inOptions = $false
+    $section = 'tool'
     foreach ($line in ($text -split "`n")) {
         if ($line -match '^\s*\[\[?tool\.options') {
             if ($line -match '^\s*\[tool\.options\]\s*$') { $inOptions = $true }
             else { return $null }
+            $section = 'options'
+        } elseif ($line -match '^\s*\[') {
+            $inOptions = $false
+            $section = if ($line -match '^\s*\[tool\]\s*$') { 'tool' } else { 'other' }
+        } elseif ($line -match '^\s*python\s*=\s*"([^"]*)"\s*$') {
+            if ($inOptions -or $section -eq 'tool') { $python = $Matches[1] }
         } elseif ($inOptions) {
-            if ($line -match '^\s*\[') { $inOptions = $false }
-            elseif ($line -match '\S' -and $line -notmatch '^\s*#') { return $null }
+            if ($line -match '\S' -and $line -notmatch '^\s*#') { return $null }
         }
     }
 
@@ -307,7 +326,7 @@ function Get-UvRecordedRequirements {
     # Hashtable member assignment preserves an array as-is (no unrolling and no
     # array-wrap comma), so an empty or single Extras/Withs stays the array
     # Get-RefreshSpec and the --with loop iterate over.
-    return @{ Extras = $extras.ToArray(); Withs = $withs.ToArray() }
+    return @{ Extras = $extras.ToArray(); Withs = $withs.ToArray(); Python = $python }
 }
 
 function Get-RefreshSpec {
@@ -338,13 +357,20 @@ function Install-WithUv {
             # version is already current, which is the repair the anchor exists
             # for. A recorded `--with` requirement is replayed as its own --with so
             # the reinstall keeps it too; a bare `tool install agentic-hil[...]`
-            # would drop it. When uv keeps no readable receipt, or records a
-            # requirement this cannot rebuild without changing it, fall back to the
-            # upgrade that preserves whatever it did record.
+            # would drop it. The interpreter uv recorded is replayed as --python
+            # for the same reason: a reinstall without it rewrites the receipt
+            # without the key, and the operator's choice is gone with nothing
+            # said. When uv keeps no readable receipt, or records a requirement
+            # this cannot rebuild without changing it, fall back to the upgrade
+            # that preserves whatever it did record.
             $recorded = Get-UvRecordedRequirements
             if ($null -ne $recorded) {
                 $uvArgs = @('tool', 'install', '--upgrade', '--reinstall', (Get-RefreshSpec -Recorded $recorded.Extras))
                 foreach ($recordedWith in $recorded.Withs) { $uvArgs += @('--with', $recordedWith) }
+                if ($recorded.Python) {
+                    Write-Say "package: the receipt records the interpreter $($recorded.Python), so the reinstall keeps it"
+                    $uvArgs += @('--python', $recorded.Python)
+                }
                 Invoke-Uv -Arguments $uvArgs
             } else {
                 Invoke-Uv -Arguments @('tool', 'upgrade', '--reinstall', 'agentic-hil')

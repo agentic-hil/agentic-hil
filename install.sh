@@ -524,14 +524,21 @@ uv_manages_tool() {
 #     ]
 #
 # The output is the agentic-hil root's extras on the first line (space-separated,
-# possibly empty) and every other recorded requirement on a following line, rebuilt
-# as a `--with` PEP 508 string (`name[extras]specifier`). Reading the whole set
-# back is what lets a refresh add the extra THIS run asks for while keeping both a
-# root extra an earlier install recorded and a `--with` requirement it recorded;
-# reinstalling from the root alone drops the latter, which the previous reader did
-# whenever the receipt went multiline. The parse spans lines and tracks bracket
-# depth so the nested `extras = [...]` and the trailing `entrypoints = [...]` block
-# do not confuse where the requirement list ends.
+# possibly empty), the interpreter uv recorded on the second (`--python 3.10` is
+# written as `python = "3.10"`, at the `[tool]` level by current uv and under
+# `[tool.options]` by older uv, and both are read; empty when none was recorded),
+# and every other recorded requirement on a following line, rebuilt as a `--with`
+# PEP 508 string (`name[extras]specifier`). Reading the whole set back is what
+# lets a refresh add the extra THIS run asks for while keeping both a root extra
+# an earlier install recorded and a `--with` requirement it recorded; reinstalling
+# from the root alone drops the latter, which the previous reader did whenever the
+# receipt went multiline. The interpreter is replayed rather than refused for the
+# same reason: `uv tool install` without `--python` rewrites the receipt without
+# the key, so a reconstruction that dropped it erased the operator's choice with
+# nothing said, and the preserving upgrade that refusal would route to cannot add
+# the extra this run asks for. The parse spans lines and tracks bracket depth so
+# the nested `extras = [...]` and the trailing `entrypoints = [...]` block do not
+# confuse where the requirement list ends.
 uv_recorded_requirements() {
     uv_tool_root=$(uv tool dir 2>/dev/null) || return 1
     uv_receipt="${uv_tool_root%/}/agentic-hil/uv-receipt.toml"
@@ -619,24 +626,39 @@ uv_recorded_requirements() {
         if (!root_seen) return 0
         return 1
     }
-    BEGIN { state = 0; options = 0; in_options = 0 }
+    function python_of(line,   quoted) {
+        # The value of a `python = "..."` line: what is between its quotes.
+        if (!match(line, /"[^"]*"/)) return ""
+        quoted = substr(line, RSTART + 1, RLENGTH - 2)
+        return quoted
+    }
+    BEGIN { state = 0; options = 0; in_options = 0; section = "tool"; python = "" }
     {
         line = $0
-        # A recorded tool option (an explicit index, a python pin) cannot be
-        # replayed by the reconstruction, which passes none, so a receipt that
-        # records any is refused and the caller keeps to the preserving upgrade.
-        # uv writes these under a `[tool.options]` table (or sub-table / array of
-        # tables) only when there are some, so a bare header with no key before the
-        # next section is treated as no options.
+        # A recorded tool option (an explicit index) cannot be replayed by the
+        # reconstruction, which passes none, so a receipt that records any is
+        # refused and the caller keeps to the preserving upgrade. uv writes these
+        # under a `[tool.options]` table (or sub-table / array of tables) only
+        # when there are some, so a bare header with no key before the next
+        # section is treated as no options. The one key read out of that table
+        # rather than refused is `python`, the spelling older uv gave the
+        # interpreter; current uv writes it at the `[tool]` level, and the
+        # reconstruction replays it as `--python` from either place.
         if (line ~ /^[ \t]*\[\[?tool\.options/) {
             if (line ~ /^[ \t]*\[tool\.options\][ \t]*$/) { in_options = 1 }
             else { options = 1; in_options = 0 }
+            section = "options"
             next
         }
-        if (in_options) {
-            if (line ~ /^[ \t]*\[/) { in_options = 0 }
-            else if (line ~ /[^ \t]/ && line !~ /^[ \t]*#/) { options = 1 }
+        if (line ~ /^[ \t]*\[/) {
+            in_options = 0
+            if (line ~ /^[ \t]*\[tool\][ \t]*$/) { section = "tool" } else { section = "other" }
         }
+        if (in_options) {
+            if (line ~ /^[ \t]*python[ \t]*=[ \t]*"[^"]*"[ \t]*$/) { python = python_of(line); next }
+            if (line ~ /[^ \t]/ && line !~ /^[ \t]*#/) { options = 1 }
+        }
+        if (section == "tool" && state != 1 && line ~ /^[ \t]*python[ \t]*=[ \t]*"[^"]*"[ \t]*$/) { python = python_of(line); next }
         if (state == 2) next
         s = line
         if (state == 0) {
@@ -662,6 +684,7 @@ uv_recorded_requirements() {
         if (options) exit 1
         if (!process(interior)) exit 1
         print out_extras
+        print python
         printf "%s", out_withs
         exit 0
     }
@@ -670,11 +693,11 @@ uv_recorded_requirements() {
 
 # The `--with` arguments a uv-managed refresh replays, built from the recorded
 # requirement set ($1, the multi-line value uv_recorded_requirements printed): its
-# second line onward, each turned into `--with <req>`. The reconstructed
+# third line onward, each turned into `--with <req>`. The reconstructed
 # requirements are bare PEP 508 strings with no spaces, so the caller can rely on
 # word-splitting to pass them as separate arguments.
 uv_with_flags() {
-    printf '%s\n' "$1" | sed -n '2,$p' | while IFS= read -r recorded_with; do
+    printf '%s\n' "$1" | sed -n '3,$p' | while IFS= read -r recorded_with; do
         [ -n "$recorded_with" ] && printf -- '--with %s ' "$recorded_with"
     done
 }
@@ -719,18 +742,26 @@ install_with_uv() {
                 # files even when the recorded version is already current, which is
                 # the repair the anchor exists for. A recorded `--with` requirement
                 # is replayed as its own --with so the reinstall keeps it too; a bare
-                # `tool install agentic-hil[...]` would drop it. When uv keeps no
-                # readable receipt, or records a requirement this cannot rebuild
-                # without changing it, fall back to the upgrade that preserves
-                # whatever it did record rather than reinstalling from a set this
-                # could not read back in full.
+                # `tool install agentic-hil[...]` would drop it. The interpreter
+                # uv recorded is replayed as --python for the same reason: a
+                # reinstall without it rewrites the receipt without the key, and
+                # the operator's choice is gone with nothing said. When uv keeps
+                # no readable receipt, or records a requirement this cannot
+                # rebuild without changing it, fall back to the upgrade that
+                # preserves whatever it did record rather than reinstalling from
+                # a set this could not read back in full.
                 if recorded=$(uv_recorded_requirements); then
                     recorded_extras=$(printf '%s\n' "$recorded" | sed -n '1p')
+                    recorded_python=$(printf '%s\n' "$recorded" | sed -n '2p')
                     with_flags=$(uv_with_flags "$recorded")
+                    if [ -n "$recorded_python" ]; then
+                        say "package: the receipt records the interpreter $recorded_python, so the reinstall keeps it"
+                    fi
                     # Word-splitting on with_flags is intended: each replayed
-                    # requirement is a space-free PEP 508 string.
+                    # requirement is a space-free PEP 508 string. The interpreter
+                    # is one argument whatever it holds, so it stays quoted.
                     # shellcheck disable=SC2086
-                    run_uv tool install --upgrade --reinstall "$(refresh_spec "$recorded_extras")" $with_flags
+                    run_uv tool install --upgrade --reinstall "$(refresh_spec "$recorded_extras")" $with_flags ${recorded_python:+--python "$recorded_python"}
                 else
                     run_uv tool upgrade --reinstall agentic-hil
                 fi
