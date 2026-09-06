@@ -103,6 +103,17 @@ testpaths = ["tests"]
 pythonpath = ["."]
 python_files = ["test_*.py"]
 addopts = "--strict-markers"
+# The two tiers that need something the hosted matrix has not got. Registered
+# here because `--strict-markers` above refuses a marker nothing declared, and
+# named here rather than only in the directories they live in so `pytest -m
+# "not container and not bench"` is a selection anybody can write without
+# reading the tree first. Both tiers also skip themselves unless their own
+# environment variable says the run is where they belong, so a bare `pytest` in
+# a checkout collects them and runs none of them.
+markers = [
+  "container: needs the real uv, OpenOCD and /proc, and no hardware; runs in tools/container/Dockerfile with AGENTIC_HIL_CONTAINER_TESTS=1",
+  "bench: needs a debug probe and the board behind it; runs on a bench with AGENTIC_HIL_BENCH=1"
+]
 
 [tool.ruff]
 line-length = 120
