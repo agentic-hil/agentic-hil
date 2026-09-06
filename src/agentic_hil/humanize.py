@@ -71,6 +71,14 @@ _PROCESS_OUTPUT_KEYS = frozenset({"stdout", "stderr"})
 # key/value row of prose in the middle of the fields is neither before it nor
 # readable.
 _RENDERED_BEFORE_DETAILS = frozenset({"manager_hint_note"})
+# What a refusal prints under its own Restart section, the way a success does,
+# rather than among the Details. A failed upgrade carries the servers it read
+# before the manager ran (#475), and rendered as rows the notice appeared twice,
+# once in the summary and once as a field, while the list of processes was
+# printed as a nested object under Details instead of under Restart, where the
+# operator reads it to decide which window to close. `restart_required` itself
+# stays a row: it is the one-word answer, and a row is where a person finds it.
+_RESTART_KEYS = frozenset({"restart_notice", "restart_required_by", "restart_required_by_count"})
 # How much captured output a report prints before it says it is cutting. A
 # manager that fails writes a handful of lines and a build that fails writes
 # thousands, and the line that names the cause sits at either end of them, so
@@ -671,6 +679,7 @@ def render_refusal(result: JsonObject, command: str | None = None) -> list[str]:
         lines.extend(_wrap(meaning, indent=_INDENT))
     lines.extend(_relayed_manager_text(result))
     lines.extend(_section("Details", _refusal_details(result)))
+    lines.extend(_restart_lines(result))
     steps, avoid = _remediation(result, command_line=command is not None)
     steps = _without_absent_pointers(result, steps)
     lines.extend(_section("What to do", _numbered(steps)))
@@ -730,7 +739,7 @@ def _refusal_details(result: JsonObject) -> list[str]:
     captured streams are printed as the process wrote them. It stays a report:
     rows first, then the objects that need a body, and never a dump of braces.
     """
-    rows, bodies = _members({key: value for key, value in result.items() if key not in _HANDLED_EVERYWHERE and key not in _RENDERED_BEFORE_DETAILS})
+    rows, bodies = _members({key: value for key, value in result.items() if key not in _HANDLED_EVERYWHERE and key not in _RENDERED_BEFORE_DETAILS and key not in _RESTART_KEYS})
     lines = _fields(rows)
     for key, value in bodies:
         lines.extend(_member_lines(key, value, _INDENT))

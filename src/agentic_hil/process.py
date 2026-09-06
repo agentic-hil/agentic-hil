@@ -651,9 +651,27 @@ def snapshot_process_images() -> tuple[ProcessImage, ...] | None:
     if not os.path.isdir(_PROC):
         return None
     try:
+        if not _proc_lists_this_process():
+            return None
         return _proc_process_images()
     except OSError:
         return None
+
+
+def _proc_lists_this_process() -> bool:
+    """Whether the table lists its own reader, which a mounted procfs cannot fail to.
+
+    A ``/proc`` with nothing mounted on it, which a chroot and a minimal
+    container image carry, is a directory that lists no process at all.
+    ``os.listdir`` on it does not raise, so it passed the directory check and
+    the ``OSError`` guard alike and answered the empty tuple: the claim that the
+    table was read and held nothing of ours, which the upgrade turned into
+    ``restart_required: false`` on a machine nothing had looked at (#475). No
+    real procfs is ever empty, since the reading process is in it, so the entry
+    for this very process is what tells a table that was read from a directory
+    that merely exists. Its absence is answered the way no directory at all is.
+    """
+    return os.path.isdir(f"{_PROC}/{os.getpid()}")
 
 
 # Where a Linux host publishes its process table. Named once, because the three

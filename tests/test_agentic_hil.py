@@ -4469,7 +4469,7 @@ def test_a_failed_upgrade_renders_the_processes_it_read_under_restart(
 
     assert "\nRestart\n" in out
     assert "\n  - 4242\n" in out
-    assert f"image  {_LIVE_SERVER['image']}" in out
+    assert _LIVE_SERVER["image"] in out
     # Once: the notice is in the summary as well, and the section may not repeat it.
     assert _reflowed(out).count(_reflowed(result["restart_notice"])) == 1
     assert "No restart is needed" not in out
@@ -4490,7 +4490,9 @@ def test_a_failed_upgrade_on_a_host_that_cannot_read_its_table_renders_the_sente
     assert _CANNOT_SAY in _reflowed(out)
     assert _reflowed(out).count(_reflowed(result["restart_notice"])) == 1
     assert "No restart is needed" not in out
-    assert "\n  - " not in out
+    # No process list: nothing was read that could be listed.
+    assert "\nRestart\n" not in out
+    assert "\n  - 4242" not in out
 
 
 @pytest.mark.parametrize(("version", "ending"), _HALF_CHANGED_ENDINGS)

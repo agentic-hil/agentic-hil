@@ -2482,6 +2482,7 @@ def _failed_upgrade(
     reinstall_command: str,
     *,
     summary: str,
+    still_running: list[JsonObject] | None,
     **failure: object,
 ) -> JsonObject:
     """A manager run that did not finish, and what it left standing.
@@ -2499,6 +2500,12 @@ def _failed_upgrade(
     machine that answers nothing is the reported end state, and the one thing it
     must never receive is a failure notice with no mention that the installation
     behind it is gone.
+
+    `still_running` is what the process table said before the manager ran, and
+    every end here owes it to the operator the way every other outcome does
+    (#475): the failures used to answer `restart_required: false` on any host,
+    with the holders they had read dropped on the floor, which on a host that
+    could not read its table at all was a claim made on no evidence.
     """
     base: JsonObject = {
         "ok": False,
@@ -2511,13 +2518,14 @@ def _failed_upgrade(
     }
     verification, loaded = _loaded_version()
     if loaded == previous_version:
+        waiting = _still_running_after_a_failed_upgrade(still_running, loaded)
         return {
             **base,
             "error_type": "upgrade_failed",
-            "summary": f"{summary} This installation still runs {loaded} and was not replaced.",
+            "summary": f"{summary} This installation still runs {loaded} and was not replaced. {_restart_sentence(waiting)}",
             "installation_intact": True,
             "version": loaded,
-            "restart_required": False,
+            **waiting,
             "verification": verification,
             # The standing text, from the same catalogue its two siblings below
             # read: what the manager's own words are worth, what a `certificates`
@@ -2527,8 +2535,8 @@ def _failed_upgrade(
             **remediation_fields("upgrade_failed"),
         }
     if loaded is not None:
-        return _upgrade_changed_on_disk(base, previous_version, loaded, installed_extras, reinstall_command, verification, summary)
-    return _installation_broken(base, installed_extras, reinstall_command, verification, summary)
+        return _upgrade_changed_on_disk(base, previous_version, loaded, installed_extras, reinstall_command, verification, summary, still_running)
+    return _installation_broken(base, previous_version, installed_extras, reinstall_command, verification, summary, still_running)
 
 
 def _upgrade_changed_on_disk(
@@ -2539,6 +2547,7 @@ def _upgrade_changed_on_disk(
     reinstall_command: str,
     verification: JsonObject,
     summary: str,
+    still_running: list[JsonObject] | None,
 ) -> JsonObject:
     """The manager failed, yet the files on disk load a different version now.
 
@@ -2552,8 +2561,11 @@ def _upgrade_changed_on_disk(
     the same known-good reinstall a broken installation gets, because a version a
     failed run left behind is not one to trust into service by restarting onto
     it. `restart_required` is false for that reason: a restart would adopt the
-    half-changed tree, which is the outcome the reinstall exists to avoid.
+    half-changed tree, which is the outcome the reinstall exists to avoid. The
+    processes running out of the installation are named all the same, as a
+    notice and not as a list to restart.
     """
+    notice = _running_processes_as_a_notice(still_running, previous_version)
     return {
         **base,
         "error_type": "installation_changed_after_failed_upgrade",
@@ -2564,22 +2576,26 @@ def _upgrade_changed_on_disk(
             f"{previous_version} this process is running: the run replaced files on disk before it stopped, so the "
             f"installation is in a half-changed state. The running server is still {previous_version} while the disk "
             f"is {loaded}. Do not restart onto it. Run `reinstall_command` to restore a known installation: {reinstall_command}"
+            + _as_a_sentence(notice)
         ),
         "version": loaded,
         "installed_extras": list(installed_extras),
         "reinstall_command": reinstall_command,
         "verification": verification,
         "restart_required": False,
+        **notice,
         **remediation_fields("installation_changed_after_failed_upgrade"),
     }
 
 
 def _installation_broken(
     base: JsonObject,
+    previous_version: str,
     installed_extras: tuple[str, ...],
     reinstall_command: str,
     verification: JsonObject,
     summary: str,
+    still_running: list[JsonObject] | None,
 ) -> JsonObject:
     """The package is gone and the console script is not: name the repair, exactly.
 
@@ -2588,8 +2604,12 @@ def _installation_broken(
     `installed_extras` are read before the manager runs, because the metadata
     they come from is part of what is missing by the time this is written, and a
     command rebuilt from what is left names the bare distribution and silently
-    drops the extras the bench was created with.
+    drops the extras the bench was created with. The processes still running
+    out of the installation are named the same way as on the half-changed tree:
+    as a notice, never as a restart request, since there is nothing here for a
+    restart to load.
     """
+    notice = _running_processes_as_a_notice(still_running, previous_version)
     return {
         **base,
         "error_type": "installation_broken",
@@ -2598,13 +2618,21 @@ def _installation_broken(
             f"{summary} This installation is now broken: its Python can no longer load `agentic_hil`, while the "
             f"`agentic-hil` console script is still on PATH and will fail with a ModuleNotFoundError on the next call. "
             f"Nothing will work again until `reinstall_command` is run: {reinstall_command}"
+            + _as_a_sentence(notice)
         ),
         "installed_extras": list(installed_extras),
         "reinstall_command": reinstall_command,
         "verification": verification,
         "restart_required": False,
+        **notice,
         **remediation_fields("installation_broken"),
     }
+
+
+def _as_a_sentence(notice: JsonObject) -> str:
+    """The restart notice as the summary's closing sentence, or nothing where there is none."""
+    text = notice.get("restart_notice")
+    return f" {text}" if isinstance(text, str) and text else ""
 
 
 def _upgrade_changed_nothing(
@@ -2952,6 +2980,62 @@ def _nothing_new_to_load(holders: list[JsonObject] | None) -> JsonObject:
     }
 
 
+def _still_running_after_a_failed_upgrade(holders: list[JsonObject] | None, previous_version: str) -> JsonObject:
+    """The servers running out of an installation a failed manager run left intact.
+
+    The same three answers as `_nothing_new_to_load`, for the same reason: this
+    run replaced nothing, so what each running server imported is whatever was
+    on disk when it started, and an earlier upgrade is how it comes to be older
+    than the installation it runs out of. The failure used to answer
+    `restart_required: false` here on every host, having read the table and
+    dropped what it said (#475). The version is named, because the intact
+    failure has one to name: it is the release still on disk.
+    """
+    if holders is None:
+        return {"restart_notice": _CANNOT_READ_THE_PROCESS_TABLE}
+    if not holders:
+        return {"restart_required": False}
+    single = len(holders) == 1
+    named = "1 process was" if single else f"{len(holders)} processes were"
+    return {
+        "restart_required": True,
+        "restart_required_by": holders[:_REPORTED_HOLDER_LIMIT],
+        "restart_required_by_count": len(holders),
+        "restart_notice": (
+            f"{named} started out of this installation before this run: {_named_holders(holders)}. Nothing was "
+            f"replaced by this run, so each still answers with the release it imported when it started, which is "
+            f"{previous_version} only if it started after the last upgrade. Restarting the host that started it is "
+            f"what makes that certain."
+        ),
+    }
+
+
+def _running_processes_as_a_notice(holders: list[JsonObject] | None, previous_version: str) -> JsonObject:
+    """The servers running out of a tree that is not to be restarted onto.
+
+    For the two half-changed endings, which keep `restart_required: false` on
+    purpose: a restart there adopts a tree the reinstall exists to replace. The
+    processes are still facts about the operator's machine, so they are named
+    (#475), and only named. No list under `restart_required_by`, since that list
+    means `restart these`, and no clause asking for the restart. Nothing where
+    the table was read and held none, and nothing where it could not be read:
+    the endings already say what to do about every process there is, and a
+    sentence about what cannot be known beside one that settles the question
+    would be two answers to it.
+    """
+    if not holders:
+        return {}
+    single = len(holders) == 1
+    return {
+        "restart_notice": (
+            f"{'1 process was' if single else f'{len(holders)} processes were'} started out of this installation "
+            f"before this run and still {'runs' if single else 'run'} {previous_version}: {_named_holders(holders)}. "
+            f"Each goes on answering with {previous_version} for as long as it runs. A restart now would adopt what "
+            f"this run left on disk, which `reinstall_command` exists to replace, so the reinstall comes first."
+        ),
+    }
+
+
 def replace_installation(*, tool: str) -> JsonObject:
     """Hand this installation to its own package manager and report what moved.
 
@@ -3016,6 +3100,7 @@ def replace_installation(*, tool: str) -> JsonObject:
                 installed_extras,
                 reinstall_command,
                 summary="Agentic HIL package upgrade could not run.",
+                still_running=still_running,
                 exception_type=type(error).__name__,
                 detail=str(error),
             ),
@@ -3050,6 +3135,7 @@ def replace_installation(*, tool: str) -> JsonObject:
                     installed_extras,
                     reinstall_command,
                     summary="Agentic HIL package upgrade was interrupted before it finished.",
+                    still_running=still_running,
                     exception_type=type(error).__name__,
                     detail=str(error),
                 ),
@@ -3072,6 +3158,7 @@ def replace_installation(*, tool: str) -> JsonObject:
                     installed_extras,
                     reinstall_command,
                     summary="Agentic HIL package manager reported an upgrade failure.",
+                    still_running=still_running,
                     install=install_result,
                 ),
                 certificates,
@@ -3090,10 +3177,12 @@ def replace_installation(*, tool: str) -> JsonObject:
             _with_certificate_note(
                 _installation_broken(
                     {"ok": False, "tool": tool, "manager": manager, "command": command, "python": sys.executable, "previous_version": previous_version, "install": install_result},
+                    previous_version,
                     installed_extras,
                     reinstall_command,
                     verification,
                     "Agentic HIL package manager completed, but the installation it left cannot be loaded.",
+                    still_running,
                 ),
                 certificates,
             ),
