@@ -30,6 +30,15 @@ INTEL_HEX_LINEAR_BASE_RECORD = 0x04
 INTEL_HEX_START_ADDRESS_RECORDS = frozenset({0x03, 0x05})
 INTEL_HEX_RECORD_PATTERN = re.compile(r"^:(?:[0-9a-fA-F]{2})+$")
 GDB_EXIT_COMMAND_TIMEOUT_S = 2.0
+# How long the reader thread waits for the process to be reaped once its output
+# pipe is at end of file, before it says what GDB exited with. The pipe closing
+# is not the exit: on every platform there is a window in which the child has
+# closed its handles and the operating system has not yet published a status,
+# and a report written inside that window says the debugger exited "with code
+# None", which tells a log reader nothing at all. The wait is bounded because
+# the reader must never be the thing that hangs; a status still unavailable
+# after it is reported as the None it is.
+GDB_EXIT_STATUS_WAIT_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -76,6 +85,9 @@ class GdbMiClient:
         self.last_stop_line: str | None = None
         self.command_history: list[JsonObject] = []
         self.exited = threading.Event()
+        # Set once, by the reader thread that saw the output pipe close, and read
+        # by everything that has to say what GDB exited with.
+        self.exit_status: int | None = None
         self.reader_threads = [
             threading.Thread(target=self._stdout_reader, daemon=True),
             threading.Thread(target=self._stderr_reader, daemon=True),
@@ -98,15 +110,27 @@ class GdbMiClient:
     def command(self, mi_command: str, timeout_s: float) -> GdbMiCommandResult:
         if "\n" in mi_command or "\r" in mi_command:
             return self._command_error(mi_command, "GDB/MI command must be a single line.")
+        # `refusal` is decided under the lock and answered outside it. Both of
+        # these refusals used to be written from inside the `with`, and
+        # `_command_error` records the refusal in the history, which takes the
+        # same lock: this lock is not reentrant, so a command sent to a GDB that
+        # had exited never returned at all. The caller waiting on it was the
+        # session teardown, so the failure was a hang rather than a wrong answer
+        # (#506).
+        refusal: str | None = None
+        pending: JsonObject | None = None
         with self.lock:
             if self.pending is not None:
-                return self._command_error(mi_command, "Another GDB/MI command is still pending.")
-            if self.exited.is_set() or self.child.stdin is None or self.child.stdin.closed:
-                return self._command_error(mi_command, "GDB process is not running.")
-            self.next_token += 1
-            token = self.next_token
-            pending: JsonObject = {"token": token, "records": [], "event": threading.Event(), "result": None}
-            self.pending = pending
+                refusal = "Another GDB/MI command is still pending."
+            elif self.exited.is_set() or self.child.stdin is None or self.child.stdin.closed:
+                refusal = "GDB process is not running."
+            else:
+                self.next_token += 1
+                token = self.next_token
+                pending = {"token": token, "records": [], "event": threading.Event(), "result": None}
+                self.pending = pending
+        if refusal is not None or pending is None:
+            return self._command_error(mi_command, refusal or "GDB process is not running.")
         try:
             self.child.stdin.write(f"{token}{mi_command}\n")
             self.child.stdin.flush()
@@ -139,7 +163,14 @@ class GdbMiClient:
             if self.pending_stop is not None:
                 return GdbMiStopResult(line="", reason="debugger_error", error_message="Another stop wait is already pending.")
             if self.exited.is_set():
-                return GdbMiStopResult(line="", reason="debugger_error", error_message="GDB process is not running.")
+                # The status GDB left with, not a bare "not running". Whether
+                # the pipe closed a moment before this wait began or a moment
+                # after is a fact about this run's scheduling; what the caller
+                # has to be told either way is that the stop it is waiting for
+                # will never come because the debugger died, and with what. A
+                # reader who sees only "not running" cannot tell a debugger that
+                # crashed from one that was never started (#506).
+                return GdbMiStopResult(line="", reason="debugger_error", error_message=self._exit_sentence())
             pending_stop: JsonObject = {"event": threading.Event(), "result": None}
             self.pending_stop = pending_stop
         if not pending_stop["event"].wait(timeout=max(0.0, timeout_s)):
@@ -236,17 +267,27 @@ class GdbMiClient:
             self.pending = None
 
     def _handle_exit(self) -> None:
+        # Reaped before the lock is taken, never under it: the wait is bounded
+        # but it is still a wait, and every other user of this transport would
+        # queue behind it.
+        with suppress(subprocess.TimeoutExpired):
+            self.child.wait(timeout=GDB_EXIT_STATUS_WAIT_S)
         with self.lock:
             self.exited.set()
-            returncode = self.child.poll()
+            self.exit_status = self.child.poll()
+            sentence = self._exit_sentence()
             if self.pending is not None:
-                self.pending["result"] = GdbMiCommandResult(result_class="error", line="", records=list(self.pending["records"]), error_message=f"GDB process exited with code {returncode}.")
+                self.pending["result"] = GdbMiCommandResult(result_class="error", line="", records=list(self.pending["records"]), error_message=sentence)
                 self.pending["event"].set()
                 self.pending = None
             if self.pending_stop is not None:
-                self.pending_stop["result"] = GdbMiStopResult(line="", reason="debugger_error", error_message=f"GDB process exited with code {returncode}.")
+                self.pending_stop["result"] = GdbMiStopResult(line="", reason="debugger_error", error_message=sentence)
                 self.pending_stop["event"].set()
                 self.pending_stop = None
+
+    def _exit_sentence(self) -> str:
+        """One sentence for a GDB that is gone, wherever the transport says it."""
+        return f"GDB process exited with code {self.exit_status}."
 
 
 def stop_result_from_line(line: str) -> GdbMiStopResult:
