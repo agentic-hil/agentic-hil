@@ -424,6 +424,7 @@ def fixture_configuration(
     *,
     executable: str | None = None,
     timeout_s: int = 20,
+    target_cfg: str = "target/stm32f4x.cfg",
     com_port_device: str | None = None,
     com_port_fields: dict[str, object] | None = None,
     com_port_identity_source: str | None = "device",
@@ -439,7 +440,9 @@ def fixture_configuration(
     ``executable`` is the YAML value for ``debuggers.dut.executable`` verbatim,
     so a test can name a wrapper, the bare name ``openocd`` or ``null``; the
     default is the absolute path of the OpenOCD this image installs.
-    ``timeout_s`` is the deadline that entry gives its process. ``com_port_device``
+    ``timeout_s`` is the deadline that entry gives its process, and ``target_cfg``
+    the target script it names, a search name the installed OpenOCD resolves
+    against its own script tree, or one it cannot. ``com_port_device``
     adds one serial port, ``dut``, on that device, writable, because the one
     bridge in this project that carries bytes into a port has to have a port.
     The port declares ``identity_source: device``: version 3 refuses a port that
@@ -486,7 +489,7 @@ debuggers:
     executable: {executable_value}
     probe_id: "FIXTUREPROBE0001"
     interface_cfg: interface/stlink.cfg
-    target_cfg: target/stm32f4x.cfg
+    target_cfg: {target_cfg}
     timeout_s: {timeout_s}
     permissions:
       allow_flash: false

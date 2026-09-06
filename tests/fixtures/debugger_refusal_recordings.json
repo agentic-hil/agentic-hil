@@ -1,0 +1,178 @@
+{
+  "what": "Refusals and version texts of the two debugger programs the container test image installs, recorded with nothing on USB. The unit tier's playback fake replays these streams byte for byte so the classifier is held to the tools' own words, and the container tier re-runs the commands and compares, so a reworded release turns a test red rather than a bench. STM32CubeProgrammer is not here: it does not run in the image and its phrases still need a bench recording.",
+  "recorded_on": "2026-09-06",
+  "image": "tools/container/Dockerfile (python:3.12-slim), no probe attached",
+  "tool_versions": {
+    "openocd": "Open On-Chip Debugger 0.12.0 (Debian package openocd 0.12.0-3+b2)",
+    "pyocd": "0.45.1"
+  },
+  "recordings": {
+    "openocd_version": {
+      "argv": [
+        "openocd",
+        "--version"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.12.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\n"
+    },
+    "openocd_unknown_option": {
+      "argv": [
+        "openocd",
+        "--no-such-option"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.12.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nopenocd: unrecognized option '--no-such-option'\n"
+    },
+    "openocd_missing_target_cfg": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/stlink.cfg",
+        "-f",
+        "target/does-not-exist.cfg",
+        "-c",
+        "gdb_port disabled",
+        "-c",
+        "tcl_port disabled",
+        "-c",
+        "telnet_port disabled",
+        "-c",
+        "init"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.12.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nembedded:startup.tcl:28: Error: Can't find target/does-not-exist.cfg\nTraceback (most recent call last):\n  File \"embedded:startup.tcl\", line 28, in script\n    find target/does-not-exist.cfg\n"
+    },
+    "openocd_missing_include": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/stlink.cfg",
+        "-f",
+        "target/stm32f4x.cfg",
+        "-f",
+        "nothing-here.tcl",
+        "-c",
+        "gdb_port disabled",
+        "-c",
+        "tcl_port disabled",
+        "-c",
+        "telnet_port disabled",
+        "-c",
+        "init"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.12.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nInfo : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.\nInfo : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD\nembedded:startup.tcl:28: Error: Can't find nothing-here.tcl\nTraceback (most recent call last):\n  File \"embedded:startup.tcl\", line 28, in script\n    find nothing-here.tcl\n"
+    },
+    "openocd_server_stlink_no_probe": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/stlink.cfg",
+        "-f",
+        "target/stm32f4x.cfg",
+        "-c",
+        "gdb_port 3333",
+        "-c",
+        "init"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.12.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nInfo : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.\nInfo : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD\nInfo : clock speed 2000 kHz\nError: open failed\n\n\n"
+    },
+    "openocd_server_ftdi_no_device": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/ftdi/olimex-arm-usb-ocd-h.cfg",
+        "-f",
+        "target/stm32f4x.cfg",
+        "-c",
+        "gdb_port 3333",
+        "-c",
+        "init"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.12.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nInfo : auto-selecting first available session transport \"jtag\". To override use 'transport select <transport>'.\nError: no device found\nError: unable to open ftdi device with vid 15ba, pid 002b, description 'Olimex OpenOCD JTAG ARM-USB-OCD-H', serial '*' at bus location '*'\n\n"
+    },
+    "openocd_program_no_probe": {
+      "argv": [
+        "openocd",
+        "-f",
+        "interface/stlink.cfg",
+        "-f",
+        "target/stm32f4x.cfg",
+        "-c",
+        "gdb_port disabled",
+        "-c",
+        "tcl_port disabled",
+        "-c",
+        "telnet_port disabled",
+        "-c",
+        "program /tmp/x.bin verify"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Open On-Chip Debugger 0.12.0\nLicensed under GNU GPL v2\nFor bug reports, read\n\thttp://openocd.org/doc/doxygen/bugs.html\nInfo : auto-selecting first available session transport \"hla_swd\". To override use 'transport select <transport>'.\nInfo : The selected transport took over low-level target control. The results might differ compared to plain JTAG/SWD\nInfo : clock speed 2000 kHz\nError: open failed\n\n** OpenOCD init failed **\nshutdown command invoked\n\n"
+    },
+    "pyocd_version": {
+      "argv": [
+        "pyocd",
+        "--version"
+      ],
+      "returncode": 0,
+      "stdout": "0.45.1\n",
+      "stderr": ""
+    },
+    "pyocd_unknown_option": {
+      "argv": [
+        "pyocd",
+        "--no-such-option"
+      ],
+      "returncode": 2,
+      "stdout": "",
+      "stderr": "usage: pyocd [-h] [-V] [--help-options]  ...\npyocd: error: unrecognized arguments: --no-such-option\n"
+    },
+    "pyocd_commander_status_no_probe": {
+      "argv": [
+        "pyocd",
+        "commander",
+        "-W",
+        "--command",
+        "status"
+      ],
+      "returncode": 0,
+      "stdout": "No connected debug probes\n",
+      "stderr": ""
+    },
+    "pyocd_flash_no_probe": {
+      "argv": [
+        "pyocd",
+        "flash",
+        "-W",
+        "--no-reset",
+        "--base-address",
+        "0x08000000",
+        "/tmp/x.bin"
+      ],
+      "returncode": 1,
+      "stdout": "No connected debug probes\n",
+      "stderr": "0000216 E No target device available [load_cmd]\n"
+    }
+  },
+  "phrases_in_the_openocd_binary": {
+    "how": "grep -a over /usr/bin/openocd of the same package: the strings OpenOCD's embedded startup.tcl `program` proc echoes, which a flash prints with a probe attached and which no probeless run can produce.",
+    "phrases": [
+      "** Programming Failed **",
+      "** Verify Failed **",
+      "** Programming Finished **",
+      "** OpenOCD init failed **"
+    ],
+    "program_failed_occurrences": 1,
+    "verify_failed_occurrences": 1
+  }
+}

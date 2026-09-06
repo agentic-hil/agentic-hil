@@ -97,6 +97,51 @@ resume_generation = 0
 EXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="1",frame={addr="0x08000200",func="test_done",args=[],file="tests.c",fullname="/work/tests.c",line="123"},thread-id="1",stopped-threads="all"'
 UNEXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="99",frame={addr="0x08000300",func="assert_failed",args=[],file="assert.c",fullname="/work/assert.c",line="7"},thread-id="1",stopped-threads="all"'
 HARDFAULT_STOP = '*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={addr="0x08000400",func="HardFault_Handler",args=[],file="startup.c",fullname="/work/startup.c",line="88"},thread-id="1",stopped-threads="all"'
+# The stop records the public `stop_reason` vocabulary maps and the suite had
+# never produced (#506): a target that ran off the end of main, a stop inside
+# the reset vector, a breakpoint instruction nobody set, a fault delivered as a
+# signal, a signal outside every named set, and the end of a step. The shapes
+# are the GDB/MI `*stopped` records the GDB manual documents (Async Records:
+# `exited-normally`, `signal-received` with `signal-name` and `signal-meaning`,
+# `end-stepping-range`, each with the `frame` tuple OpenOCD's gdbserver
+# populates); a bench recording of a real fault and a real reset over
+# arm-none-eabi-gdb is still owed and would replace these. Each is opted into
+# by name, so the default fake keeps answering the breakpoint hit the rest of
+# the suite relies on.
+STOP_EXITED_NORMALLY = "stop_exited_normally"
+STOP_IN_RESET_HANDLER = "stop_in_reset_handler"
+STOP_SIGTRAP = "stop_sigtrap"
+STOP_SIGSEGV = "stop_sigsegv"
+STOP_SIGUSR1 = "stop_sigusr1"
+STOP_END_STEPPING_RANGE = "stop_end_stepping_range"
+EXITED_NORMALLY_STOP = '*stopped,reason="exited-normally"'
+RESET_HANDLER_STOP = '*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={addr="0x080001c0",func="Reset_Handler",args=[],file="startup_stm32f446xx.s",fullname="/work/startup_stm32f446xx.s",line="65"},thread-id="1",stopped-threads="all"'
+SIGTRAP_STOP = '*stopped,reason="signal-received",signal-name="SIGTRAP",signal-meaning="Trace/breakpoint trap",frame={addr="0x08000310",func="assert_failed",args=[],file="assert.c",fullname="/work/assert.c",line="9"},thread-id="1",stopped-threads="all"'
+SIGSEGV_STOP = '*stopped,reason="signal-received",signal-name="SIGSEGV",signal-meaning="Segmentation fault",frame={addr="0x08000520",func="main",args=[],file="main.c",fullname="/work/main.c",line="77"},thread-id="1",stopped-threads="all"'
+SIGUSR1_STOP = '*stopped,reason="signal-received",signal-name="SIGUSR1",signal-meaning="User defined signal 1",frame={addr="0x08000530",func="main",args=[],file="main.c",fullname="/work/main.c",line="80"},thread-id="1",stopped-threads="all"'
+END_STEPPING_RANGE_STOP = '*stopped,reason="end-stepping-range",frame={addr="0x08000534",func="main",args=[],file="main.c",fullname="/work/main.c",line="81"},thread-id="1",stopped-threads="all"'
+STOP_LINES_BY_BEHAVIOR = {
+    STOP_EXITED_NORMALLY: EXITED_NORMALLY_STOP,
+    STOP_IN_RESET_HANDLER: RESET_HANDLER_STOP,
+    STOP_SIGTRAP: SIGTRAP_STOP,
+    STOP_SIGSEGV: SIGSEGV_STOP,
+    STOP_SIGUSR1: SIGUSR1_STOP,
+    STOP_END_STEPPING_RANGE: END_STEPPING_RANGE_STOP,
+}
+# A GDB that dies under the session (#506), in the three timings the transport
+# tells apart. `gdb_exits_after_running` answers `-exec-continue` with
+# `^running` and the `*running` record and then exits at once, so the pipe is
+# already closed when the product asks to wait for a stop.
+# `gdb_exits_during_the_stop_wait` answers the same way and exits a moment
+# later, so the exit lands while the stop wait is pending and it is the wait
+# that has to report it. `gdb_exits_before_answering` exits with the command
+# itself still pending, so the product's command wait is what sees the close.
+GDB_EXITS_AFTER_RUNNING = "gdb_exits_after_running"
+GDB_EXITS_DURING_THE_STOP_WAIT = "gdb_exits_during_the_stop_wait"
+GDB_EXITS_BEFORE_ANSWERING = "gdb_exits_before_answering"
+# Long enough for the product to have entered its stop wait, short enough that
+# a test waiting on that wait is not slowed by it.
+STOP_WAIT_EXIT_DELAY_S = 0.5
 
 
 def emit(line: str) -> None:
@@ -161,6 +206,9 @@ def continue_stop_line() -> str:
         return UNEXPECTED_BREAKPOINT_STOP
     if has_behavior("hardfault"):
         return HARDFAULT_STOP
+    for name, line in STOP_LINES_BY_BEHAVIOR.items():
+        if has_behavior(name):
+            return line
     return EXPECTED_BREAKPOINT_STOP
 
 
@@ -297,8 +345,15 @@ def main() -> int:
             emit(f'{token}^done,bkpt={{number="{next_breakpoint}",type="breakpoint",disp="keep",enabled="y",addr="0x08000200",func="test_done",file="tests.c",line="123"}}')
             next_breakpoint += 1
         elif command.startswith("-exec-continue"):
+            if has_behavior(GDB_EXITS_BEFORE_ANSWERING):
+                return 0
             emit(f"{token}^running")
             emit("*running,thread-id=\"all\"")
+            if has_behavior(GDB_EXITS_AFTER_RUNNING):
+                return 0
+            if has_behavior(GDB_EXITS_DURING_THE_STOP_WAIT):
+                time.sleep(STOP_WAIT_EXIT_DELAY_S)
+                return 0
             if has_behavior(BENCH_RUN_STATE):
                 # The demo's main loop never returns: only a live breakpoint
                 # stops a resumed target, and nothing else ever does.
