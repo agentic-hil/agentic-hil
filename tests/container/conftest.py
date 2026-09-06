@@ -399,14 +399,45 @@ def uv_tool(tmp_path: Path, uv_binary: str, uv_cache: Path) -> UvTool:
     return UvTool(directory=directory, bin_directory=bin_directory, cache=uv_cache, uv=uv_binary)
 
 
-def fixture_configuration(workspace: Path, config_path: Path, state_root: Path) -> Path:
+def fixture_configuration(
+    workspace: Path,
+    config_path: Path,
+    state_root: Path,
+    *,
+    executable: str | None = None,
+    timeout_s: int = 20,
+    com_port_device: str | None = None,
+) -> Path:
     """A configuration for a project with no hardware behind it.
 
     It names the OpenOCD this image installs and a probe id no probe answers to,
     grants nothing that could reach a board, and declares no serial port. It
     exists so a server can start for a project and be found in the process
     table, which is a question about processes and not about hardware.
+
+    ``executable`` is the YAML value for ``debuggers.dut.executable`` verbatim,
+    so a test can name a wrapper, the bare name ``openocd`` or ``null``; the
+    default is the absolute path of the OpenOCD this image installs.
+    ``timeout_s`` is the deadline that entry gives its process. ``com_port_device``
+    adds one serial port, ``dut``, on that device, writable, because the one
+    bridge in this project that carries bytes into a port has to have a port.
+    The port declares ``identity_source: device``: version 3 refuses a port that
+    is identified by its device name alone unless the operator has said so, and
+    a pseudo-terminal has no other identity to offer.
     """
+    executable_value = repr(shutil.which("openocd")) if executable is None else executable
+    com_ports = (
+        "com_ports: {}\n"
+        if com_port_device is None
+        else f"""com_ports:
+  dut:
+    device: {com_port_device!r}
+    baudrate: 115200
+    identity_source: device
+    permissions:
+      allow_write: true
+"""
+    )
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         f"""workspace_root: {str(workspace)!r}
@@ -424,11 +455,11 @@ target:
 debuggers:
   dut:
     type: openocd
-    executable: {shutil.which("openocd")!r}
+    executable: {executable_value}
     probe_id: "FIXTUREPROBE0001"
     interface_cfg: interface/stlink.cfg
     target_cfg: target/stm32f4x.cfg
-    timeout_s: 20
+    timeout_s: {timeout_s}
     permissions:
       allow_flash: false
       allow_reset: false
@@ -446,8 +477,7 @@ artifacts:
   allowed_extensions: [".elf"]
   max_upload_size_mb: 1
   allow_upload: false
-com_ports: {{}}
-can_buses: {{}}
+{com_ports}can_buses: {{}}
 reports:
   directory: ".agentic-hil/reports"
 logs:
