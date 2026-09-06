@@ -46,6 +46,7 @@ from agentic_hil.config import (
     safe_read_text,
 )
 from agentic_hil.process import spawn_detached_process
+from agentic_hil.redact import filesystem_error_detail
 from agentic_hil.report import CANONICAL_REPORT_KEY, last_report_path
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
@@ -347,6 +348,32 @@ def prune_run_records(config: AgenticHILConfig) -> None:
                 continue
 
 
+def _runs_directory_unwritable(config: AgenticHILConfig, handle: str, summary: str, error: BaseException, **named: str) -> ConfigError:
+    """The refusal for a runs directory this process cannot write into.
+
+    Raised before any device is taken, and on both routes into a run: the
+    detached start's log open and the registration's first record. The run is
+    refused rather than run unwatched because the record is what a handle
+    names: without it nobody can ask what the run is doing or ask it to stop by
+    name, and a detached worker would run the whole plan behind a start command
+    that reported it never came up. Nothing was locked or driven, so the retry
+    is safe once the directory is."""
+    return ConfigError(
+        "run_state_unwritable",
+        summary,
+        {
+            "run": handle,
+            "runs_directory": display_path(config, str(runs_directory(config))),
+            **named,
+            **filesystem_error_detail(error),
+            "retry_safe": True,
+            "side_effect_committed": False,
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+        },
+    )
+
+
 class RunRegistration:
     """The run record, from the process that is running it.
 
@@ -394,7 +421,24 @@ class RunRegistration:
             "pid": os.getpid(),
             "started_at": utc_now_iso(),
         }
-        registration._write(RUN_STARTING, {})
+        # The first record is required where every later one is best effort.
+        # A run that is going and loses its record is a run nobody can watch,
+        # and the plan is what the bench is for; a run that cannot publish that
+        # it exists has taken nothing yet and is refused instead, because the
+        # handle its caller holds would otherwise name nothing: no status, no
+        # stop by name, and for a detached worker a whole plan run behind a
+        # start command told the worker never came up.
+        try:
+            registration._write(RUN_STARTING, {}, force=True, required=True)
+        except (ConfigError, OSError, ValueError) as error:
+            registration._lock.release()
+            raise _runs_directory_unwritable(
+                config,
+                handle,
+                "This run's record could not be written under the runs directory, so the run was refused before it took any device: a run with no record is one nobody can watch or stop by name.",
+                error,
+                record_path=display_path(config, str(record_path(config, handle))),
+            ) from error
         prune_run_records(config)
         return registration
 
@@ -489,8 +533,11 @@ class RunRegistration:
         self._stop_seen = stop_requested_at(self.config, self.handle)
         return self._stop_seen is not None
 
-    def _write(self, state: str, fields: JsonObject, *, force: bool = False) -> bool:
-        """Publish the record, or say the throttle held this one back."""
+    def _write(self, state: str, fields: JsonObject, *, force: bool = False, required: bool = False) -> bool:
+        """Publish the record, or say the throttle held this one back.
+
+        ``required`` lets a failed write out as the error it was; `take` asks it
+        of the first record, and nothing else does."""
         now = time.monotonic()
         if not force and now - self._last_write < PROGRESS_WRITE_INTERVAL_S:
             return False
@@ -499,6 +546,8 @@ class RunRegistration:
         try:
             write_run_record(self.config, self.handle, record)
         except (ConfigError, OSError, ValueError):
+            if required:
+                raise
             # A record that could not be written is a run nobody can watch, not
             # a run that should stop. The plan is what the bench is for. Reported
             # as written all the same: asking again forever would turn a
@@ -728,8 +777,28 @@ def spawn_run_worker(config: AgenticHILConfig, handle: str, test_config_path: st
     left reading a detached run's stderr once the command that started it has
     returned, and a full pipe would block the run mid-plan. The report is what
     a caller reads; this is for the case where there is no report because the
-    worker could not get far enough to write one."""
-    with open(runs_directory(config) / f"{validated_run_handle(handle)}.log", "ab") as handle_log:
+    worker could not get far enough to write one.
+
+    The log is opened before the worker exists, and a runs directory that
+    refuses the open refuses the start: it used to leave here as the bare
+    ``PermissionError`` it was, which the command printed as a traceback, and
+    the same directory would have refused the worker's record next, which is
+    the plan run behind a start command that reported the worker never came
+    up. So it is the refusal the registration raises for its record, with the
+    log named, and no worker is spawned."""
+    log_path = runs_directory(config) / f"{validated_run_handle(handle)}.log"
+    try:
+        # Closed by the `with` below; opened apart from it so the refusal is the open's alone and never the spawn's.
+        handle_log = open(log_path, "ab")  # noqa: SIM115
+    except OSError as error:
+        raise _runs_directory_unwritable(
+            config,
+            handle,
+            "The detached run's log could not be opened under the runs directory, so no worker was started and nothing was touched.",
+            error,
+            log_path=display_path(config, str(log_path)),
+        ) from error
+    with handle_log:
         return spawn_detached_process(
             [
                 sys.executable,

@@ -416,13 +416,15 @@ def test_a_starting_record_that_cannot_be_written_refuses_the_run_before_the_ben
     def refused_write(*_: object, **__: object) -> None:
         raise PermissionError(13, "Permission denied")
 
+    writable = runlifecycle.write_run_record
     monkeypatch.setattr(runlifecycle, "write_run_record", refused_write)
 
     with pytest.raises(ConfigError) as refused:
         run_plan(config, str(plan))
 
     assert refused.value.error_type == "run_state_unwritable", refused.value.to_dict()
-    assert str(runlifecycle.runs_directory(config)) in json.dumps(refused.value.to_dict()), refused.value.to_dict()
+    named = " ".join(str(value) for value in refused.value.to_dict().values())
+    assert str(runlifecycle.runs_directory(config)) in named, refused.value.to_dict()
     assert refused.value.details.get("side_effect_committed") is False, refused.value.to_dict()
     assert not (workspace / ".agentic-hil" / "reports" / "last-report.json").exists()
     assert runlifecycle.known_runs(config)["runs"] == []
@@ -432,6 +434,15 @@ def test_a_starting_record_that_cannot_be_written_refuses_the_run_before_the_ben
         assert stranger.acquire(declared_devices(config, load_test_config(str(plan), config.work_dir)), wait_s=0.0)
     finally:
         stranger.release_all()
+    # And the run lock the refused registration took on its way in is given
+    # back: the same handle registers once the directory writes again.
+    handle = runlifecycle.new_run_handle()
+    with pytest.raises(ConfigError):
+        runlifecycle.RunRegistration.take(config, handle, name="refused", test_config_path=str(plan), detached=False)
+    monkeypatch.setattr(runlifecycle, "write_run_record", writable)
+    with runlifecycle.RunRegistration.take(config, handle, name="again", test_config_path=str(plan), detached=False) as registration:
+        registration.finish({"ok": True})
+    assert runlifecycle.run_status(config, handle)["state"] == "finished"
 
 
 def test_a_record_write_that_fails_once_the_run_is_going_does_not_end_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

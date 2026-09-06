@@ -1653,6 +1653,27 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "For a plan, that is `bench_run_stop` and then `test_reactor_run` again; the plan needs no run around it.",
         ),
     ),
+    "run_state_unwritable": ErrorRemedy(
+        meaning=(
+            "The runs directory under `state_root` refused a write, so the run was refused before it took any device. A "
+            "run's record is what its handle names: without it nobody can watch the run or ask it to stop by name, and a "
+            "detached worker would have run the whole plan behind a start command that reported it never came up. "
+            "`runs_directory` names the directory and `errno` says what the operating system answered; nothing was "
+            "locked or driven."
+        ),
+        remediation=(
+            "Make the directory named in `runs_directory` writable for the user this command or server runs as, then "
+            "start the run again; the retry is safe.",
+            "A state root that is unwritable as a whole is refused when the configuration loads, as "
+            "`unsafe_configured_path` on `state_root`. This refusal is the runs directory alone, which is usually a "
+            "permission or ownership change made after the state root was created, or a disk that is full.",
+        ),
+        do_not=(
+            "Do not delete the coordination state to get past this: the records beside the one that could not be "
+            "written belong to runs that may still be going, and the leases and the audit trail under the same root "
+            "are what `agentic-hil lease-status` and `agentic-hil recover` read.",
+        ),
+    ),
     # The most common refusal on this surface, and for a long time the one that
     # carried nothing: every other entry here explains a bench, a policy or a
     # backend, and this one explains the caller's own payload. It is deliberately
