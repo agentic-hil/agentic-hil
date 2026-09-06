@@ -2,6 +2,7 @@
 """Fake GDB/MI process for tests: token-numbered replies, delayed async *stopped records."""
 from __future__ import annotations
 
+import os
 import re
 import sys
 import threading
@@ -36,7 +37,63 @@ BATCH_SYMBOLS = {
 UNTYPED_SYMBOLS = {"g_pfnVectors"}
 UNKNOWN_TYPE_MESSAGE = "'{symbol}' has unknown type; cast it to its declared type"
 BEHAVIOR_MARKER = b"FAKE_GDB_BEHAVIOR="
-behavior_override = ""
+# The behaviour is learned twice. The artifact trailer is read when
+# `-file-exec-and-symbols` arrives, which is the third command of a session, so
+# anything the product sends before it is answered by the default fake; a test
+# whose claim is about a startup command therefore seeds the same string through
+# the environment, which the GDB child inherits from the test process and this
+# fake reads before its first command. The trailer, when present, still wins.
+BEHAVIOR_ENVIRONMENT_VARIABLE = "FAKE_GDB_BEHAVIOR"
+behavior_override = os.environ.get(BEHAVIOR_ENVIRONMENT_VARIABLE, "")
+# What the bench observed and the two issues recorded, 2026-09-05, a debug
+# session over OpenOCD's GDB server (the GDB version itself was not recorded in
+# either issue; the bench tier carries the hardware half of these tests):
+#
+# #495: GDB started without `-gdb-set mi-async on` does not read the next MI
+#   command while `-exec-continue` is in flight. An `-exec-interrupt --all` sent
+#   while the target runs is not processed until the target stops on its own,
+#   and a firmware whose main loop never returns never does; the product saw
+#   `halt_command_acknowledged: False` and then "GDB/MI command timed out." on
+#   the explicit `debug_halt`. With asynchronous MI on, the interrupt is
+#   processed while the target runs and answered `^done` followed by a
+#   `*stopped` record carrying SIGINT.
+# #492: `-exec-interrupt --all` on a target that is already stopped is
+#   acknowledged `^done`, and no `*stopped` record follows, because the target
+#   never resumed; the product saw `error_type: timeout` with "Target halt was
+#   requested but not confirmed."
+#
+# The default fake answers every interrupt with a stop and every resume with a
+# breakpoint hit, which is what the rest of the suite relies on. The behaviour
+# below is opted into by the tests that need the bench's answers.
+BENCH_RUN_STATE = "bench_run_state"
+# Two more of the bench's run-state answers, each opted into on top of it:
+# `halt_timeout` acknowledges an interrupt and never stops (the shape of a probe
+# that lost the core), and `interrupt_lost_once` leaves the first interrupt
+# unanswered altogether and the target running, so the product's containment
+# fails once for a real reason and a later `debug_halt` meets a target that is
+# still running.
+HALT_TIMEOUT = "halt_timeout"
+INTERRUPT_LOST_ONCE = "interrupt_lost_once"
+# A GDB without the setting. The product must refuse at session start; the
+# assertion behind this is that whatever the debugger answered is carried to
+# the caller, and this is the text this fake answers. It is not a recording:
+# no GDB without asynchronous MI has been driven on the bench, and a recording
+# from one (older than 7.8, where the setting was still `target-async`, or built
+# without async support, given `-gdb-set mi-async on` under `--interpreter=mi2`)
+# is still owed.
+MI_ASYNC_UNSUPPORTED = "mi_async_unsupported"
+MI_ASYNC_REFUSAL = 'No symbol \\"mi\\" in current context.'
+INTERRUPT_STOP = '*stopped,reason="signal-received",signal-name="SIGINT",frame={addr="0x08000100",func="main",file="main.c",line="42"}'
+target_running = False
+mi_async = False
+run_state_lock = threading.Lock()
+target_stopped = threading.Event()
+target_stopped.set()
+# Which resume the target is running from. A delayed breakpoint stop belongs to
+# the resume that scheduled it; once an interrupt has stopped that resume, the
+# delayed stop must not land on the next one, or the product reads a stale
+# breakpoint stop and attributes it to a resume that never reached one.
+resume_generation = 0
 EXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="1",frame={addr="0x08000200",func="test_done",args=[],file="tests.c",fullname="/work/tests.c",line="123"},thread-id="1",stopped-threads="all"'
 UNEXPECTED_BREAKPOINT_STOP = '*stopped,reason="breakpoint-hit",disp="keep",bkptno="99",frame={addr="0x08000300",func="assert_failed",args=[],file="assert.c",fullname="/work/assert.c",line="7"},thread-id="1",stopped-threads="all"'
 HARDFAULT_STOP = '*stopped,reason="signal-received",signal-name="SIGINT",signal-meaning="Interrupt",frame={addr="0x08000400",func="HardFault_Handler",args=[],file="startup.c",fullname="/work/startup.c",line="88"},thread-id="1",stopped-threads="all"'
@@ -51,16 +108,58 @@ def behavior() -> str:
     return behavior_override
 
 
+def has_behavior(name: str) -> bool:
+    """Whether `name` is among the behaviours the artifact asked for.
+
+    The marker takes several joined by `+`, so a test can combine the bench's
+    run-state answers with one of the stop lines below."""
+    return name in behavior_override.split("+")
+
+
+def mark_running() -> int:
+    """Record the resume and return its generation, for the stop that ends it."""
+    global target_running, resume_generation
+    with run_state_lock:
+        target_running = True
+        resume_generation += 1
+        target_stopped.clear()
+        return resume_generation
+
+
+def mark_stopped(stop_line: str, generation: int | None = None) -> None:
+    """Emit the stop and record that the target is halted, atomically enough
+    that a command read after the record sees a stopped target.
+
+    With a generation, only if the target is still running from that resume:
+    a stop scheduled for a resume that an interrupt already ended is dropped."""
+    global target_running
+    with run_state_lock:
+        if generation is not None and (not target_running or generation != resume_generation):
+            return
+        target_running = False
+        emit(stop_line)
+        target_stopped.set()
+
+
+def is_running() -> bool:
+    with run_state_lock:
+        return target_running
+
+
+def emit_delayed_bench_stop(stop_line: str, generation: int) -> None:
+    time.sleep(ASYNC_STOP_DELAY_S)
+    mark_stopped(stop_line, generation)
+
+
 def emit_delayed_stop(stop_line: str) -> None:
     time.sleep(ASYNC_STOP_DELAY_S)
     emit(stop_line)
 
 
 def continue_stop_line() -> str:
-    current = behavior()
-    if current == "unexpected_breakpoint":
+    if has_behavior("unexpected_breakpoint"):
         return UNEXPECTED_BREAKPOINT_STOP
-    if current == "hardfault":
+    if has_behavior("hardfault"):
         return HARDFAULT_STOP
     return EXPECTED_BREAKPOINT_STOP
 
@@ -124,7 +223,7 @@ def batch_query(args: list[str]) -> int:
 
 
 def main() -> int:
-    global behavior_override
+    global behavior_override, mi_async
 
     if "--batch" in sys.argv[1:]:
         return batch_query(sys.argv[1:])
@@ -134,11 +233,17 @@ def main() -> int:
     next_breakpoint = 1
     live_breakpoints: set[int] = set()
     reset_count = 0
+    interrupts_lost = 0
     for raw_line in sys.stdin:
         match = COMMAND_PATTERN.match(raw_line.strip())
         if match is None:
             continue
         token, command = match.group(1), match.group(2)
+        # Synchronous MI: the command just read is not processed while the
+        # target runs. It is processed once the target stops on its own; a target
+        # that never stops leaves it unread until the fake is killed (#495).
+        if has_behavior(BENCH_RUN_STATE) and not mi_async and is_running():
+            target_stopped.wait()
         if command == "-gdb-exit":
             emit(f"{token}^exit")
             return 0
@@ -173,6 +278,11 @@ def main() -> int:
                 continue
             emit(f"{token}^done")
         elif command.startswith("-gdb-set"):
+            if "mi-async" in command and has_behavior(MI_ASYNC_UNSUPPORTED):
+                emit(f'{token}^error,msg="{MI_ASYNC_REFUSAL}"')
+                continue
+            if "mi-async" in command:
+                mi_async = command.split()[-1] == "on"
             emit(f"{token}^done")
         elif command.startswith("-break-delete"):
             for number_text in command[len("-break-delete") :].split():
@@ -189,11 +299,28 @@ def main() -> int:
         elif command.startswith("-exec-continue"):
             emit(f"{token}^running")
             emit("*running,thread-id=\"all\"")
+            if has_behavior(BENCH_RUN_STATE):
+                # The demo's main loop never returns: only a live breakpoint
+                # stops a resumed target, and nothing else ever does.
+                generation = mark_running()
+                if live_breakpoints:
+                    threading.Thread(target=emit_delayed_bench_stop, args=(continue_stop_line(), generation), daemon=True).start()
+                continue
             threading.Thread(target=emit_delayed_stop, args=(continue_stop_line(),), daemon=True).start()
         elif command.startswith("-exec-interrupt"):
+            if has_behavior(INTERRUPT_LOST_ONCE) and interrupts_lost == 0:
+                # Not answered at all, and the target keeps running.
+                interrupts_lost += 1
+                continue
             emit(f"{token}^done")
-            if behavior() != "halt_timeout":
-                emit('*stopped,reason="signal-received",signal-name="SIGINT",frame={addr="0x08000100",func="main",file="main.c",line="42"}')
+            if has_behavior(BENCH_RUN_STATE):
+                # Acknowledged either way; a stop follows only from a target
+                # that was running (#492), and from a probe that still has it.
+                if is_running() and not has_behavior(HALT_TIMEOUT):
+                    mark_stopped(INTERRUPT_STOP)
+                continue
+            if not has_behavior(HALT_TIMEOUT):
+                emit(INTERRUPT_STOP)
         elif command.startswith("-data-evaluate-expression"):
             expression = command[len("-data-evaluate-expression") :].strip().strip('"')
             evaluate_expression(token, expression)

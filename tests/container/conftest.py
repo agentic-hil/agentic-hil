@@ -10,17 +10,17 @@ time is the moment of the first lookup rather than the process's start, and
 OpenOCD prints a failure-worded line after a reset that succeeded. A fake cannot
 tell anyone any of that.
 
-So this tier runs the real tools. It needs uv, an OpenOCD binary, ``/proc`` and
-the package index, and it needs no probe and no board: what needs those is the
-bench tier under ``tests/bench``. ``tools/container/Dockerfile`` is the image it
+So this tier runs the real tools. It needs uv, an OpenOCD binary, pyOCD, curl,
+``/proc`` and the package index, and it needs no probe and no board: what needs
+those is the bench tier under ``tests/bench``. ``tools/container/Dockerfile`` is the image it
 is published with and the image the hosted CI job builds.
 
 The gate has two halves, because a skip and an error are different answers.
 ``AGENTIC_HIL_CONTAINER_TESTS=1`` says a run means to be in the image, and every
 test here skips without it, so a developer's ``pytest`` and the hosted matrix
 are unaffected. A run that does set it and cannot find the marker the image
-build writes, or uv, or the debugger, or ``/proc``, ends the collection with an
-error naming what is missing. A required check that reported success over
+build writes, or uv, or either debugger, or curl, or ``/proc``, ends the
+collection with an error naming what is missing. A required check that reported success over
 fifteen skipped tests would be a check measuring nothing and saying nothing
 about it, and a machine that satisfied the variable outside the image could be a
 bench with a probe attached.
@@ -51,7 +51,8 @@ import socket
 import subprocess
 import sys
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
@@ -133,6 +134,14 @@ def missing_from_the_image(which: Callable[[str], str | None] | None = None, pro
         return "uv is not on PATH, and this tier reads receipts uv writes"
     if which("openocd") is None:
         return "openocd is not on PATH, and this tier drives the real debugger backend"
+    if which("pyocd") is None:
+        return "pyocd is not on PATH, and this tier drives the pyOCD backend against nothing on USB"
+    if which("curl") is None:
+        return "curl is not on PATH, and this tier runs install.sh's fetch route, which downloads the pinned uv installer with it"
+    if which("ip") is None:
+        return "ip (iproute2) is not on PATH, and this tier creates the virtual CAN interface the CAN tools bind with it"
+    if which("candump") is None:
+        return "candump (can-utils) is not on PATH, and this tier reads a frame the CAN tools sent off the interface with it"
     if not proc_root.is_dir():
         return f"this host publishes no {proc_root}, and this tier reads the process table out of it"
     return None
@@ -399,14 +408,64 @@ def uv_tool(tmp_path: Path, uv_binary: str, uv_cache: Path) -> UvTool:
     return UvTool(directory=directory, bin_directory=bin_directory, cache=uv_cache, uv=uv_binary)
 
 
-def fixture_configuration(workspace: Path, config_path: Path, state_root: Path) -> Path:
+def _yaml_scalar(value: object) -> str:
+    """One configuration value the way an operator writes it: quoted text, a bare number, a lowercase boolean."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return repr(str(value))
+
+
+def fixture_configuration(
+    workspace: Path,
+    config_path: Path,
+    state_root: Path,
+    *,
+    executable: str | None = None,
+    timeout_s: int = 20,
+    com_port_device: str | None = None,
+    com_port_fields: dict[str, object] | None = None,
+    com_port_identity_source: str | None = "device",
+    can_buses_yaml: str = "can_buses: {}\n",
+) -> Path:
     """A configuration for a project with no hardware behind it.
 
     It names the OpenOCD this image installs and a probe id no probe answers to,
     grants nothing that could reach a board, and declares no serial port. It
     exists so a server can start for a project and be found in the process
     table, which is a question about processes and not about hardware.
+
+    ``executable`` is the YAML value for ``debuggers.dut.executable`` verbatim,
+    so a test can name a wrapper, the bare name ``openocd`` or ``null``; the
+    default is the absolute path of the OpenOCD this image installs.
+    ``timeout_s`` is the deadline that entry gives its process. ``com_port_device``
+    adds one serial port, ``dut``, on that device, writable, because the one
+    bridge in this project that carries bytes into a port has to have a port.
+    The port declares ``identity_source: device``: version 3 refuses a port that
+    is identified by its device name alone unless the operator has said so, and
+    a pseudo-terminal has no other identity to offer. ``com_port_fields`` adds
+    further keys to that entry as an operator would write them (an encoding, a
+    buffer size, a serial number), and ``com_port_identity_source`` is the
+    declaration to write, or None to write none, for an entry whose identity
+    one of those added keys carries instead. ``can_buses_yaml`` is the
+    whole ``can_buses:`` section verbatim, for a test that declares a bus on a
+    virtual CAN interface; the default declares none.
     """
+    executable_value = repr(shutil.which("openocd")) if executable is None else executable
+    entry_lines = "".join(f"    {key}: {_yaml_scalar(value)}\n" for key, value in (com_port_fields or {}).items())
+    identity_line = "" if com_port_identity_source is None else f"    identity_source: {com_port_identity_source}\n"
+    com_ports = (
+        "com_ports: {}\n"
+        if com_port_device is None
+        else f"""com_ports:
+  dut:
+    device: {com_port_device!r}
+    baudrate: 115200
+{identity_line}{entry_lines}    permissions:
+      allow_write: true
+"""
+    )
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         f"""workspace_root: {str(workspace)!r}
@@ -424,11 +483,11 @@ target:
 debuggers:
   dut:
     type: openocd
-    executable: {shutil.which("openocd")!r}
+    executable: {executable_value}
     probe_id: "FIXTUREPROBE0001"
     interface_cfg: interface/stlink.cfg
     target_cfg: target/stm32f4x.cfg
-    timeout_s: 20
+    timeout_s: {timeout_s}
     permissions:
       allow_flash: false
       allow_reset: false
@@ -446,9 +505,7 @@ artifacts:
   allowed_extensions: [".elf"]
   max_upload_size_mb: 1
   allow_upload: false
-com_ports: {{}}
-can_buses: {{}}
-reports:
+{com_ports}{can_buses_yaml}reports:
   directory: ".agentic-hil/reports"
 logs:
   directory: ".agentic-hil/logs"
@@ -456,3 +513,404 @@ logs:
         encoding="utf-8",
     )
     return config_path
+
+
+# ---------------------------------------------------------------------------
+# The serial transport: a pseudo-terminal pair, the scripted peer on its far
+# end, a live server over its own pipe, and the console script.
+#
+# The pair is made by socat and opened through the real pyserial, so what these
+# fixtures put in front of a test is the kernel's terminal device and pyserial's
+# own POSIX behaviour on it: the exclusive flock a second opener meets, the
+# termios the open applies, the read that returns nothing when the far end is
+# quiet. None of that is reachable through the fake serial handle the unit tier
+# uses, which is the reason this arrangement exists.
+#
+# The peer on the far end is `tests/container/pty_responder.py`: a byte peer
+# for the transport and nothing more. It runs no firmware, models nothing
+# electrical, and its answers are an argument the test wrote, documented beside
+# the assertions that read them back.
+
+# How long the pair may take to appear, and how long a peer may take to open
+# its end. Generous: both are a process start away.
+PTY_SETUP_TIMEOUT_S = 15.0
+# How long a live server may take to answer one request before that is a
+# failure rather than a slow machine. A `com_read` waits out its own
+# `wait_timeout_s` inside this, so it has to exceed every wait a test asks for.
+SERVER_ANSWER_TIMEOUT_S = 60.0
+
+RESPONDER = Path(__file__).resolve().parent / "pty_responder.py"
+
+
+@dataclass
+class PtyPair:
+    """Two linked pseudo-terminals, and the socat that joins them.
+
+    ``dut`` is the link the configuration names as its COM port; ``peer`` is
+    the link the responder holds. Both are symbolic links socat made to the
+    ``/dev/pts/N`` slaves it allocated, so a configuration written against
+    them is stable across runs and never names a pts number.
+    """
+
+    dut: Path
+    peer: Path
+    socat: subprocess.Popen[bytes]
+
+    @property
+    def dut_slave(self) -> Path:
+        """The ``/dev/pts/N`` behind the configured link, as the kernel names it."""
+        return Path(os.path.realpath(self.dut))
+
+    def stop(self) -> None:
+        """End socat and wait for it, which removes both slaves.
+
+        Idempotent, so a test that killed the pair itself to make the device
+        vanish can leave the fixture's teardown to find it already gone.
+        """
+        if self.socat.poll() is None:
+            self.socat.kill()
+        self.socat.wait(timeout=30)
+        for stream in (self.socat.stdout, self.socat.stderr):
+            if stream is not None:
+                stream.close()
+
+
+def _wait_until(condition: Callable[[], bool], timeout_s: float, what: str, process: subprocess.Popen[bytes] | None = None) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not condition():
+        if process is not None and process.poll() is not None:
+            stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr is not None else ""
+            raise RuntimeError(f"{what}: the process exited with {process.returncode} first:\n{stderr}")
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"{what}: not within {timeout_s:.0f}s")
+        time.sleep(0.02)
+
+
+@pytest.fixture
+def pty_pair(tmp_path: Path) -> Iterator[PtyPair]:
+    """A fresh pair per test, so one test's holder can never be another's.
+
+    ``raw,echo=0`` on both ends is not optional: the two slaves share nothing,
+    but a slave left in its default line discipline echoes what it receives
+    back to its writer, and the product would then read its own stimulus as
+    the peer's answer.
+
+    Skips, with the reason named, where the pair cannot be made: no socat on
+    PATH, or a devpts the container does not mount. A skip here reaches the
+    job's own gate, which refuses a tier that skipped anything, so a container
+    that could not create the transport is a red run and not a quiet pass.
+    """
+    socat = shutil.which("socat")
+    if socat is None:
+        pytest.skip("socat is not on PATH, and the pseudo-terminal pair this module drives is made by it")
+    try:
+        pair = make_pty_pair(socat, tmp_path / "dut", tmp_path / "peer")
+    except RuntimeError as error:
+        pytest.skip(f"the pseudo-terminal pair could not be created here: {error}")
+    try:
+        yield pair
+    finally:
+        pair.stop()
+
+
+def make_pty_pair(socat: str, dut: Path, peer: Path) -> PtyPair:
+    """One socat pair with its two links at the given paths, or a RuntimeError naming why not.
+
+    Separate from the fixture so a test that made its device vanish by ending
+    the pair can put a fresh one behind the same configured link and prove
+    the product opens it again.
+    """
+    process = subprocess.Popen(
+        [socat, "-d", "-d", f"pty,raw,echo=0,link={dut}", f"pty,raw,echo=0,link={peer}"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    pair = PtyPair(dut=dut, peer=peer, socat=process)
+    try:
+        _wait_until(lambda: dut.exists() and peer.exists(), PTY_SETUP_TIMEOUT_S, "waiting for socat's two links", process)
+    except RuntimeError:
+        pair.stop()
+        raise
+    return pair
+
+
+@dataclass
+class Responder:
+    """The scripted peer, running, and what it has received so far."""
+
+    process: subprocess.Popen[bytes]
+    record: Path
+
+    def received(self) -> bytes:
+        """Every byte the product put on the wire, as the peer saw it."""
+        return self.record.read_bytes() if self.record.exists() else b""
+
+    def wait_for(self, expected: bytes, timeout_s: float = 10.0) -> bytes:
+        """The record once ``expected`` is in it, or whatever it holds at the bound."""
+        deadline = time.monotonic() + timeout_s
+        while expected not in self.received() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return self.received()
+
+    def stop(self) -> bytes:
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=10)
+        if self.process.stderr is not None:
+            self.process.stderr.close()
+        return self.received()
+
+
+def start_responder(pair: PtyPair, tmp_path: Path, *replies: str, delay_s: float = 0.0, announce: str | None = None, announce_every_s: float = 0.0) -> Responder:
+    """Put the peer on the far end of ``pair`` with the given answer table.
+
+    Each reply is ``REQUEST=RESPONSE`` under Python's escape rules, so
+    ``PING=PONG\\r\\n`` answers the line ``PING`` with the bytes ``PONG\\r\\n``.
+    No replies at all is a peer that listens and records and never answers.
+    ``announce`` is a line the peer writes on its own every ``announce_every_s``
+    without being asked, which is how a test reaches a plan format that has no
+    write step. Returns once the peer has opened its end, so a test that
+    writes next is writing to a listener.
+    """
+    record = tmp_path / "responder-received.bin"
+    ready = tmp_path / "responder-ready"
+    arguments = [sys.executable, str(RESPONDER), "--device", str(pair.peer), "--record", str(record), "--ready", str(ready), "--delay-s", str(delay_s)]
+    for reply in replies:
+        arguments += ["--reply", reply]
+    if announce is not None:
+        arguments += ["--announce", announce, "--announce-every-s", str(announce_every_s)]
+    process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    _wait_until(ready.exists, PTY_SETUP_TIMEOUT_S, "waiting for the responder to open its end of the pair", process)
+    return Responder(process=process, record=record)
+
+
+class LiveServer:
+    """One ``agentic-hil mcp-stdio`` over its own pipes, spoken to as a host does.
+
+    Started by absolute interpreter in the project directory with the
+    configuration named through ``AGENTIC_HIL_CONFIG``, exactly the way an
+    agent host starts one. ``call`` is a ``tools/call`` and returns the
+    ``structuredContent`` document, which is the same document the server puts
+    in the content text and what a caller reads.
+    """
+
+    def __init__(self, config: Path, project: Path, *, command: list[str] | None = None, environment: dict[str, str] | None = None):
+        self.project = project
+        env = {**os.environ, "AGENTIC_HIL_CONFIG": str(config), **(environment or {})}
+        self.process = subprocess.Popen(
+            command or [sys.executable, "-m", "agentic_hil", "mcp-stdio"],
+            cwd=str(project),
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        self._next_id = 1
+
+    def __enter__(self) -> LiveServer:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def request(self, method: str, params: dict | None = None, timeout_s: float = SERVER_ANSWER_TIMEOUT_S) -> dict:
+        assert self.process.stdin is not None and self.process.stdout is not None
+        request_id = self._next_id
+        self._next_id += 1
+        message = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}
+        self.process.stdin.write(json.dumps(message) + "\n")
+        self.process.stdin.flush()
+        deadline = time.monotonic() + timeout_s
+        while True:
+            remaining = max(0.1, deadline - time.monotonic())
+            line = a_line_within(self.process.stdout, remaining)
+            if line is None or line == "":
+                state = f"exited with {self.process.returncode}" if self.process.poll() is not None else "is still running"
+                raise AssertionError(f"the server did not answer {method} (id {request_id}) within {timeout_s:.0f}s and {state}")
+            answered = json.loads(line)
+            if answered.get("id") == request_id:
+                return answered
+            if time.monotonic() > deadline:
+                raise AssertionError(f"the server answered other messages but never id {request_id} for {method}")
+
+    def initialize(self) -> dict:
+        answered = self.request(
+            "initialize",
+            {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "container-tier", "version": "1"}},
+        )
+        assert "result" in answered, answered
+        return answered["result"]
+
+    def call(self, name: str, arguments: dict | None = None, timeout_s: float = SERVER_ANSWER_TIMEOUT_S) -> dict:
+        answered = self.request("tools/call", {"name": name, "arguments": arguments or {}}, timeout_s=timeout_s)
+        assert "result" in answered, answered
+        result = answered["result"]
+        document = result["structuredContent"]
+        # The content text is the same document, which a host that reads no
+        # structuredContent parses; held to it here so the two cannot drift.
+        assert json.loads(result["content"][0]["text"]) == document, result
+        return document
+
+    def close(self, timeout_s: float = 30.0) -> str:
+        """End the server by closing its stdin, and return what it wrote to stderr."""
+        if self.process.poll() is None:
+            try:
+                _stdout, stderr = self.process.communicate(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                _stdout, stderr = self.process.communicate(timeout=timeout_s)
+        else:
+            stderr = self.process.stderr.read() if self.process.stderr is not None else ""
+        return stderr or ""
+
+    def kill(self) -> None:
+        if self.process.poll() is None:
+            self.process.kill()
+            self.process.wait(timeout=30)
+
+
+def run_cli(project: Path, config: Path | None, *arguments: str, stdin: bytes | None = None, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
+    """The console script, in the project, with the configuration named.
+
+    Bytes in and bytes out, so what a test asserts on is what a shell saw.
+    ``config`` None leaves ``AGENTIC_HIL_CONFIG`` as the environment has it,
+    for the commands that read no configuration.
+    """
+    env = {**os.environ, **(environment or {})}
+    if config is not None:
+        env["AGENTIC_HIL_CONFIG"] = str(config)
+    return subprocess.run(
+        [sys.executable, "-m", "agentic_hil", *arguments],
+        cwd=str(project),
+        env=env,
+        input=stdin,
+        capture_output=True,
+        timeout=COMMAND_TIMEOUT_S,
+        check=False,
+    )
+
+
+def json_document(completed: subprocess.CompletedProcess[bytes]) -> dict:
+    """The one JSON document a ``--json`` run printed."""
+    text = completed.stdout.decode("utf-8")
+    assert text.strip(), f"no document on stdout (exit {completed.returncode}):\n{completed.stderr.decode('utf-8', errors='replace')}"
+    return json.loads(text)
+
+
+# ---------------------------------------------------------------------------
+# An unprivileged user for the cases the kernel's permission checks decide.
+#
+# The container runs its tests as root, and root passes every mode bit, so a
+# device this user cannot open, a log this user cannot append to and a logs
+# directory this user cannot write into are only reachable by a server that is
+# not root. `setpriv` drops one child to `nobody`; the tree that child works in
+# is made under /tmp and handed to that user, because pytest's own temporary
+# tree is created with mode 0o700 and cannot even be traversed by anyone else.
+
+
+@dataclass(frozen=True)
+class UnprivilegedUser:
+    """The `nobody` uid and gid, and the `setpriv` that starts a process as them."""
+
+    uid: int
+    gid: int
+    setpriv: str
+
+    def command(self, *argv: str) -> list[str]:
+        return [self.setpriv, f"--reuid={self.uid}", f"--regid={self.gid}", "--clear-groups", *argv]
+
+
+def unprivileged_user() -> UnprivilegedUser:
+    """The user a server is dropped to, or a skip naming what this run lacks for it."""
+    if os.geteuid() != 0:
+        pytest.skip("needs root: a device or a file the server's user cannot open is something only root can arrange here")
+    setpriv = shutil.which("setpriv")
+    if setpriv is None:
+        pytest.skip("setpriv is not on PATH, and it is what drops the server to an unprivileged user")
+    import pwd
+
+    try:
+        entry = pwd.getpwnam("nobody")
+    except KeyError:
+        pytest.skip("this image has no `nobody` user to drop the server to")
+    return UnprivilegedUser(uid=entry.pw_uid, gid=entry.pw_gid, setpriv=setpriv)
+
+
+@dataclass
+class UnprivilegedTree:
+    """A workspace, configuration, state root and HOME an unprivileged server can use.
+
+    Everything under ``root`` is handed to the user by ``give_away``, which a
+    test calls once the configuration is written; what a test then wants
+    root-owned it makes afterwards.
+    """
+
+    root: Path
+    user: UnprivilegedUser
+
+    @property
+    def project(self) -> Path:
+        return self.root / "project"
+
+    @property
+    def home(self) -> Path:
+        return self.root / "home"
+
+    @property
+    def state(self) -> Path:
+        return self.root / "state"
+
+    @property
+    def config_path(self) -> Path:
+        return self.root / "config" / "config.yaml"
+
+    def give_away(self) -> None:
+        for path in [self.root, *self.root.rglob("*")]:
+            os.chown(path, self.user.uid, self.user.gid)
+
+    def environment(self) -> dict[str, str]:
+        """HOME and the XDG roots under the tree, and temporary storage the user can write."""
+        temporary = self.root / "tmp"
+        return {
+            "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "XDG_CACHE_HOME": str(self.home / ".cache"),
+            "XDG_DATA_HOME": str(self.home / ".local" / "share"),
+            "XDG_STATE_HOME": str(self.home / ".local" / "state"),
+            "TMPDIR": str(temporary),
+            "TEMP": str(temporary),
+            "TMP": str(temporary),
+        }
+
+    def server(self) -> LiveServer:
+        """A live server in the project, running as the unprivileged user."""
+        return LiveServer(
+            self.config_path,
+            self.project,
+            command=self.user.command(sys.executable, "-m", "agentic_hil", "mcp-stdio"),
+            environment=self.environment(),
+        )
+
+    def remove(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+def unprivileged_tree(user: UnprivilegedUser, com_port_device: str) -> UnprivilegedTree:
+    """A fresh tree under /tmp with the configuration written and everything handed to ``user``."""
+    import tempfile
+
+    root = Path(tempfile.mkdtemp(prefix="agentic-hil-unprivileged-", dir="/tmp"))
+    tree = UnprivilegedTree(root=root, user=user)
+    tree.project.mkdir()
+    tree.home.mkdir()
+    (root / "tmp").mkdir()
+    fixture_configuration(tree.project, tree.config_path, tree.state, com_port_device=com_port_device)
+    tree.give_away()
+    return tree

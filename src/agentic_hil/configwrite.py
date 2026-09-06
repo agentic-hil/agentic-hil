@@ -88,7 +88,7 @@ from agentic_hil.config import (
     secure_user_file_lock,
     write_generated_config,
 )
-from agentic_hil.configstate import config_stale, config_status, with_config_status
+from agentic_hil.configstate import config_stale, config_status, with_config_status, written_config_status
 from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
     CONFIG_GRANT_COMMAND,
@@ -1417,6 +1417,12 @@ def _permission_key_refusal(command: str, rejected: list[JsonObject], path: Path
         "ok": False,
         "command": f"agentic-hil {command}",
         "error_type": "invalid_argument",
+        # The argument the refusal is about, in the name the parser gives it,
+        # and the catalogue's advice for that argument merged in the way
+        # `ConfigError.to_dict` merges it: the unscoped `invalid_argument` entry
+        # explains a tool payload (`validator`, `inputSchema`, `tools/list`),
+        # none of which this refusal carries or a shell has (#504).
+        "field": "keys",
         "summary": (
             f"{len(rejected)} of the names given to `agentic-hil {command}` do not name a permission in this "
             "configuration, so nothing was written. Every key this command accepts is listed in "
@@ -1432,6 +1438,7 @@ def _permission_key_refusal(command: str, rejected: list[JsonObject], path: Path
         ),
         **NOT_STARTED,
         "retry_safe": False,
+        **remediation_fields("invalid_argument", "keys"),
     }
 
 
@@ -1659,7 +1666,10 @@ def _permission_change_result(command: str, value: bool, written: JsonObject, un
         ],
         **NOT_STARTED,
         "cleanup_required": False,
-        "config_status": config_status(existing),
+        # Against the document this command loaded, which is what makes the
+        # state `changed` after every successful write: that is the write, not
+        # a stale server, and the status says so without a refusal in it.
+        "config_status": written_config_status(existing),
     }
 
 

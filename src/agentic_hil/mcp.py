@@ -6,10 +6,11 @@ from typing import Any
 from agentic_hil import __version__
 from agentic_hil.contracts import MCP_TOOL_NAMES as MCP_TOOL_NAMES
 from agentic_hil.contracts import MCP_TOOLS as MCP_TOOLS
+from agentic_hil.contracts import invalid_argument
 from agentic_hil.knowledge import MCP_RESOURCE_TEMPLATES as MCP_RESOURCE_TEMPLATES
 from agentic_hil.knowledge import MCP_RESOURCES as MCP_RESOURCES
 from agentic_hil.knowledge import read_resource
-from agentic_hil.redact import redact_sensitive
+from agentic_hil.redact import redact_sensitive, redact_stream_text
 from agentic_hil.report import overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import JsonObject
@@ -178,10 +179,32 @@ def handle_single_mcp_message(message: Any, tools: AgenticHILToolService) -> Jso
         return None
     try:
         return handle_method(request_id, str(message["method"]), message.get("params", {}), tools)
-    except (TypeError, ValueError) as error:
-        return error_response(request_id, JSONRPC_INVALID_PARAMS, "Invalid params", {"summary": str(error)})
+    except InvalidParamsError as error:
+        return error_response(request_id, JSONRPC_INVALID_PARAMS, "Invalid params", {"summary": fault_summary(error)})
     except Exception as error:
-        return error_response(request_id, JSONRPC_INTERNAL_ERROR, "Internal error", {"summary": str(error)})
+        # Every other exception, a TypeError or ValueError included, is a fault
+        # behind a well-formed request. Answered as -32602 it told the agent to
+        # correct arguments that were right; the code for the server's own
+        # fault is -32603.
+        return error_response(request_id, JSONRPC_INTERNAL_ERROR, "Internal error", {"summary": fault_summary(error)})
+
+
+class InvalidParamsError(ValueError):
+    """The request's params are not what JSON-RPC lets a method take: -32602.
+
+    Raised by the envelope's own checks and by nothing else, so that the code
+    for the caller's mistake is never handed out for an exception a tool let
+    escape."""
+
+
+def fault_summary(error: BaseException) -> str:
+    """An exception's text, fit for the wire.
+
+    It is whatever the failing code quoted, and a tool that failed against a
+    package index quotes the index URL with its credential. It takes the same
+    content pass a captured process stream takes, because it is the same kind
+    of text: the tool's words, not a summary this server wrote."""
+    return redact_stream_text(str(error))
 
 
 def handle_method(request_id: Any, method: str, params: Any, tools: AgenticHILToolService) -> JsonObject:
@@ -228,12 +251,15 @@ def call_tool(params: Any, tools: AgenticHILToolService) -> JsonObject:
     params_object = params_object_or_throw(params)
     name = params_object.get("name")
     arguments = params_object.get("arguments", {})
+    # The envelope's own two refusals are built where every schema refusal is
+    # built, so they carry the field, the validator and the catalogue's fix the
+    # agent reads together on every other invalid_argument.
     if not isinstance(name, str):
-        return mcp_tool_error("unknown", "invalid_argument", "tools/call requires a string name.")
+        return tool_error_result(invalid_argument("unknown", "name", "type", "tools/call requires a string name."))
     if arguments is None:
         arguments = {}
     if not isinstance(arguments, dict):
-        return mcp_tool_error(name, "invalid_argument", "tools/call arguments must be an object.")
+        return tool_error_result(invalid_argument(name, "$", "type", "tools/call arguments must be an object."))
     result = tools.call(name, arguments)
     # Defense-in-depth: strip any secret-named field before the result is
     # serialized into the MCP content text and structuredContent. isError is
@@ -255,11 +281,11 @@ def params_object_or_throw(params: Any) -> JsonObject:
         return {}
     if isinstance(params, dict):
         return params
-    raise TypeError("JSON-RPC params must be an object.")
+    raise InvalidParamsError("JSON-RPC params must be an object.")
 
 
-def mcp_tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
-    result = {"ok": False, "tool": tool, "error_type": error_type, "summary": summary}
+def tool_error_result(result: JsonObject) -> JsonObject:
+    """A refusal the envelope raised itself, in the shape of a failed tool result."""
     return {"content": [{"type": "text", "text": tool_result_text(result)}], "structuredContent": result, "isError": True}
 
 

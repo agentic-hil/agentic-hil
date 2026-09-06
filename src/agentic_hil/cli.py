@@ -16,7 +16,7 @@ from pathlib import Path, PurePath
 import yaml
 
 from agentic_hil import __version__, upgrade
-from agentic_hil.adopt import is_unset, project_config_adopt_hardware
+from agentic_hil.adopt import discovery_remedy, enumerated_stlink_ports, is_unset, project_config_adopt_hardware
 from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.bootstrap import (
     BOOTSTRAP_BACKEND,
@@ -40,6 +40,7 @@ from agentic_hil.config import (
     atomic_write_text,
     authoritative_config_target,
     bind_debugger,
+    cache_roots,
     config_schema_text,
     debugger_drives_hardware,
     debugger_is_placeholder,
@@ -2237,12 +2238,6 @@ def _placeholder_discovery(config_step: JsonObject) -> JsonObject | None:
     return None
 
 
-def _enumerated_stlink_ports(discovery: JsonObject) -> list[JsonObject]:
-    """The ST-Link-shaped host serial ports discovery saw, if it recorded any."""
-    ports = discovery.get("stlink_ports")
-    return [port for port in ports if isinstance(port, dict)] if isinstance(ports, list) else []
-
-
 def _placeholder_reason(discovery: JsonObject) -> str:
     """Why the placeholder was written, named from discovery's own answer.
 
@@ -2261,7 +2256,7 @@ def _placeholder_reason(discovery: JsonObject) -> str:
     an empty bench; telling that operator no bench was found contradicts a
     listing they can read, which is how the whole of this was reported. The
     ports are named instead."""
-    enumerated = _enumerated_stlink_ports(discovery)
+    enumerated = enumerated_stlink_ports(discovery)
     if discovery.get("error_type") == "adapter_not_found":
         if enumerated:
             devices = ", ".join(str(port.get("stable_device") or port.get("device") or "?") for port in enumerated)
@@ -2308,7 +2303,7 @@ def _discovery_account(discovery: JsonObject) -> str | None:
         ]
         if looked:
             parts.append("Discovery looked for " + "; ".join(looked) + ".")
-    enumerated = _enumerated_stlink_ports(discovery)
+    enumerated = enumerated_stlink_ports(discovery)
     if enumerated:
         listed = ", ".join(
             f"{port.get('serial_number') or 'no serial'} on {port.get('stable_device') or port.get('device') or '?'}" for port in enumerated
@@ -2324,106 +2319,23 @@ def _discovery_account(discovery: JsonObject) -> str | None:
     return " ".join(parts) if parts else None
 
 
-_ADOPT_FILLS = (
-    "the probe id, the toolchain executable, the detected controller and the probe's own COM port without "
-    "anything being retyped"
-)
-
-
 def _placeholder_next_step(discovery: JsonObject) -> str:
     """The first next step for a placeholder file, matched to why it was written.
 
     Every branch opens the same way -- the file describes no board yet and the
     whole result is under `hardware_discovery` -- and then names the remedy the
-    discovery result actually calls for. "Attach the bench" is the right move for
-    `adapter_not_found` only when enumeration ran and this host showed no ST-Link
-    serial port at all. It is the wrong move for a missing toolchain, two attached
-    probes, a target that did not answer, or a timeout: each of those can happen
-    with the board plugged in the whole time, so telling the operator to attach
-    one sends them to reseat hardware that is already there instead of to the fix.
-    It is the wrong move too for an `adapter_not_found` that lists an ST-Link
-    serial port it could read no probe serial off, which is a visible probe rather
-    than an absent bench, so that case is branched onto its own driver/vendor
-    remedy (round 3, finding 3). Each names its own remedy and keeps `agentic-hil
-    adopt-hardware` as the command that fills the file in once the reason is
-    cleared. This is the `next_steps` sibling of `_placeholder_reason`, which does
-    the same for the headline (#416).
+    discovery result actually calls for, which is `discovery_remedy`'s: the same
+    text `agentic-hil adopt-hardware` answers a failed discovery with, because
+    the reason it failed and the move that clears it are the same on both
+    commands (#416, #504). This is the `next_steps` sibling of
+    `_placeholder_reason`, which does the same for the headline.
     """
     summary = discovery.get("summary") or "no attached bench was identified"
     preamble = (
         "This file describes no board yet, because hardware discovery ran without configuring one: "
         f"{summary} (the whole result is under `hardware_discovery`). "
     )
-    error_type = discovery.get("error_type")
-    if error_type == "debugger_not_found":
-        remedy = (
-            "Install a debug toolchain so one of them resolves on this host (the board itself may already be "
-            "attached): OpenOCD is the smaller of the two and is enough on its own, because with it installed the "
-            "ST-Link is enumerated from this host's USB serial inventory; STM32CubeProgrammer also works and reads "
-            f"the part number off the target itself. Then run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
-        )
-    elif error_type == "ambiguous_hardware":
-        remedy = (
-            "More than one probe is attached, so leave one connected or name the board this project is about "
-            "with `agentic-hil adopt-hardware --probe-id <serial>`; the attached serials are listed under "
-            f"`hardware_discovery.probes`. Adoption then fills in {_ADOPT_FILLS}."
-        )
-    elif error_type == "probe_inventory_incomplete":
-        # The inventory saw no ST-Link at all, which is the only reading that
-        # reaches here: a sole visible probe is bound with its caveat and two are
-        # `ambiguous_hardware`. Nothing was visible to name, so `--probe-id
-        # <serial>` has no serial to take yet, and the empty reading still is not
-        # an absent bench, because the inventory cannot see a VCP-less ST-LINK/V2.
-        # So this does not say "attach the bench" either (round 2, finding 3).
-        # Once a probe that publishes a virtual COM port is attached, bare
-        # `adopt-hardware` binds the one this inventory then shows; `--probe-id`
-        # is for the bench where a second probe without a VCP is attached beside
-        # it, which this inventory would not list.
-        remedy = (
-            "STM32CubeProgrammer is not installed, so probes are read from this host's USB serial inventory, which "
-            "reaches an ST-Link only through its virtual COM port and saw none here; that does not rule out a "
-            "VCP-less ST-LINK/V2 attached right now, so no absent bench is reported. Attach a probe that publishes a "
-            "virtual COM port and run `agentic-hil adopt-hardware`, which binds the one this host then shows; name "
-            "the board with `agentic-hil adopt-hardware --probe-id <serial>` instead if a second probe without a "
-            "virtual COM port is attached beside it, or install STM32CubeProgrammer for an authoritative count. "
-            f"Either fills in {_ADOPT_FILLS}."
-        )
-    elif error_type == "target_not_detected":
-        remedy = (
-            "The ST-Link answered but named no target, so check the board is powered and wired to the probe, "
-            f"then run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
-        )
-    elif error_type == "timeout":
-        remedy = (
-            "Discovery timed out before it could read the bench, so run `agentic-hil adopt-hardware` once the "
-            f"board responds, which fills in {_ADOPT_FILLS}."
-        )
-    elif error_type == "adapter_not_found":
-        if _enumerated_stlink_ports(discovery):
-            # Enumeration ran and this host is showing an ST-Link serial port, but
-            # no probe serial could be read off it to bind. "Attach the bench"
-            # contradicts the very serial port this same result lists under
-            # `stlink_ports` and the account it prints; the fix is to make the
-            # serial readable, not to reseat hardware that is already here. This is
-            # the visible-but-serial-less zero-ID case the empty-inventory finding
-            # left, told apart the same way `_placeholder_reason` and
-            # `_discovery_account` tell it apart, on the presence of a port with no
-            # serial off it (round 3, finding 3). Once a serial can be read off the
-            # port, bare adoption binds the probe it names, on either enumeration;
-            # `--probe-id` is for the bench that has a second probe the inventory
-            # cannot see, exactly as the empty-inventory branch above says.
-            remedy = (
-                "This host is showing an ST-Link serial port but no probe serial could be read off it to bind, so check the "
-                "probe is a genuine ST unit with its driver installed, or install STM32CubeProgrammer, which reads the serial "
-                "off the probe itself. Then `agentic-hil adopt-hardware` binds the board on its own; name it with "
-                "`agentic-hil adopt-hardware --probe-id <serial>` instead if a second probe without a virtual COM port is "
-                f"attached beside it. Either fills in {_ADOPT_FILLS}."
-            )
-        else:
-            remedy = f"Attach the bench and run `agentic-hil adopt-hardware`, which fills in {_ADOPT_FILLS}."
-    else:
-        remedy = f"Run `agentic-hil adopt-hardware` once the bench is ready, which fills in {_ADOPT_FILLS}."
-    return preamble + remedy
+    return preamble + discovery_remedy(discovery)
 
 
 def setup_project(agent: str, force: bool = False) -> JsonObject:
@@ -3444,11 +3356,33 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narro
     return next_steps
 
 
-def schema(output: str | None = None, force: bool = False) -> JsonObject:
+def _printed_document(text: str) -> int:
+    """Print one document to stdout and answer with the exit code, nothing else.
+
+    The three commands that print a document (`schema`, `test-schema`,
+    `mcp-config`) are the ones a shell redirects into a file, so what they write
+    has to be one parseable document and the verdict has to travel as the exit
+    code alone. A result returned here would be printed after the document by
+    the entrypoint, in whichever spelling the reader asked for.
+    """
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+def schema(output: str | None = None, force: bool = False) -> JsonObject | int:
+    """The bundled configuration schema, written to a file or printed as it is.
+
+    Without `--output` the document is the whole of stdout and the answer is the
+    exit code: a result printed after it made `agentic-hil schema >
+    agentic-hil.schema.json` a file that does not load, because the redirect
+    captured the schema and then `OK.` (or `{"ok": true}` under `--json`), and
+    the exit code said 0 over both (#504).
+    """
     text = config_schema_text()
     if output is None:
-        sys.stdout.write(text)
-        return {"ok": True}
+        return _printed_document(text)
     output_path = Path(output)
     if output_path.exists() and not force:
         return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL configuration schema already exists. Use --force to overwrite it.", "path": output}
@@ -3457,11 +3391,10 @@ def schema(output: str | None = None, force: bool = False) -> JsonObject:
     return {"ok": True, "summary": "Agentic HIL configuration schema written.", "path": output}
 
 
-def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
+def test_schema(output: str | None = None, force: bool = False) -> JsonObject | int:
     text = resources.files("agentic_hil").joinpath("schemas", "testconfig.schema.json").read_text(encoding="utf-8")
     if output is None:
-        sys.stdout.write(text)
-        return {"ok": True}
+        return _printed_document(text)
     output_path = Path(output)
     if output_path.exists() and not force:
         return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL test configuration schema already exists. Use --force to overwrite it.", "path": output}
@@ -3639,13 +3572,10 @@ check_plan.__test__ = False  # type: ignore[attr-defined] - keep pytest from col
 
 
 def _mcp_cache_roots() -> list[Path]:
-    cache_roots: list[Path] = [Path(tempfile.gettempdir()), Path.home() / ".cache", Path.home() / "Library" / "Caches"]
-    for variable in ("UV_CACHE_DIR", "XDG_CACHE_HOME"):
-        if value := os.environ.get(variable):
-            cache_roots.append(Path(value).expanduser())
-    if local_app_data := os.environ.get("LOCALAPPDATA"):
-        cache_roots.append(Path(local_app_data) / "uv" / "cache")
-    return cache_roots
+    # The one cache list, shared with the configured-executable rule in
+    # `config.cache_roots`: a root refused for the launcher is refused for the
+    # toolchain, and the other way round.
+    return [Path(tempfile.gettempdir()), *cache_roots()]
 
 
 def _trusted_mcp_command(command: str) -> str:
@@ -3694,11 +3624,10 @@ def mcp_config_text() -> str:
     return json.dumps({"mcpServers": {"agentic-hil": {"command": mcp_server_command(), "args": ["mcp-stdio"]}}}, indent=2) + "\n"
 
 
-def mcp_config(output: str | None = None, force: bool = False) -> JsonObject:
+def mcp_config(output: str | None = None, force: bool = False) -> JsonObject | int:
     text = mcp_config_text()
     if output is None:
-        sys.stdout.write(text)
-        return {"ok": True}
+        return _printed_document(text)
     workspace = absolute_without_symlinks(Path.cwd())
     requested = Path(output).expanduser()
     output_path = absolute_without_symlinks(requested if requested.is_absolute() else workspace / requested)

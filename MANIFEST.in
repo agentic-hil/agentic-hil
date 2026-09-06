@@ -29,6 +29,9 @@ exclude tests/test_ci_linux.py
 # The battery is `tools/bench_battery.py`, so its test imports out of the same
 # directory and cannot collect from a distribution that does not carry it.
 exclude tests/test_bench_battery.py
+# The container test of the install eval's startup arm imports the verifier out
+# of evals/, which never ships, so it cannot collect from a distribution either.
+exclude tests/container/test_protocol_startup_refusal.py
 # The one-line installers sit at the repository root and are fetched from there
 # rather than from the distribution, so the pins on them have nothing to read in
 # a source distribution.

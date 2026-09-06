@@ -666,6 +666,14 @@ def host_environment(config: Path | None = None, *, config_home: Path | None = N
 # one behaviour under test switched by MODE. `release` is what this release does:
 # refuse a configuration bound elsewhere, and serve a workspace it has no
 # configuration for with every hardware tool refusing.
+#
+# The refusal goes where the release writes it. A protocol command owns stdout
+# for framed messages, so since #458 a startup refusal is written to
+# stderr and stdout stays empty; this stand-in printed it to stdout, from the
+# world before that, and stayed green while the arm failed the real server
+# (#481, #490). Its shape is the recorded one under
+# tests/fixtures/protocol_startup_refusal_recording.json: `config_invalid`, the
+# binding sentence, both roots.
 FAKE_SERVER = """
 import json
 import os
@@ -676,7 +684,15 @@ MODE = {mode!r}
 here = str(Path.cwd().resolve())
 
 if os.environ.get("AGENTIC_HIL_CONFIG") and MODE != "serves-a-config-bound-elsewhere":
-    print(json.dumps({{"ok": False, "error_type": "config_invalid", "summary": "bound to a different workspace"}}))
+    refusal = {{
+        "ok": False,
+        "error_type": "config_invalid",
+        "summary": "The authoritative config is bound to a different workspace.",
+        "path": os.environ["AGENTIC_HIL_CONFIG"],
+        "workspace_root": "/workspace/project",
+        "expected_workspace": here,
+    }}
+    sys.stderr.write(json.dumps(refusal, indent=2) + "\\n")
     raise SystemExit(1)
 
 for line in sys.stdin:
@@ -943,15 +959,31 @@ def test_the_probes_resolve_the_bench_the_way_the_agents_container_did() -> None
 # --- 219: the wrong-workspace arm has to prove the binding -------------------
 
 
-def _drive_wrong_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, refusal: dict) -> tuple[bool, str]:
-    """Run both arms with the named one answering exactly this refusal."""
+def _drive_wrong_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, refusal: dict, *, stream: str = "stderr", returncode: int = 1
+) -> tuple[bool, str]:
+    """Run both arms with the named one answering exactly this refusal.
+
+    On stderr, with stdout empty, which is where the release has written a
+    startup refusal since #458 and what the recording under tests/fixtures
+    shows; this helper handed the arm `stdout=<refusal>, stderr=""` from the
+    world before that (#481). `stream="stdout"` is the older release, which the
+    arm still has to read; `stream="neither"` is a process that died without a
+    document on either.
+    """
     other = tmp_path / "other-project"
     monkeypatch.setattr(verifier, "OTHER_WORKSPACE", other)
     monkeypatch.setattr(verifier, "PROBE_CONFIG_ROOT", tmp_path / "probe-config")
+    document = json.dumps(refusal, indent=2) + "\n"
+    named = {
+        "stderr": SimpleNamespace(returncode=returncode, stdout="", stderr=document),
+        "stdout": SimpleNamespace(returncode=returncode, stdout=document, stderr=""),
+        "neither": SimpleNamespace(returncode=returncode, stdout="", stderr=""),
+    }[stream]
 
     def session(arguments, cwd, requests, *, config=None, config_home=None):  # type: ignore[no-untyped-def]
         if config is not None:
-            return SimpleNamespace(returncode=1, stdout=json.dumps(refusal), stderr=""), []
+            return named, []
         # The discovered arm, answering the way the release does: a server bound
         # to the other directory, refusing the hardware tool as unconfigured.
         answer = {"ok": False, "error_type": "config_file_not_found", "workspace_root": str(other)}
@@ -1322,3 +1354,183 @@ def test_the_trusted_doctor_probe_asks_for_the_json_document(monkeypatch: pytest
     assert prose.returncode == 0
     with pytest.raises(json.JSONDecodeError):
         json.loads(prose.stdout)
+
+
+# --- 481, 490: the named arm reads the refusal where the release writes it ----
+#
+# Since #458 `agentic-hil mcp-stdio` started with a configuration bound
+# to another workspace exits 1 with stdout empty and the JSON refusal on stderr.
+# The arm parsed `named.stdout` alone, so against every release from #458 on
+# it answered `refused for the wrong reason: error_type=<no document>`, failed a
+# sound install, and never reached `workspace_binding_named`, the check that
+# gives it teeth. The recording below is what the server actually writes, taken
+# in the container test image and held to the live server by
+# tests/container/test_protocol_startup_refusal.py; it is replayed here with
+# the recording's temporary paths swapped for this test's own, because the arm
+# holds `expected_workspace` to the directory it started the server in.
+
+STARTUP_REFUSAL_RECORDING = Path(__file__).parent / "fixtures" / "protocol_startup_refusal_recording.json"
+
+
+def recorded_startup_refusal(command: str = "mcp-stdio") -> dict:
+    """One recorded run: argv, cwd, returncode, stdout and stderr, verbatim."""
+    return json.loads(STARTUP_REFUSAL_RECORDING.read_text(encoding="utf-8"))["runs"][command]
+
+
+def _replay_recorded_refusal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[bool, str]:
+    """Both arms, the named one answering with the recorded streams.
+
+    The recording's `expected_workspace` names the directory the recording was
+    taken in; the arm requires the one it started the server in, so that one
+    field is rewritten to this test's own directory and everything else on the
+    stream, including which stream, is the recording's.
+    """
+    recorded = recorded_startup_refusal()
+    other = tmp_path / "other-project"
+    monkeypatch.setattr(verifier, "OTHER_WORKSPACE", other)
+    monkeypatch.setattr(verifier, "PROBE_CONFIG_ROOT", tmp_path / "probe-config")
+    refusal = json.loads(recorded["stderr"])
+    refusal["expected_workspace"] = str(other)
+    named = SimpleNamespace(returncode=recorded["returncode"], stdout=recorded["stdout"], stderr=json.dumps(refusal, indent=2) + "\n")
+
+    def session(arguments, cwd, requests, *, config=None, config_home=None):  # type: ignore[no-untyped-def]
+        if config is not None:
+            return named, []
+        answer = {"ok": False, "error_type": "config_file_not_found", "workspace_root": str(other)}
+        response = {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"text": json.dumps(answer)}]}}
+        return SimpleNamespace(returncode=0, stdout="", stderr=""), [response]
+
+    monkeypatch.setattr(verifier, "one_shot_session", session)
+    return verifier.wrong_workspace_fails(["mcp-stdio"], tmp_path / "config.yaml")
+
+
+@pytest.mark.parametrize("command", ["mcp-stdio", "com-stdio --port dut"])
+def test_the_recording_says_the_refusal_is_on_stderr_and_stdout_is_empty(command: str) -> None:
+    """The recording's own facts, so a retake that moved cannot pass unnoticed.
+
+    Exit 1, nothing on stdout, and a refusal on stderr that is the whole
+    document: the type every document defect carries, the binding sentence, and
+    both roots. This is the account every stand-in in this file is now typed
+    from.
+    """
+    recorded = recorded_startup_refusal(command)
+
+    assert recorded["returncode"] == 1
+    assert recorded["stdout"] == ""
+    refusal = json.loads(recorded["stderr"])
+    assert refusal["ok"] is False
+    assert refusal["error_type"] == "config_invalid"
+    assert refusal["summary"] == "The authoritative config is bound to a different workspace."
+    assert refusal["workspace_root"] != refusal["expected_workspace"]
+    assert refusal["expected_workspace"] == recorded["cwd"]
+    assert Path(refusal["workspace_root"]).name == "project"
+    assert Path(refusal["expected_workspace"]).name == "other-project"
+
+
+def test_the_named_arm_reads_the_refusal_where_the_release_writes_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The failure #481 observed, replayed from the recording: a sound install passes."""
+    ok, detail = _replay_recorded_refusal(monkeypatch, tmp_path)
+
+    assert ok, detail
+    assert "config_invalid" in detail
+    assert f"expected_workspace={tmp_path / 'other-project'}" in detail, detail
+
+
+def test_the_named_arm_still_reads_a_refusal_an_older_release_wrote_to_stdout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Releases before #458 wrote the refusal to stdout, and they stay verifiable."""
+    other = tmp_path / "other-project"
+    ok, detail = _drive_wrong_workspace(
+        monkeypatch,
+        tmp_path,
+        {
+            "ok": False,
+            "error_type": "config_invalid",
+            "summary": "The authoritative config is bound to a different workspace.",
+            "workspace_root": "/workspace/project",
+            "expected_workspace": str(other),
+        },
+        stream="stdout",
+    )
+
+    assert ok, detail
+    assert "expected_workspace" in detail
+
+
+def test_a_refusal_on_neither_stream_is_still_no_document(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Reading both streams does not turn a silent exit into a refusal."""
+    ok, detail = _drive_wrong_workspace(monkeypatch, tmp_path, {}, stream="neither")
+
+    assert not ok
+    assert "refused for the wrong reason" in detail
+    assert "<no document>" in detail
+
+
+def test_a_traceback_on_stderr_is_not_a_document_either(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """stderr is read for a JSON document, not for whatever the process printed."""
+    other = tmp_path / "other-project"
+    monkeypatch.setattr(verifier, "OTHER_WORKSPACE", other)
+    monkeypatch.setattr(verifier, "PROBE_CONFIG_ROOT", tmp_path / "probe-config")
+    crashed = SimpleNamespace(returncode=1, stdout="", stderr="Traceback (most recent call last):\n  ...\nRuntimeError: expected_workspace\n")
+
+    def session(arguments, cwd, requests, *, config=None, config_home=None):  # type: ignore[no-untyped-def]
+        assert config is not None, "the named arm has to stop before the discovered arm runs"
+        return crashed, []
+
+    monkeypatch.setattr(verifier, "one_shot_session", session)
+    ok, detail = verifier.wrong_workspace_fails(["mcp-stdio"], tmp_path / "config.yaml")
+
+    assert not ok
+    assert "<no document>" in detail, detail
+
+
+def test_a_document_behind_a_warning_line_on_stderr_is_no_document(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The stream is the document, not a stream with a document somewhere in it.
+
+    The release writes the refusal to stderr and nothing else there; the
+    recording shows the stream beginning with `{`. A stream that carries a line
+    before the document is a release that changed what it writes, and an arm
+    that fished the document out from behind that line would pass a contract the
+    release no longer keeps. So the arm parses the stream whole, and this is
+    reported the way a silent exit is.
+    """
+    other = tmp_path / "other-project"
+    monkeypatch.setattr(verifier, "OTHER_WORKSPACE", other)
+    monkeypatch.setattr(verifier, "PROBE_CONFIG_ROOT", tmp_path / "probe-config")
+    refusal = {
+        "ok": False,
+        "error_type": "config_invalid",
+        "summary": "The authoritative config is bound to a different workspace.",
+        "workspace_root": "/workspace/project",
+        "expected_workspace": str(other),
+    }
+    noisy = SimpleNamespace(returncode=1, stdout="", stderr="UserWarning: something the release did not use to say\n" + json.dumps(refusal, indent=2) + "\n")
+
+    def session(arguments, cwd, requests, *, config=None, config_home=None):  # type: ignore[no-untyped-def]
+        assert config is not None, "the named arm has to stop before the discovered arm runs"
+        return noisy, []
+
+    monkeypatch.setattr(verifier, "one_shot_session", session)
+    ok, detail = verifier.wrong_workspace_fails(["mcp-stdio"], tmp_path / "config.yaml")
+
+    assert not ok
+    assert "<no document>" in detail, detail
+
+
+def test_a_refusal_written_to_stderr_by_a_server_that_exited_zero_still_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The exit code gate is unchanged by which stream the document came from."""
+    other = tmp_path / "other-project"
+    ok, detail = _drive_wrong_workspace(
+        monkeypatch,
+        tmp_path,
+        {
+            "ok": False,
+            "error_type": "config_invalid",
+            "summary": "The authoritative config is bound to a different workspace.",
+            "workspace_root": "/workspace/project",
+            "expected_workspace": str(other),
+        },
+        returncode=0,
+    )
+
+    assert not ok
+    assert "exited 0" in detail, detail

@@ -42,7 +42,13 @@ from agentic_hil.coordination import (
     HardwareCoordinator,
     debugger_effect_resources,
 )
-from agentic_hil.report import CONTACT_MARKER_KEY, CONTACT_MARKER_SOURCE_KEY, write_report
+from agentic_hil.report import (
+    CONTACT_MARKER_KEY,
+    CONTACT_MARKER_SOURCE_KEY,
+    mark_audit_failure,
+    read_last_report,
+    write_report,
+)
 from agentic_hil.tools import AgenticHILToolService
 
 # Machine-wide device locks contend across sibling clones, so these names are
@@ -395,6 +401,73 @@ def test_a_stop_whose_cleanup_did_not_confirm_records_it_on_the_lease(tmp_path: 
         assert session.lease.reported_cleanup_reasons() == ["com_cleanup_unconfirmed"]
         assert session.lease.cleanup_reasons() == []
         assert coordinator.blocked is False
+    finally:
+        coordinator.close()
+
+
+# ---------------------------------------------------------------------------
+# C2. What a report says about itself once the lease's audit is already broken.
+
+
+def _break_the_reader_audit(service: ComPortService) -> None:
+    """What the background reader records when its `rx` line cannot be
+    appended: its own error, the session's audit flag, and the quarantine
+    under the reader's reason. Written here as the reader writes it, so the
+    lease is audit-broken before the next report is written."""
+    session = service.sessions[PORT_ID]
+    error = OSError(13, "Permission denied", session.log_path)
+    session.reader_error = {"error_type": "audit_write_failed", "summary": "COM port feedback could not be audited.", "backend_error": str(error)}
+    session.audit_broken = True
+    session.lease.quarantine("com_reader_audit_broken", error, audit_broken=True)
+
+
+def test_a_report_that_landed_is_not_reported_as_unpersisted_because_the_lease_was_already_audit_broken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reader's append failed; the reports directory is fine.
+
+    Every report a session writes carries its lease's status, and an
+    audit-broken lease says `audit_ok: false` there. That flag is the lease's
+    and travels into the persisted report on purpose; it is not the report
+    write failing. The next call's report lands, the file says so, and the
+    reasons name the one thing that broke."""
+    config = com_config(tmp_path)
+    coordinator = HardwareCoordinator(config, "com-report-attribution")
+    service = ComPortService(config, coordinator)
+    _install_serial(monkeypatch, _WorkingHandle())
+    try:
+        assert service.session_start(PORT_ID)["ok"] is True
+        session = service.sessions[PORT_ID]
+        _break_the_reader_audit(service)
+
+        refused = service.read(PORT_ID)
+
+        assert refused["ok"] is False and refused["error_type"] == "resource_quarantined", refused
+        persisted = read_last_report(config)
+        assert persisted["tool"] == "com_read" and persisted["lease_id"] == session.lease.lease_id, persisted
+        assert persisted["audit_ok"] is False, persisted
+        assert session.lease.reported_cleanup_reasons() == ["com_reader_audit_broken"]
+        assert refused["cleanup_reasons"] == ["com_reader_audit_broken"], refused
+    finally:
+        coordinator.close()
+
+
+def test_a_report_that_did_not_land_is_reported_under_its_own_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour, unchanged: a report write that really fails is the
+    report's reason, on top of whatever the lease already carried."""
+    config = com_config(tmp_path)
+    coordinator = HardwareCoordinator(config, "com-report-failure")
+    service = ComPortService(config, coordinator)
+    _install_serial(monkeypatch, _WorkingHandle())
+    try:
+        assert service.session_start(PORT_ID)["ok"] is True
+        session = service.sessions[PORT_ID]
+        _break_the_reader_audit(service)
+        monkeypatch.setattr("agentic_hil.comports.write_report", lambda config, report: mark_audit_failure(dict(report), OSError(28, "No space left on device", "last-report.json")))
+
+        refused = service.read(PORT_ID)
+
+        assert refused["ok"] is False and refused["audit_ok"] is False, refused
+        assert session.lease.reported_cleanup_reasons() == ["com_reader_audit_broken", "com_report_audit_broken"]
+        assert refused["cleanup_reasons"] == ["com_reader_audit_broken", "com_report_audit_broken"], refused
     finally:
         coordinator.close()
 

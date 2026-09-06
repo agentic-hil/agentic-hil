@@ -82,6 +82,7 @@ from agentic_hil.config import (
     user_file_lock_path,
     user_state_root,
 )
+from agentic_hil.gdbmi import intel_hex_record
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.process import ProcessImage, spawn_managed_process, terminate_process_tree
 from agentic_hil.report import logs_directory
@@ -98,10 +99,10 @@ NUCLEO_VCP_PORT: dict = {
     "description": "STM32 STLink - ST-Link VCP Ctrl",
     "manufacturer": "STMicroelectronics",
     "product": "STM32 STLink",
-    "serial_number": "066AFF303435554157113106",
+    "serial_number": "066BFF505050505050505050",
     "vid": 0x0483,
     "pid": 0x374B,
-    "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066AFF303435554157113106-if02",
+    "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066BFF505050505050505050-if02",
 }
 
 
@@ -3310,6 +3311,26 @@ def test_a_process_whose_host_answered_neither_carries_neither_field(
     assert _processes_holding_installation() == [{"pid": 400, "image": f"{_TOOL_ENV}/Scripts/python.exe"}]
 
 
+def _proc_lists_the_reader(proc: Path) -> None:
+    """The entry every real procfs carries: the process that is reading it.
+
+    A `/proc` with nothing mounted on it lists no process at all, and one that
+    is mounted lists at least its reader, so the entry for this very process is
+    what tells a table that was read from a directory that merely exists
+    (#475). Created after whatever `os.getpid` a test has patched in, so it is
+    the reader as the code under test sees it, and without an `exe`, so the
+    reader is never mistaken for a holder of the installation. `self` links to
+    the bare pid the way procfs links it, so a reader that compares the link
+    target with the pid string sees here what it sees on a real host.
+    """
+    own = proc / str(os.getpid())
+    own.mkdir(parents=True, exist_ok=True)
+    (own / "status").write_text("Name:\tpytest\nPPid:\t1\n", encoding="utf-8")
+    link = proc / "self"
+    if not link.exists() and not link.is_symlink():
+        link.symlink_to(str(os.getpid()), target_is_directory=True)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the /proc reader needs the symlinks a POSIX host makes without privileges")
 def test_a_linux_host_reads_its_process_table_out_of_proc(
     monkeypatch: pytest.MonkeyPatch,
@@ -3349,7 +3370,7 @@ def test_a_linux_host_reads_its_process_table_out_of_proc(
     # A process whose executable this user may not read, and the non-numeric
     # entries every /proc carries.
     (proc / "99").mkdir()
-    (proc / "self").mkdir()
+    _proc_lists_the_reader(proc)
     (proc / "uptime").write_text("1 1\n", encoding="utf-8")
     monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
 
@@ -3362,6 +3383,72 @@ def test_a_linux_host_reads_its_process_table_out_of_proc(
     assert filetime_epoch_seconds(snapshot[0].created_ns) == pytest.approx(1700000000 + 4200 / os.sysconf("SC_CLK_TCK"))
     assert process_working_directory(4242) == str(project)
     assert process_working_directory(99) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+def test_a_proc_with_nothing_mounted_on_it_is_not_a_table_that_was_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#475, the first path: an empty `/proc` was read as "nothing is running".
+
+    A chroot and a minimal container image carry a `/proc` with nothing mounted
+    on it. The directory exists, so the reader accepted it, and it lists no
+    process, so the reader answered the empty tuple: the claim that the table
+    was read and none of ours was in it, which the upgrade turned into
+    `restart_required: false`. Nothing raised on the way, because `os.listdir`
+    on an empty directory does not, so the `OSError` guard beside it never
+    fired. No real procfs is ever empty, since the reading process is in it: a
+    listing without the reader is a table that was not read, and the answer is
+    the same None a host with no table at all gives.
+    """
+    from agentic_hil.process import snapshot_process_images
+
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+
+    assert snapshot_process_images() is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+def test_a_proc_that_does_not_list_the_reading_process_was_not_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The same rule where the directory is not empty.
+
+    Entries for other processes and a `stat` file are not evidence that this
+    process was looked at by the table it is reading: the one entry a mounted
+    procfs cannot lack is the reader's own, so a listing without it was not
+    read either, whatever else it holds.
+    """
+    from agentic_hil.process import snapshot_process_images
+
+    proc = tmp_path / "proc"
+    interpreter = tmp_path / "tools" / "agentic-hil" / "bin" / "python3"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("", encoding="utf-8")
+    somebody_else = 4242 if os.getpid() != 4242 else 4243
+    _proc_entry(proc, somebody_else, exe=interpreter)
+    (proc / "stat").write_text("cpu  1 2 3\nbtime 1700000000\nprocesses 12\n", encoding="utf-8")
+    (proc / "uptime").write_text("1 1\n", encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+
+    assert snapshot_process_images() is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+def test_a_host_with_no_proc_at_all_still_answers_that_it_cannot_say(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The neighbour that must not move: no directory is still None, not a raise."""
+    from agentic_hil.process import snapshot_process_images
+
+    monkeypatch.setattr("agentic_hil.process._PROC", str(tmp_path / "no-proc-here"))
+
+    assert snapshot_process_images() is None
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="a real child's start time is read out of /proc, which only Linux publishes")
@@ -3450,6 +3537,7 @@ def test_a_linux_server_started_by_the_environments_own_python_is_found(
     monkeypatch.setattr(sys, "prefix", str(environment))
     monkeypatch.setattr(sys, "executable", str(venv_python))
     monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+    _proc_lists_the_reader(proc)
 
     assert _processes_holding_installation() == [{"pid": 4242, "image": str(system_python)}]
 
@@ -3488,6 +3576,7 @@ def test_a_linux_server_is_found_by_its_console_script_or_by_virtual_env(
     monkeypatch.setattr(sys, "prefix", str(environment))
     monkeypatch.setattr(sys, "executable", str(venv_python))
     monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+    _proc_lists_the_reader(proc)
 
     assert [holder["pid"] for holder in _processes_holding_installation() or []] == [4242]
 
@@ -3523,6 +3612,7 @@ def test_a_linux_process_of_another_installation_is_still_not_claimed(
     monkeypatch.setattr(sys, "prefix", str(environment))
     monkeypatch.setattr(sys, "executable", str(environment / "bin" / "python"))
     monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+    _proc_lists_the_reader(proc)
 
     assert _processes_holding_installation() == []
 
@@ -3573,6 +3663,7 @@ def test_a_start_time_that_cannot_be_read_leaves_the_field_off_rather_than_inven
     live.mkdir(parents=True)
     (live / "exe").symlink_to(interpreter)
     (live / "status").write_text("Name:\tpython3\nPPid:\t7\n", encoding="utf-8")
+    _proc_lists_the_reader(proc)
     monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
 
     snapshot = snapshot_process_images()
@@ -4140,6 +4231,295 @@ def test_an_upgrade_with_nothing_running_out_of_it_says_nothing_about_restarting
     assert "restart_required_by_count" not in result
     assert "restart_notice" not in result
     assert "restart" not in result["summary"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+def test_an_empty_proc_reaches_the_upgrade_as_a_table_that_could_not_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#475 end to end: the container answer, through the real holder reader.
+
+    The same upgrade the cannot-read tests above drive, with the process table
+    read by the real reader out of a `/proc` that exists and publishes nothing.
+    That is the machine the issue measured, and it used to answer
+    `restart_required: false` with "No restart is needed" beside it.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation as reads_the_real_table
+
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+    )
+    # After `_recording_manager`, which replaces the reader with an empty list.
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", reads_the_real_table)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+
+    result = upgrade_installation()
+
+    assert result["upgraded_on_disk"] is True
+    assert "restart_required" not in result
+    assert "restart_required_by" not in result
+    assert _CANNOT_SAY in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+
+
+# ---------------------------------------------------------------------------
+# #475, the second path: a failed upgrade, and the processes it read before the
+# manager ran. `replace_installation` reads them first and hands them to every
+# outcome except the failures, which answered `restart_required: false` on any
+# host, including one whose table could not be read at all.
+
+
+def _manager_fails(monkeypatch: pytest.MonkeyPatch, *, version: subprocess.CompletedProcess[str]) -> None:
+    """A manager that exits non-zero, over an installation that then answers `version`."""
+    _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": subprocess.CompletedProcess([], 1, "", "network failed"),
+            "version": version,
+        },
+    )
+
+
+def test_a_failed_upgrade_that_left_the_installation_intact_names_the_processes_it_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The intact failure carries the holders, the way every other outcome does.
+
+    Measured with a live holder present and a manager exiting non-zero:
+    `restart_required: false`, no `restart_required_by`, no `restart_notice`,
+    and a summary saying the installation was not replaced. It was not, and the
+    server started out of it before the run is still up and still answering
+    with the release it imported, which is exactly what `restart_required`
+    already means on the upgraded and the already-current outcomes. The rule
+    since #459: true where a holder was found, and the holder named.
+    """
+    _manager_fails(monkeypatch, version=_version_answer(__version__))
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_failed"
+    assert result["installation_intact"] is True
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [_LIVE_SERVER]
+    assert result["restart_required_by_count"] == 1
+    assert "pid 4242" in result["restart_notice"]
+    assert __version__ in result["restart_notice"]
+    # And on the line a person reads first, the same as on the upgraded outcome.
+    assert "pid 4242" in result["summary"]
+
+
+def test_a_manager_that_could_not_be_run_still_names_the_processes_it_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other door into the same failure: the manager never started.
+
+    An `OSError` out of the manager run reaches `_failed_upgrade` the same way
+    a non-zero exit does, and the holders were read before either, so both
+    failures owe them to the operator.
+    """
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "version": _version_answer(__version__)},
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    def cannot_run(manager: str, command: list[str]) -> object:
+        raise OSError("the package manager could not be executed")
+
+    monkeypatch.setattr("agentic_hil.upgrade._manager_run", cannot_run)
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == "upgrade_failed"
+    assert result["exception_type"] == "OSError"
+    assert result["installation_intact"] is True
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [_LIVE_SERVER]
+    assert "pid 4242" in result["restart_notice"]
+
+
+def test_a_failed_upgrade_on_a_host_that_cannot_read_its_process_table_says_so_rather_than_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same failure on a host with no table: the sentence, and no `restart_required`.
+
+    The rest of the module already draws this line, so that no result claims a
+    restart is unnecessary on the strength of a question nobody could put. The
+    failure was the one outcome that escaped it and answered false.
+    """
+    _manager_fails(monkeypatch, version=_version_answer(__version__))
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == "upgrade_failed"
+    assert result["installation_intact"] is True
+    assert "restart_required" not in result
+    assert "restart_required_by" not in result
+    assert _CANNOT_SAY in result["restart_notice"]
+    assert _CANNOT_SAY in result["summary"]
+
+
+_HALF_CHANGED_ENDINGS = [
+    pytest.param(
+        _version_answer("9.9.9"),
+        "installation_changed_after_failed_upgrade",
+        id="changed-on-disk",
+    ),
+    pytest.param(
+        subprocess.CompletedProcess([], 1, "", "ModuleNotFoundError: No module named 'agentic_hil'"),
+        "installation_broken",
+        id="broken",
+    ),
+]
+
+
+@pytest.mark.parametrize(("version", "ending"), _HALF_CHANGED_ENDINGS)
+def test_the_half_changed_endings_name_the_running_processes_as_a_notice_and_not_as_a_restart_request(
+    version: subprocess.CompletedProcess[str],
+    ending: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`restart_required: false` stays on both, on purpose, and the processes are named.
+
+    A restart onto a half-changed tree, or onto one that no longer loads, adopts
+    what the reinstall exists to replace, so neither ending may ask for one:
+    the field stays false and the list that means `restart these` stays off.
+    The running processes are still facts about the operator's machine, so
+    they gain the notice that names them and nothing more. Nothing more means
+    the notice may not ask for the restart either: the clause the upgraded
+    outcome closes on, that the restart "is the whole of what is left to do",
+    would sit in the same result as "Do not restart onto it".
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
+    _manager_fails(monkeypatch, version=version)
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == ending
+    assert result["restart_required"] is False
+    assert "restart_required_by" not in result
+    assert "restart_required_by_count" not in result
+    assert "pid 4242" in result["restart_notice"]
+    assert __version__ in result["restart_notice"]
+    assert "whole of what is left to do" not in result["restart_notice"]
+    assert "Restarting the host" not in result["restart_notice"]
+    if ending == "installation_changed_after_failed_upgrade":
+        assert "Do not restart onto it" in result["summary"]
+
+
+@pytest.mark.parametrize(("version", "ending"), _HALF_CHANGED_ENDINGS)
+def test_the_half_changed_endings_keep_refusing_the_restart_where_the_table_could_not_be_read(
+    version: subprocess.CompletedProcess[str],
+    ending: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neighbour that must not move: an unreadable table changes nothing here.
+
+    No notice either, on purpose. The cannot-read sentence says that whether a
+    process still answers with an earlier release cannot be said, and these two
+    endings already say what to do about every process there is: do not restart
+    it onto this tree, run the reinstall. A sentence about what cannot be known
+    beside one that settles the question would be two answers to it.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
+    _manager_fails(monkeypatch, version=version)
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == ending
+    assert result["restart_required"] is False
+    assert "restart_required_by" not in result
+    assert "restart_notice" not in result
+
+
+# The human rendering of the same results. #475 observed that it printed no
+# Restart section at all for the failed upgrade, on a host with a live holder
+# and on one that could not read its table alike. Rendered from the document
+# the command really produces, not from one written by hand: the renderer
+# prints whatever list it is given, and the gap was in the document.
+
+
+def _reflowed(text: str) -> str:
+    """The rendering with the wrapper's line breaks taken back out."""
+    return " ".join(text.split())
+
+
+def test_a_failed_upgrade_renders_the_processes_it_read_under_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Restart section, with the pid on a bullet, the way the upgraded outcome prints it."""
+    from agentic_hil.humanize import render_result
+
+    _manager_fails(monkeypatch, version=_version_answer(__version__))
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+    out = render_result(result, "upgrade")
+
+    assert "\nRestart\n" in out
+    assert "\n  - 4242\n" in out
+    assert _LIVE_SERVER["image"] in out
+    # Once: the notice is in the summary as well, and the section may not repeat it.
+    assert _reflowed(out).count(_reflowed(result["restart_notice"])) == 1
+    assert "No restart is needed" not in out
+
+
+def test_a_failed_upgrade_on_a_host_that_cannot_read_its_table_renders_the_sentence_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cannot-read sentence, printed, and printed once."""
+    from agentic_hil.humanize import render_result
+
+    _manager_fails(monkeypatch, version=_version_answer(__version__))
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+    out = render_result(result, "upgrade")
+
+    assert _CANNOT_SAY in _reflowed(out)
+    assert _reflowed(out).count(_reflowed(result["restart_notice"])) == 1
+    assert "No restart is needed" not in out
+    # No process list: nothing was read that could be listed.
+    assert "\nRestart\n" not in out
+    assert "\n  - 4242" not in out
+
+
+@pytest.mark.parametrize(("version", "ending"), _HALF_CHANGED_ENDINGS)
+def test_the_half_changed_endings_render_the_processes_as_a_notice_and_not_as_a_restart_list(
+    version: subprocess.CompletedProcess[str],
+    ending: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The processes are named in prose, and no bullet list asks for their restart."""
+    from agentic_hil.humanize import render_result
+
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
+    _manager_fails(monkeypatch, version=version)
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+    out = render_result(result, "upgrade")
+
+    assert result["error_type"] == ending
+    assert "pid 4242" in _reflowed(out)
+    assert _reflowed(out).count(_reflowed(result["restart_notice"])) == 1
+    assert "\n  - 4242\n" not in out
+    assert "whole of what is left to do" not in _reflowed(out)
+    if ending == "installation_changed_after_failed_upgrade":
+        assert "Do not restart onto it" in _reflowed(out)
 
 
 # ---------------------------------------------------------------------------
@@ -9779,6 +10159,214 @@ def test_stlink_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None
     assert result["ok"] is False
     assert result["error_type"] == "invalid_argument"
     assert "debuggers.<name>.flash_address" in result["summary"]
+
+
+# Where the configured `flash_address` stands in the line each backend hands its
+# tool for a raw image (#490). A .bin carries no load address, so the address is
+# the whole safety of the write: STM32CubeProgrammer's grammar is `-w <file>
+# <address>`, with the address a positional after the file, and pyOCD's is
+# `flash -a/--base-address <address> <file>` ("Base address used for the address
+# where to write a binary ... Only allowed if a single binary file is being
+# loaded", pyocd 0.45.1 `pyocd flash --help`, recorded 2026-09-06 from a pip
+# installation with no probe attached). The two branches that append it were
+# never taken by any test. The command the backend ran is read back out of the
+# log it wrote, parsed with the same quoting `command_for_log` applies, so what
+# is asserted is the argument list the tool received and not a substring of it.
+
+
+def _logged_arguments(tmp_path: Path, result: dict) -> list[str]:
+    """The argument list the backend ran, out of its own log."""
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    return shlex.split(logged, posix=True)
+
+
+@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+def test_bin_flash_carries_the_flash_address_in_the_tool_argument_order(tmp_path: Path, backend: str) -> None:
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    arguments = _logged_arguments(tmp_path, result)
+    if backend == "stlink":
+        at = arguments.index("-w")
+        assert Path(arguments[at + 1]).suffix == ".bin", arguments
+        assert arguments[at + 2] == "0x08000000", arguments
+        # The verify flag follows the address; it is not what the address
+        # displaced.
+        assert arguments[at + 3] == "-v", arguments
+        assert arguments.count("0x08000000") == 1, arguments
+    else:
+        # The fake is a script, so the interpreter and the script stand in
+        # front of pyOCD's own subcommand; the order asserted starts there.
+        subcommand = arguments.index("flash")
+        at = arguments.index("--base-address")
+        assert subcommand < at, arguments
+        assert arguments[at + 1] == "0x08000000", arguments
+        assert Path(arguments[-1]).suffix == ".bin", arguments
+        assert at + 1 < len(arguments) - 1, "the address option stands before the file, which is the last argument"
+        assert "--no-reset" in arguments[subcommand:at], arguments
+        assert arguments.count("0x08000000") == 1, arguments
+
+
+@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+def test_an_elf_flash_never_carries_the_flash_address_even_when_configured(tmp_path: Path, backend: str) -> None:
+    """The neighbour: the address is for a raw image and is not read for an ELF.
+
+    An ELF carries its own load addresses, and a configured `flash_address`
+    handed to the tool beside it would either be refused or, worse, move the
+    image. The knowledge the product publishes says the field is not read for
+    .elf or .hex; this is that sentence held against the argument list.
+    """
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.elf"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    arguments = _logged_arguments(tmp_path, result)
+    assert "0x08000000" not in arguments, arguments
+    assert "--base-address" not in arguments, arguments
+    if backend == "stlink":
+        at = arguments.index("-w")
+        assert Path(arguments[at + 1]).suffix == ".elf", arguments
+        assert arguments[at + 2] == "-v", arguments
+    else:
+        assert Path(arguments[-1]).suffix == ".elf", arguments
+
+
+@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+def test_a_bin_flash_without_a_flash_address_runs_no_tool_at_all(tmp_path: Path, backend: str) -> None:
+    """The other neighbour: the refusal stays, and it stays before the tool runs.
+
+    The two tests above this section pin the refusal's type and summary; this
+    one pins that no log was written, because a refusal that had already handed
+    the tool a write with no address would be the defect in another shape.
+    """
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type)))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "invalid_argument"
+    assert "log_path" not in result, result
+
+
+@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+def test_a_hex_flash_never_carries_the_flash_address_even_when_configured(tmp_path: Path, backend: str) -> None:
+    """The other format that carries its own addresses: an Intel HEX record names
+    where every byte goes, so a configured `flash_address` is not read for it
+    either, on either backend."""
+    firmware = tmp_path / "build" / "firmware.hex"
+    firmware.parent.mkdir(parents=True)
+    records = [intel_hex_record(0, 0x04, bytes([0x08, 0x00])), intel_hex_record(0, 0x00, b"\x01\x02\x03\x04"), ":00000001FF"]
+    firmware.write_text("\n".join(records) + "\n", encoding="ascii")
+    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.hex"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    arguments = _logged_arguments(tmp_path, result)
+    assert "0x08000000" not in arguments, arguments
+    assert "--base-address" not in arguments, arguments
+    if backend == "stlink":
+        at = arguments.index("-w")
+        assert Path(arguments[at + 1]).suffix == ".hex", arguments
+        assert arguments[at + 2] == "-v", arguments
+    else:
+        assert Path(arguments[-1]).suffix == ".hex", arguments
+
+
+def test_a_bin_flash_with_a_reset_keeps_the_address_between_the_file_and_the_flags(tmp_path: Path) -> None:
+    """`-rst` is one more action on the same STM32CubeProgrammer line, after the
+    write and its verify, and the address stays where the grammar puts it: right
+    after the file, before `-v` and before `-rst`."""
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink", probe_id="STLINK123", flash_address="0x08000000")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin", "reset_after_flash": True})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert result["reset_after_flash"] is True
+    arguments = _logged_arguments(tmp_path, result)
+    at = arguments.index("-w")
+    assert Path(arguments[at + 1]).suffix == ".bin", arguments
+    assert arguments[at + 2 : at + 5] == ["0x08000000", "-v", "-rst"], arguments
+    assert arguments.count("0x08000000") == 1, arguments
+
+
+FLASH_TOOL_HELP_RECORDINGS = Path(__file__).resolve().parent / "fixtures" / "flash_tool_help_recordings.json"
+
+
+def test_the_recorded_help_of_each_flash_tool_puts_the_address_where_the_backends_do() -> None:
+    """The grammar the two argument order tests encode, read off the tools' own `--help`.
+
+    Recorded from the real programs with no probe attached (the recording names
+    the versions and the date). STM32CubeProgrammer documents `-w` as
+    `<file_path>` then `[<address>]`, a positional after the file, and `-rst` as
+    a command of its own; pyOCD documents `-a, --base-address ADDR` as a load
+    option and `<file-path>` as the positional that ends the usage line. A
+    backend that put the address anywhere else would agree with neither tool.
+    """
+    recorded = json.loads(FLASH_TOOL_HELP_RECORDINGS.read_text(encoding="utf-8"))
+    cube = recorded["tools"]["stm32cubeprogrammer"]
+    assert cube["version"] == "2.23.0" and cube["returncode"] == 0
+    cube_lines = [line.strip() for line in cube["help"].splitlines()]
+    write = cube_lines.index("-w,     --write")
+    block = cube_lines[write : cube_lines.index("-w32                   : Write a 32-bits data into device memory")]
+    file_line = next(index for index, line in enumerate(block) if line.startswith("<file_path>"))
+    address_line = next(index for index, line in enumerate(block) if line.startswith("[<address>]"))
+    assert file_line < address_line, block
+    assert block[address_line] == "[<address>]        : Start address of download", block
+    assert "bin" in block[file_line], block
+    assert "-v,     --verify       : Verify if the programming operation is achieved" in cube_lines
+    assert "-rst                   : Reset system" in cube_lines
+
+    pyocd = recorded["tools"]["pyocd"]
+    assert pyocd["version"] == "0.45.1" and pyocd["returncode"] == 0
+    # The recording keeps the line endings the tool printed; the paragraphs are
+    # read with them normalised.
+    pyocd_text = pyocd["help"].replace("\r\n", "\n")
+    usage = pyocd_text.split("\n\n", 1)[0]
+    assert "[-a ADDR]" in usage and usage.rstrip().endswith("[<file-path> ...]"), usage
+    assert usage.index("[-a ADDR]") < usage.index("[<file-path> ...]"), usage
+    load_options = pyocd_text.split("load options:", 1)[1]
+    assert "-a, --base-address ADDR" in load_options, load_options
+    assert "Only allowed if a\n                        single binary file is being loaded." in load_options, load_options
+    assert "--no-reset" in load_options
 
 
 # What each backend puts on the wire for each mode it supports, which is the

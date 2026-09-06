@@ -156,19 +156,6 @@ def test_debug_session_full_cycle_breakpoint_symbol_and_ihex_dump(tmp_path: Path
         service.close()
 
 
-def test_debug_halt_records_manual_halt_stop(tmp_path: Path) -> None:
-    service = debug_service(tmp_path)
-    try:
-        assert start_debug_session(service, mode="attach")["ok"] is True
-        halted = service.call("debug_halt", {"timeout_s": 5})
-        assert halted["ok"] is True, halted
-        assert halted["stop"]["stop_reason"] == "halted"
-        assert halted["stop"]["backend_stop_reason"] == "signal-received"
-        assert halted["stop"]["signal"]["name"] == "SIGINT"
-    finally:
-        service.close()
-
-
 def test_debug_continue_reports_unexpected_breakpoint(tmp_path: Path) -> None:
     service = debug_service(tmp_path, fake_gdb_behavior="unexpected_breakpoint")
     try:
@@ -193,32 +180,6 @@ def test_debug_continue_reports_unexpected_breakpoint(tmp_path: Path) -> None:
         assert classified["source_tool"] == "debug_continue"
     finally:
         service.close()
-
-
-def test_unconfirmed_debug_halt_quarantines_lease(tmp_path: Path) -> None:
-    service = debug_service(tmp_path, fake_gdb_behavior="halt_timeout")
-    try:
-        assert start_debug_session(service, mode="attach")["ok"] is True
-
-        halted = service.call("debug_halt", {"timeout_s": 0.1})
-
-        assert halted["ok"] is False
-        assert halted["target_state"] == "unknown"
-        assert halted["side_effect_status"] == "unknown"
-        assert halted["cleanup_required"] is True
-        assert service.coordinator.blocked is True
-        cleared = service.call("debug_clear_breakpoints")
-        assert cleared["cleanup_required"] is True
-        assert service.coordinator.blocked is True
-    finally:
-        # Service shutdown now catches this closer to the fact than the lease
-        # bookkeeping alone did: `close()` re-attempts the halt itself, finds
-        # the same `halt_timeout` fake still refusing to confirm one, and
-        # refuses to call that a clean stop before the lease release is ever
-        # reached.
-        with pytest.raises(RuntimeError, match="reconfirming the target was halted"):
-            service.close()
-        service.coordinator.close()
 
 
 def test_debug_continue_reports_target_exception_context(tmp_path: Path) -> None:
@@ -1004,6 +965,7 @@ def latch_audit_break(service: AgenticHILToolService) -> None:
 INIT_COMMAND_PREFIXES = [
     "-gdb-set pagination off",
     "-gdb-set confirm off",
+    "-gdb-set mi-async on",
     "-file-exec-and-symbols",
     "-target-select",
     "-interpreter-exec",
@@ -1075,7 +1037,13 @@ def test_audit_break_blocks_status_effects_and_new_sessions_but_not_containment(
         halted = service.call("debug_halt", {"timeout_s": 1})
         assert halted["audit_ok"] is False
         assert overall_success(halted) is False
-        assert any(command.startswith("-exec-interrupt") for command in recorded), "containment halt must still reach the target"
+        # Containment is not what the latch refuses: the halt reached the
+        # backend and was answered from the session's own record. The target
+        # never ran in this session, so there is no interrupt to send (#492);
+        # the next test pins that a target the latch caught running still gets
+        # its interrupt.
+        assert halted["summary"].startswith("Target was already stopped"), halted
+        assert not any(command.startswith("-exec-interrupt") for command in recorded), "a target that never ran has nothing to interrupt"
         assert service.coordinator.blocked is True, "containment must not lift the audit quarantine"
 
         restarted = service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "attach"})

@@ -121,12 +121,18 @@ jobs:
   # above already covers. It needs the network, because uv resolves this
   # distribution's dependency set from the package index and one test reads the
   # release index over HTTPS to establish that a currency claim is only made
-  # after the index has answered.
+  # after the index has answered. It needs NET_ADMIN and the host's `vcan` and
+  # `can_raw` modules, because the CAN sub-tier binds the product's SocketCAN
+  # transport to a virtual interface it creates.
   #
   # Measured cold, with no layer cache and the base image pulled, which is what
-  # a hosted runner has: 28 seconds to build the image and 15 to run the tests,
-  # so about three quarters of a minute in total. The limit below is margin for
-  # a slow runner and a slow index rather than a deadline a slow runner beats.
+  # a hosted runner has: about two minutes to build the image, most of it apt
+  # and the locked dependency set over the network, and a few minutes to run
+  # the tests, whose wall clock is set by the serial reads over the
+  # pseudo-terminal pair and the CAN reads over the virtual interface that
+  # prove their own timeouts rather than by any single tool. The limit below
+  # is margin for a slow runner and a slow index rather than a deadline a slow
+  # runner beats.
   container_tests:
     name: Container tests
     runs-on: ubuntu-latest
@@ -144,22 +150,46 @@ jobs:
           DOCKER_BUILDKIT: "1"
         run: docker build -f tools/container/Dockerfile -t agentic-hil-container-tests .
 
+      # The CAN tests bind the product's SocketCAN transport to a virtual CAN
+      # interface the container creates. A container cannot load a kernel
+      # module, so the runner's kernel has to carry `vcan` before the run, and
+      # the hosted image does not load it by itself. Its own step, so a runner
+      # kernel without the module fails the job here with modprobe's own line
+      # rather than as a tier that skipped itself below; the check further down
+      # would catch that skip too, but this names the cause.
+      - name: Load the virtual CAN module on the runner
+        run: |
+          sudo modprobe vcan || { sudo apt-get update && sudo apt-get install -y "linux-modules-extra-$(uname -r)" && sudo modprobe vcan; }
+          sudo modprobe can_raw
+          lsmod | grep -E '^(vcan|can_raw) '
+
       # The marker as well as the path, so a test that lands in this directory
       # without it is a test this job does not silently start running, and the
       # variable the image already sets is passed again here as the statement it
-      # is: these tests run because this run means them to.
+      # is: these tests run because this run means them to. NET_ADMIN is what
+      # lets the CAN tests create their virtual interface inside the container;
+      # nothing else in the tier needs a capability. The serial tests need
+      # what a container has by default and this line leaves alone: the devpts
+      # that socat allocates its pseudo-terminal pair from, and root inside the
+      # container, which two of them use to drop a server to `nobody` and read
+      # what the kernel's permission checks answer it.
       - name: Run the container tests
         run: |
           mkdir -p container-report
-          docker run --rm -e AGENTIC_HIL_CONTAINER_TESTS=1 -v "$PWD/container-report:/report" agentic-hil-container-tests \
+          docker run --rm --cap-add NET_ADMIN -e AGENTIC_HIL_CONTAINER_TESTS=1 -v "$PWD/container-report:/report" agentic-hil-container-tests \
             python -m pytest tests/container -m container -q --junitxml=/report/container-tests.xml
 
-      # This job's whole claim is that it ran the real uv, the real OpenOCD and
-      # the real /proc, and pytest exits 0 for a tier in which every test
-      # skipped. Green over fifteen skips and green over fifteen passes are
-      # indistinguishable to a workflow that reads only the status, so the
-      # report is what the claim is read out of: tests ran, none of them
-      # skipped, none of them errored.
+      # This job's whole claim is that it ran the real uv, the real OpenOCD,
+      # the real /proc, a real terminal device and a real SocketCAN transport,
+      # and pytest exits 0 for a tier in which every test skipped. Green over
+      # fifteen skips and green over fifteen passes are indistinguishable to a
+      # workflow that reads only the status, so the report is what the claim
+      # is read out of: tests ran, none of them skipped, none of them errored.
+      # A transport that could not be created (no socat, no devpts, no `vcan`
+      # or `can_raw` on the runner, no NET_ADMIN on the run, no `nobody` to
+      # drop to) is a skip with that reason in its fixture, and a skip is what
+      # this step turns red, with the reasons printed so the cause is on the
+      # job page rather than a tier gone green having proved nothing.
       - name: Check the container tests actually ran
         shell: python
         run: |
@@ -172,6 +202,9 @@ jobs:
           skipped = sum(int(suite.get("skipped", 0)) for suite in suites)
           errors = sum(int(suite.get("errors", 0)) for suite in suites)
           print(f"{tests} test(s) ran, {skipped} skipped, {errors} error(s)")
+          for case in root.iter("testcase"):
+              for verdict in case.findall("skipped") + case.findall("error"):
+                  print(f"{verdict.tag}: {case.get('classname')}::{case.get('name')}: {verdict.get('message') or verdict.text or ''}")
           if tests == 0 or skipped or errors:
               print("This tier has to run every test it collects: a tier that skipped proves nothing and still reports success.")
               sys.exit(1)

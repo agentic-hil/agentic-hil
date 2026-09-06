@@ -19,10 +19,15 @@ where the interpreter or the daemon is missing, and say what would have run it.
 
 from __future__ import annotations
 
+import io
+import json
 import os
+import platform
 import re
 import shutil
 import subprocess
+import sys
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -1109,6 +1114,10 @@ def _machine_whose_only_python_is(tmp_path: Path, python_body: str) -> tuple[dic
         f'echo "fetched" > "{fetched}"\n'
         'cat > "$out" <<\'PAYLOAD\'\n'
         "#!/bin/sh\n"
+        # What Astral's installer reads to decide whether it edits the shell rc
+        # files, recorded as this installer saw it. Nothing the stub writes
+        # depends on it; the test about the header promise reads the record.
+        f'echo "${{UV_NO_MODIFY_PATH:-unset}}" > "{tmp_path / "installer-saw-no-modify-path"}"\n'
         f'mkdir -p "{user_bin}"\n'
         f'cp "{staging}/uv" "{user_bin}/uv"\n'
         f'chmod +x "{user_bin}/uv"\n'
@@ -2313,6 +2322,254 @@ def test_refreshing_a_uv_tool_with_a_recorded_index_option_falls_back_to_the_upg
     assert marker.read_text(encoding="utf-8").strip() == "damaged", transcript
 
 
+# uv's receipt for `uv tool install --python 3.10 "agentic-hil[can]"`, recorded with
+# uv 0.11.27 on 2026-09-06: the interpreter is a `[tool]`-level key beside
+# `requirements`, not a `[tool.options]` entry, and the entrypoints array closes
+# the file. The container tier reads the same layout off uv 0.12.9
+# (tests/container/test_uv_receipt.py). The install path is a neutral one in
+# place of the recorded one, which named the recording machine's directories.
+_RECEIPT_WITH_A_RECORDED_INTERPRETER = (
+    "[tool]\n"
+    'requirements = [{ name = "agentic-hil", extras = ["can"] }]\n'
+    'python = "3.10"\n'
+    "entrypoints = [\n"
+    '    { name = "agentic-hil", install-path = "/opt/uv/bin/agentic-hil", from = "agentic-hil" },\n'
+    "]\n"
+)
+# The spelling older uv used, which the upgrade path reads second
+# (`_recorded_python` in upgrade.py) and which the suite already carries as a
+# fixture (tests/test_agentic_hil.py, `recorded-under-tool-options`): receipts
+# written that way are still on disk, so both installers read both levels.
+_RECEIPT_WITH_THE_INTERPRETER_UNDER_OPTIONS = (
+    "[tool]\n"
+    'requirements = [{ name = "agentic-hil", extras = ["can"] }]\n'
+    "\n"
+    "[tool.options]\n"
+    'python = "3.10"\n'
+)
+# Both spellings, one case each, in both installers.
+_RECORDED_INTERPRETER_RECEIPTS = [
+    pytest.param(_RECEIPT_WITH_A_RECORDED_INTERPRETER, id="under-tool-as-uv-writes-it-now"),
+    pytest.param(_RECEIPT_WITH_THE_INTERPRETER_UNDER_OPTIONS, id="under-tool-options-as-older-uv-wrote-it"),
+]
+# The two recorded layouts in one receipt: the multiline requirement list uv
+# writes the moment a `--with` is recorded (the fixture the with-replay tests
+# above carry) and the `[tool]`-level interpreter of the recording above. Not a
+# third recording; the reinstall line has to carry both `--with` and `--python`,
+# and the with-replay tests have no interpreter while the interpreter tests
+# have no `--with`.
+_RECEIPT_WITH_AN_INTERPRETER_AND_A_WITH = (
+    "[tool]\n"
+    "requirements = [\n"
+    '    { name = "agentic-hil", extras = ["pyocd"] },\n'
+    '    { name = "requests", specifier = "==2.32.5" },\n'
+    "]\n"
+    'python = "3.10"\n'
+    "entrypoints = [\n"
+    '    { name = "agentic-hil", install-path = "/opt/uv/bin/agentic-hil", from = "agentic-hil" },\n'
+    "]\n"
+)
+# What the refresh says when it replays the interpreter, so that the choice
+# being kept is on screen: #476 observed that the record was lost "with nothing
+# said on screen", and the same line says it is kept.
+RECORDED_INTERPRETER_SAID = "the receipt records the interpreter 3.10, so the reinstall keeps it"
+
+
+def _uv_refresh_interpreter_stub(release: str, uv_log: Path, pycan_marker: Path, marker: Path) -> str:
+    """A uv stub for the recorded-interpreter refresh path. Like ``_uv_refresh_stub``
+    it answers the probes and repairs the console script under --reinstall, and its
+    `tool install` models what uv records about the interpreter: the receipt it
+    rewrites carries `python = "<value>"` at the `[tool]` level when the install
+    line handed it `--python <value>`, and no `python` key at all when it did not.
+    Both measured with uv 0.11.27 on 2026-09-06: `uv tool install --upgrade
+    --reinstall` without `--python` left no `python` key in the receipt, and with
+    `--python 3.10` it recorded `python = "3.10"` again; #476 measured the same
+    on uv 0.12.9. A replayed `--with` goes into the receipt the way
+    ``_uv_refresh_with_stub`` writes it, one object per requirement under a
+    multiline list. `tool upgrade` leaves the receipt exactly as it is, which is
+    the preserving behaviour the fallback relies on (measured the same way). That
+    it also leaves the copy unrepaired is the stub's own device and no claim
+    about uv: the marker then still reads "damaged", which tells a refresh that
+    took the fallback wrongly apart from one that repaired the copy."""
+    return (
+        f'echo "$*" >> "{uv_log}"\n'
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  if [ "$3" = "--bin" ]; then echo "$UV_TOOL_BIN_DIR"; else echo "$UV_TOOL_ROOT"; fi\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "list" ]; then\n'
+        f'  echo "agentic-hil v{release}"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  case "$*" in\n'
+        "    *--reinstall*) : ;;\n"
+        "    *) exit 0 ;;\n"
+        "  esac\n"
+        # The reconstructed root spec, the interpreter the line replays, if any,
+        # and every replayed --with.
+        '  spec=""; python=""; withs=""; prev=""\n'
+        '  for a in "$@"; do\n'
+        '    if [ "$prev" = "--python" ]; then python="$a"; fi\n'
+        '    if [ "$prev" = "--with" ]; then withs="$withs $a"; fi\n'
+        '    case "$a" in agentic-hil*) spec="$a" ;; esac\n'
+        '    prev="$a"\n'
+        "  done\n"
+        '  extras=$(printf \'%s\' "$spec" | sed -n \'s/[^[]*\\[\\([^]]*\\)\\].*/\\1/p\' | tr \',\' \' \')\n'
+        '  quoted=""\n'
+        '  for e in $extras; do\n'
+        '    if [ -z "$quoted" ]; then quoted="\\"$e\\""; else quoted="$quoted, \\"$e\\""; fi\n'
+        "  done\n"
+        '  if [ -n "$quoted" ]; then root="{ name = \\"agentic-hil\\", extras = [$quoted] }"; else root="{ name = \\"agentic-hil\\" }"; fi\n'
+        "  {\n"
+        '    echo "[tool]"\n'
+        '    if [ -z "$withs" ]; then\n'
+        '      echo "requirements = [$root]"\n'
+        "    else\n"
+        '      echo "requirements = ["\n'
+        '      echo "    $root,"\n'
+        "      for w in $withs; do\n"
+        '        case "$w" in\n'
+        '          *==*) echo "    { name = \\"${w%%==*}\\", specifier = \\"==${w#*==}\\" }," ;;\n'
+        '          *) echo "    { name = \\"$w\\" }," ;;\n'
+        "        esac\n"
+        "      done\n"
+        '      echo "]"\n'
+        "    fi\n"
+        '    if [ -n "$python" ]; then echo "python = \\"$python\\""; fi\n'
+        '    echo "entrypoints = ["\n'
+        '    echo "    { name = \\"agentic-hil\\", install-path = \\"$UV_TOOL_BIN_DIR/agentic-hil\\", from = \\"agentic-hil\\" },"\n'
+        '    echo "]"\n'
+        '  } > "$UV_TOOL_ROOT/agentic-hil/uv-receipt.toml"\n'
+        '  case " $extras " in\n'
+        f'    *" can "*) echo installed > "{pycan_marker}" ;;\n'
+        "  esac\n"
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        f'  --version) echo "{release}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "upgrade" ]; then\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+def _reinstall_lines(invocations: str, spec: str = "agentic-hil[can]") -> list[str]:
+    """The `tool install --upgrade --reinstall <spec> ...` lines a refresh ran."""
+    return [line for line in invocations.splitlines() if line.startswith(f"tool install --upgrade --reinstall {spec}")]
+
+
+@pytest.mark.parametrize("recorded_receipt", _RECORDED_INTERPRETER_RECEIPTS)
+def test_refreshing_a_uv_tool_installed_with_an_interpreter_replays_it(tmp_path: Path, recorded_receipt: str) -> None:
+    """#476: the recorded interpreter survives the refresh, and is on the line that rebuilds it.
+
+    `uv tool install --python 3.10 "agentic-hil[can]"` records the interpreter,
+    and current uv records it as a `[tool]`-level key. The reader refused only a
+    `[tool.options]` table, so that receipt passed straight through and the
+    refresh reached `uv tool install --upgrade --reinstall agentic-hil[can]` with
+    no `--python`: uv then rewrote the receipt without the key, and the
+    operator's choice of interpreter was gone from the record, with nothing said
+    on screen.
+
+    The decided behaviour is the second of the two the issue allows: replay, not
+    refusal. The refresh reads the interpreter at either level and replays it as
+    `--python`, which is what `agentic-hil upgrade` already prints for the same
+    receipt, so the reinstall keeps the extras, the `--with` packages and the
+    interpreter alike, and it can still merge the `[can]` this run asks for,
+    which the preserving `tool upgrade` never adds. The older spelling under
+    `[tool.options]` used to be refused outright and sent to that upgrade, which
+    kept the record but never repaired the copy; it is replayed now too, and the
+    line that says so is on screen.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(tmp_path, recorded_receipt, stub=_uv_refresh_interpreter_stub)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    reinstalls = _reinstall_lines(invocations)
+    assert len(reinstalls) == 1, invocations
+    assert "--python 3.10" in reinstalls[0], invocations
+    assert "tool upgrade" not in invocations, invocations
+    assert RECORDED_INTERPRETER_SAID in transcript, transcript
+    # The repair happened out of the reconstruction, not out of the fallback.
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+    # And what uv recorded afterwards still names the interpreter and the extra.
+    recorded = receipt.read_text(encoding="utf-8")
+    assert 'python = "3.10"' in recorded, recorded
+    assert '"can"' in recorded, recorded
+    assert pycan_marker.is_file(), transcript
+
+
+def test_refreshing_a_uv_tool_with_an_interpreter_and_a_with_replays_both(tmp_path: Path) -> None:
+    """A recorded `--with` beside the interpreter: the line carries both flags.
+
+    The with-replay and the interpreter-replay are two readings of one receipt,
+    and a reader that took the interpreter out of the requirement list's place
+    or the other way round would keep one and drop the other.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(tmp_path, _RECEIPT_WITH_AN_INTERPRETER_AND_A_WITH, stub=_uv_refresh_interpreter_stub)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    reinstalls = _reinstall_lines(invocations, "agentic-hil[can,pyocd]")
+    assert len(reinstalls) == 1, invocations
+    assert "--with requests==2.32.5" in reinstalls[0], invocations
+    assert "--python 3.10" in reinstalls[0], invocations
+    assert "tool upgrade" not in invocations, invocations
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+    recorded = receipt.read_text(encoding="utf-8")
+    assert 'python = "3.10"' in recorded, recorded
+    assert '"pyocd"' in recorded and '"can"' in recorded, recorded
+    assert '"requests"' in recorded and "==2.32.5" in recorded, recorded
+    assert pycan_marker.is_file(), transcript
+
+
+def test_a_recorded_interpreter_does_not_make_a_recorded_index_replayable(tmp_path: Path) -> None:
+    """The neighbour that must not move: a `[tool.options]` index is still refused.
+
+    Reading `python` out of `[tool.options]` must not turn the table into one
+    the reconstruction accepts. An index recorded beside the interpreter cannot
+    be replayed, so the refresh keeps to the preserving upgrade, which keeps the
+    interpreter along with everything else.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(
+        tmp_path,
+        "[tool]\n"
+        'requirements = [{ name = "agentic-hil", extras = ["can"] }]\n'
+        'python = "3.10"\n'
+        "\n"
+        "[tool.options]\n"
+        'index = ["https://buildbot:tok3n@packages.example.internal/simple/"]\n',
+        stub=_uv_refresh_interpreter_stub,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "tool upgrade --reinstall agentic-hil" in invocations, invocations
+    assert _reinstall_lines(invocations) == [], invocations
+    assert marker.read_text(encoding="utf-8").strip() == "damaged", transcript
+    assert 'python = "3.10"' in receipt.read_text(encoding="utf-8")
+    # Nothing was replayed, so nothing says it was.
+    assert "records the interpreter" not in transcript, transcript
+
+
 def test_refreshing_a_uv_tool_with_an_empty_receipt_falls_back_to_the_upgrade(tmp_path: Path) -> None:
     """An empty receipt has no `requirements = [` anchor, so the reader must return
     failure rather than accept it as `no extras` and reinstall a bare `agentic-hil`
@@ -2380,6 +2637,124 @@ def test_both_scripts_refuse_a_receipt_they_cannot_replay_in_full() -> None:
     # one is refused before it is indexed as a string.
     assert re.search(r"try \{\s*\$text = Get-Content -LiteralPath \$receipt -Raw\s*\} catch \{\s*return \$null", powershell), powershell
     assert "[string]::IsNullOrEmpty($text)" in powershell, powershell
+
+
+def _powershell_function(source: str, name: str) -> str:
+    """One `function Name { ... }` of install.ps1, closed at the first `}` in column 0."""
+    found = re.search(rf"^function {re.escape(name)} \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+    assert found is not None, f"install.ps1 defines no {name}"
+    return found.group(0)
+
+
+# The functions install.ps1 reaches on a uv-managed refresh, from the decision
+# down to the uv line, in the order the script defines them. `Invoke-Captured`
+# is deliberately not among them: the harness below supplies one that records
+# what uv was asked and answers the two probes, so the decision is driven
+# against a receipt on disk without a uv on the machine. A helper added between
+# the reader and `Install-WithUv` has to be added here too, or the harness
+# fails on a name it does not know rather than on an assertion.
+_POWERSHELL_REFRESH_FUNCTIONS = ("Invoke-Uv", "Test-UvManagesTool", "Get-UvRecordedRequirements", "Get-RefreshSpec", "Install-WithUv")
+
+
+def _run_powershell_uv_refresh(tmp_path: Path, recorded_receipt: str) -> tuple[str, str]:
+    """Drive install.ps1's refresh decision in Windows PowerShell against a receipt.
+
+    `Install-WithUv` and the functions it reads through are taken out of the
+    script verbatim and run with the script-scope state a refresh has (`refresh`
+    mode, the `can` extra wanted, no version pin). Returns the uv invocation
+    log, one line per call, the way the shell harness returns its own, and what
+    the script said on the way, one `Write-Say` per line.
+    """
+    powershell = _windows_powershell()
+    tool_root = tmp_path / "tools"
+    receipt_dir = tool_root / "agentic-hil"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "uv-receipt.toml").write_text(recorded_receipt, encoding="utf-8")
+    log = tmp_path / "uv-invocations"
+    said = tmp_path / "said"
+    functions = "".join(_powershell_function(_powershell_source(), name) for name in _POWERSHELL_REFRESH_FUNCTIONS)
+    harness = (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"$toolRoot = '{tool_root}'\n"
+        f"$log = '{log}'\n"
+        f"$said = '{said}'\n"
+        "$InstallMode = 'refresh'\n"
+        "$WithCan = $true\n"
+        "$Version = ''\n"
+        "$SystemCertsMode = 'never'\n"
+        "$UvInstallFailure = 'uv could not install agentic-hil'\n"
+        "function Write-Say { param([string]$Text) Add-Content -LiteralPath $said -Value $Text -Encoding utf8 }\n"
+        "function Invoke-Captured {\n"
+        "    param([string]$File, [string[]]$Arguments)\n"
+        "    Add-Content -LiteralPath $log -Value ($Arguments -join ' ') -Encoding utf8\n"
+        "    if ($Arguments[0] -eq 'tool' -and $Arguments[1] -eq 'dir') { return @{ ExitCode = 0; Output = \"$toolRoot`n\" } }\n"
+        "    if ($Arguments[0] -eq 'tool' -and $Arguments[1] -eq 'list') { return @{ ExitCode = 0; Output = \"agentic-hil v0.1.0`n- agentic-hil`n\" } }\n"
+        "    return @{ ExitCode = 0; Output = '' }\n"
+        "}\n"
+        f"{functions}"
+        "Install-WithUv\n"
+    )
+    script = tmp_path / "refresh-harness.ps1"
+    script.write_text(harness, encoding="utf-8")
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    invocations = log.read_text(encoding="utf-8-sig") if log.is_file() else ""
+    return invocations, (said.read_text(encoding="utf-8-sig") if said.is_file() else "")
+
+
+@pytest.mark.parametrize("recorded_receipt", _RECORDED_INTERPRETER_RECEIPTS)
+def test_the_powershell_refresh_replays_the_recorded_interpreter(tmp_path: Path, recorded_receipt: str) -> None:
+    """#476 on the PowerShell side: `Get-UvRecordedRequirements` had the same gap.
+
+    The same receipt, the same decision, the same line: the reconstruction is
+    taken, and it carries `--python 3.10`, at either level the interpreter was
+    recorded at, and the script says so. There is no real-uv tier for this
+    installer, since the image is Linux; this harness is its coverage.
+    """
+    invocations, said = _run_powershell_uv_refresh(tmp_path, recorded_receipt)
+
+    reinstalls = _reinstall_lines(invocations)
+    assert len(reinstalls) == 1, invocations
+    assert "--python 3.10" in reinstalls[0], invocations
+    assert "tool upgrade" not in invocations, invocations
+    assert RECORDED_INTERPRETER_SAID in said, said
+
+
+def test_the_powershell_refresh_replays_an_interpreter_beside_a_with(tmp_path: Path) -> None:
+    """The PowerShell twin of the two-flag case: `--with` and `--python` on one line."""
+    invocations, _said = _run_powershell_uv_refresh(tmp_path, _RECEIPT_WITH_AN_INTERPRETER_AND_A_WITH)
+
+    reinstalls = _reinstall_lines(invocations, "agentic-hil[can,pyocd]")
+    assert len(reinstalls) == 1, invocations
+    assert "--with requests==2.32.5" in reinstalls[0], invocations
+    assert "--python 3.10" in reinstalls[0], invocations
+    assert "tool upgrade" not in invocations, invocations
+
+
+def test_the_powershell_refresh_still_keeps_to_the_upgrade_for_a_recorded_index(tmp_path: Path) -> None:
+    """The neighbour on the PowerShell side: an index beside the interpreter is still refused."""
+    invocations, said = _run_powershell_uv_refresh(
+        tmp_path,
+        "[tool]\n"
+        'requirements = [{ name = "agentic-hil", extras = ["can"] }]\n'
+        'python = "3.10"\n'
+        "\n"
+        "[tool.options]\n"
+        'index = ["https://buildbot:tok3n@packages.example.internal/simple/"]\n',
+    )
+
+    assert "tool upgrade --reinstall agentic-hil" in invocations, invocations
+    assert _reinstall_lines(invocations) == [], invocations
+    assert "records the interpreter" not in said, said
 
 
 def test_refreshing_a_pip_installation_forces_the_reinstall(tmp_path: Path) -> None:
@@ -2850,6 +3225,10 @@ def test_the_retry_is_refused_when_it_was_told_to_be(tmp_path: Path) -> None:
     assert result.returncode != 0, transcript
     assert attempts.read_text(encoding="utf-8").split() == ["unset"], transcript
     assert "--no-system-certs" in transcript, transcript
+    # And uv's own words for the failure, which is what the sentence about the
+    # flag is added to rather than substituted for: a run this script cannot
+    # resolve shows the line it failed on.
+    assert "invalid peer certificate: UnknownIssuer" in transcript, transcript
 
 
 def _recording_uv_stub(seen: Path) -> str:
@@ -3047,3 +3426,749 @@ def test_the_one_liner_installs_the_machine_half_in_a_fresh_container() -> None:
     # streamed dump away.
     assert f"agent: claude-code {REGISTERED_LINE}" in transcript
     assert "agentic_hil_agent_install" not in transcript
+
+
+# ---------------------------------------------------------------------------
+# #488: what the stubs assumed about uv and about Astral's installer, and what
+# the real ones do. The container tier runs both for real in
+# tests/container/test_install_routes.py; these are the unit-fake tier's
+# recordings of the same two facts, so the suite that runs everywhere keeps them.
+
+# uv 0.12.9, recorded 2026-09-06 in the container test image, on `uv tool install
+# agentic-hil` with a console script pip had written in uv's own bin directory.
+# uv installed every package first, then stopped on this line and exited 2.
+UV_REFUSES_AN_EXISTING_EXECUTABLE = "error: Executable already exists: agentic-hil (use `--force` to overwrite)"
+
+# What both scripts say when they meet that refusal, after the directory uv
+# named. It says which copy was replaced and what that copy's own manager still
+# believes, because uninstalling the package there removes this launcher with
+# it: the reader has to know that before they tidy up.
+DISPLACED_COPY_TAIL = (
+    "that it did not write (pip --user, pipx or another manager put it there), so it was told to replace it; "
+    "that manager still records the old package, and uninstalling it there removes this launcher too, "
+    "so run this script again if you do"
+)
+
+
+def test_the_anchor_replaces_a_copy_uv_did_not_write_in_its_own_bin(tmp_path: Path) -> None:
+    """A `pip install --user` copy in `~/.local/bin`, then uv arrives, then the anchor.
+
+    pip's console script and uv's own bin are the same directory on Linux and
+    macOS, and uv refuses to overwrite an executable it did not write. The stub
+    uv here keeps uv's rule: it refuses with uv's recorded line unless it is
+    told to replace the file. Before this fix the anchor stopped at step 2 on
+    that line, with the old copy still on PATH and a closing sentence naming no
+    fix; the run has to end with the fresh copy answering in that directory.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+    shell = _posix_shell()
+
+    home = tmp_path / "home"
+    project = home / "project"
+    user_bin = home / ".local" / "bin"
+    tools = tmp_path / "tools"
+    for directory in (project, user_bin, tools):
+        directory.mkdir(parents=True)
+    uv_wrote = user_bin / "agentic-hil.written-by-uv"
+
+    # The copy pip wrote: an old release, and not a file uv knows.
+    _stub_executable(user_bin / "agentic-hil", 'case "$1" in\n  --version) echo "0.3.0" ;;\nesac\nexit 0\n')
+    _stub_executable(
+        tools / "uv",
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        f'  echo "{user_bin}"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "list" ]; then\n'
+        '  echo "No tools installed"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'  if [ -e "{user_bin}/agentic-hil" ] && [ ! -e "{uv_wrote}" ]; then\n'
+        '    case " $* " in\n'
+        '      *" --force "*) ;;\n'
+        f"      *) echo '{UV_REFUSES_AN_EXISTING_EXECUTABLE}' >&2; exit 2 ;;\n"
+        "    esac\n"
+        "  fi\n"
+        f'  cat > "{user_bin}/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        '  --version) echo "99.0.0" ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        f'  chmod +x "{user_bin}/agentic-hil"\n'
+        f'  : > "{uv_wrote}"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+    result = subprocess.run(
+        [shell, str(SHELL_SCRIPT), "--no-agent-install", "--no-can"],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={"HOME": str(home), "PATH": f"{tools}:{user_bin}:/usr/bin:/bin"},
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert f"agentic-hil 0.3.0 is older than {_release()}, upgrading it" in transcript, transcript
+    assert "could not install" not in transcript, transcript
+    # Named, not silently overwritten: the copy came from another manager, and
+    # that manager's record of it outlives this run.
+    assert f"uv refused to overwrite an agentic-hil in {user_bin} {DISPLACED_COPY_TAIL}" in transcript, transcript
+    # And uv's refusal itself is not printed. The run resolved it, so a
+    # transcript that ends in a working installation must not carry a line that
+    # reads as the fault and tells the reader to pass a flag this script passed
+    # for them. What a failure the script does not resolve still shows is pinned
+    # by test_the_retry_is_refused_when_it_was_told_to_be.
+    assert UV_REFUSES_AN_EXISTING_EXECUTABLE not in transcript, transcript
+    answered = subprocess.run([str(user_bin / "agentic-hil"), "--version"], capture_output=True, text=True, timeout=SCRIPT_TIMEOUT_S, check=False)
+    assert answered.stdout.strip() == "99.0.0", transcript
+
+
+def test_the_fetched_uv_installer_is_told_not_to_edit_shell_profiles(tmp_path: Path) -> None:
+    """The fetch route keeps the promise in the header, by saying so to the installer.
+
+    Astral's installer appends to `~/.profile` and `~/.bashrc` and creates
+    `~/.zshrc` unless `UV_NO_MODIFY_PATH` is set, and the five lines a stranger
+    reads before piping this script into a shell say it touches no shell rc
+    file. The stub installer here records what it was told; the real one runs in
+    the container tier and its rc files are read back there.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, _marker, _uv_log, fetched = _machine_whose_only_python_is(tmp_path, _PYTHON_WITHOUT_PIP)
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert fetched.is_file(), transcript
+    seen = tmp_path / "installer-saw-no-modify-path"
+    assert seen.is_file(), transcript
+    assert seen.read_text(encoding="utf-8").strip() == "1", transcript
+
+
+def test_both_scripts_tell_the_fetched_uv_installer_not_to_edit_profiles() -> None:
+    """The same instruction on the Windows side, where the installer edits the user Path.
+
+    The pinned install.ps1 writes `%USERPROFILE%\\.local\\bin` into the user's
+    Path in the registry unless `UV_NO_MODIFY_PATH` is set, and step 3 then
+    prints a line that prepends the same directory again. Running the real
+    installer on a developer's Windows machine would edit that developer's
+    registry, so the Windows half is pinned on the text: the variable is set,
+    and it is set before the line that executes the fetched bytes.
+    """
+    shell = _code_only(_shell_source())
+    assert "UV_NO_MODIFY_PATH" in shell
+    assert shell.index("UV_NO_MODIFY_PATH") < shell.index('sh "$installer_path"'), "install.sh sets the variable after it has already run the installer"
+    powershell = _code_only(_powershell_source())
+    assert "UV_NO_MODIFY_PATH" in powershell
+    assert powershell.index("UV_NO_MODIFY_PATH") < powershell.index("Invoke-Expression ([Text.Encoding]"), "install.ps1 sets the variable after it has already run the installer"
+
+
+# ---------------------------------------------------------------------------
+# install.ps1, run whole, on the one platform that has Windows PowerShell 5.1.
+#
+# Every behavioural test above runs install.sh and skips on Windows, and the
+# PowerShell script was executed only to parse it, print its help and refuse an
+# unknown flag; its equivalence to the shell script was pinned by regexes over
+# the two texts, which is the assumption that identical wording means identical
+# behaviour, and the shape #462 broke for install.sh on a bench. The harness
+# here runs `install.ps1` itself, through `powershell.exe -File`, against a
+# stub uv on PATH and a real `agentic-hil.exe` in the manager's bin, built the
+# way pip builds one. What it cannot reach is written down at the end.
+
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="install.ps1's flow runs under Windows PowerShell 5.1, which exists on Windows alone")
+
+# The one route this harness may not take on a developer's machine, and the one
+# machine it may take it on. Astral's pinned installer writes `$HOME\.local\bin`
+# into HKCU\Environment\Path unless it is told not to, and whether install.ps1
+# tells it is the question, so the installer has to be the real one and the
+# registry has to be somebody's. A hosted runner is discarded after the job; a
+# self-hosted one is a bench, and the environment names which of the two it is.
+HOSTED_WINDOWS_RUNNER_ONLY = pytest.mark.skipif(
+    os.name != "nt" or os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted",
+    reason="the fetch route runs Astral's real installer, which edits the user's registry Path unless told not to, so it runs only on a disposable hosted Windows runner",
+)
+
+# The refresh over a receipt that records a root extra and a `--with`, in the
+# shape uv writes once a `--with` is present: one requirement per line.
+_RECEIPT_WITH_PYOCD_AND_A_WITH = (
+    "[tool]\n"
+    "requirements = [\n"
+    '    { name = "agentic-hil", extras = ["pyocd"] },\n'
+    '    { name = "requests", specifier = "==2.32.5" },\n'
+    "]\n"
+    "entrypoints = [\n"
+    '    { name = "agentic-hil", install-path = "C:\\\\x\\\\agentic-hil.exe", from = "agentic-hil" },\n'
+    "]\n"
+)
+
+# Two receipts the reconstruction must refuse, so the refresh keeps to the
+# upgrade that preserves what uv recorded: a root installed from a directory
+# (a url or git source the same), and a recorded index option.
+_RECEIPT_WITH_A_DIRECTORY_SOURCE = '[tool]\nrequirements = [{ name = "agentic-hil", directory = "C:/src/agentic-hil" }]\n'
+_RECEIPT_WITH_AN_INDEX_OPTION = '[tool]\nrequirements = [{ name = "agentic-hil", extras = ["can"] }]\n\n[tool.options]\nindex = ["https://buildbot:tok3n@packages.example.internal/simple/"]\n'
+
+
+def _powershell_release() -> str:
+    found = re.search(r"^\$Release = '(\d+\.\d+\.\d+)'$", _powershell_source(), re.MULTILINE)
+    assert found is not None, "install.ps1 states no $Release"
+    return found.group(1)
+
+
+def _windows_launcher(path: Path, version: str, marker: Path | None = None, answers: str = "fresh") -> None:
+    """A real `agentic-hil.exe` answering `version`, built the way pip builds one.
+
+    pip's console-script launcher is a small executable followed by a shebang
+    line and a zip archive whose `__main__` is what runs. The same three parts,
+    with this interpreter on the shebang and a `__main__` of the test's own,
+    give install.ps1 the `.exe` it looks for by that name: `Get-Command`, the
+    call operator and `Test-Path` all see an executable, and `--version` and
+    `agent-install` answer what the test decided.
+    """
+    from pip._vendor import distlib
+
+    stub = {"AMD64": "t64.exe", "ARM64": "t64-arm.exe", "x86": "t32.exe"}[platform.machine()]
+    launcher = (Path(distlib.__file__).parent / stub).read_bytes()
+    body = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"if '--version' in sys.argv:\n    print({version!r})\n    raise SystemExit(0)\n"
+        f"if 'agent-install' in sys.argv:\n    Path({str(marker)!r}).write_text({answers!r}, encoding='utf-8')\n    raise SystemExit(0)\n"
+        "raise SystemExit(0)\n"
+    )
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("__main__.py", body)
+    path.write_bytes(launcher + f"#!{sys.executable}\r\n".encode() + archive.getvalue())
+
+
+_UV_STUB_BODY = '''"""The uv install.ps1 talks to, driven by the plan written beside this file."""
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+plan = json.loads(Path(sys.argv[0]).with_suffix(".json").read_text(encoding="utf-8"))
+args = sys.argv[1:]
+with open(plan["log"], "a", encoding="utf-8") as log:
+    log.write(" ".join(args) + "\\n")
+if args[:2] == ["tool", "dir"]:
+    print(os.environ["UV_TOOL_BIN_DIR"] if "--bin" in args else os.environ["UV_TOOL_DIR"])
+    raise SystemExit(0)
+if args[:2] == ["tool", "list"]:
+    print(plan["tool_list"])
+    raise SystemExit(0)
+if args[:2] in (["tool", "install"], ["tool", "upgrade"]):
+    if plan.get("attempts"):
+        with open(plan["attempts"], "a", encoding="utf-8") as attempts:
+            attempts.write(os.environ.get("UV_SYSTEM_CERTS", "unset") + "\\n")
+    if plan.get("proxied") and not os.environ.get("UV_SYSTEM_CERTS"):
+        print("error: Failed to fetch: https://pypi.org/simple/agentic-hil/", file=sys.stderr)
+        print("  Caused by: invalid peer certificate: UnknownIssuer", file=sys.stderr)
+        raise SystemExit(2)
+    target = Path(os.environ["UV_TOOL_BIN_DIR"]) / "agentic-hil.exe"
+    written_by_uv = target.with_name("agentic-hil.exe.written-by-uv")
+    # uv's own rule: an executable in its bin that it did not write is refused
+    # unless it is told to replace it.
+    if plan.get("refuses_occupied") and target.exists() and not written_by_uv.exists() and "--force" not in args:
+        print(plan["refuses_occupied"], file=sys.stderr)
+        raise SystemExit(2)
+    if plan.get("writes"):
+        shutil.copy2(plan["writes"], target)
+        written_by_uv.write_text("", encoding="utf-8")
+    print("Installed 1 executable: agentic-hil.exe", file=sys.stderr)
+    raise SystemExit(0)
+raise SystemExit(0)
+'''
+
+_PYTHON_STUB_BODY = '''"""The python install.ps1 finds when there is no uv: new enough, with a pip, and a user scripts directory of its own."""
+import json
+import shutil
+import sys
+from pathlib import Path
+
+plan = json.loads(Path(sys.argv[0]).with_suffix(".json").read_text(encoding="utf-8"))
+args = sys.argv[1:]
+with open(plan["log"], "a", encoding="utf-8") as log:
+    log.write(" ".join(args) + "\\n")
+if args[:1] == ["-c"]:
+    # The version probe exits 0; the sysconfig question names the directory
+    # this interpreter's pip writes user scripts into.
+    if "sysconfig" in args[1]:
+        print(plan["scripts"])
+    raise SystemExit(0)
+if args[:2] == ["-m", "pip"]:
+    if "--version" in args:
+        print("pip 25.2 from " + plan["scripts"] + " (python 3.12)")
+        raise SystemExit(0)
+    if "install" in args:
+        Path(plan["scripts"]).mkdir(parents=True, exist_ok=True)
+        if plan.get("writes"):
+            shutil.copy2(plan["writes"], Path(plan["scripts"]) / "agentic-hil.exe")
+        print("Successfully installed agentic-hil")
+        raise SystemExit(0)
+raise SystemExit(0)
+'''
+
+
+class _WindowsBench:
+    """One Windows machine for install.ps1: a stub manager on PATH and a bin of its own.
+
+    `installed` is what an `agentic-hil.exe` already in the manager's bin
+    answers, or None for a machine that has none; `manager_writes` is what the
+    copy the stub manager installs answers, or None for a manager that installs
+    nothing. The manager is uv unless `uv` is False, and then it is the pip of
+    a stub python when `python_with_pip` is True, or nothing at all, which is
+    the machine that fetches uv. Each stub is a Python script behind a `.cmd`,
+    because a batch file cannot read a receipt or decide on an environment
+    variable, and the plan it follows is written beside it. `refuses_occupied`
+    gives the uv stub uv's own rule about an executable it did not write.
+    """
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        installed: str | None,
+        manager_writes: str | None,
+        tool_list: str = "No tools installed",
+        receipt: str | None = None,
+        proxied: bool = False,
+        uv: bool = True,
+        python_with_pip: bool = False,
+        refuses_occupied: bool = False,
+    ) -> None:
+        self.home = tmp_path / "home"
+        self.project = self.home / "project"
+        self.early_bin = tmp_path / "early-bin"
+        self.uv_bin = tmp_path / "uv-tools" / "bin"
+        self.uv_tools = tmp_path / "uv-tools" / "tools"
+        self.pip_scripts = tmp_path / "python-user" / "Scripts"
+        self.staging = tmp_path / "staging"
+        for directory in (self.project, self.early_bin, self.uv_bin, self.uv_tools, self.pip_scripts, self.staging):
+            directory.mkdir(parents=True)
+        self.manager_bin = self.uv_bin if uv else self.pip_scripts
+        self.marker = tmp_path / "who-ran-agent-install"
+        self.log = tmp_path / "uv-invocations"
+        self.python_log = tmp_path / "python-invocations"
+        self.attempts = tmp_path / "attempts"
+        if installed is not None:
+            _windows_launcher(self.manager_bin / "agentic-hil.exe", installed, self.marker, "stale")
+        staged = None
+        if manager_writes is not None:
+            staged = self.staging / "agentic-hil.exe"
+            _windows_launcher(staged, manager_writes, self.marker, "fresh")
+        if receipt is not None:
+            (self.uv_tools / "agentic-hil").mkdir()
+            (self.uv_tools / "agentic-hil" / "uv-receipt.toml").write_text(receipt, encoding="utf-8")
+        if uv:
+            self._stub("uv", _UV_STUB_BODY, {"log": str(self.log), "attempts": str(self.attempts), "tool_list": tool_list, "writes": str(staged) if staged else None, "proxied": proxied, "refuses_occupied": UV_REFUSES_AN_EXISTING_EXECUTABLE if refuses_occupied else None})
+        if python_with_pip:
+            self._stub("python", _PYTHON_STUB_BODY, {"log": str(self.python_log), "scripts": str(self.pip_scripts), "writes": str(staged) if staged else None})
+        # A claude on PATH, so agent detection has a claude-code to register for
+        # where a test lets step 4 run.
+        (self.early_bin / "claude.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+
+    def _stub(self, name: str, body: str, plan: dict) -> None:
+        stub = self.early_bin / f"{name}-stub.py"
+        stub.write_text(body, encoding="utf-8")
+        stub.with_suffix(".json").write_text(json.dumps(plan), encoding="utf-8")
+        (self.early_bin / f"{name}.cmd").write_text(f'@echo off\r\n"{sys.executable}" "{stub}" %*\r\nexit /b %ERRORLEVEL%\r\n', encoding="utf-8")
+
+    def environment(self, *, manager_bin_on_path: bool = True, **extra: str) -> dict[str, str]:
+        """What the script inherits: Windows itself, this bench, and nothing of the developer's.
+
+        System32 and the PowerShell directory are what powershell.exe and
+        cmd.exe need to start, and not the Windows directory itself: the `py`
+        launcher lives there on a hosted runner and on many machines, and
+        `Find-Python` takes it ahead of the bench's own python. The three home
+        variables all name the bench's home, because install.ps1 reads
+        `USERPROFILE` and Astral's installer reads `$HOME`, which Windows
+        PowerShell builds from `HOMEDRIVE` and `HOMEPATH`. `PATH` carries the
+        stubs' directory ahead of the manager's own bin, the way a machine with
+        a manager on PATH is arranged, unless the test is about the machine
+        before its first install.
+        """
+        system_root = os.environ["SYSTEMROOT"]
+        temp = self.home / "tmp"
+        temp.mkdir(exist_ok=True)
+        path = [str(self.early_bin), *([str(self.manager_bin)] if manager_bin_on_path else []), str(Path(system_root) / "System32"), str(Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0")]
+        drive, tail = os.path.splitdrive(str(self.home))
+        return {
+            "SYSTEMROOT": system_root,
+            "SystemRoot": system_root,
+            "WINDIR": system_root,
+            "COMSPEC": os.environ.get("COMSPEC", str(Path(system_root) / "System32" / "cmd.exe")),
+            "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+            "PATH": os.pathsep.join(path),
+            "USERPROFILE": str(self.home),
+            "HOMEDRIVE": drive,
+            "HOMEPATH": tail,
+            "TEMP": str(temp),
+            "TMP": str(temp),
+            "UV_TOOL_BIN_DIR": str(self.uv_bin),
+            "UV_TOOL_DIR": str(self.uv_tools),
+            **extra,
+        }
+
+    def run(self, *arguments: str, manager_bin_on_path: bool = True, timeout: float = SCRIPT_TIMEOUT_S, **extra: str) -> tuple[subprocess.CompletedProcess[str], str]:
+        result = subprocess.run(
+            [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(POWERSHELL_SCRIPT), *arguments],
+            cwd=str(self.project),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=self.environment(manager_bin_on_path=manager_bin_on_path, **extra),
+            timeout=timeout,
+            check=False,
+        )
+        return result, f"{result.stdout}{result.stderr}"
+
+    def invocations(self) -> str:
+        return self.log.read_text(encoding="utf-8") if self.log.is_file() else ""
+
+    def python_invocations(self) -> str:
+        return self.python_log.read_text(encoding="utf-8") if self.python_log.is_file() else ""
+
+    def version_in(self, directory: Path) -> str:
+        answered = subprocess.run([str(directory / "agentic-hil.exe"), "--version"], capture_output=True, text=True, env=self.environment(), timeout=SCRIPT_TIMEOUT_S, check=False)
+        return answered.stdout.strip()
+
+    def version_in_uv_bin(self) -> str:
+        return self.version_in(self.uv_bin)
+
+
+def _user_path_in_the_registry() -> str | None:
+    """HKCU\\Environment\\Path as it is stored, or None where the value is absent."""
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as environment:
+        try:
+            value, _kind = winreg.QueryValueEx(environment, "Path")
+        except FileNotFoundError:
+            return None
+    return str(value)
+
+
+@WINDOWS_ONLY
+def test_an_exact_version_pin_refuses_a_mismatched_copy_in_the_managers_bin_under_powershell(tmp_path: Path) -> None:
+    """The shell test of the same name, on the script Windows actually runs.
+
+    uv's bin ends up holding a 9.9.9 where 0.5.0 was pinned. Step 3 has to say
+    the fresh copy does not resolve, step 4 has to refuse the machine half
+    rather than hand `agent-install` to that copy, and the script has to exit
+    non-zero for it, all of which are PowerShell 5.1 semantics no text
+    comparison with install.sh can see.
+    """
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes="9.9.9")
+
+    result, transcript = bench.run("-Version", "0.5.0", "--no-can")
+
+    assert result.returncode != 0, transcript
+    assert not bench.marker.exists(), transcript
+    assert "does not resolve here" in transcript, transcript
+    assert REGISTERED_LINE not in transcript, transcript
+    assert "tool install --upgrade agentic-hil==0.5.0" in bench.invocations(), bench.invocations()
+
+
+@WINDOWS_ONLY
+def test_the_powershell_refresh_keeps_the_recorded_extras_and_with_end_to_end(tmp_path: Path) -> None:
+    """The receipt replay, reached from the top of the script rather than from an extracted function.
+
+    A copy at the release is on PATH, uv says it owns it, and the receipt
+    records a pyOCD extra and a `--with`. The reinstall line uv is given has to
+    carry both merged with this run's `can`, the run has to close on the
+    refresh sentence because the version moved, and the copy in uv's bin has to
+    be the one uv wrote.
+    """
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed=release, manager_writes="99.0.0", tool_list=f"agentic-hil v{release}\n- agentic-hil", receipt=_RECEIPT_WITH_PYOCD_AND_A_WITH)
+
+    result, transcript = bench.run("--no-agent-install")
+
+    assert result.returncode == 0, transcript
+    assert f"agentic-hil {release} is here and not older than {release}, refreshing this current installation" in transcript, transcript
+    invocations = bench.invocations()
+    assert "tool install --upgrade --reinstall agentic-hil[can,pyocd] --with requests==2.32.5" in invocations, invocations
+    assert "tool upgrade" not in invocations, invocations
+    assert bench.version_in_uv_bin() == "99.0.0", transcript
+    assert REFRESH_LINE in transcript, transcript
+    assert CALM_LINE not in transcript, transcript
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize(
+    ("receipt", "recorded"),
+    [
+        (_RECEIPT_WITH_A_DIRECTORY_SOURCE, "a directory source"),
+        (_RECEIPT_WITH_AN_INDEX_OPTION, "an index option"),
+    ],
+)
+def test_the_powershell_refresh_keeps_to_the_preserving_upgrade_over_a_receipt_it_cannot_replay(tmp_path: Path, receipt: str, recorded: str) -> None:
+    """The shell tests of the same shape: a receipt the reconstruction would change is refused whole.
+
+    A root installed from a directory cannot be rebuilt as `agentic-hil[...]`
+    without switching the tool to the public index, and a recorded index option
+    cannot be replayed by a reconstruction that passes none. Both keep the
+    refresh on `uv tool upgrade --reinstall`, which preserves whatever uv
+    recorded, and neither reaches a `tool install`.
+    """
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed=release, manager_writes="99.0.0", tool_list=f"agentic-hil v{release}\n- agentic-hil", receipt=receipt)
+
+    result, transcript = bench.run("--no-agent-install")
+
+    assert result.returncode == 0, transcript
+    invocations = bench.invocations()
+    assert "tool upgrade --reinstall agentic-hil\n" in invocations, (recorded, invocations)
+    assert "tool install" not in invocations, (recorded, invocations)
+    assert "records the interpreter" not in transcript, transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_run_that_moved_nothing_closes_on_the_kept_sentence(tmp_path: Path) -> None:
+    """The closing sentence follows what step 2 did: the version stayed, so no server is behind it."""
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed=release, manager_writes=release, tool_list=f"agentic-hil v{release}\n- agentic-hil", receipt=_RECEIPT_WITH_PYOCD_AND_A_WITH)
+
+    result, transcript = bench.run("--no-agent-install")
+
+    assert result.returncode == 0, transcript
+    assert f"This installation stayed at {release}, {KEPT_CURRENT_TAIL}" in transcript, transcript
+    assert REFRESH_LINE not in transcript, transcript
+    assert CALM_LINE not in transcript, transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_step_3_says_already_on_your_path_from_the_startup_path(tmp_path: Path) -> None:
+    """The other step 3 sentence: the manager's bin was on the PATH the run was handed.
+
+    Read from the startup PATH and not the live one, which the run itself has
+    edited by then. The line the operator would run once is not printed, because
+    there is nothing for them to add.
+    """
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed=release, manager_writes=release, tool_list=f"agentic-hil v{release}\n- agentic-hil", receipt=_RECEIPT_WITH_PYOCD_AND_A_WITH)
+
+    result, transcript = bench.run("--no-agent-install")
+
+    assert result.returncode == 0, transcript
+    assert f"PATH: agentic-hil is installed in {bench.uv_bin}, already on your PATH" in transcript, transcript
+    assert "SetEnvironmentVariable" not in transcript, transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_first_install_closes_on_the_calm_sentence_and_reports_the_path(tmp_path: Path) -> None:
+    """No agentic-hil anywhere: a first install, with nothing to reinstall and a directory to report.
+
+    Step 2's line carries no `--reinstall`, step 3 reads the PATH the run was
+    started with and finds uv's bin missing from it, so it prints the line the
+    operator runs once, and the run closes on the first-install sentence.
+    """
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes="99.0.0")
+
+    result, transcript = bench.run("--no-agent-install", "--no-can", manager_bin_on_path=False)
+
+    assert result.returncode == 0, transcript
+    assert "no agentic-hil on this PATH, installing it user-local" in transcript, transcript
+    invocations = bench.invocations()
+    assert "tool install --upgrade agentic-hil\n" in invocations, invocations
+    assert "--reinstall" not in invocations, invocations
+    assert f"agentic-hil landed in {bench.uv_bin}, which is not on your PATH" in transcript, transcript
+    assert f"[Environment]::SetEnvironmentVariable('Path', '{bench.uv_bin};'" in transcript, transcript
+    assert CALM_LINE in transcript, transcript
+    assert REFRESH_LINE not in transcript, transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_run_registers_the_agent_through_the_copy_it_installed(tmp_path: Path) -> None:
+    """Step 4, on the script Windows runs: `agent-install` goes to the copy step 3 resolved.
+
+    A stale copy sits in uv's bin and answers `agent-install` with `stale`; the
+    copy uv writes over it answers `fresh`. Step 1 calls the run an upgrade,
+    step 2 reinstalls, step 3 resolves the fresh copy, and step 4 registers the
+    claude on PATH through exactly that copy and says so with the one line the
+    shell script prints for the same thing.
+    """
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed="0.3.0", manager_writes="99.0.0")
+
+    result, transcript = bench.run("--no-can")
+
+    assert result.returncode == 0, transcript
+    assert f"agentic-hil 0.3.0 is older than {release}, upgrading it" in transcript, transcript
+    assert "agent: registering the skill and the MCP server for claude-code" in transcript, transcript
+    assert f"agent: claude-code {REGISTERED_LINE}" in transcript, transcript
+    assert bench.marker.read_text(encoding="utf-8") == "fresh", transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_pip_route_installs_user_local_and_asks_the_interpreter_where(tmp_path: Path) -> None:
+    """No uv, a python with a pip: `-m pip install --user`, and step 3 asks sysconfig where that landed.
+
+    The manager's bin is the interpreter's own `nt_user` scripts directory,
+    asked of the interpreter rather than guessed, and it is not `.local\\bin`,
+    which is why the pip route on Windows never collides with uv's bin. A
+    first install carries no `--force-reinstall`, the directory is reported
+    with the line the operator runs once, and the run closes on the calm
+    sentence.
+    """
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes="99.0.0", uv=False, python_with_pip=True)
+
+    result, transcript = bench.run("--no-agent-install", manager_bin_on_path=False)
+
+    assert result.returncode == 0, transcript
+    assert "package: installing agentic-hil[can] user-local with python -m pip install --user" in transcript, transcript
+    python_calls = bench.python_invocations()
+    assert "-m pip install --user --upgrade agentic-hil[can]\n" in python_calls, python_calls
+    assert "--force-reinstall" not in python_calls, python_calls
+    # The quotes around the two names are cmd.exe's to keep or drop on the way
+    # through the stub's `.cmd`; the question and its answer are what is pinned.
+    assert re.search(r'sysconfig\.get_path\("?scripts"?, "?nt_user"?\)', python_calls), python_calls
+    assert bench.invocations() == "", bench.invocations()
+    assert f"agentic-hil landed in {bench.pip_scripts}, which is not on your PATH" in transcript, transcript
+    assert f"[Environment]::SetEnvironmentVariable('Path', '{bench.pip_scripts};'" in transcript, transcript
+    assert bench.version_in(bench.pip_scripts) == "99.0.0", transcript
+    assert CALM_LINE in transcript, transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_pip_route_reinstalls_a_copy_already_here_by_force(tmp_path: Path) -> None:
+    """The pip half of the anchor: a copy already here is replaced with `--force-reinstall`.
+
+    pip leaves a package whose installed version already satisfies the request
+    untouched under `--upgrade`, so a refresh has to add the flag or the anchor
+    repairs nothing. The copy is in pip's own scripts directory and on the
+    startup PATH, so step 3 finds it already there.
+    """
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed="0.3.0", manager_writes="99.0.0", uv=False, python_with_pip=True)
+
+    result, transcript = bench.run("--no-agent-install")
+
+    assert result.returncode == 0, transcript
+    assert f"agentic-hil 0.3.0 is older than {release}, upgrading it" in transcript, transcript
+    python_calls = bench.python_invocations()
+    assert "-m pip install --user --upgrade --force-reinstall agentic-hil[can]\n" in python_calls, python_calls
+    assert f"PATH: agentic-hil is installed in {bench.pip_scripts}, already on your PATH" in transcript, transcript
+    assert bench.version_in(bench.pip_scripts) == "99.0.0", transcript
+    assert REFRESH_LINE in transcript, transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_anchor_replaces_a_copy_uv_did_not_write_in_its_own_bin(tmp_path: Path) -> None:
+    """The Windows half of the uv collision: a pipx copy in uv's bin, then the anchor.
+
+    pipx puts its launchers in `%USERPROFILE%\\.local\\bin`, which is also uv's
+    own bin on Windows, and uv refuses to overwrite an executable it did not
+    write. The stub uv keeps that rule and answers with the line the container
+    tier recorded from uv 0.12.9 on Linux, which names the executable without
+    its `.exe`; the phrase the retry reads is the same, and no Windows
+    recording exists yet. The run has to end with the fresh copy answering in
+    that directory, with the refusal named and the replacement said.
+    """
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed="0.3.0", manager_writes="99.0.0", refuses_occupied=True)
+
+    result, transcript = bench.run("--no-agent-install")
+
+    assert result.returncode == 0, transcript
+    assert f"agentic-hil 0.3.0 is older than {release}, upgrading it" in transcript, transcript
+    installs = [line for line in bench.invocations().splitlines() if line.startswith("tool install")]
+    assert installs == ["tool install --upgrade --reinstall agentic-hil[can]", "tool install --upgrade --reinstall agentic-hil[can] --force"], installs
+    assert f"uv refused to overwrite an agentic-hil in {bench.uv_bin} {DISPLACED_COPY_TAIL}" in transcript, transcript
+    assert "could not install" not in transcript, transcript
+    # The shell half's rule on the script Windows runs: the refusal this run
+    # resolved is not printed, so a transcript that ends in a working
+    # installation carries no line reading as the fault.
+    assert UV_REFUSES_AN_EXISTING_EXECUTABLE not in transcript, transcript
+    assert bench.version_in_uv_bin() == "99.0.0", transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_install_retries_a_certificate_failure_against_the_system_store(tmp_path: Path) -> None:
+    """The proxied machine, through the script Windows runs.
+
+    uv comes back saying the chain ended outside its own roots; the second
+    attempt validates against the store this machine already trusts. The stub
+    records what it was given on each attempt, exactly as the shell test's does.
+    """
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes="99.0.0", proxied=True)
+
+    result, transcript = bench.run("--no-agent-install", "--no-can")
+
+    assert result.returncode == 0, transcript
+    assert bench.attempts.read_text(encoding="utf-8").split() == ["unset", "1"], transcript
+    assert "retrying once against this machine's own store" in transcript, transcript
+    assert bench.version_in_uv_bin() == "99.0.0", transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_retry_is_refused_when_it_was_told_to_be(tmp_path: Path) -> None:
+    """`--no-system-certs` keeps uv on its own roots, and the refusal names the flag."""
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes="99.0.0", proxied=True)
+
+    result, transcript = bench.run("--no-agent-install", "--no-can", "--no-system-certs")
+
+    assert result.returncode != 0, transcript
+    assert bench.attempts.read_text(encoding="utf-8").split() == ["unset"], transcript
+    assert "--no-system-certs was given" in transcript, transcript
+    # And uv's own words for the failure, the way the shell half shows them: a
+    # run this script cannot resolve shows the line it failed on.
+    assert "invalid peer certificate: UnknownIssuer" in transcript, transcript
+    assert not (bench.uv_bin / "agentic-hil.exe").exists(), transcript
+
+
+@HOSTED_WINDOWS_RUNNER_ONLY
+def test_the_powershell_fetch_route_leaves_the_users_registry_path_untouched(tmp_path: Path) -> None:
+    """The issue's Windows fixture: HKCU\\Environment\\Path before and after, on a runner nobody keeps.
+
+    No uv and no python on PATH, so step 2 fetches Astral's pinned installer
+    and runs the bytes the pin vouches for. That installer writes
+    `$HOME\\.local\\bin` into the user's registry Path unless it is told not to,
+    and step 3 then printed the line that prepends the same directory again.
+    Afterwards uv is where the installer put it, agentic-hil is where uv put
+    it, the registry value is byte for byte what it was, and the one line
+    about the PATH is install.ps1's own, printed once.
+    """
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes=None, uv=False)
+    before = _user_path_in_the_registry()
+
+    result, transcript = bench.run(
+        "--no-agent-install",
+        "--no-can",
+        manager_bin_on_path=False,
+        timeout=CONTAINER_TIMEOUT_S,
+        UV_CACHE_DIR=str(tmp_path / "uv-cache"),
+        UV_PYTHON_INSTALL_DIR=str(tmp_path / "uv-python"),
+    )
+
+    after = _user_path_in_the_registry()
+    assert after == before, f"the user's registry Path was edited:\n{before!r}\n{after!r}\n{transcript}"
+    assert result.returncode == 0, transcript
+    assert "fetching Astral's uv installer first" in transcript, transcript
+    assert (bench.home / ".local" / "bin" / "uv.exe").is_file(), transcript
+    assert (bench.uv_bin / "agentic-hil.exe").is_file(), transcript
+    assert f"agentic-hil landed in {bench.uv_bin}, which is not on your PATH" in transcript, transcript
+    assert transcript.count("[Environment]::SetEnvironmentVariable('Path'") == 1, transcript
+
+
+# What this harness does not reach, so nobody reads the tests above as reaching
+# it: the `irm ... | iex` form (the script arrives here as a file, and a script
+# read from a pipe binds its parameters differently); the PEP 668 and no-pip
+# fallbacks, which reach Install-Uv and so the network; and step 5's restart
+# block, which reads the real process table for a running claude, codex or
+# opencode. The fetch route is reached by the last test alone, on a hosted
+# runner, because the installer it runs edits the registry of whoever runs it.

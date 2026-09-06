@@ -21,6 +21,7 @@ comes back as something readable rather than as a wall of braces.
 """
 from __future__ import annotations
 
+import contextvars
 import re
 import shutil
 import textwrap
@@ -53,6 +54,17 @@ JSON_FLAG_HELP = (
 PROTOCOL_COMMANDS = frozenset({"mcp-stdio", "com-stdio"})
 
 _INDENT = "  "
+# Whether the document being rendered is being read by a person at a shell. Set
+# by `_render_lines` from the command the entrypoint hands it and read wherever
+# a remediation is printed, which is at the top of a refusal and one level in:
+# under a doctor's check, an init step, a probe listing's per-debugger refusal,
+# a nested result in the generic pass. #451 spelled the catalogue's tool names as
+# the commands that do the same move for the top-level refusal only, and every
+# nested site kept sending the same reader to `debugger_probes_list` (#504).
+# Carried as context rather than as a parameter because every renderer and
+# every pass under them reaches a remediation, and the fact is one per
+# rendering: the same "decided once, here" the entrypoint makes of it.
+_READER_AT_A_SHELL: contextvars.ContextVar[bool] = contextvars.ContextVar("reader_at_a_shell", default=False)
 _MIN_WIDTH = 60
 _MAX_WIDTH = 100
 _FALLBACK_WIDTH = 88
@@ -71,6 +83,14 @@ _PROCESS_OUTPUT_KEYS = frozenset({"stdout", "stderr"})
 # key/value row of prose in the middle of the fields is neither before it nor
 # readable.
 _RENDERED_BEFORE_DETAILS = frozenset({"manager_hint_note"})
+# What a refusal prints under its own Restart section, the way a success does,
+# rather than among the Details. A failed upgrade carries the servers it read
+# before the manager ran (#475), and rendered as rows the notice appeared twice,
+# once in the summary and once as a field, while the list of processes was
+# printed as a nested object under Details instead of under Restart, where the
+# operator reads it to decide which window to close. `restart_required` itself
+# stays a row: it is the one-word answer, and a row is where a person finds it.
+_RESTART_KEYS = frozenset({"restart_notice", "restart_required_by", "restart_required_by_count"})
 # How much captured output a report prints before it says it is cutting. A
 # manager that fails writes a handful of lines and a build that fails writes
 # thousands, and the line that names the cause sits at either end of them, so
@@ -110,19 +130,26 @@ def write_rendered(stream: object, text: str) -> None:
 def _render_lines(result: JsonObject, command: str | None) -> list[str]:
     result = _audit_errors_where_they_happened(result)
     result = _one_error_type_answered_once(result)
-    if _error_type(result):
-        # A refusal is rendered the same way for every command: the error type
-        # names it, the summary says what happened, and the catalogue says what
-        # to do about it. A per-command renderer has nothing to add to that and
-        # several would have quietly dropped the remediation list.
-        #
-        # The command is handed on all the same. It is not what the refusal is
-        # rendered *by*; it is the one fact this layer holds about who is
-        # reading, and for a refusal that has a route for each reader the
-        # catalogue puts theirs first.
-        return render_refusal(result, command)
-    renderer = _RENDERERS.get(command or "")
-    return renderer(result) if renderer is not None else render_generic(result)
+    # Who is reading, decided once for the whole rendering: a person typed the
+    # command, or nobody did. Every remediation printed under this document,
+    # however deep the refusal it belongs to is nested, reads the same answer.
+    reader = _READER_AT_A_SHELL.set(command is not None)
+    try:
+        if _error_type(result):
+            # A refusal is rendered the same way for every command: the error type
+            # names it, the summary says what happened, and the catalogue says what
+            # to do about it. A per-command renderer has nothing to add to that and
+            # several would have quietly dropped the remediation list.
+            #
+            # The command is handed on all the same. It is not what the refusal is
+            # rendered *by*; it is the one fact this layer holds about who is
+            # reading, and for a refusal that has a route for each reader the
+            # catalogue puts theirs first.
+            return render_refusal(result, command)
+        renderer = _RENDERERS.get(command or "")
+        return renderer(result) if renderer is not None else render_generic(result)
+    finally:
+        _READER_AT_A_SHELL.reset(reader)
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +598,7 @@ def _command_line_order(result: JsonObject, steps: Sequence[str]) -> list[str]:
     return list(steps)
 
 
-def _remediation(result: JsonObject, *, command_line: bool = False) -> tuple[list[str], list[str]]:
+def _remediation(result: JsonObject, *, command_line: bool | None = None) -> tuple[list[str], list[str]]:
     """What to do and what not to do, from the result or from the catalogue.
 
     A refusal built by `ConfigError.to_dict` already carries both, merged from
@@ -585,6 +612,8 @@ def _remediation(result: JsonObject, *, command_line: bool = False) -> tuple[lis
     also ships a command for is named as that command. It changes no step and
     drops none: `command_line_remediation` reorders the entry's own steps or
     declines, and the rewriting is one name for another name for one move.
+    Left unsaid, it is the answer the rendering was started with, which is what
+    every nested refusal reads: the reader does not change one level in.
 
     The rewriting is last, after the ordering, because the ordering is the
     catalogue's own and is matched against the catalogue's own text: a step
@@ -592,6 +621,8 @@ def _remediation(result: JsonObject, *, command_line: bool = False) -> tuple[lis
     `command_line_remediation` would decline to order a list it could not
     recognise.
     """
+    if command_line is None:
+        command_line = _READER_AT_A_SHELL.get()
     steps = _strings(result.get("remediation"))
     avoid = _strings(result.get("do_not"))
     if steps or avoid:
@@ -641,11 +672,28 @@ def _work_was_done(result: Mapping[str, object]) -> bool:
     refused at preflight carries it too, naming the step whose *text* is wrong,
     so reading it as evidence of execution would call every schema error a failed
     test run.
+
+    An upgrade answers the same question with its own two markers, and it is
+    the one command whose "ran" is a package manager rather than a bench:
+    `changed_on_disk` is the half-finished run that replaced files before it
+    stopped, and `installation_broken` is the run that left no package to load
+    at all. Both are a disk that is other than it was, so both were headed
+    `Refused:`, the word that promises nothing happened, over a summary saying
+    the installation is half-changed (#504). The intact failure keeps the word:
+    the manager ran and moved nothing, and nothing on this host is different.
     """
     if result.get("side_effect_committed") is True:
         return True
+    if any(result.get(marker) is True for marker in _DISK_CHANGED_MARKERS):
+        return True
     steps = result.get("steps")
     return isinstance(steps, Sequence) and not isinstance(steps, (str, bytes)) and bool(steps)
+
+
+# The markers `upgrade._failed_upgrade` writes when the manager left the disk
+# other than it found it, by name, because they are the producer's own words
+# for the two outcomes and nothing else on any result spells them.
+_DISK_CHANGED_MARKERS = ("changed_on_disk", "installation_broken")
 
 
 def render_refusal(result: JsonObject, command: str | None = None) -> list[str]:
@@ -671,6 +719,7 @@ def render_refusal(result: JsonObject, command: str | None = None) -> list[str]:
         lines.extend(_wrap(meaning, indent=_INDENT))
     lines.extend(_relayed_manager_text(result))
     lines.extend(_section("Details", _refusal_details(result)))
+    lines.extend(_restart_lines(result))
     steps, avoid = _remediation(result, command_line=command is not None)
     steps = _without_absent_pointers(result, steps)
     lines.extend(_section("What to do", _numbered(steps)))
@@ -730,7 +779,7 @@ def _refusal_details(result: JsonObject) -> list[str]:
     captured streams are printed as the process wrote them. It stays a report:
     rows first, then the objects that need a body, and never a dump of braces.
     """
-    rows, bodies = _members({key: value for key, value in result.items() if key not in _HANDLED_EVERYWHERE and key not in _RENDERED_BEFORE_DETAILS})
+    rows, bodies = _members({key: value for key, value in result.items() if key not in _HANDLED_EVERYWHERE and key not in _RENDERED_BEFORE_DETAILS and key not in _RESTART_KEYS})
     lines = _fields(rows)
     for key, value in bodies:
         lines.extend(_member_lines(key, value, _INDENT))
@@ -957,12 +1006,47 @@ def _step_verdict(step: Mapping[str, object]) -> str:
     return "not reached" if skipped else "FAILED"
 
 
+# The one field of a step that is printed as a body under it, by name. The
+# refusal `init --force` raises over an open run carries the holds it found
+# here, and its own next step tells the reader that `open_holds` "here" names
+# the holder; a rendering that printed the sentence and not the field sent the
+# reader to a place that was not on the screen (#486). Named rather than
+# "every member of the step that is not a scalar", because the steps the other
+# renderers build (an agent install, an upgrade's integrations, an uninstall's
+# leftovers) carry bodies that are accounted for elsewhere on their screens.
+_STEP_BODY_KEY = "open_holds"
+
+
+def _step_carries(step: Mapping[str, object], indent: str) -> list[str]:
+    """What a step was given beyond its summary, its error type and the catalogue.
+
+    The `next_steps` `init` and `setup` put on their config step are the whole
+    of what the operator is asked to do next: the placeholder remedy, the review
+    line, the ports that were seen, `agentic-hil doctor`. They rode the step
+    into `--json` and no further (#486). The same rule as `_tail` has for the
+    top level and `_result_body` has for a nested result, one level in: the
+    holds first, because they are facts, then the numbered list, then the one
+    sentence, and the catalogue's advice stands under all of it as before.
+    """
+    lines: list[str] = []
+    holds = step.get(_STEP_BODY_KEY)
+    if isinstance(holds, Mapping) and holds:
+        lines.extend(_member_lines(_STEP_BODY_KEY, holds, indent))
+    lines.extend(_numbered(_strings(step.get("next_steps")), indent=indent))
+    next_step = step.get("next_step")
+    if isinstance(next_step, str) and next_step.strip():
+        lines.extend(_wrap(next_step, indent=indent))
+    return lines
+
+
 def _steps_block(steps: Mapping[str, object]) -> list[str]:
-    """One line per step, plus the failure detail of any step that failed.
+    """One line per step, plus what the step carries under it.
 
     The step name and its verdict are aligned so a person reads the column and
     stops at the one that is not `ok`; the summary follows on the same line and
-    wraps under it.
+    wraps under it. Under that, at the same indent, the step's error type, the
+    next steps and the holds it carries, and the catalogue's advice for its
+    error type; a step that carries none of those gets the one line.
     """
     rows = [(name, dict(value)) for name, value in steps.items() if isinstance(value, Mapping)]
     if not rows:
@@ -974,10 +1058,12 @@ def _steps_block(steps: Mapping[str, object]) -> list[str]:
         verdict = _step_verdict(step)
         head = f"{_INDENT}{_step_label(name).ljust(label_width)}  {verdict.ljust(verdict_width)}  "
         lines.extend(_wrap(_summary(step) or verdict, indent=head, hanging=" " * len(head)))
+        detail = " " * len(head)
         error_type = _error_type(step)
         if error_type:
-            detail = " " * len(head)
             lines.extend(_fields([("error_type", error_type)], indent=detail))
+        lines.extend(_step_carries(step, detail))
+        if error_type:
             remedy, avoid = _remediation(step)
             lines.extend(_numbered(remedy, indent=detail))
             lines.extend(_bullets([f"do not: {item}" for item in avoid], indent=detail))
@@ -1514,6 +1600,38 @@ def render_adopt_hardware(result: JsonObject) -> list[str]:
     return lines
 
 
+def _tool_landing(tool: Mapping[str, object]) -> str:
+    """Where one searched toolchain was found, or that it was not."""
+    return f"found at {_scalar(tool.get('path'))}" if tool.get("found") is True else "not on this host"
+
+
+def _stlink_port_lines(result: JsonObject) -> list[str]:
+    """The ST-Link serial ports the ids were read off, or that there were none.
+
+    `stlink_ports` is the evidence #432 put on the OpenOCD listing so that an
+    empty `probes` beside a visible ST-Link is read as a probe that is there and
+    cannot be named, not as no probe attached; the rendering printed `0
+    connected debugger probe(s)` and never named the port (#504). The one fact a
+    reader needs about each port is the serial it published, because a port
+    that published none is exactly the probe the listing could not name. A key
+    that is present and empty is a reading too: the inventory was taken and
+    held no ST-Link, which is not the same as never having looked.
+    """
+    if "stlink_ports" not in result:
+        return []
+    ports = _entries(result.get("stlink_ports"))
+    if not ports:
+        return ["", *_wrap("This host's serial inventory showed no ST-Link serial port.", indent=_INDENT)]
+    rows: list[str] = []
+    for port in ports:
+        device = _scalar(port.get("stable_device") or port.get("device") or "?")
+        serial = port.get("serial_number")
+        named = f"serial {_scalar(serial)}" if serial not in (None, "") else "serial not published"
+        described = _scalar(port.get("description") or port.get("product") or "")
+        rows.append(f"{device}, {named}" + (f", {described}" if described else ""))
+    return _section("ST-Link serial ports this host is showing", _bullets(rows))
+
+
 def render_debugger_probes(result: JsonObject) -> list[str]:
     lines = _headline(result)
     # `discovered_by` beside the backend, because on an OpenOCD bench the two are
@@ -1537,9 +1655,13 @@ def render_debugger_probes(result: JsonObject) -> list[str]:
     if header:
         lines.append("")
         lines.extend(header)
+    searched = _entries(result.get("tools_searched"))
+    if searched:
+        lines.extend(_section("Tools searched", _fields([(f"{tool.get('name', 'tool')} ({tool.get('provided_by', 'unknown')})", _tool_landing(tool)) for tool in searched])))
     probes = _entries(result.get("probes"))
     if probes:
         lines.extend(_section("Probes", _bullets([", ".join(f"{key} {_scalar(value)}" for key, value in probe.items() if _renderable_scalar(value)) for probe in probes])))
+    lines.extend(_stlink_port_lines(result))
     per_debugger = _mapping(result.get("debuggers"))
     for name, raw in per_debugger.items():
         entry = _mapping(raw)

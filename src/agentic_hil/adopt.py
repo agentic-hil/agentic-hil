@@ -748,6 +748,111 @@ def plan_adoption(document: JsonObject, discovery: JsonObject, *, debugger_id: s
 
 
 # ---------------------------------------------------------------------------
+# What a failed discovery asks the operator to do, matched to why it failed.
+
+ADOPT_FILLS = (
+    "the probe id, the toolchain executable, the detected controller and the probe's own COM port without "
+    "anything being retyped"
+)
+
+
+def enumerated_stlink_ports(discovery: JsonObject) -> list[JsonObject]:
+    """The ST-Link-shaped host serial ports discovery saw, if it recorded any."""
+    ports = discovery.get("stlink_ports")
+    return [port for port in ports if isinstance(port, dict)] if isinstance(ports, list) else []
+
+
+def discovery_remedy(discovery: JsonObject) -> str:
+    """The one move that clears a failed discovery, named from its own answer.
+
+    "Attach the bench" is the right move for `adapter_not_found` only when
+    enumeration ran and this host showed no ST-Link serial port at all. It is
+    the wrong move for a missing toolchain, two attached probes, a target that
+    did not answer, or a timeout: each of those can happen with the board
+    plugged in the whole time, so telling the operator to attach one sends them
+    to reseat hardware that is already there instead of to the fix. It is the
+    wrong move too for an `adapter_not_found` that lists an ST-Link serial port
+    it could read no probe serial off, which is a visible probe rather than an
+    absent bench, so that case is branched onto its own driver/vendor remedy
+    (round 3, finding 3). Each names its own remedy and keeps `agentic-hil
+    adopt-hardware` as the command that fills the file in once the reason is
+    cleared.
+
+    One text for the two commands that run discovery: `agentic-hil init` puts
+    it under the placeholder file's next steps (#416), and `agentic-hil
+    adopt-hardware` answers a failed discovery with it, where it used to tell
+    every operator to attach the board, a host with no toolchain included (#504).
+    """
+    error_type = discovery.get("error_type")
+    if error_type == "debugger_not_found":
+        return (
+            "Install a debug toolchain so one of them resolves on this host (the board itself may already be "
+            "attached): OpenOCD is the smaller of the two and is enough on its own, because with it installed the "
+            "ST-Link is enumerated from this host's USB serial inventory; STM32CubeProgrammer also works and reads "
+            f"the part number off the target itself. Then run `agentic-hil adopt-hardware`, which fills in {ADOPT_FILLS}."
+        )
+    if error_type == "ambiguous_hardware":
+        return (
+            "More than one probe is attached, so leave one connected or name the board this project is about "
+            "with `agentic-hil adopt-hardware --probe-id <serial>`; the attached serials are listed under "
+            f"`hardware_discovery.probes`. Adoption then fills in {ADOPT_FILLS}."
+        )
+    if error_type == "probe_inventory_incomplete":
+        # The inventory saw no ST-Link at all, which is the only reading that
+        # reaches here: a sole visible probe is bound with its caveat and two are
+        # `ambiguous_hardware`. Nothing was visible to name, so `--probe-id
+        # <serial>` has no serial to take yet, and the empty reading still is not
+        # an absent bench, because the inventory cannot see a VCP-less ST-LINK/V2.
+        # So this does not say "attach the bench" either (round 2, finding 3).
+        # Once a probe that publishes a virtual COM port is attached, bare
+        # `adopt-hardware` binds the one this inventory then shows; `--probe-id`
+        # is for the bench where a second probe without a VCP is attached beside
+        # it, which this inventory would not list.
+        return (
+            "STM32CubeProgrammer is not installed, so probes are read from this host's USB serial inventory, which "
+            "reaches an ST-Link only through its virtual COM port and saw none here; that does not rule out a "
+            "VCP-less ST-LINK/V2 attached right now, so no absent bench is reported. Attach a probe that publishes a "
+            "virtual COM port and run `agentic-hil adopt-hardware`, which binds the one this host then shows; name "
+            "the board with `agentic-hil adopt-hardware --probe-id <serial>` instead if a second probe without a "
+            "virtual COM port is attached beside it, or install STM32CubeProgrammer for an authoritative count. "
+            f"Either fills in {ADOPT_FILLS}."
+        )
+    if error_type == "target_not_detected":
+        return (
+            "The ST-Link answered but named no target, so check the board is powered and wired to the probe, "
+            f"then run `agentic-hil adopt-hardware`, which fills in {ADOPT_FILLS}."
+        )
+    if error_type == "timeout":
+        return (
+            "Discovery timed out before it could read the bench, so run `agentic-hil adopt-hardware` once the "
+            f"board responds, which fills in {ADOPT_FILLS}."
+        )
+    if error_type == "adapter_not_found":
+        if enumerated_stlink_ports(discovery):
+            # Enumeration ran and this host is showing an ST-Link serial port, but
+            # no probe serial could be read off it to bind. "Attach the bench"
+            # contradicts the very serial port this same result lists under
+            # `stlink_ports` and the account it prints; the fix is to make the
+            # serial readable, not to reseat hardware that is already here. This is
+            # the visible-but-serial-less zero-ID case the empty-inventory finding
+            # left, told apart the same way `_placeholder_reason` and
+            # `_discovery_account` tell it apart, on the presence of a port with no
+            # serial off it (round 3, finding 3). Once a serial can be read off the
+            # port, bare adoption binds the probe it names, on either enumeration;
+            # `--probe-id` is for the bench that has a second probe the inventory
+            # cannot see, exactly as the empty-inventory branch above says.
+            return (
+                "This host is showing an ST-Link serial port but no probe serial could be read off it to bind, so check the "
+                "probe is a genuine ST unit with its driver installed, or install STM32CubeProgrammer, which reads the serial "
+                "off the probe itself. Then `agentic-hil adopt-hardware` binds the board on its own; name it with "
+                "`agentic-hil adopt-hardware --probe-id <serial>` instead if a second probe without a virtual COM port is "
+                f"attached beside it. Either fills in {ADOPT_FILLS}."
+            )
+        return f"Attach the bench and run `agentic-hil adopt-hardware`, which fills in {ADOPT_FILLS}."
+    return f"Run `agentic-hil adopt-hardware` once the bench is ready, which fills in {ADOPT_FILLS}."
+
+
+# ---------------------------------------------------------------------------
 # The tool.
 
 
@@ -866,7 +971,12 @@ def _adopt(workspace: Path, existing: AgenticHILConfig | None, arguments: JsonOb
             "summary": f"{discovery.get('summary', 'Hardware discovery failed.')} Nothing was read out of the configuration and nothing was written.",
             "path": str(target_path),
             "workspace_root": existing.workspace_root,
-            "next_step": str(discovery.get("next_step") or "Attach the board this project drives, then call this again. Nothing was written."),
+            # Discovery's own next step where it wrote one, else the remedy
+            # matched to why it failed: one sentence for every failure told an
+            # operator with no toolchain to attach a board that may have been
+            # plugged in the whole time, the misdirection #416 took out of
+            # `init` (#504).
+            "next_step": str(discovery.get("next_step") or f"{discovery_remedy(discovery)} Nothing was written."),
             **NOT_STARTED,
         }
 

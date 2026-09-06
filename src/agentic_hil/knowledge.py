@@ -54,6 +54,12 @@ BACKENDS = ("openocd", "stlink", "pyocd")
 # and that module imports this one: a second copy of either would be exactly the
 # drift this file exists to prevent.
 DEFAULT_TEST_CONFIG_PATH = ".agentic-hil/testconfig.yaml"
+# The `field` a test-plan refusal names when what is wrong is the document as a
+# whole rather than a path into it: the schema validator's own spelling of the
+# root, and the scope the loader's three pre-parse refusals (not UTF-8, not
+# YAML or JSON, root not a mapping) carry so the catalogue answers them with the
+# fault and not with advice about a plan nobody has read.
+WHOLE_PLAN_FIELD = "$"
 TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
 # The annotation the plan schema marks a newer format's additions with. A plan
 # is held to what its own `version:` contains, and the schema is what says which
@@ -1575,6 +1581,39 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "narrowed on purpose is exactly the bench where that costs the most.",
         ),
     ),
+    # The `test_config_invalid` the loader raises before it has a document: the
+    # file is not UTF-8 text, it is not valid YAML or JSON, or its root is not a
+    # mapping. The unscoped entry above is about a plan the loader has read, and
+    # every step of it (device names, adoption, `init --force`, plan versions)
+    # is about contents this refusal never saw; it sent a reader whose plan has
+    # a duplicate key at a named line and column to reconfigure the bench
+    # (#448's class, #504). Scoped on the field the three refusals carry, which
+    # is the validator's own spelling of the whole document.
+    f"test_config_invalid:{WHOLE_PLAN_FIELD}": ErrorRemedy(
+        meaning=(
+            "The test plan could not be read as a document, so nothing in it was checked and nothing on the bench "
+            "was reached: it is not UTF-8 text, it is not valid YAML or JSON, or its root is not a mapping. `summary` "
+            "says which. Where the parser could name the place, `line` and `column` locate the fault, counted from 1, "
+            "and `backend_error` is the parser's own words for it. A duplicate key is refused here on purpose: a plan "
+            "that names the same key twice would be run under whichever value the parser kept, which is not what "
+            "anybody wrote."
+        ),
+        remediation=(
+            "Open the plan at the `line` and `column` the refusal names and correct the document there; "
+            "`backend_error` says what the parser found. Then run the plan again: nothing needs recovering, because "
+            "no session was opened and no board was driven.",
+            "A plan that is not UTF-8 was saved in another encoding; save it as UTF-8. A root that is not a mapping "
+            "is a file whose top level is a list or a bare value, and a plan is a mapping with `version:` and "
+            "`steps:` at the top.",
+            "`{test_plan_reference}` shows the shape a plan takes once it parses; the schema is checked only after "
+            "this refusal is cleared, so a step or key fault is reported on the next run by its own path.",
+        ),
+        do_not=(
+            "Do not touch the bench configuration for this. Nothing here is about a device, a permission or an "
+            "entry: the fault is in the plan's own text, and nothing written to the configuration changes what the "
+            "parser reads there.",
+        ),
+    ),
     # The one `test_config_invalid` that is not about the plan's contents at all.
     # It is raised by the loader before a single byte of the file is read, so
     # every step the unscoped entry above offers is about a document nothing has
@@ -1646,6 +1685,51 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "instead: the same request failing one layer later for a reason that is not the real one.",
             "Do not read this as a hardware or a permission problem. Nothing was contacted, so there is no state to "
             "recover and no permission to ask the operator for.",
+        ),
+    ),
+    # Two `invalid_argument` refusals that are not about a tool payload at all,
+    # scoped on the argument each names. The unscoped entry above explains
+    # `field` and `validator`, `inputSchema` in `tools/list` and `wait_s: true`;
+    # a permission name typed at `agentic-hil grant` and a run handle typed at
+    # `agentic-hil test-reactor-status --run` carry no `validator` and were
+    # decided against no schema, and the reader was sent through four steps and
+    # three bullets about a surface they were not on before the one line they
+    # could act on (#504).
+    "invalid_argument:keys": ErrorRemedy(
+        meaning=(
+            "A name given to `agentic-hil grant` or `agentic-hil revoke` is not a permission key of this "
+            "configuration. `rejected_keys` lists each one with why, and `permission_keys_here` lists every key the "
+            "command accepts, read out of the file as it stands. Nothing was written: the command writes all of its "
+            "names or none of them."
+        ),
+        remediation=(
+            "Name one of `permission_keys_here`. A permission is named one at a time and several may be given in one "
+            "command; there is no wildcard and no whole-entry form, so what is opened is exactly what was typed.",
+            "A key is spelled as the section, the entry and the permission (`debuggers.dut.permissions.allow_flash`); "
+            "the shorter `debuggers.dut.allow_flash` is accepted too. The entry names are this bench's own, which is "
+            "why the list comes out of this file rather than out of a reference.",
+            "`agentic-hil doctor` shows each configured entry with the permissions it grants today, if the question "
+            "is what the bench allows rather than how a key is spelled.",
+        ),
+        do_not=(
+            "Do not reach for `{reopen_command}` to make a name valid. It rewrites the whole file from the project "
+            "profile, every narrowed permission included, and adds no permission key the schema does not already have.",
+        ),
+    ),
+    "invalid_argument:run": ErrorRemedy(
+        meaning=(
+            "The value given as a run handle is not one. A handle is the `run` value `test_reactor_run` answered when "
+            "the run started: `run-` followed by sixteen hexadecimal digits. `value` carries what was given. Nothing "
+            "was reached: no record was read and no run was touched."
+        ),
+        remediation=(
+            "Use the `run` value the start of the run printed, exactly as it was printed.",
+            "Called without a handle, `test_reactor_status` lists every run this bench still has a record of, newest "
+            "first, with the handle of each; that is where a handle nobody wrote down is found.",
+        ),
+        do_not=(
+            "Do not guess a handle from a report file name or shorten one. The record is looked up by the exact "
+            "handle, and a value that does not match the shape is refused before the lookup.",
         ),
     ),
     # The only entry here that is about this server's own output rather than

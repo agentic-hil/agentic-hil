@@ -35,7 +35,7 @@ from agentic_hil.devices import (
     config_devices,
     lock_keys,
 )
-from agentic_hil.knowledge import attach_quarantine_guidance
+from agentic_hil.knowledge import attach_quarantine_guidance, recovery_operator_command
 from agentic_hil.redact import filesystem_error_detail, redact_sensitive
 from agentic_hil.report import CALL_SCOPED_LEASE_TOOLS, CONFIG_IN_FORCE_KEY, CONTACT_MARKER_KEY, read_report_state
 from agentic_hil.types import AgenticHILConfig, JsonObject
@@ -726,7 +726,28 @@ class HardwareCoordinator:
             bench_taken: list[str] = []
             try:
                 for resource in normalized:
-                    lock = self._acquire_lock(resource, normalized)
+                    try:
+                        lock = self._acquire_lock(resource, normalized)
+                    except CoordinationError as error:
+                        # #501: a second session on a resource THIS owner already
+                        # holds reaches here, because the project lock is already
+                        # this owner's and the per-resource lock is the first
+                        # collision. That lock cannot name a holder, so the refusal
+                        # blamed "another Agentic HIL process" with none named, and
+                        # the field that would say the holder is this very owner was
+                        # absent on exactly the path where it is true. The device
+                        # mutex does know the holder: where this owner's own bench
+                        # already holds the resource, answer the way the mutex would,
+                        # with the holder and holder_is_this_process. The condition
+                        # is this bench's own hold, not merely the same OS process:
+                        # two projects sharing one physical resource in one process
+                        # must still meet the anonymous resource_busy, and a genuine
+                        # cross-process collision (this bench holds nothing) is left
+                        # exactly as it was. The cross-process no-run case meets the
+                        # project lock first and never reaches this branch.
+                        if self.bench.holds(resource):
+                            raise CoordinationError({**self.bench.busy_result(resource), "resources": normalized}) from error
+                        raise
                     locks.append(lock)
                     stale = self._read_record(resource)
                     if stale is not None and stale.get("state") not in {None, "released"}:
@@ -1382,7 +1403,7 @@ class HardwareCoordinator:
                 # the physical board, per reason. Attached at reporting time so
                 # the record itself carries reasons, never versioned prose.
                 result = attach_quarantine_guidance({**result, "cleanup_required": True})
-            return result
+            return _with_status_sentences(result)
 
     def _dead_owner_made_no_contact(self, record: JsonObject) -> JsonObject | None:
         """What the dead owner's own last record proves about its hardware, or ``None``.
@@ -2043,6 +2064,41 @@ class HardwareCoordinator:
         finally:
             for lock in reversed(locks):
                 lock.release()
+
+
+def _with_status_sentences(status: JsonObject) -> JsonObject:
+    """The lease status with the sentence a person reads first, and the next step.
+
+    Every other result opens with a `summary`; this one carried nine facts and
+    no sentence, so a clean bench rendered as `OK.` and a quarantined one as the
+    containment block and nothing else, with the one command that clears it
+    nowhere on the screen (#504). The sentence is derived from the facts already
+    in the result and says which of the three states the bench is in: held,
+    quarantined, or neither. The next step is the recovery command with this
+    incident's id in it where an operator's signature is what the bench is
+    waiting for, and the statement that nothing needs signing where the next
+    hardware call settles the incident on its own evidence.
+    """
+    devices = [str(item) for item in status.get("held_devices") or [] if isinstance(item, str)]
+    reasons = [str(item) for item in status.get("cleanup_reasons") or [] if isinstance(item, str)]
+    quarantine_id = status.get("quarantine_id")
+    incident = f" under incident {quarantine_id}" if isinstance(quarantine_id, str) and quarantine_id else ""
+    if status.get("cleanup_required") is True:
+        opening = f"This bench is quarantined{incident}" + (f" for {', '.join(reasons)}" if reasons else "") + "."
+        if status.get("incident_stands") is True:
+            summary = f"{opening} The incident stands until an operator signs for the board's physical state; `quarantine_guidance` says what to check."
+            next_step = (
+                f"Check the board as `quarantine_guidance` describes, then run `{recovery_operator_command(str(quarantine_id) if quarantine_id else None)}`; "
+                "the signature is a statement about the physical board and nothing on the bench moves until it is given."
+            )
+        else:
+            summary = f"{opening} Nothing needs signing: the next hardware call settles it on its own evidence, and `cleanup_reasons` names what it has to confirm."
+            next_step = "Nothing to sign for. The next hardware call settles this incident, or stands it down, on what it reads back from the board."
+        return {**status, "summary": summary, "next_step": next_step}
+    if status.get("bench_held") is True:
+        held = f"This bench is held: {', '.join(devices)} under a live session." if devices else "This bench is held by a live session and no device is held under it yet."
+        return {**status, "summary": f"{held} No incident is standing."}
+    return {**status, "summary": "Nothing on this bench is held and no incident is standing."}
 
 
 def nothing_standing_result(status: JsonObject) -> JsonObject:

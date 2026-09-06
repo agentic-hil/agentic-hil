@@ -204,6 +204,10 @@ UNTRACKED_MENTIONS: dict[str, str] = {
     "tests/fixtures/fake_openocd_no_target.py": "the fake prints OpenOCD's own banner version",
     "tests/fixtures/fake_openocd_post_init_unconfirmed.py": "the fake prints OpenOCD's own banner version",
     "tests/fixtures/fake_openocd_unconfirmed.py": "the fake prints OpenOCD's own banner version",
+    # A recording of what the server writes on each stream names the release
+    # that made it, the way a bench log names the programmer that printed it.
+    # The recording is evidence about that release and must not follow this one.
+    "tests/fixtures/protocol_startup_refusal_recording.json": "the recording names the release that made it",
     # NOT_CONTACTED's comment names the release that introduced the shape it
     # generalizes. History, not a pin.
     "src/agentic_hil/backends/common.py": "prose reference to the release a precedent shipped in",

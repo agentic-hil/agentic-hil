@@ -301,6 +301,38 @@ def firmware(bench: Bench) -> Path:
             pytest.skip(f"the demo firmware did not build here: {' '.join(command)}\n{built.stdout[-2000:]}\n{built.stderr[-2000:]}")
     image = bench.project / "build" / "Debug" / "nucleo-f446re_demo.elf"
     assert image.is_file(), f"the build left no ELF at {image}"
+    # Put that firmware on the board, once per session, through the product's
+    # own plan runner. Every debug session below opens this ELF for its symbols
+    # and downloads nothing, so a breakpoint on `main` is an address in this
+    # build; a board carrying some other firmware runs straight past it and the
+    # resume times out. The flash tests used to be the only thing that made the
+    # two agree, which made every debug test depend on running after them.
+    plan = bench.project / "bench-firmware-on-the-board.yaml"
+    plan.write_text(
+        chr(10).join([
+            "version: 3",
+            "name: bench-firmware-on-the-board",
+            "steps:",
+            f"  - device: {bench.debugger_name()}",
+            "    action: flash",
+            f"    image_path: {image.relative_to(bench.project).as_posix()}",
+            f"  - device: {bench.debugger_name()}",
+            "    action: reset",
+            "    mode: run",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    try:
+        flashed = bench.run("test-reactor", "--test-config", plan.name, "--json")
+        try:
+            report = json.loads(flashed.stdout)
+        except ValueError:
+            report = {}
+        if report.get("ok") is not True:
+            pytest.fail(f"the demo firmware could not be put on the board before this session: {report.get('summary') or flashed.stderr[-1500:]}", pytrace=False)
+    finally:
+        plan.unlink(missing_ok=True)
     return image
 
 

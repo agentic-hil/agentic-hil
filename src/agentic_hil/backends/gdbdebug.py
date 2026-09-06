@@ -80,6 +80,7 @@ MEMORY_READ_CHUNK_BYTES = 1024
 # for why both are stated rather than assumed.
 INTEGER_VALUE_WIDTHS = frozenset({1, 2, 4, 8})
 DEFAULT_SYMBOL_VALUE_BYTE_ORDER = "little"
+MI_ASYNC_COMMAND = "-gdb-set mi-async on"
 GDB_COMMAND_TIMEOUT_CAP_S = 10.0
 CONTINUE_COMMAND_TIMEOUT_CAP_S = 5.0
 STOP_SESSION_TIMEOUT_CAP_S = 5.0
@@ -573,6 +574,23 @@ class GdbDebugSessions:
         session = session_result["session"]
         if self._refresh_session_stop(session) is not None:
             return self._report(self._stopped_result(tool, session, "Target was already stopped"))
+        # Nothing new arrived, so the decision is the session's own record. A
+        # stop the session already consumed (the breakpoint a debug_continue
+        # waited for, a fault, a confirmed halt) is the stop the target is in,
+        # and it is answered as it stands. A session that has recorded no stop
+        # but says halted is one that has not run since it started: every mode
+        # ends debug_start_session with the target halted. Neither gets an
+        # interrupt: on a target that never resumed the interrupt is
+        # acknowledged and no stop ever follows, and the wait for one timed out
+        # and quarantined a board that was sitting where it was told to (#492).
+        if session.status == "halted":
+            if session.stop_reason is not None:
+                return self._report(self._stopped_result(tool, session, "Target was already stopped"))
+            session.stop_reason = {"stop_reason": "halted", "backend_stop_reason": "session_start"}
+            self._write_session_log(session)
+            result = self._stopped_result(tool, session, "Target was already stopped")
+            result["summary"] += " The session started with the target halted and nothing has resumed it since."
+            return self._report(result)
         timeout = min(self.config.debugger.timeout_s, GDB_COMMAND_TIMEOUT_CAP_S)
         if timeout_s is not None:
             timeout = min(timeout, max(0.1, timeout_s))
@@ -793,10 +811,32 @@ class GdbDebugSessions:
         return resolve_gdb_executable(self.config, self.backend_name)
 
     def _initialize_gdb(self, session: GdbDebugSession, timeout: float) -> JsonObject:
-        commands = ["-gdb-set pagination off", "-gdb-set confirm off", f"-file-exec-and-symbols {mi_string(str(session.artifact['resolved_path']))}"]
+        # Asynchronous MI is asked for before the target is connected, and it
+        # is not optional. In synchronous mode GDB does not read the next MI
+        # command while -exec-continue is in flight, so the interrupt the
+        # timeout path sends to contain a running target is not processed
+        # until the target stops on its own, which a firmware whose main loop
+        # never returns never does: every timeout became a free-running board
+        # and a quarantine (#495). A GDB that refuses the setting is refused
+        # here, before anything on the target was touched, rather than found
+        # out at the first timeout.
+        commands = ["-gdb-set pagination off", "-gdb-set confirm off", MI_ASYNC_COMMAND, f"-file-exec-and-symbols {mi_string(str(session.artifact['resolved_path']))}"]
         for command in commands:
             response = self._gdb_command(session, command, min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
             if not response.ok:
+                if command == MI_ASYNC_COMMAND and not response.timed_out and not getattr(response, "audit_failure", False):
+                    return {
+                        **self._gdb_failure("debug_start_session", session, response.error_message, False, response=response),
+                        "error_type": "gdb_async_unsupported",
+                        "summary": f"GDB refused `{MI_ASYNC_COMMAND}`, and a debug session needs asynchronous MI to interrupt a running target; this GDB cannot run one.",
+                        "backend_error": response.error_message,
+                        "load_phase": session.load_phase,
+                        "firmware_load_status": session.firmware_load_status,
+                        "target_contacted": False,
+                        "side_effect_committed": False,
+                        "side_effect_status": "not_started",
+                        "retry_safe": True,
+                    }
                 return {**self._gdb_failure("debug_start_session", session, response.error_message or f"GDB startup command failed: {command}", response.timed_out, response=response), **self._startup_effect_fields(session, response.timed_out)}
         session.load_phase = "target_connect_started"
         target = self._gdb_command(session, f"-target-select extended-remote localhost:{session.gdb_port}", min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
@@ -995,13 +1035,16 @@ class GdbDebugSessions:
         validated = self._validate_symbol(tool, symbol)
         if not validated["ok"]:
             return validated
-        # The stop reason as it stood before the queries. An untyped symbol makes
-        # GDB answer `^error`, and _gdb_command records every failed command as a
-        # debugger_error stop, which would make the next debug_continue
-        # short-circuit on "Target is already stopped" because a symbol lookup
-        # took the second route. Restored below for the same reason
-        # clear_breakpoints restores it: resolving a symbol does not change
-        # target execution state.
+        # The stop reason as it stood before the queries. GDB answers `^error`
+        # for an untyped symbol and for a name it does not have, and
+        # _gdb_command records every failed command as a debugger_error stop,
+        # which would make the next debug_continue short-circuit on "Target is
+        # already stopped". The stop reason describes the target, and a name the
+        # debugger could not resolve says nothing about the target, so the
+        # record is put back the moment the refusal is known, whichever route
+        # answers afterwards and whether any does (#493); the same reason
+        # clear_breakpoints restores it. Only a query that never got an answer
+        # keeps the record, because that one is about the debugger.
         prior_stop_reason = session.stop_reason
         address_value, failed = self._evaluate_symbol_expression(session, f"(unsigned long)&{symbol}")
         size_value = None
@@ -1015,11 +1058,11 @@ class GdbDebugSessions:
             # and would hide a debugger that has stopped responding or an audit
             # trail that has broken, so neither is covered by this fallback.
             return self._symbol_expression_failure(tool, symbol, failed)
+        if session.stop_reason is not None and str(session.stop_reason.get("stop_reason")) == "debugger_error":
+            session.stop_reason = prior_stop_reason
         table = read_elf_symbol(str(session.artifact["resolved_path"]), symbol)
         if not table["ok"]:
             return {**self._symbol_expression_failure(tool, symbol, failed), "symbol_table_lookup": table["reason"]}
-        if session.stop_reason is not None and str(session.stop_reason.get("stop_reason")) == "debugger_error":
-            session.stop_reason = prior_stop_reason
         address = int(table["address"])
         return {"ok": True, "symbol": symbol, "address": hex(address), "address_value": address, "size_bytes": int(table["size_bytes"]), "resolved_from": "elf_symbol_table"}
 

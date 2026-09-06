@@ -440,8 +440,26 @@ def load_authoritative_config(expected_workspace: str | Path | None = None) -> A
         requested = project_config_path(expected)
     requested = absolute_without_symlinks(requested)
     resolved = requested.resolve()
-    if not resolved.is_file():
-        raise ConfigError("config_file_not_found", "Agentic HIL configuration file could not be found.", {"path": str(resolved)})
+    # Asked of the stat rather than of `is_file()`, which answers False for a
+    # directory, a socket or a path it could not stat exactly as it does for
+    # nothing at all. Only the genuinely absent path is "no configuration", the
+    # one state that starts the unprovisioned server and that `check-plan`
+    # tolerates as the board-free case; everything else that exists at the
+    # path is a configuration location that could not be read, the same answer
+    # `load_config` gives for it, so a directory left there by a bind mount or
+    # by hand is refused instead of being read as an invitation to generate.
+    try:
+        state = os.stat(resolved)
+    except (FileNotFoundError, NotADirectoryError) as error:
+        raise ConfigError("config_file_not_found", "Agentic HIL configuration file could not be found.", {"path": str(resolved)}) from error
+    except OSError as error:
+        raise ConfigError(
+            "config_unreadable",
+            "Agentic HIL configuration file could not be read.",
+            {"path": str(resolved), "backend_error": str(error)},
+        ) from error
+    if not stat.S_ISREG(state.st_mode):
+        raise ConfigError("config_unreadable", "Agentic HIL configuration file could not be read.", {"path": str(resolved)})
     if os.lstat(resolved).st_nlink != 1:
         raise ConfigError(
             "config_invalid",
@@ -1014,6 +1032,14 @@ def configured_executable(
             "Configured executables must be stored outside the workspace.",
             {"field": field, "path": str(resolved), "workspace_root": config.workspace_root},
         )
+    # Measured on the resolved path, whichever way the value arrived: the
+    # absolute spelling, a bare name PATH resolved, a link followed to its
+    # target, or a candidate autodetection filled in. That path is what is
+    # pinned and what the backend starts, and the objection is to where that
+    # program is. Asked before the file-shape check for the same reason the
+    # scripts ask it first: "not an existing file" is the wrong sentence for a
+    # program that is right there and will not be after the next sweep.
+    refuse_ephemeral_executable(config, resolved, field)
     if not resolved.is_file() or os.lstat(resolved).st_nlink != 1:
         raise ConfigError(
             "config_invalid",
@@ -1096,6 +1122,52 @@ def temporary_roots() -> tuple[Path, ...]:
     return tuple(unique.values())
 
 
+def cache_roots() -> tuple[Path, ...]:
+    """Every package-manager cache root a pinned program is refused from.
+
+    One list for the two things that get pinned: the MCP launcher is measured
+    against exactly these roots (plus the temporary directory, which
+    ``temporary_roots`` holds) and ``docs/mcp-hosts.md`` says why, a cache is
+    not an installation boundary. The debugger toolchain is the thing that
+    reaches the board, so it is held to the same boundary from the same list,
+    and a root added for one is added for both.
+    """
+    roots = [Path.home() / ".cache", Path.home() / "Library" / "Caches"]
+    for variable in ("UV_CACHE_DIR", "XDG_CACHE_HOME"):
+        if value := os.environ.get(variable):
+            roots.append(Path(value).expanduser())
+    if local_app_data := os.environ.get("LOCALAPPDATA"):
+        roots.append(Path(local_app_data) / "uv" / "cache")
+    unique: dict[str, Path] = {}
+    for root in roots:
+        unique.setdefault(str(root), root)
+    return tuple(unique.values())
+
+
+TEMPORARY_STORAGE_REFUSAL = "Configured debugger files must not live in system temporary storage: it is cleared without warning, so the configuration would stop describing this bench."
+CACHE_STORAGE_REFUSAL = "Configured debugger files must not live in a package manager cache: a cache is not an installation boundary and is pruned without warning, so the configuration would stop describing this bench."
+
+
+def _disqualifying_root(config: AgenticHILConfig, candidate: Path, roots: tuple[Path, ...]) -> Path | None:
+    """The first of ``roots`` that ``candidate`` is under and the configuration is not.
+
+    The exemption is per root. A configuration that lives under a root itself
+    is already as ephemeral, or as far from an installation boundary, as the
+    field could make it, so the field is not what is wrong with it and naming
+    it would name the wrong thing. That says nothing about the other roots: a
+    configuration in temporary storage is still refused for a program in a
+    cache it does not share.
+    """
+    config_file = Path(config.config_path) if config.config_path else None
+    for root in roots:
+        if not is_path_within(candidate, root):
+            continue
+        if config_file is not None and is_path_within(config_file, root):
+            continue
+        return root
+    return None
+
+
 def refuse_temporary_debugger_script(config: AgenticHILConfig, value: str, field: str) -> None:
     """Refuse a script in temporary storage, whichever way the field spells it.
 
@@ -1114,19 +1186,39 @@ def refuse_temporary_debugger_script(config: AgenticHILConfig, value: str, field
     candidate = Path(value)
     if not candidate.is_absolute():
         return
-    config_file = Path(config.config_path) if config.config_path else None
-    for root in temporary_roots():
-        if not is_path_within(candidate, root):
-            continue
-        # A configuration that lives in temporary storage itself is already as
-        # ephemeral as this field could make it, so the field is not what is
-        # wrong with it and saying so here would name the wrong thing.
-        if config_file is not None and is_path_within(config_file, root):
-            continue
+    root = _disqualifying_root(config, candidate, temporary_roots())
+    if root is not None:
         raise ConfigError(
             "config_invalid",
-            "Configured debugger files must not live in system temporary storage: it is cleared without warning, so the configuration would stop describing this bench.",
+            TEMPORARY_STORAGE_REFUSAL,
             {"field": field, "path": str(candidate), "temporary_root": str(root)},
+        )
+
+
+def refuse_ephemeral_executable(config: AgenticHILConfig, resolved: Path, field: str) -> None:
+    """Refuse a pinned program in temporary storage or in a package-manager cache.
+
+    The sentence the script refusal makes is true of the program the debugger
+    starts, and more so: a toolchain under ``/tmp`` describes this bench until
+    the next reboot, and on POSIX the swept name in a sticky world-writable
+    directory is then free for any local account to create, to be started as
+    the operator with every grant the entry carries. So the temporary half is
+    the script refusal itself, same message, same details. The cache half is
+    the boundary the MCP launcher is already held to, from the same list.
+    """
+    root = _disqualifying_root(config, resolved, temporary_roots())
+    if root is not None:
+        raise ConfigError(
+            "config_invalid",
+            TEMPORARY_STORAGE_REFUSAL,
+            {"field": field, "path": str(resolved), "temporary_root": str(root)},
+        )
+    root = _disqualifying_root(config, resolved, cache_roots())
+    if root is not None:
+        raise ConfigError(
+            "config_invalid",
+            CACHE_STORAGE_REFUSAL,
+            {"field": field, "path": str(resolved), "cache_root": str(root)},
         )
 
 

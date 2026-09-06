@@ -262,6 +262,68 @@ def test_the_mcp_path_reports_the_other_servers_the_same_way_the_command_line_do
     assert any("restart the MCP server" in step for step in result["next_steps"])
 
 
+def test_a_failed_upgrade_over_mcp_carries_the_processes_it_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#475 on this surface: the intact failure names the holders it read.
+
+    `server_upgrade` hands the failure document through `_reported_as_running_code`
+    untouched apart from `running_version`, so what the shared implementation
+    puts on it is what the MCP caller reads. The list is of the *other* servers:
+    the reader excludes the upgrading process, which over MCP is this one, and
+    this server is described by `running_version` beside `version`, equal here
+    because nothing on disk moved.
+    """
+    fake_manager(
+        monkeypatch,
+        installed=subprocess.CompletedProcess([], 1, "", "network failed"),
+        version_after=__version__,
+    )
+    holder = {"pid": 4242, "image": "C:/Users/op/AppData/Roaming/uv/tools/agentic-hil/Scripts/python.exe", "working_directory": "C:/projects/blinky"}
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [holder])
+    tools = AgenticHILToolService(upgradable_config(tmp_path))
+    try:
+        result = tools.call(SERVER_UPGRADE)
+    finally:
+        tools.close()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_failed"
+    assert result["installation_intact"] is True
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [holder]
+    assert result["restart_required_by_count"] == 1
+    assert "pid 4242" in result["restart_notice"]
+    assert "pid 4242" in result["summary"]
+    assert result["running_version"] == result["version"] == __version__
+    # Not rewritten into the upgraded summary: nothing was upgraded.
+    assert "was upgraded" not in result["summary"]
+
+
+def test_a_failed_upgrade_over_mcp_on_a_host_that_cannot_read_its_table_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same failure where the table could not be read: the sentence, no field."""
+    fake_manager(
+        monkeypatch,
+        installed=subprocess.CompletedProcess([], 1, "", "network failed"),
+        version_after=__version__,
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: None)
+    tools = AgenticHILToolService(upgradable_config(tmp_path))
+    try:
+        result = tools.call(SERVER_UPGRADE)
+    finally:
+        tools.close()
+
+    assert result["error_type"] == "upgrade_failed"
+    assert "restart_required" not in result
+    assert "restart_required_by" not in result
+    assert "could not be read on this host" in result["restart_notice"]
+    assert "could not be read on this host" in result["summary"]
+    assert result["running_version"] == __version__
+
+
 def test_a_pinned_installation_is_refused_with_a_command_that_keeps_the_extras(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

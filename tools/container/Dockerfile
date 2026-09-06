@@ -11,16 +11,23 @@
 # OpenOCD prints a failure-worded line after a reset that succeeded. Every one
 # of them is invisible to a fake and obvious to the real tool.
 #
-# So this image carries the real tools and nothing that needs hardware: uv at
-# one pinned version, the distribution's OpenOCD, this project's dev and can
-# dependency set installed from the locked file the hosted matrix uses, and this
-# checkout on top of it. What still needs a probe or a board is the bench tier
+# So this image carries the real tools and nothing that needs hardware: uv and
+# pyOCD at one pinned version each, the distribution's OpenOCD and curl, this
+# project's dev and can dependency set installed from the locked file the hosted
+# matrix uses, and this checkout on top of it. What still needs a probe or a board is the bench tier
 # under tests/bench, which never runs here.
 #
 # Build and run it from the repository root:
 #
 #     DOCKER_BUILDKIT=1 docker build -f tools/container/Dockerfile -t agentic-hil-container-tests .
-#     docker run --rm agentic-hil-container-tests
+#     docker run --rm --cap-add NET_ADMIN agentic-hil-container-tests
+#
+# NET_ADMIN is for the CAN tests, which create a virtual CAN interface inside
+# the container and bind the product's SocketCAN transport to it; the host
+# kernel has to carry the `vcan` and `can_raw` modules (`modprobe vcan can_raw`).
+# The serial tests need only what a container has by default: the devpts socat
+# allocates its pseudo-terminal pair from, and root inside the container, which
+# two of them use to drop a server to `nobody` through `setpriv`.
 #
 # The run needs the network. uv resolves this distribution's dependencies from
 # the package index, and one test reads the release index over HTTPS to check
@@ -37,13 +44,27 @@ FROM python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e18
 # ^ python:3.12-slim
 
 # OpenOCD is the debugger backend the no-probe tests drive, ca-certificates is
-# what lets uv and the release-index read verify anything at all, and procps is
+# what lets uv and the release-index read verify anything at all, procps is
 # `ps`: one test reads a process's start time out of procfs and checks it
-# against what a program with no stake in the answer says. Nothing else: an
-# image that grew a toolchain would be an image whose results depend on which
-# toolchain.
+# against what a program with no stake in the answer says, curl is what
+# install.sh fetches Astral's pinned uv installer with on the route that has
+# no uv and no Python, which one test runs for real to read the shell rc files
+# back, socat is what makes the pseudo-terminal pair the serial tests open
+# through the real pyserial (one end is the configured COM port, the other is
+# held by a scripted peer under tests/container), iproute2 is `ip`, which the
+# CAN tests create their virtual CAN interface with and which the product
+# itself reads a link's control mode from (it looks in /sbin and /usr/sbin,
+# where this package installs), and can-utils is `candump`, the observer with
+# no stake in the answer that reads a frame off the interface after the
+# product says it sent one. Nothing else: an image that grew a toolchain
+# would be an image whose results depend on which toolchain.
+#
+# The virtual CAN interface itself is not made here: a container cannot load
+# a kernel module, so the host has to carry `vcan` and `can_raw` and the run has to grant
+# `--cap-add NET_ADMIN`. Without both, the CAN tests skip naming that reason,
+# and the job that runs this tier counts the skip as a failure.
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes openocd ca-certificates procps \
+    && apt-get install --no-install-recommends --yes openocd ca-certificates procps curl socat iproute2 can-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # One version, named here, because the receipts these tests read are written by
@@ -51,11 +72,18 @@ RUN apt-get update \
 # reason the tests exist. Moving the pin is a deliberate change with a test run
 # behind it, not something a rebuild does by itself.
 ARG UV_VERSION=0.12.9
+# pyOCD, pinned for the same reason. The suite's fixture reproduces what this
+# version prints when nothing is on USB, `No connected debug probes` and the
+# `--uid` form of it, and the classifier reads those words; a release that
+# rewords them should fail the drift test in this tier on a deliberate bump,
+# not on a rebuild. The mirror argument above does not reach it: the package
+# index keeps every release.
+ARG PYOCD_VERSION=0.45.1
 # setuptools and wheel are the build backend this project declares, and the
 # tests build wheels of this checkout with `--no-isolation` so the build needs
 # no network of its own.
 RUN python -m pip install --no-cache-dir --disable-pip-version-check \
-    "uv==${UV_VERSION}" "setuptools>=77" "wheel"
+    "uv==${UV_VERSION}" "pyocd==${PYOCD_VERSION}" "setuptools>=77" "wheel"
 
 WORKDIR /work
 

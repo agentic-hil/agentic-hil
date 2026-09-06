@@ -1381,3 +1381,142 @@ def test_an_attach_after_the_last_detach_stop_decision_is_refused(tmp_path: Path
     assert reply["error_type"] == "can_broker_stopping"
     assert reply["retry_safe"] is True
     assert broker.participants == {}, "no participant may be seated onto a stopping broker"
+
+
+# ---------------------------------------------------------------------------
+# What a bus with `shares:` says about itself while sessions still take it whole (#489).
+#
+# The broker's participant path is complete under `attach_participant`, and no
+# tool or plan step reaches it: `can_session_start` takes the bus's own lock and
+# opens the adapter itself, so a second session on a shared bus is refused
+# exactly as on a single-owner one. Until a session can attach as a participant,
+# the advertisement has to say so, in the listing an agent reads before starting
+# a session and in the refusal it meets when it did not.
+
+SHARING_NOTE_FRAGMENT = "takes the whole bus"
+# A second, single-owner entry beside the shared one, for the mixed listing.
+SOLO_BUS_YAML = '  solo:\n    adapter: "peak"\n    channel: "PCAN_USBBUS2"\n    bitrate: 500000\n'
+
+
+def test_a_shared_bus_says_sessions_still_take_it_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = shared_config(tmp_path, monkeypatch)
+    service = CanBusService(config)
+    try:
+        listed = service.list_buses()
+    finally:
+        service.close()
+    status = listed["buses"]["bench"]
+    # The declared views are still advertised: they are configuration, and the
+    # listing is where an operator checks what the file says.
+    assert sorted(status["shares"]) == ["alpha", "beta"]
+    assert status["shares_declared"] is True
+    assert status["session_takes_whole_bus"] is True
+    assert "can_session_start" in status["sharing_note"]
+    assert SHARING_NOTE_FRAGMENT in status["sharing_note"]
+    assert "declared shareable" in listed["summary"]
+    assert SHARING_NOTE_FRAGMENT in listed["summary"]
+
+
+def test_a_single_owner_bus_carries_no_sharing_note(tmp_path: Path) -> None:
+    config = single_owner_config(tmp_path)
+    service = CanBusService(config)
+    try:
+        listed = service.list_buses()
+    finally:
+        service.close()
+    status = listed["buses"]["bench"]
+    for key in ("shares_declared", "session_takes_whole_bus", "sharing_note"):
+        assert key not in status, key
+    assert listed["summary"] == "1 configured CAN bus(es)."
+
+
+def test_a_mixed_listing_counts_the_shared_buses_in_its_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # One bus with `shares:` beside one without: the summary counts the buses
+    # and says how many of them are declared shareable, and the note lands on
+    # the shared entry only.
+    workspace = tmp_path / "project"
+    write_authoritative_config(workspace, monkeypatch, can_buses_yaml=shared_bus_yaml() + SOLO_BUS_YAML)
+    from agentic_hil.config import load_authoritative_config
+
+    service = CanBusService(load_authoritative_config(workspace))
+    try:
+        listed = service.list_buses()
+    finally:
+        service.close()
+    assert listed["summary"].startswith("2 configured CAN bus(es). 1 declared shareable")
+    assert SHARING_NOTE_FRAGMENT in listed["summary"]
+    assert listed["buses"]["bench"]["shares_declared"] is True
+    assert "sharing_note" not in listed["buses"]["solo"]
+
+
+def test_a_second_session_on_a_shared_bus_is_refused_and_told_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = shared_config(tmp_path, monkeypatch)
+    first = CanBusService(config)
+    second = CanBusService(config)
+    try:
+        opened = first.session_start("bench")
+        assert opened["ok"] is True, opened
+        assert "participant" not in opened
+
+        refused = second.session_start("bench")
+
+        assert refused["ok"] is False, refused
+        # The project lock answers first for a second owner of the same
+        # configuration, so this is the refusal a second run in fact meets.
+        assert refused["error_type"] == "resource_busy", refused
+        assert refused["side_effect_committed"] is False
+        assert refused["shares_declared"] is True
+        assert refused["session_takes_whole_bus"] is True
+        assert SHARING_NOTE_FRAGMENT in refused["sharing_note"]
+    finally:
+        second.close()
+        first.close()
+
+
+def test_a_second_session_on_a_single_owner_bus_is_refused_without_the_sharing_note(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour: the same refusal on a bus that declares no shares carries
+    none of the sharing vocabulary, because there is nothing shareable to be
+    truthful about. Same fake bridge, same two services, no `shares:`."""
+    from agentic_hil.config import load_authoritative_config
+
+    workspace = tmp_path / "project"
+    single_owner_yaml = shared_bus_yaml().split("    shares:\n")[0]
+    write_authoritative_config(workspace, monkeypatch, can_buses_yaml=single_owner_yaml)
+    config = load_authoritative_config(workspace)
+    assert not config.can_buses["bench"].shares
+    first = CanBusService(config)
+    second = CanBusService(config)
+    try:
+        opened = first.session_start("bench")
+        assert opened["ok"] is True, opened
+
+        refused = second.session_start("bench")
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_busy", refused
+        for key in ("shares_declared", "session_takes_whole_bus", "sharing_note"):
+            assert key not in refused, key
+    finally:
+        second.close()
+        first.close()
+
+
+def test_a_participant_argument_is_refused_by_the_schema_until_sharing_lands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The design document plans a participant vocabulary for `can_session_start`
+    (Phase 2). An agent that read it and passes `participant` today is told the
+    argument does not exist, rather than being admitted onto a surface whose
+    sessions are still keyed by bus alone. Pinned so the advertisement fields
+    are not half-joined by an argument the sessions map cannot honour."""
+    from agentic_hil.mcp import call_tool
+    from agentic_hil.tools import AgenticHILToolService
+
+    service = AgenticHILToolService(shared_config(tmp_path, monkeypatch))
+    try:
+        response = call_tool({"name": "can_session_start", "arguments": {"bus_id": "bench", "participant": "alpha"}}, service)
+        refused = response["structuredContent"]
+        assert refused["ok"] is False
+        assert refused["error_type"] == "invalid_argument", refused
+        assert "participant" in json.dumps(refused)
+        assert service.can_buses.sessions == {}
+    finally:
+        service.close()

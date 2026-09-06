@@ -31,6 +31,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from support import trusted_launcher
 
 from agentic_hil import __version__, cli
 from agentic_hil.humanize import (
@@ -52,12 +53,24 @@ INIT_FORCED = {
     "permission_changes": ["tightened /home/op/.local/bin"],
     "rollback": {"attempted": False, "ok": True, "errors": []},
     "steps": {
-        "config": {"ok": True, "summary": "Authoritative config written, every permission granted but the two flashing is interlocked against.", "forced": True},
+        # The next steps ride the config step, which is where `init_config`
+        # puts them; `init_project` gives the result no top-level `next_step`
+        # at all. This document carried one, invented, and the prose test read
+        # its `Next step` section off that field while the thirteen lines a real
+        # run writes here never reached the screen (#486).
+        "config": {
+            "ok": True,
+            "summary": "Authoritative config written, every permission granted but the two flashing is interlocked against.",
+            "forced": True,
+            "next_steps": [
+                "Review the config at /home/op/.config/agentic-hil/projects/blinky/config.yaml. Set AGENTIC_HIL_CONFIG only when an explicit absolute-path override is needed.",
+                "Run: agentic-hil doctor",
+            ],
+        },
         "doctor": {"ok": True, "tool": "agentic_hil_doctor", "summary": "Agentic HIL configuration loaded and 1 debugger(s) checked."},
         "agent_write_restriction": {"ok": True, "summary": "Claude Code was asked to refuse its own write tools."},
     },
     "warnings": ["This debugger names no probe_id."],
-    "next_step": "Restart Claude Code so it loads the MCP server.",
 }
 
 INIT_FAILED = {
@@ -256,7 +269,11 @@ def test_a_pipe_is_rendered_like_anything_else(monkeypatch: pytest.MonkeyPatch) 
     code, out = _run(monkeypatch, ["init"], INIT_FORCED, tty=False)
     assert code == 0
     assert not out.lstrip().startswith("{"), out
-    assert "Restart Claude Code" in out, out
+    # A line the document carries and a person acts on, rendered as prose.
+    assert "tightened /home/op/.local/bin" in out, out
+    # And one the config step carries: the pipe is held to the same rule as the
+    # terminal, so a pipe that dropped the next steps cannot pass here.
+    assert "Run: agentic-hil doctor" in out, out
 
 
 def test_every_subcommand_accepts_the_json_flag_and_documents_it() -> None:
@@ -396,8 +413,12 @@ def test_the_forced_init_a_person_runs_reads_as_prose() -> None:
     assert not out.lstrip().startswith("{")
     for step in ("config", "doctor", "agent write restriction"):
         assert step in out
-    assert "Next step" in out
-    assert "Restart Claude Code so it loads the MCP server." in out
+    # The config step's next steps, where `init` actually puts them. The
+    # document has no top-level `next_step`, because `init` writes none, so
+    # there is no `Next step` section for the renderer to have taken these from.
+    assert "next_step" not in INIT_FORCED
+    assert "Review the config at /home/op/.config/agentic-hil/projects/blinky/config.yaml." in _reflowed(out)
+    assert "Run: agentic-hil doctor" in out
     assert "tightened /home/op/.local/bin" in out
     assert "This debugger names no probe_id." in out
     assert "/home/op/.config/agentic-hil/projects/blinky/config.yaml" in out
@@ -1616,7 +1637,7 @@ def test_a_probe_listing_says_which_enumeration_produced_the_ids() -> None:
         "tool": "debugger_probes_list",
         "backend": "openocd",
         "discovered_by": "usb_serial_inventory",
-        "probes": [{"probe_id": "066AFF303435554157113106"}],
+        "probes": [{"probe_id": "066BFF505050505050505050"}],
         "summary": "1 connected debugger probe(s) read from this host's USB serial inventory.",
     }
 
@@ -1624,7 +1645,7 @@ def test_a_probe_listing_says_which_enumeration_produced_the_ids() -> None:
 
     assert "discovered_by" in out
     assert "usb_serial_inventory" in out
-    assert "066AFF303435554157113106" in out
+    assert "066BFF505050505050505050" in out
 
 
 def test_a_probe_listing_refused_on_an_adapter_nothing_enumerates_says_which_script() -> None:
@@ -1656,7 +1677,7 @@ ADOPT_DRY_RUN = {
     "path": "/home/op/.config/agentic-hil/projects/blinky/config.yaml",
     "debugger_id": "dut",
     "com_port_id": "dut_uart",
-    "carried": [{"key": "debuggers.dut.probe_id", "value": "066AFF303435554157113106", "previous_value": None}],
+    "carried": [{"key": "debuggers.dut.probe_id", "value": "066BFF505050505050505050", "previous_value": None}],
     "already_current": [{"key": "debug.gdb_executable", "value": "/usr/bin/arm-none-eabi-gdb"}],
     "kept": [
         {
@@ -1705,7 +1726,7 @@ def test_the_plan_still_renders_the_boxes_the_comparison_is_not_in() -> None:
     out = _reflowed(_rendered(ADOPT_DRY_RUN, "adopt-hardware"))
 
     assert "Would be filled in" in out
-    assert "debuggers.dut.probe_id 066AFF303435554157113106" in out
+    assert "debuggers.dut.probe_id 066BFF505050505050505050" in out
     assert "Already match the attached hardware" in out
     assert "debug.gdb_executable" in out
 
@@ -1741,7 +1762,7 @@ def test_a_healthy_probe_listing_is_not_rendered_as_a_containment() -> None:
         "tool": "debugger_probes_list",
         "backend": "openocd",
         "discovered_by": "usb_serial_inventory",
-        "probes": [{"probe_id": "066AFF303435554157113106"}],
+        "probes": [{"probe_id": "066BFF505050505050505050"}],
         "complete": False,
         "summary": "1 connected debugger probe(s) read from this host's USB serial inventory, which is not an authoritative count.",
     }
@@ -1779,3 +1800,217 @@ def test_a_probe_listing_with_something_standing_still_says_it_did_not_come_back
     assert "did not come back clean" in out
     assert "q-7f3a" in out
     assert out.index("complete no") > out.index("backend openocd")
+
+
+# ---------------------------------------------------------------------------
+# What a step carries reaches the screen: the next steps `init` writes on its
+# config step, and the refusal that step becomes over an open run (#486).
+#
+# `_steps_block` printed a step's summary, its error type and the catalogue's
+# advice, and nothing else the step carried. So the thirteen `next_steps` a real
+# `init` puts on its config step, the #416 placeholder remedy first among them,
+# reached the screen under `--json` only, and the open-run refusal of `init
+# --force` lost its own `next_step` (the one that names `agentic-hil
+# lease-status` and the retry) and its `open_holds`, leaving the operator with
+# two MCP tool names and a pointer to a field that was not on the screen.
+#
+# The documents here are the ones the commands build, not hand-typed ones: the
+# rendering is a pure function of the result, and a fixture that carried a
+# field the command never writes is how the prose test above stayed green.
+
+
+def _no_toolchain_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A workspace on a host with no toolchain, which is the placeholder path.
+
+    The suite's autouse fixture already hides both toolchain finders, so
+    discovery ends without configuring a board and the config step carries the
+    #416 remedy as its first next step.
+    """
+    workspace = tmp_path / "firmware"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
+def _a_stranger_holding_the_probe(monkeypatch: pytest.MonkeyPatch, *, pid: int) -> dict:
+    """`bench_open_holds` answering the way the coordinator's status does for a
+    held bench: a run in another process holds the probe this file names."""
+    holds = {
+        "owner_active": True,
+        "held_devices": ["probe:stlink123"],
+        "busy_devices": [
+            {
+                "resource": "probe:stlink123",
+                "holder": {"pid": pid, "frontend": "mcp-stdio", "label": "other-bench-session"},
+                "held_since": "2026-09-06T10:00:00Z",
+            }
+        ],
+        "snapshot_atomic": True,
+        "frontend": "mcp-stdio",
+        "owner_pid": pid,
+        "owner_started_at": "2026-09-06T10:00:00Z",
+        "updated_at": "2026-09-06T10:00:05Z",
+    }
+    monkeypatch.setattr(cli, "bench_open_holds", lambda config: holds)
+    return holds
+
+
+def test_the_placeholder_remedy_init_writes_reaches_the_person_reading_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real `agentic-hil init` on a host with no toolchain, rendered.
+
+    The headline, the three step rows and nothing else was what a person got.
+    Every one of the config step's next steps is a thing to do, the first of
+    them is the remedy #416 wrote for exactly this run, and the CHANGELOG says
+    the operator gets it; `--json` was the only place they did.
+    """
+    _no_toolchain_init(tmp_path, monkeypatch)
+
+    result = cli.init_project()
+
+    assert result["ok"] is True, result
+    assert "next_step" not in result, "init writes no top-level next step; the steps carry them"
+    next_steps = result["steps"]["config"]["next_steps"]
+    assert next_steps[0].startswith("This file describes no board yet, because hardware discovery ran without configuring one"), next_steps[0]
+    assert any(step.startswith("Review the config at ") for step in next_steps), next_steps
+    assert "Run: agentic-hil doctor" in next_steps
+    assert any(step.startswith(("Detected COM ports: ", "No host COM ports detected", "COM port discovery failed")) for step in next_steps), next_steps
+
+    rendered = _rendered(result, "init")
+    out = _reflowed(rendered)
+
+    for step in next_steps:
+        assert _reflowed(step) in out, step
+    assert "Run: agentic-hil doctor" in out
+    # The rest of the report is where it was: the sentence first, then the step
+    # rows, and the next steps are not what the reader meets before them.
+    assert out.startswith("Agentic HIL project configured.")
+    assert out.index("Steps") < out.index(_reflowed(next_steps[0]))
+    # There is no `Next step` section: the document has no top-level field for
+    # one to be printed from, and the steps are not lifted out of the step that
+    # carries them into a heading the document does not have.
+    assert not any(line in ("Next step", "Next steps") for line in rendered.splitlines()), rendered
+
+
+def test_the_json_flag_prints_the_real_init_document_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour of the rendering: what `--json` prints is the document, whole.
+
+    The next steps reaching the screen is a change to the rendering and to
+    nothing else; the document a caller parses, the config step's `next_steps`
+    included, is the one the command built.
+    """
+    _no_toolchain_init(tmp_path, monkeypatch)
+    result = cli.init_project()
+    assert result["steps"]["config"]["next_steps"], result
+
+    code, out = _run(monkeypatch, ["init", "--json"], result, tty=False)
+
+    assert code == 0
+    assert out == json.dumps(result, indent=2) + "\n"
+    assert json.loads(out)["steps"]["config"]["next_steps"] == result["steps"]["config"]["next_steps"]
+    assert "next_step" not in json.loads(out)
+
+
+def test_setup_carries_the_config_steps_next_steps_to_the_screen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`setup` renders the same config step and dropped the same list.
+
+    The real command, both halves, on the same host with no toolchain: the
+    user-wide half installs into the sandboxed profile, the project half writes
+    the placeholder, and the report has to carry the placeholder's remedy the
+    way `init`'s does.
+    """
+    _no_toolchain_init(tmp_path, monkeypatch)
+    command = str(trusted_launcher())
+    monkeypatch.setattr("agentic_hil.cli.mcp_server_command", lambda: command)
+    monkeypatch.setattr("agentic_hil.cli._mcp_command_candidates", list)
+    real_which = shutil.which
+    monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda name: None if name == "claude" else real_which(name))
+
+    result = cli.setup_project(agent="claude-code")
+
+    assert result["ok"] is True, result
+    next_steps = result["steps"]["config"]["next_steps"]
+    assert next_steps[0].startswith("This file describes no board yet"), next_steps[0]
+
+    out = _reflowed(_rendered(result, "setup"))
+
+    for step in next_steps:
+        assert _reflowed(step) in out, step
+    assert "Run: agentic-hil doctor" in out
+    assert "Halves" in out and "user (agent-install)" in out and "project (init)" in out
+
+
+def test_a_regeneration_refused_for_an_open_run_prints_the_holder_and_the_shell_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`agentic-hil init --force` while somebody holds the bench, as a person sees it.
+
+    The refusal is the config step, and it carries two things the screen lost:
+    its own `next_step`, which names `agentic-hil lease-status`, the retry and
+    `agentic-hil adopt-hardware`, and `open_holds`, which names the holder. What
+    was printed instead was the catalogue's advice, whose second line points the
+    reader at `open_holds` "here". Exit 1 either way.
+    """
+    _no_toolchain_init(tmp_path, monkeypatch)
+    assert cli.init_project()["ok"] is True
+    _a_stranger_holding_the_probe(monkeypatch, pid=4242)
+    stream = FakeStdout(tty=True)
+    monkeypatch.setattr("sys.stdout", stream)
+
+    assert cli.entrypoint(["init", "--force"]) == 1
+    out = _reflowed(stream.getvalue())
+
+    # The document, for the record: this is the refusal `_init_open_run_refusal`
+    # builds, and nothing below is asked of the rendering that it does not carry.
+    refused = cli.init_project(force=True)["steps"]["config"]
+    assert refused["error_type"] == "config_write_in_open_run"
+    assert refused["open_holds"]["owner_pid"] == 4242
+    assert "lease-status" in refused["next_step"]
+
+    assert "config_write_in_open_run" in out
+    assert "`agentic-hil lease-status` names the holder" in out
+    assert "then run `agentic-hil init --force` again" in out
+    assert "`agentic-hil adopt-hardware` is the command that refreshes the hardware" in out
+    # The holder: its pid, the frontend it took the bench under, and the device.
+    assert "4242" in out
+    assert "mcp-stdio" in out
+    assert "probe:stlink123" in out
+    assert "other-bench-session" in out
+    # The catalogue's advice is still there under the refusal, as it was.
+    assert "bench_run_stop" in out
+
+
+def test_a_step_without_next_steps_renders_exactly_as_it_did() -> None:
+    """The neighbour: a step that carries no next step gets no line for one.
+
+    INIT_FAILED's three steps carry none, and the rendering they got before is
+    the rendering they keep, so the change is confined to steps that have
+    something to say. The whole rendering is held, reflowed: the headline, the
+    three fields, the three step rows, and under the failed step its error type
+    and the catalogue's advice for `config_stale` and nothing else, then the
+    rollback line. The catalogue's text is read out of the catalogue, so what
+    is pinned is that the failed step shows exactly that advice and that no
+    line was added to any of the three.
+    """
+    out = _rendered(INIT_FAILED, "init")
+    assert "Next step" not in out
+    assert "Next steps" not in out
+    for step in INIT_FAILED["steps"].values():
+        assert "next_step" not in step and "next_steps" not in step
+
+    advice = remediation_fields("config_stale")
+    expected = " ".join(
+        [
+            "Agentic HIL project setup failed; its own committed file changes were rolled back.",
+            "config_path /home/op/.config/agentic-hil/projects/blinky/config.yaml",
+            "agent codex",
+            "scope project",
+            "Steps",
+            "config ok Authoritative config written.",
+            "doctor FAILED The configuration changed under this run.",
+            "error_type config_stale",
+            *[f"{number}. {step}" for number, step in enumerate(advice["remediation"], start=1)],
+            *[f"- do not: {item}" for item in advice["do_not"]],
+            "agent write restriction not reached Agent write restriction was not reached.",
+            "Rollback",
+            "Every file this command had written was put back the way it found it.",
+        ]
+    )
+    assert _reflowed(out) == _reflowed(expected)
