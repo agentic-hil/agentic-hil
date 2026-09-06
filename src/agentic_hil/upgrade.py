@@ -526,6 +526,24 @@ def _not_carried_by_the_reinstall(recorded: _RecordedInstall) -> str:
 _EXACT_PIN_MARKERS = ("is pinned to", "exact version pin")
 _PINNED_AT = re.compile(r"pinned to [`'\"]?([0-9][^`'\"\s,;)]*)")
 
+# The other manager that can hold an installation at one release, and its own
+# wording for it. `pipx pin agentic-hil` records the pin, and every later
+# `pipx upgrade agentic-hil` exits 0, changes nothing and writes one line to
+# stderr: "Not upgrading pinned package agentic-hil. Run `pipx unpin
+# agentic-hil` to unpin it." Measured against pipx 1.17.2, recorded 2026-09-06.
+#
+# Reading uv's two phrases alone is what left a pipx pin with no path to a
+# refusal at all: the run fell through to the already-current answer, reported
+# `ok: true` and exit 0, and offered a private index or an interpreter the newer
+# release does not accept as the explanation. Both are false where a pin is what
+# held the release back, and the fix pipx itself names was nowhere in the answer.
+_PIPX_PIN_MARKERS = ("not upgrading pinned package",)
+# What pipx offers for it, and what no rebuilt install line is needed for: it
+# clears the pin and leaves the installation, its extras and its scope exactly as
+# they are. uv records its pin in the requirement itself, so there is no such
+# command there and only a reinstall clears it.
+_PIPX_UNPIN_COMMAND = "pipx unpin agentic-hil"
+
 # The other half of what the manager says about a run that moved nothing: that
 # its resolution against the index produced no candidate to install. Read out of
 # the same prose as the pin hint above, because `uv tool upgrade` publishes no
@@ -533,6 +551,10 @@ _PINNED_AT = re.compile(r"pinned to [`'\"]?([0-9][^`'\"\s,;)]*)")
 # reported as a block, which is where this started and is the safe direction to
 # fall: it names a pin that may be holding nothing back, rather than passing over
 # one that is.
+#
+# pipx says it in the same sentence that names the pin, because a pinned package
+# is the only reason it declines to move one, so its pin marker counts as this
+# too.
 _NOTHING_TO_UPGRADE = "nothing to upgrade"
 
 
@@ -541,13 +563,47 @@ def _manager_output(install_result: JsonObject) -> str:
 
 
 def _manager_reports_exact_pin(install_result: JsonObject) -> bool:
+    """Whether the manager's own words say a pin is what held this run.
+
+    Both managers that can hold an installation at one release, read out of the
+    prose each writes, because neither publishes a machine-readable report of it.
+    """
     text = _manager_output(install_result).lower()
-    return any(marker in text for marker in _EXACT_PIN_MARKERS)
+    return any(marker in text for marker in (*_EXACT_PIN_MARKERS, *_PIPX_PIN_MARKERS))
 
 
-def _pinned_version(install_result: JsonObject) -> str | None:
+def _manager_installed_nothing(install_result: JsonObject) -> bool:
+    """Whether the manager says its run put no release on this machine.
+
+    uv says `Nothing to upgrade` for it. pipx says it inside the pin sentence
+    itself, which is the whole of what that sentence is: it did not upgrade the
+    package, and the pin is why.
+    """
+    text = _manager_output(install_result).lower()
+    return _NOTHING_TO_UPGRADE in text or any(marker in text for marker in _PIPX_PIN_MARKERS)
+
+
+def _pinned_version(install_result: JsonObject, manager: str, current_version: str) -> str | None:
+    """The release the pin holds this installation at, or None where none is named.
+
+    uv names it in its hint and it is read off there, so a wording this stops
+    being able to read shows up as the refusal it falls to and never as a number
+    invented here.
+
+    pipx names no version, and it does not have to: `pipx pin` holds an
+    installation at whatever it already has, so the release the pin names is the
+    release that is installed. That is read off this process, not out of the
+    manager's words, and it is a fact about this machine either way.
+    """
+    if manager == "pipx":
+        return current_version if _manager_reports_exact_pin(install_result) else None
     match = _PINNED_AT.search(_manager_output(install_result))
     return match.group(1) if match else None
+
+
+def _manager_unpin_command(manager: str) -> str:
+    """The manager's own one-line way to clear a pin, empty where it has none."""
+    return _PIPX_UNPIN_COMMAND if manager == "pipx" else ""
 
 
 def _pin_holds_nothing_back(install_result: JsonObject, current_version: str, manager: str, command: list[str]) -> tuple[bool, JsonObject | None, _CertificateNote]:
@@ -586,9 +642,9 @@ def _pin_holds_nothing_back(install_result: JsonObject, current_version: str, ma
     that reject a pin before the query runs return no resolution and an empty
     note: nothing was asked, so there is nothing to carry.
     """
-    if _NOTHING_TO_UPGRADE not in _manager_output(install_result).lower():
+    if not _manager_installed_nothing(install_result):
         return False, None, _CertificateNote("", {})
-    if _pinned_version(install_result) != current_version:
+    if _pinned_version(install_result, manager, current_version) != current_version:
         return False, None, _CertificateNote("", {})
     currency, resolution, note = _installed_release_is_current(manager, command)
     return currency is True, resolution, note
@@ -651,8 +707,13 @@ def _shell_quoted(value: str) -> str:
     return shlex.quote(value)
 
 
-def _plain_line_would_remove(installed_extras: tuple[str, ...], recorded: _RecordedInstall) -> str:
+def _plain_line_would_remove(manager: str, installed_extras: tuple[str, ...], recorded: _RecordedInstall) -> str:
     """What uv's own hint would take off this installation, in words, or nothing.
+
+    uv's hint and nothing else, so this is empty for every other manager. pipx's
+    own sentence names `pipx unpin`, which clears the pin and takes nothing off
+    the installation, and warning an operator away from a line their manager
+    never printed is a warning about a danger their machine does not have.
 
     The pin refusal already carried `reinstall_command` and `installed_extras`,
     and an operator still ran the bare line uv prints beside them, because
@@ -668,6 +729,8 @@ def _plain_line_would_remove(installed_extras: tuple[str, ...], recorded: _Recor
     pytest", where "they" has one extra to refer back to and "pytest" arrives
     with nothing saying what it is.
     """
+    if manager != "uv":
+        return ""
     losses: list[str] = []
     if installed_extras:
         named = ", ".join(f"[{extra}]" for extra in installed_extras)
@@ -1942,14 +2005,28 @@ def _would_install_nothing(manager: str, command: list[str]) -> tuple[bool, Json
         return False, None, _CertificateNote("", {})
     if answered.returncode != 0:
         return False, resolution, certificates
-    if manager == "pip":
+    return _resolution_installs_nothing(query, answered, resolution), resolution, certificates
+
+
+def _resolution_installs_nothing(query: list[str], answered: subprocess.CompletedProcess[str], resolution: JsonObject) -> bool:
+    """Whether the resolution this query returned would install nothing.
+
+    Read off the query rather than off the manager's name, because what decides
+    the shape of the answer is which command was asked. pip's `--report -` puts
+    its own resolution on stdout as JSON, and `install: []` is pip stating that
+    it would install nothing; `uv pip install --dry-run` publishes no such report
+    and says it in prose instead. A pipx installation is asked through the pip
+    inside the environment pipx manages, so the manager's name and the shape of
+    the answer no longer line up and only the query knows which is which.
+    """
+    if "--report" in query:
         try:
             report = json.loads(answered.stdout)
         except (json.JSONDecodeError, TypeError):
-            return False, resolution, certificates
+            return False
         planned = report.get("install") if isinstance(report, dict) else None
-        return isinstance(planned, list) and not planned, resolution, certificates
-    return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower(), resolution, certificates
+        return isinstance(planned, list) and not planned
+    return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower()
 
 
 def _unpinned_resolution_query(manager: str, command: list[str]) -> list[str] | None:
@@ -1978,13 +2055,23 @@ def _unpinned_resolution_query(manager: str, command: list[str]) -> list[str] | 
     dependency where it is, and a newer Agentic HIL that needs a newer dependency
     still moves both, which is a real upgrade and reads as one.
 
-    None for pipx, whose upgrade path can also carry a pin but which publishes no
-    resolver this can drive without risking the environment it is asking about; a
-    pin it cannot get an independent answer for stays reported as a block, which
-    is the safe direction to fall.
+    A pipx installation is asked the same question through the pip inside the
+    environment pipx manages, which is the pip pipx itself resolves and installs
+    with and is reached as `sys.executable -m pip`. `pipx pin` is pipx's own
+    record and is no constraint inside that environment, so the resolution it
+    returns is the unpinned one this needs, and `--dry-run --report -` keeps it
+    from touching anything. Without it a pipx pin at the newest release the index
+    publishes would be refused as a block, which is the refusal an installation
+    that is exactly where it should be must not get.
+
+    None where neither shape matches, and a query whose answer cannot be read
+    falls to the same place: a pin nobody could get an independent answer for
+    stays reported as a block, which is the safe direction to fall.
     """
     if manager == "uv" and command[1:3] == ["tool", "upgrade"]:
         return [command[0], "pip", "install", "--python", sys.executable, "--upgrade-package", "agentic-hil", "--dry-run", _upgrade_requirement()]
+    if manager == "pipx":
+        return [sys.executable, "-m", "pip", "install", "--upgrade", "--dry-run", "--quiet", "--report", "-", _upgrade_requirement()]
     return None
 
 
@@ -2011,10 +2098,10 @@ def _installed_release_is_current(manager: str, command: list[str]) -> tuple[boo
     Asked through `_manager_run`, so it meets the same one-shot certificate retry
     the install and the pre-flight resolution do: a question that fails the way
     every index request does comes back unreadable and falls to None -- the safe
-    direction -- rather than being read as a currency it could not establish.
-    `_UV_PIP_NO_CHANGES` is the prose `uv pip install --dry-run` prints when the
-    environment already satisfies the newest requirement; a wording that stops
-    matching reads as False, which keeps the pin reported as a block.
+    direction -- rather than being read as a currency it could not establish. The
+    answer is read by `_resolution_installs_nothing`, which reads whichever of the
+    two shapes the query it was given answers in; anything it cannot read is
+    False, which keeps the pin reported as a block.
     """
     query = _unpinned_resolution_query(manager, command)
     if query is None:
@@ -2025,7 +2112,7 @@ def _installed_release_is_current(manager: str, command: list[str]) -> tuple[boo
         return None, None, _CertificateNote("", {})
     if answered.returncode != 0:
         return None, resolution, certificates
-    return _UV_PIP_NO_CHANGES in _manager_output(resolution).lower(), resolution, certificates
+    return _resolution_installs_nothing(query, answered, resolution), resolution, certificates
 
 
 # ---------------------------------------------------------------------------
@@ -2299,7 +2386,7 @@ def _judged_against_the_index(outcome: JsonObject, check: _NewestRelease, manage
             f"`reinstall_command` is the line that records this installation again without it, with "
             f"{_carried_by_the_reinstall(recorded)}; running it is the operator's decision.",
             _not_carried_by_the_reinstall(recorded),
-            _plain_line_would_remove(installed_extras, recorded),
+            _plain_line_would_remove(manager, installed_extras, recorded),
         ),
         **remediation_fields("upgrade_blocked_by_recorded_option"),
     }
@@ -2591,7 +2678,13 @@ def _upgrade_changed_nothing(
         # operator to uv's bare hint and cost them their `--with` packages, and the
         # note branch prints the identical line for the identical purpose.
         installed_extras, recorded, shape = _installation_shape()
-        loss = _plain_line_would_remove(installed_extras, recorded)
+        loss = _plain_line_would_remove(manager, installed_extras, recorded)
+        # The manager's own one-line way past the pin, where it has one. pipx
+        # clears a pin without rebuilding anything, and that is the shortest
+        # thing an operator reading this can do; naming only the reinstall sent
+        # them to record the installation again for a pin `pipx unpin` lifts.
+        unpin = _manager_unpin_command(manager)
+        unpin_sentence = f"`{unpin}` clears the pin on its own and leaves this installation exactly as it is." if unpin else ""
         # The index is asked on the pinned path too, and it decides nothing here.
         # Whether the pin holds a release back is settled by the unpinned
         # `--dry-run` resolution above, which put the question to the index this
@@ -2610,13 +2703,14 @@ def _upgrade_changed_nothing(
                         f"Agentic HIL was not upgraded: {manager} holds this installation at an exact version pin, so it is "
                         f"still {current_version}. Nothing was changed.",
                         _restart_sentence(waiting),
+                        unpin_sentence,
                         f"`reinstall_command` is the line that clears the pin and rebuilds this installation as it "
                         f"stands, with {_carried_by_the_reinstall(recorded)}.",
                         _not_carried_by_the_reinstall(recorded),
                         loss,
                         "Running it is the operator's decision.",
                     ),
-                    "pinned_version": _pinned_version(install_result) or current_version,
+                    "pinned_version": _pinned_version(install_result, manager, current_version) or current_version,
                     # This outcome replaced nothing, exactly like the note below
                     # and the plain already-current answer, so a server started
                     # before it is running whatever was on disk then and is named
@@ -2689,6 +2783,7 @@ def _upgrade_changed_nothing(
         elif check.version:
             sentences.append(_index_agrees_sentence(check, current_version))
         sentences.append(_restart_sentence(waiting))
+        sentences.append(unpin_sentence)
         sentences.append(
             f"`reinstall_command` is the line that clears the pin and rebuilds this installation as it stands, with "
             f"{_carried_by_the_reinstall(recorded)}, for whenever later releases are to be picked up without it."
@@ -2707,7 +2802,9 @@ def _upgrade_changed_nothing(
                 # established is this version. Read off the hint rather than copied
                 # from `version`, so a wording this stops being able to read shows up
                 # as the refusal it falls to and never as a number invented here.
-                "pinned_version": _pinned_version(install_result),
+                # For pipx, which names no version, it is the release the pin holds
+                # this installation at, which is the one that is installed.
+                "pinned_version": _pinned_version(install_result, manager, current_version),
                 **shape,
                 "reinstall_command": reinstall_command,
                 **newest_release,
@@ -2739,10 +2836,22 @@ def _relayed_hint_note(manager: str, reinstall_command: str) -> str:
     indistinguishable from this program's own advice, and then a Do-not bullet
     further down contradicting it. So the block is introduced: whose text it is,
     what following it costs, and which line on this result is the one to run.
+
+    pipx's own sentence is not that, and must not be described as if it were: it
+    names `pipx unpin`, which clears the pin and takes nothing off the
+    installation, so the introduction says that is a line worth running and names
+    the reinstall as the other way to the same place.
     """
+    unpin = _manager_unpin_command(manager)
+    whose = f"The `install` block under Details below carries {manager}'s own output, printed as {manager} wrote it and not as advice from here."
+    if unpin:
+        return (
+            f"{whose} Its own `{unpin}` line clears the pin and leaves this installation, its extras and its scope "
+            f"exactly as they are, and it is the shortest way past this refusal. `reinstall_command` is the other "
+            f"way to it, by recording the installation again without the pin: {reinstall_command}"
+        )
     return (
-        f"The `install` block under Details below carries {manager}'s own output, printed as {manager} wrote it and "
-        f"not as advice from here. Its own `reinstall with` line names the bare distribution, which is the one thing "
+        f"{whose} Its own `reinstall with` line names the bare distribution, which is the one thing "
         f"this refusal exists to talk an operator out of: it drops the extras and any package the receipt records "
         f"beside them. The line to run is `reinstall_command`: {reinstall_command}"
     )
