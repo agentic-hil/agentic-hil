@@ -19,6 +19,7 @@ imports the tools the tier needs.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -264,8 +265,15 @@ def test_a_missing_curl_is_named_by_the_gate(tmp_path: Path) -> None:
 def test_the_image_carries_pyocd_and_curl() -> None:
     """The gate looks for both, so the build has to be what installs them.
 
-    pyOCD from the package index, unpinned like the distribution's own packages
-    for the reason the Dockerfile gives; curl from the distribution.
+    pyOCD from the package index at one pinned version, named the way the same
+    file names `UV_VERSION` and for the same reason: the fixture under
+    tests/fixtures reproduces what pyOCD 0.45.1 printed, a different release may
+    word its refusal differently, and the drift test in the tier should go red
+    on a deliberate bump with a test run behind it, not on a rebuild. The reason
+    the distribution's own packages stay unpinned (the mirror drops superseded
+    versions) does not reach pyOCD: the package index keeps every release. curl
+    from the distribution, because install.sh fetches the pinned Astral
+    installer with it.
     """
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
     commands = [line for line in dockerfile.splitlines() if line.startswith("RUN ")]
@@ -273,5 +281,7 @@ def test_the_image_carries_pyocd_and_curl() -> None:
     apt = next(line for line in commands if "apt-get" in line)
     apt_block = dockerfile[dockerfile.index(apt) :].split("\n\n", 1)[0]
     assert "curl" in apt_block, apt_block
+    pinned = re.search(r"^ARG PYOCD_VERSION=(\d+\.\d+\.\d+)$", dockerfile, re.MULTILINE)
+    assert pinned is not None, "pyocd is not pinned by an ARG the way uv is"
     pip_lines = [line for line in dockerfile.splitlines() if "pip install" in line or line.strip().startswith('"')]
-    assert any("pyocd" in line for line in pip_lines), pip_lines
+    assert any("pyocd==${PYOCD_VERSION}" in line for line in pip_lines), pip_lines

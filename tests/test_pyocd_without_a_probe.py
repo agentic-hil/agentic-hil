@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import write_config
+from conftest import FAKE_GDB, elf_with_symbols, write_config
 
 from agentic_hil.backends.pyocd import PyOCDBackend
 from agentic_hil.config import load_config
@@ -153,7 +153,11 @@ def test_pyocds_own_no_probe_sentences_classify_as_a_missing_probe(tmp_path: Pat
 
     The reset and flash outputs carry a second line about the missing target,
     which the reset and flash buckets would otherwise claim; the sentence about
-    the probe is the one that says where the run stopped.
+    the probe is the one that says where the run stopped. The `[reset_cmd]`
+    line is what `pyocd reset` prints; the backend's `reset_target` runs the
+    commander instead, which prints the sentence alone and exits 0, and the
+    service-level test below carries that real shape. Here the pairing is the
+    harder one for the classifier, a reset-worded line to be outranked.
     """
     backend = PyOCDBackend(config_for(tmp_path))
 
@@ -234,6 +238,79 @@ def test_a_probe_that_vanished_after_its_uid_was_resolved_is_refused_the_same_wa
         assert log["stdout"] == "No connected debug probe matches unique ID 'PYOCD123'\n", log
     assert elapsed_s < CONFIGURED_TIMEOUT_S, elapsed_s
     assert len(written_logs(config)) == 2, [path.name for path in written_logs(config)]
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("debug_symbol_value", {"symbol": "boot_counter"}),
+        ("debug_dump_symbol_ihex", {"symbol": "boot_counter", "output_path": "build/boot_counter.hex"}),
+    ],
+)
+def test_a_sessionless_read_with_no_probe_attached_is_refused_the_same_way(tmp_path: Path, tool: str, arguments: dict) -> None:
+    """The two reads the issue does not name, which share the same connection half.
+
+    `debug_symbol_value` and `debug_dump_symbol_ihex` spawn one `savemem`
+    through the commander with the same `--uid` and `--target` half as the
+    three named tools, so the same wait reached them and the same refusal has
+    to. The symbol is resolved offline first, from the ELF this service is told
+    it flashed, so the spawn is the first thing that can fail.
+    """
+    config = load_config(str(write_config(tmp_path, debugger_type="pyocd", debugger_executable=FAKE_PYOCD_NO_PROBE, target_type="stm32f446re", gdb_executable=FAKE_GDB)))
+    elf_path = tmp_path / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(elf_with_symbols([("boot_counter", 0x20000000, 4)]))
+    service = AgenticHILToolService(config)
+    try:
+        # The ELF a flash would have proven on the target, set the way the
+        # symbol-read suite sets it: a flash through this fixture refuses
+        # before it can prove anything.
+        service._symbol_elf = service.artifacts.validate_local_path("build/app.elf")["artifact"]
+        started = time.perf_counter()
+        result = service.call(tool, arguments)
+        elapsed_s = time.perf_counter() - started
+    finally:
+        service.close()
+
+    assert result["error_type"] != "timeout", result
+    assert_refused_before_contact(result, config)
+    assert result.get("retry_safe") is True, result
+    assert elapsed_s < CONFIGURED_TIMEOUT_S, (elapsed_s, result)
+    log = log_of(config, result)
+    assert "-W" in log["command"].split() or "--no-wait" in log["command"].split(), log["command"]
+    assert log["stdout"] == RECORDED_NO_PROBE, log
+    assert not (tmp_path / "build" / "boot_counter.hex").exists()
+
+
+def test_a_pyocd_that_hangs_despite_the_flag_is_still_a_timeout_with_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour the flag must not move: a probe present and a target that never answers.
+
+    `-W` only stops pyOCD waiting for a probe. A run that found one and then
+    hung on the target is still reaped at `timeout_s`, still reports its
+    hardware state unknown, still asks for a cleanup and still gets the two
+    recovery resets after it, because nothing in that run said where it
+    stopped. Pinned before the change and unchanged by it.
+    """
+    monkeypatch.setenv("AGENTIC_HIL_FAKE_PYOCD_HANGS_DESPITE_NO_WAIT", "1")
+    config = config_for(tmp_path)
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call("reset_target", {"mode": "run"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "timeout", result
+    assert result["side_effect_status"] == "unknown", result
+    assert result["retry_safe"] is False, result
+    assert result["cleanup_required"] is True, result
+    assert result.get("quarantine_id"), result
+    assert result["recovery"]["attempted"] is True, result
+    assert result["recovery"]["outcome"] == "failed", result
+    log = log_of(config, result)
+    assert log["timed_out"] is True, log
+    # The call and the two recovery resets behind it, each reaped in turn.
+    assert len(written_logs(config)) == 3, [path.name for path in written_logs(config)]
 
 
 def test_probe_enumeration_is_spawned_exactly_as_before(tmp_path: Path) -> None:

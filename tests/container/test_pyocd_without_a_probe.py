@@ -111,20 +111,35 @@ def blocking_record_states(config) -> set[str]:
     return {state for state in states if isinstance(state, str)} & {"cleanup_required", "quarantined", "recovery_pending"}
 
 
-def test_the_installed_pyocd_still_refuses_with_the_sentences_the_fixture_recorded() -> None:
+def test_the_installed_pyocd_still_refuses_with_the_sentences_the_fixture_recorded(tmp_path: Path) -> None:
     """The premise of the suite's fixture, held against the pyOCD this image has.
 
-    Three commands, three exit codes, two sentences. A release that rewords the
-    refusal, or starts exiting non-zero from the commander, fails here rather
-    than quietly returning `unknown_debugger_error` on a bench again.
+    The three spawns the backend issues (`commander --command status`,
+    `commander --command reset` and `flash --no-reset`), the `--uid` form of
+    the first, and the `reset` subcommand the recording listed: five commands,
+    two sentences, and the exit codes the fixture reproduces. A release that
+    rewords the refusal, or starts exiting non-zero from the commander, fails
+    here rather than quietly returning `unknown_debugger_error` on a bench
+    again.
     """
     pyocd = real_pyocd()
+    image = tmp_path / "x.elf"
+    image.write_bytes(b"\x7fELFfake")
 
     commander = subprocess.run([pyocd, "commander", "-W", "--command", "status"], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
     assert (commander.stdout, commander.returncode) == (RECORDED_NO_PROBE, 0), commander
 
     by_uid = subprocess.run([pyocd, "commander", "-W", "--uid", "NOSUCHPROBE0001", "--command", "status"], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
     assert (by_uid.stdout, by_uid.returncode) == (RECORDED_NO_PROBE_FOR_UID, 0), by_uid
+
+    # What `reset_target` spawns: the commander, which exits 0 over the sentence.
+    reset_through_the_commander = subprocess.run([pyocd, "commander", "-W", "--command", "reset"], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
+    assert (reset_through_the_commander.stdout, reset_through_the_commander.returncode) == (RECORDED_NO_PROBE, 0), reset_through_the_commander
+
+    # What `flash_firmware` spawns: exit 1, with a second line of its own on stderr.
+    flash = subprocess.run([pyocd, "flash", "-W", "--no-reset", str(image)], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
+    assert (flash.stdout, flash.returncode) == (RECORDED_NO_PROBE, 1), flash
+    assert "No target device available" in flash.stderr, flash
 
     reset = subprocess.run([pyocd, "reset", "-W"], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
     assert (reset.stdout, reset.returncode) == (RECORDED_NO_PROBE, 1), reset

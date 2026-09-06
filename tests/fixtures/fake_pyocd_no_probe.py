@@ -40,6 +40,11 @@ and `flash` exit 1, each with a second line of its own on stderr.
 The probes the `json` enumeration lists come from AGENTIC_HIL_FAKE_PYOCD_PROBES,
 a JSON list of unique ids, so a test can have enumeration find a probe that the
 connect afterwards cannot: a probe unplugged between the two calls.
+
+AGENTIC_HIL_FAKE_PYOCD_HANGS_DESPITE_NO_WAIT is the other bench: a probe that is
+there and a target that never answers. With it set the fixture prints nothing
+and never exits, `-W` or not, which is what a stuck core looks like from the
+backend and what its timeout exists for.
 """
 
 from __future__ import annotations
@@ -81,6 +86,10 @@ def main() -> int:
             return 2
         print("unsafe probe discovery arguments", file=sys.stderr)
         return 2
+    if os.environ.get("AGENTIC_HIL_FAKE_PYOCD_HANGS_DESPITE_NO_WAIT") == "1":
+        # A probe found and a target that never answers: no sentence, no exit.
+        time.sleep(300)
+        return 0
     if not any(flag in args for flag in NO_WAIT_FLAGS):
         # What 0.45.1 does with no `-W`: says so once and polls for a probe
         # until somebody ends the process. Long enough that only the backend's
