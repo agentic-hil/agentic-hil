@@ -583,6 +583,23 @@ class PtyPair:
                 stream.close()
 
 
+def coordination_record_states(state_root: str | Path) -> list[str]:
+    """Every coordination record a run left behind, by state, in file order.
+
+    Every record rather than only the blocking ones, and a list rather than a
+    set. Filtering for ``cleanup_required``, ``quarantined`` and
+    ``recovery_pending`` answers the empty set both when a run released
+    everything and when a run wrote no record at all, so a check written over
+    the filtered answer holds whatever happened and can never go red. What a
+    caller wants to say is that the records are there and that all of them say
+    ``released``, and both halves of that can.
+    """
+    records = Path(state_root) / "coordination" / "records"
+    if not records.is_dir():
+        return []
+    return [str(json.loads(path.read_text(encoding="utf-8")).get("state")) for path in sorted(records.glob("*.json"))]
+
+
 def _wait_until(condition: Callable[[], bool], timeout_s: float, what: str, process: subprocess.Popen[bytes] | None = None) -> None:
     deadline = time.monotonic() + timeout_s
     while not condition():

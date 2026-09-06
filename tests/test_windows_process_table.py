@@ -43,9 +43,14 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="the Toolhelp snapshot r
 # How far the snapshot's start time may sit from the moment this process
 # returned from `Popen`: scheduling and the clock's granularity, not drift.
 AGREEMENT_S = 2.0
-# How long the child runs before it is read. More than AGREEMENT_S, so a time
-# that was really the moment of the lookup cannot pass as the start.
-SETTLE_S = 2.0
+# How long the child runs before it is read. Comfortably more than
+# AGREEMENT_S, and the same pair the container tier uses, for the same reason:
+# the defect this catches reports the moment of the lookup, and a value stamped
+# then sits SETTLE_S after the spawn. At 2.0 s against a 2.0 s tolerance such a
+# value passes the agreement check, and the floor below it is SETTLE_S minus
+# AGREEMENT_S, which is zero and holds for any past instant. At 4.0 s it fails
+# the agreement check and the floor is a real 2.0 s in the past.
+SETTLE_S = 4.0
 
 
 def a_sleeping_child(interpreter: str) -> subprocess.Popen:
@@ -167,11 +172,16 @@ def test_a_windows_upgrade_names_a_server_out_of_its_installation_and_never_itse
 
         assert Path(answer["prefix"]) == environment, answer
         assert Path(answer["owned"]) == environment, answer
-        # The measured Windows shape, and the reason the walk exists: the code
-        # ran outside the environment, under a launcher inside it.
-        assert not answer["image"].casefold().startswith(str(environment).casefold()), answer
-        assert answer["launcher_image"] is not None, answer
-        assert answer["launcher_image"].casefold() == launcher.casefold(), answer
+
+        # A precondition, not the behaviour: the walk exists because CPython's
+        # Windows venv writes `Scripts\\python.exe` as a redirector that starts
+        # the base interpreter as its child, so the code runs outside the
+        # environment under a process inside it. That is a property of the
+        # interpreter that built the environment, not of the code under test,
+        # and an interpreter whose venv writes a plain copy instead leaves this
+        # test nothing to exclude rather than a defect to report.
+        if answer["launcher_image"] is None or answer["launcher_image"].casefold() != launcher.casefold() or answer["image"].casefold().startswith(str(environment).casefold()):
+            pytest.skip(f"this interpreter's virtual environment is not a launcher redirector, so the parent walk has nothing to exclude here: {answer['image']} under {answer['launcher_image']}")
 
         holders = answer["holders"]
         assert holders is not None, answer

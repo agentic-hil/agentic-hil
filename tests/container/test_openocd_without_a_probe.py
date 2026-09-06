@@ -27,8 +27,13 @@ import sys
 from pathlib import Path
 
 import pytest
+from fixtures.fake_openocd_no_probe import (
+    RECORDED_NO_PROBE_RETURNCODE,
+    RECORDED_NO_PROBE_STDERR,
+    THE_LINE_THE_CLASSIFIER_READS,
+)
 
-from .conftest import COMMAND_TIMEOUT_S, CONTAINER_ONLY, fixture_configuration
+from .conftest import COMMAND_TIMEOUT_S, CONTAINER_ONLY, coordination_record_states, fixture_configuration
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
 
@@ -149,10 +154,11 @@ def test_doctor_accepts_a_bound_configuration_whose_openocd_is_installed(tmp_pat
 # the abort-point proof is withheld, the lease quarantines and the operator is
 # sent to `recover` over a bench nothing touched.
 
-# OpenOCD 0.12.0, 2026-09-06, in this image, with nothing on USB. The unit
-# tier's fake (tests/fixtures/fake_openocd_no_probe.py) prints this recording
-# verbatim, so the two tiers are held to one transcript.
-RECORDED_OPEN_FAILED = "Error: open failed"
+# The recording lives in the fake the unit tier runs, and is imported here
+# rather than restated, so the two tiers are held to one transcript and a one
+# sided edit of either is a failure rather than a silent divergence.
+# OpenOCD 0.12.0, 2026-09-06, in this image, with nothing on USB.
+#
 # A libusb refusal is not recordable here: the container has no USB bus, so
 # libusb has nothing to refuse and the transcript carries the open failure
 # alone. On a host without a udev rule the same run prints
@@ -174,20 +180,19 @@ def effectful_project(tmp_path: Path) -> tuple[Path, Path]:
     return project, config
 
 
-def blocking_record_states(config) -> set[str]:
-    records = Path(config.state_root) / "coordination" / "records"
-    if not records.is_dir():
-        return set()
-    states = {json.loads(path.read_text(encoding="utf-8")).get("state") for path in records.glob("*.json")}
-    return {state for state in states if isinstance(state, str)} & {"cleanup_required", "quarantined", "recovery_pending"}
+STALE_RECORDING = "the recording in tests/fixtures/fake_openocd_no_probe.py is stale: take it again from this image and note the version and the date"
 
 
 def test_the_installed_openocd_refuses_a_missing_probe_before_init_with_the_recorded_line() -> None:
     """The premise: what this OpenOCD prints with no probe, and where it stops.
 
-    The stage marker is asked for after `init` the way the backend asks for it,
-    and it must not print: the refusal is OpenOCD's own, before any target was
-    addressed, which is what lets the backend say the board was never touched.
+    The whole transcript, not only the classified line, because the fake the
+    unit tier runs prints this recording and nothing else asserts the two are
+    the same text: an edit to either side is caught here, with the message
+    naming the file to re record. The stage marker is asked for after `init`
+    the way the backend asks for it, and it must not print: the refusal is
+    OpenOCD's own, before any target was addressed, which is what lets the
+    backend say the board was never touched.
     """
     from agentic_hil.backends.openocd import OPENOCD_INIT_STAGE_MARKER
 
@@ -199,10 +204,10 @@ def test_the_installed_openocd_refuses_a_missing_probe_before_init_with_the_reco
         check=False,
     )
 
-    assert refused.returncode == 1, refused
-    assert RECORDED_OPEN_FAILED in refused.stderr.splitlines(), refused.stderr
+    assert refused.returncode == RECORDED_NO_PROBE_RETURNCODE, refused
+    assert refused.stderr == RECORDED_NO_PROBE_STDERR, STALE_RECORDING
+    assert THE_LINE_THE_CLASSIFIER_READS in refused.stderr.splitlines(), refused.stderr
     assert OPENOCD_INIT_STAGE_MARKER not in refused.stdout + refused.stderr, refused
-    assert "Open On-Chip Debugger 0.12.0" in refused.stderr, refused.stderr
 
 
 @pytest.mark.parametrize(("tool", "arguments"), THE_THREE_TOOLS)
@@ -236,15 +241,17 @@ def test_a_tool_with_no_probe_attached_is_adapter_not_found_and_never_contacted(
     assert result.get("cleanup_required") is not True, json.dumps(result)
     assert result.get("quarantine_id") is None, json.dumps(result)
     assert result.get("quarantined") is not True, json.dumps(result)
-    assert not blocking_record_states(config), blocking_record_states(config)
-    assert RECORDED_OPEN_FAILED in result["programmer_output"]["stderr"].splitlines(), result["programmer_output"]
+    states = coordination_record_states(config.state_root)
+    assert states, "the run wrote no coordination record at all, so nothing here says a lease was taken and given back"
+    assert set(states) == {"released"}, states
+    assert THE_LINE_THE_CLASSIFIER_READS in result["programmer_output"]["stderr"].splitlines(), result["programmer_output"]
     assert result["programmer_output"]["returncode"] == 1, result["programmer_output"]
     assert any("Connect the probe" in step for step in result["remediation"]), result["remediation"]
     assert not any("recover" in step.lower() for step in result["remediation"]), result["remediation"]
     log = json.loads((project / result["log_path"]).read_text(encoding="utf-8"))
     assert log["returncode"] == 1, log
     assert log["timed_out"] is False, log
-    assert RECORDED_OPEN_FAILED in log["stderr"].splitlines(), log
+    assert THE_LINE_THE_CLASSIFIER_READS in log["stderr"].splitlines(), log
 
 
 def test_the_console_script_shows_the_operator_the_line_and_the_remedy(tmp_path: Path) -> None:
@@ -265,7 +272,7 @@ def test_the_console_script_shows_the_operator_the_line_and_the_remedy(tmp_path:
 
     assert rendered.returncode == 1, rendered.stdout + rendered.stderr
     assert rendered.stdout.startswith("Failed: adapter_not_found"), rendered.stdout
-    assert RECORDED_OPEN_FAILED in rendered.stdout, rendered.stdout
+    assert THE_LINE_THE_CLASSIFIER_READS in rendered.stdout, rendered.stdout
     assert re.search(r"target_contacted\s+no\b", rendered.stdout), rendered.stdout
     assert re.search(r"quarantined\s+no\b", rendered.stdout), rendered.stdout
     assert re.search(r"hardware_state\s+unchanged\b", rendered.stdout), rendered.stdout
@@ -282,4 +289,4 @@ def test_the_console_script_shows_the_operator_the_line_and_the_remedy(tmp_path:
     assert step["target_contacted"] is False, step
     assert step["hardware_state"] == "unchanged", step
     assert step["quarantined"] is False, step
-    assert RECORDED_OPEN_FAILED in step["programmer_output"]["stderr"].splitlines(), step["programmer_output"]
+    assert THE_LINE_THE_CLASSIFIER_READS in step["programmer_output"]["stderr"].splitlines(), step["programmer_output"]

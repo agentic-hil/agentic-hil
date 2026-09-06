@@ -26,7 +26,7 @@ import pytest
 from agentic_hil.config import load_config
 from agentic_hil.tools import AgenticHILToolService
 
-from .conftest import COMMAND_TIMEOUT_S, CONTAINER_ONLY
+from .conftest import COMMAND_TIMEOUT_S, CONTAINER_ONLY, coordination_record_states
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
 
@@ -103,14 +103,6 @@ logs:
     return config_path
 
 
-def blocking_record_states(config) -> set[str]:
-    records = Path(config.state_root) / "coordination" / "records"
-    if not records.is_dir():
-        return set()
-    states = {json.loads(path.read_text(encoding="utf-8")).get("state") for path in records.glob("*.json")}
-    return {state for state in states if isinstance(state, str)} & {"cleanup_required", "quarantined", "recovery_pending"}
-
-
 def test_the_installed_pyocd_still_refuses_with_the_sentences_the_fixture_recorded(tmp_path: Path) -> None:
     """The premise of the suite's fixture, held against the pyOCD this image has.
 
@@ -183,7 +175,9 @@ def test_a_tool_with_no_probe_attached_refuses_promptly_against_the_real_pyocd(t
     assert result["hardware_state"] == "unchanged", result
     assert result.get("cleanup_required") is not True, result
     assert result.get("quarantine_id") is None, result
-    assert not blocking_record_states(config), blocking_record_states(config)
+    states = coordination_record_states(config.state_root)
+    assert states, "the run wrote no coordination record at all, so nothing here says a lease was taken and given back"
+    assert set(states) == {"released"}, states
     assert elapsed_s < TIMEOUT_S / 2, (elapsed_s, result)
     log = json.loads((project / result["log_path"]).read_text(encoding="utf-8"))
     assert log["timed_out"] is False, log
@@ -195,14 +189,17 @@ def test_a_tool_with_no_probe_attached_refuses_promptly_against_the_real_pyocd(t
 # #509: the wording behind `target_type_invalid`, on the one leg that has pyOCD.
 #
 # tests/test_pyocd_unknown_target_phrases.py holds the classifier's two markers
-# against the installed pyOCD's own refusal, and it `importorskip`s pyOCD: the
-# hosted matrix installs requirements/dev.txt, which pins no pyocd, and the
-# job that runs this tier runs only tests/container. So the one place the
-# suite had a real pyOCD never asked it, and the markers were pinned only by a
-# fixture sentence typed from memory of 0.45.1. The `target_type_invalid`
-# classification is the only thing that unlocks the `pyocd pack find` /
-# `pyocd pack install` remediation; an earlier phrase list matched nothing
-# pyOCD printed and every such failure fell to `unknown_debugger_error`.
+# against the installed pyOCD's own refusal, and it `importorskip`s pyOCD, so
+# the hosted matrix has to install the extra for those markers to be pinned
+# anywhere the matrix runs. What that file cannot say is what the sentence was
+# when the fixture was written: it asserts the markers, not the words. That is
+# what belongs here, where a real pyOCD is guaranteed, and it is the only thing
+# added, because a second copy of the markers would be a second copy of a fact
+# that has one owner. The refusal itself is made by that file's helper, imported
+# rather than restated for the same reason. The `target_type_invalid`
+# classification is what unlocks the `pyocd pack find` / `pyocd pack install`
+# remediation; an earlier phrase list matched nothing pyOCD printed and every
+# such failure fell to `unknown_debugger_error`.
 
 # Not a plausible near-miss of a real part: unresolvable on any host, including
 # one whose CMSIS-pack cache is full of vendor targets.
@@ -215,47 +212,29 @@ RECORDED_UNKNOWN_TARGET = (
     "available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional "
     "target support."
 )
+STALE_RECORDING = "the sentence in tests/fixtures/fake_pyocd_unknown_target.py is stale: take it again from this image and note the version and the date"
 
 
-def the_installed_pyocds_refusal(target_type: str = UNRESOLVABLE_TARGET_TYPE) -> str:
-    """What this image's pyOCD says about a target type it cannot resolve, with no probe.
+def test_the_installed_pyocd_refuses_an_unknown_target_with_the_sentence_the_fixture_reproduces(tmp_path: Path) -> None:
+    """The words, the fixture's copy of them, and what the classifier makes of them.
 
-    pyOCD's command line reaches for a probe before it resolves the type, so the
-    sentence is made the way the unit tier makes it: through the documented
-    options-container session and the `Board` that raises, with the probe
-    `None` throughout.
-    """
-    from pyocd.board.board import Board
-    from pyocd.core.exceptions import TargetSupportError
-    from pyocd.core.session import Session
-
-    session = Session(None, no_config=True, project_dir=".", target_override=target_type)
-    assert session.probe is None
-    with pytest.raises(TargetSupportError) as raised:
-        Board(session)
-    return str(raised.value)
-
-
-def test_the_installed_pyocd_refuses_an_unknown_target_with_the_words_the_classifier_reads(tmp_path: Path) -> None:
-    """The markers, the classification and the fixture, all held against pyOCD's own sentence.
-
-    Named separately so a failure says which died: either marker alone
-    classifies, so losing one is not yet the regression, but it is the drift
-    that preceded it last time. The unit fixture's sentence is the third
-    check: the fake the matrix runs has to say what the tool says.
+    The markers themselves belong to tests/test_pyocd_unknown_target_phrases.py,
+    which the hosted matrix runs against a real pyOCD; the helper that produces
+    the refusal is that file's, imported here so the two tiers ask the tool the
+    same question. What is added here is the recording: the sentence as it read
+    when the unit fake was written, so a reworded release is a failure that
+    names the file to re record rather than a fake drifting away from the tool
+    it stands in for.
     """
     from fixtures.fake_pyocd_unknown_target import TARGET_NOT_RECOGNIZED
+    from test_pyocd_unknown_target_phrases import real_pyocd_refusal
 
-    from agentic_hil.backends.pyocd import TARGET_TYPE_INVALID_DOC, PyOCDBackend
+    from agentic_hil.backends.pyocd import PyOCDBackend
 
-    message = the_installed_pyocds_refusal()
-    lower = message.lower()
+    message = real_pyocd_refusal(UNRESOLVABLE_TARGET_TYPE)
 
-    assert message == RECORDED_UNKNOWN_TARGET, message
-    assert "target type" in lower, message
-    assert "not recognized" in lower, message
-    assert TARGET_TYPE_INVALID_DOC in lower, message
-    assert TARGET_NOT_RECOGNIZED.format(target=UNRESOLVABLE_TARGET_TYPE) == f"0001042 C {message} [__main__]", TARGET_NOT_RECOGNIZED
+    assert message == RECORDED_UNKNOWN_TARGET, STALE_RECORDING
+    assert TARGET_NOT_RECOGNIZED.format(target=UNRESOLVABLE_TARGET_TYPE) == f"0001042 C {message} [__main__]", STALE_RECORDING
 
     project = tmp_path / "project"
     project.mkdir()
