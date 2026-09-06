@@ -90,7 +90,7 @@ def assert_refused_before_contact(result: dict, config) -> None:
     assert result["side_effect_status"] == "not_started", result
     assert result["hardware_state"] == "unchanged", result
     assert result.get("cleanup_required") is not True, result
-    assert "quarantine_id" not in result, result
+    assert result.get("quarantine_id") is None, result
     assert result.get("quarantined") is not True, result
     assert not blocking_record_states(config), blocking_record_states(config)
 

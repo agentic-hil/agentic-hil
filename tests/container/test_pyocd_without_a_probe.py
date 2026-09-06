@@ -182,7 +182,7 @@ def test_a_tool_with_no_probe_attached_refuses_promptly_against_the_real_pyocd(t
     assert result["side_effect_status"] == "not_started", result
     assert result["hardware_state"] == "unchanged", result
     assert result.get("cleanup_required") is not True, result
-    assert "quarantine_id" not in result, result
+    assert result.get("quarantine_id") is None, result
     assert not blocking_record_states(config), blocking_record_states(config)
     assert elapsed_s < TIMEOUT_S / 2, (elapsed_s, result)
     log = json.loads((project / result["log_path"]).read_text(encoding="utf-8"))

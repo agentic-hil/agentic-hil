@@ -69,6 +69,10 @@ def listed_probes() -> list[str]:
 
 
 def main() -> int:
+    # The recording's bytes on every platform: a line feed after each line, not
+    # the carriage return and line feed a Windows text stream would substitute.
+    sys.stdout.reconfigure(newline="\n")
+    sys.stderr.reconfigure(newline="\n")
     args = sys.argv[1:]
     if "--version" in args:
         print(PYOCD_VERSION)
