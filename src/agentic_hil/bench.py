@@ -326,6 +326,17 @@ class BenchMutex:
         self._root = root
         self._held: dict[str, _HeldDevice] = {}
         self._guard = threading.RLock()
+        # The holder's own clock. A record was refreshed at each acquire and
+        # never between them, so a run inside a long step (a delay, an expect
+        # waiting out its timeout, a repeat block) took no lease for minutes and
+        # read to a contender as a hung process once its last write aged past the
+        # window. The hold is true for as long as this process holds the OS lock,
+        # and the record has to say so for exactly that long: a thread refreshes
+        # every held device on `HEARTBEAT_INTERVAL_S`, started with the first
+        # hold and stopped with the last release. Best effort like `heartbeat`
+        # itself: a refresh that cannot land drops nothing.
+        self._pump: threading.Thread | None = None
+        self._pump_stop = threading.Event()
 
     @property
     def root(self) -> Path:
@@ -393,6 +404,33 @@ class BenchMutex:
                 held = self._held[resource]
                 held.holders = 1
                 self._drop(resource)
+            self._stop_heartbeat_pump()
+
+    def _ensure_heartbeat_pump(self) -> None:
+        """Start the refresh thread if it is not running. Called under `_guard`
+        once a device is held; a thread that did not survive a fork is started
+        again by the first hold the child takes."""
+        if self._pump is not None and self._pump.is_alive():
+            return
+        self._pump_stop = threading.Event()
+        self._pump = threading.Thread(target=self._pump_heartbeats, args=(self._pump_stop,), name="agentic-hil-heartbeat", daemon=True)
+        self._pump.start()
+
+    def _pump_heartbeats(self, stop: threading.Event) -> None:
+        # The interval is read on every wait rather than once, so the value a
+        # record promises (`_write_holder` reads the same name) is the one the
+        # refresh keeps to.
+        while not stop.wait(HEARTBEAT_INTERVAL_S):
+            self.heartbeat()
+
+    def _stop_heartbeat_pump(self) -> None:
+        """Called under `_guard`. The thread is only signalled, never joined: it
+        takes `_guard` for its own refresh, and a join under it would wait on a
+        thread waiting on us."""
+        if self._pump is None:
+            return
+        self._pump_stop.set()
+        self._pump = None
 
     def heartbeat(self) -> None:
         """Refresh every held device's record so a stranger can age the hold.
@@ -468,6 +506,7 @@ class BenchMutex:
         # the ability to name us to a contender is lost.
         with suppress(ConfigError, OSError):
             self._write_holder(resource, "held")
+        self._ensure_heartbeat_pump()
         return True
 
     def _drop(self, resource: str) -> None:
@@ -481,6 +520,8 @@ class BenchMutex:
             self._write_holder(resource, "released", released=True)
         self._held.pop(resource, None)
         held.lock.release()
+        if not self._held:
+            self._stop_heartbeat_pump()
 
     def _holder_path(self, resource: str) -> Path:
         return self.root / f"{resource_digest(resource)}.holder.json"
