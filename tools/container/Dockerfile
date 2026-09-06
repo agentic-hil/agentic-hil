@@ -20,7 +20,14 @@
 # Build and run it from the repository root:
 #
 #     DOCKER_BUILDKIT=1 docker build -f tools/container/Dockerfile -t agentic-hil-container-tests .
-#     docker run --rm agentic-hil-container-tests
+#     docker run --rm --cap-add NET_ADMIN agentic-hil-container-tests
+#
+# NET_ADMIN is for the CAN tests, which create a virtual CAN interface inside
+# the container and bind the product's SocketCAN transport to it; the host
+# kernel has to carry the `vcan` module (`modprobe vcan`). The serial tests
+# need only what a container has by default: the devpts socat allocates its
+# pseudo-terminal pair from, and root inside the container, which two of them
+# use to drop a server to `nobody` through `setpriv`.
 #
 # The run needs the network. uv resolves this distribution's dependencies from
 # the package index, and one test reads the release index over HTTPS to check

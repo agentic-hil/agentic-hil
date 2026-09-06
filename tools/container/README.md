@@ -43,8 +43,16 @@ From the repository root:
 
 ```
 DOCKER_BUILDKIT=1 docker build -f tools/container/Dockerfile -t agentic-hil-container-tests .
-docker run --rm agentic-hil-container-tests
+docker run --rm --cap-add NET_ADMIN agentic-hil-container-tests
 ```
+
+The serial tests need nothing on that line. `socat` allocates their
+pseudo-terminal pair from the devpts Docker mounts by default, and the tests
+run as root inside the container, which two of them use to start a server as
+`nobody` through `setpriv` and read what the kernel answers a user who cannot
+open the device or append to the session's log. A container started with a
+user other than root skips those two, naming that reason, and the job that
+runs this tier reads the skip as a failure.
 
 `DOCKER_BUILDKIT=1` is not decoration. This build's ignore file is
 `Dockerfile.dockerignore`, which sits beside the Dockerfile, and only BuildKit
@@ -124,6 +132,8 @@ runs it on every pull request, and it is one of the jobs `Required CI` insists
 on. The job writes a JUnit report out of the container and fails when nothing
 ran, when anything was skipped or when anything errored, because a tier whose
 gate turned every test into a skip exits 0 and is otherwise indistinguishable
-from a tier that passed. Measured cold, with no layer cache and the base image
-pulled, the build takes 28 seconds and the tests 15, so the job is about three
-quarters of a minute of work.
+from a tier that passed. Measured cold, with no layer cache, the build takes
+about two minutes, most of it apt and the locked dependency set over the
+network, and the 63 tests take 78 seconds, the serial tests over the
+pseudo-terminal pair being the larger half because they wait out the read and
+write timeouts they prove; the job is about three and a half minutes of work.
