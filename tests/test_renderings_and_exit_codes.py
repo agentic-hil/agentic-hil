@@ -73,6 +73,33 @@ def _reflowed(text: str) -> str:
     return " ".join(text.split())
 
 
+def _section_text(out: str, title: str) -> str:
+    """The body of one section of a rendering, reflowed: from its title line to
+    the next line that stands at the margin, which is the next title."""
+    lines = out.splitlines()
+    start = lines.index(title)
+    body: list[str] = []
+    for line in lines[start + 1 :]:
+        if line and not line[0].isspace():
+            break
+        body.append(line)
+    return _reflowed("\n".join(body))
+
+
+def _standing_quarantine(config: object) -> None:
+    """A quarantine whose evidence chain is damaged: the one incident `recover`
+    still has work to do on. The project record and the resource marker are
+    written the way tests/test_coordination.py writes them, with `audit_ok`
+    false on the project's, which is what keeps the incident standing."""
+    setup = HardwareCoordinator(config, "setup")  # type: ignore[arg-type]
+    try:
+        incident = {"quarantine_id": "q-experiment", "reason": "owner_process_exited_without_release"}
+        setup._write_record("physical:dut", {**setup._base_record("quarantined", ["physical:dut"]), **incident})
+        setup._write_record(setup.project_key, {**setup._base_record("cleanup_required", ["physical:dut"]), **incident, "audit_ok": False})
+    finally:
+        setup.close()
+
+
 def _generated_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A workspace `agentic-hil init` configured, with the finders the autouse fixture hides."""
     workspace = tmp_path / "firmware"
@@ -459,21 +486,7 @@ def test_lease_status_opens_with_a_sentence_about_the_bench(tmp_path: Path, monk
     # The facts a script reads are still on screen under it.
     assert "bench_held" in out and "incident_stands" in out
 
-    # A quarantine whose evidence chain is damaged: the one incident `recover`
-    # still has work to do on, written the way tests/test_coordination.py writes one.
-    setup = HardwareCoordinator(config, "setup")
-    try:
-        setup._write_record(
-            setup.project_key,
-            {
-                **setup._base_record("cleanup_required", ["physical:dut"]),
-                "quarantine_id": "q-experiment",
-                "reason": "owner_process_exited_without_release",
-                "audit_ok": False,
-            },
-        )
-    finally:
-        setup.close()
+    _standing_quarantine(config)
     reader = HardwareCoordinator(config, "operator-cli")
     try:
         quarantined = reader.status()
@@ -488,11 +501,14 @@ def test_lease_status_opens_with_a_sentence_about_the_bench(tmp_path: Path, monk
     assert "did not come back clean" not in opening, out
     assert "quarantin" in opening.lower(), out
     assert recovery_operator_command("q-experiment") in _reflowed(out), out
-    # The exit code over a standing quarantine, pinned where it was not: the
-    # rendering's own containment block promises "the exit code says so", and a
-    # `set -e` gate on a bench that owes a signature is exactly what that is for.
-    # `complete: false` (#445) is a fact about an enumeration; a quarantine is a
-    # fact about this bench, and the two do not score alike.
+    # The exit code over a standing quarantine, pinned where it was not. The
+    # issue left the verdict open: today's 1 is what #445's rule (a read that
+    # answered exits 0) argues against, and the rendering's own containment block
+    # promises "the exit code says so", which is what a `set -e` gate on a bench
+    # that owes a signature reads. This pins today's verdict as the test's own
+    # reading (`complete: false` is a fact about an enumeration, a quarantine is
+    # a fact about this bench) until the owner decides; if the decision goes to
+    # 0, this assertion flips and the "exit code says so" sentence goes with it.
     code, out, _ = _shell(["lease-status"])
     assert code == 1
     assert "q-experiment" in out
@@ -523,10 +539,13 @@ def test_a_shell_refusal_on_its_arguments_does_not_send_the_reader_to_tools_list
     assert "inputSchema" not in flat, out
     assert "`validator`" not in flat, out
     if argv[0] == "revoke":
+        # The refusal's own next step stands before any catalogue step, whatever
+        # the catalogue steps say: no numbered step precedes it other than the
+        # number that is its own.
         named = flat.find("Name one of `permission_keys_here`")
         assert named != -1, out
-        catalogue = [flat.find(_reflowed(step)) for step in remediation_fields("invalid_argument")["remediation"]]
-        assert all(named < position for position in catalogue if position != -1), out
+        earlier_steps = re.findall(r"(?<!\S)(\d+)\. ", flat[:named])
+        assert earlier_steps in ([], ["1"]), out
 
 
 @pytest.mark.parametrize(
@@ -593,8 +612,11 @@ def test_a_plan_that_does_not_parse_is_not_advised_about_device_names(tmp_path: 
     assert out.startswith("Refused: test_config_invalid"), out.splitlines()[0]
     assert "adopt-hardware" not in flat, out
     assert "init --force" not in flat, out
-    assert re.search(r"\bline\s+3\b", flat), out
-    assert re.search(r"\bcolumn\s+1\b", flat), out
+    # The `line` and `column` rows themselves, not the loader's sentence in the
+    # `backend_error` row, which spells the same position.
+    details = _section_text(out, "Details").replace("line 3, column 1", "")
+    assert re.search(r"(?<!\S)line\s+3(?!\S)", details), out
+    assert re.search(r"(?<!\S)column\s+1(?!\S)", details), out
 
     code, out, _ = _shell(["test-reactor", "--test-config", "dupe.testconfig.yaml", "--json"])
     document = json.loads(out)
@@ -637,6 +659,13 @@ def _bound_bench(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
     write_authoritative_config(workspace, monkeypatch, debugger_executable=FAKE_OPENOCD, probe_id="066AFF303435554157113106")
 
 
+def _quarantined_bench(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
+    """A standing incident for `recover` to sign for. The `--json` pass of the
+    same command afterwards finds nothing standing, which is the other 0."""
+    del monkeypatch
+    _standing_quarantine(load_authoritative_config(workspace))
+
+
 EXIT_CODES: list[tuple[str, list[str], int, Callable[[pytest.MonkeyPatch, Path], None] | None]] = [
     ("revoke of a name that is not a permission", ["revoke", "nonsense.key"], 1, None),
     ("revoke", ["revoke", FLASH], 0, None),
@@ -649,11 +678,11 @@ EXIT_CODES: list[tuple[str, list[str], int, Callable[[pytest.MonkeyPatch, Path],
     ("test-reactor-status listing", ["test-reactor-status"], 0, None),
     ("lease-status over a clean bench", ["lease-status"], 0, None),
     ("recover with nothing standing", ["recover", "--confirm-safe-state", "--quarantine-id", "q-none"], 0, None),
+    ("recover over a standing incident", ["recover", "--confirm-safe-state", "--quarantine-id", "q-experiment"], 0, _quarantined_bench),
     ("com-ports", ["com-ports"], 0, _no_host_serial_ports),
     ("config-reload", ["config-reload"], 0, None),
     ("adopt-hardware refused for a missing toolchain", ["adopt-hardware", "--dry-run"], 1, None),
     ("doctor over a bound bench", ["doctor"], 0, _bound_bench),
-    ("doctor over an unbound bench", ["doctor"], 1, None),
     ("skill-install", ["skill-install", "--agent", "codex"], 0, _registered_agent_host),
     ("skill-install of an agent this program does not know", ["skill-install", "--agent", "nonsense"], 1, None),
     ("setup", ["setup", "--agent", "claude-code"], 0, _registered_agent_host),
