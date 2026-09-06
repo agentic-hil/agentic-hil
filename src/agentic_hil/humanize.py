@@ -966,12 +966,47 @@ def _step_verdict(step: Mapping[str, object]) -> str:
     return "not reached" if skipped else "FAILED"
 
 
+# The one field of a step that is printed as a body under it, by name. The
+# refusal `init --force` raises over an open run carries the holds it found
+# here, and its own next step tells the reader that `open_holds` "here" names
+# the holder; a rendering that printed the sentence and not the field sent the
+# reader to a place that was not on the screen (#486). Named rather than
+# "every member of the step that is not a scalar", because the steps the other
+# renderers build (an agent install, an upgrade's integrations, an uninstall's
+# leftovers) carry bodies that are accounted for elsewhere on their screens.
+_STEP_BODY_KEY = "open_holds"
+
+
+def _step_carries(step: Mapping[str, object], indent: str) -> list[str]:
+    """What a step was given beyond its summary, its error type and the catalogue.
+
+    The `next_steps` `init` and `setup` put on their config step are the whole
+    of what the operator is asked to do next: the placeholder remedy, the review
+    line, the ports that were seen, `agentic-hil doctor`. They rode the step
+    into `--json` and no further (#486). The same rule as `_tail` has for the
+    top level and `_result_body` has for a nested result, one level in: the
+    holds first, because they are facts, then the numbered list, then the one
+    sentence, and the catalogue's advice stands under all of it as before.
+    """
+    lines: list[str] = []
+    holds = step.get(_STEP_BODY_KEY)
+    if isinstance(holds, Mapping) and holds:
+        lines.extend(_member_lines(_STEP_BODY_KEY, holds, indent))
+    lines.extend(_numbered(_strings(step.get("next_steps")), indent=indent))
+    next_step = step.get("next_step")
+    if isinstance(next_step, str) and next_step.strip():
+        lines.extend(_wrap(next_step, indent=indent))
+    return lines
+
+
 def _steps_block(steps: Mapping[str, object]) -> list[str]:
-    """One line per step, plus the failure detail of any step that failed.
+    """One line per step, plus what the step carries under it.
 
     The step name and its verdict are aligned so a person reads the column and
     stops at the one that is not `ok`; the summary follows on the same line and
-    wraps under it.
+    wraps under it. Under that, at the same indent, the step's error type, the
+    next steps and the holds it carries, and the catalogue's advice for its
+    error type; a step that carries none of those gets the one line.
     """
     rows = [(name, dict(value)) for name, value in steps.items() if isinstance(value, Mapping)]
     if not rows:
@@ -983,10 +1018,12 @@ def _steps_block(steps: Mapping[str, object]) -> list[str]:
         verdict = _step_verdict(step)
         head = f"{_INDENT}{_step_label(name).ljust(label_width)}  {verdict.ljust(verdict_width)}  "
         lines.extend(_wrap(_summary(step) or verdict, indent=head, hanging=" " * len(head)))
+        detail = " " * len(head)
         error_type = _error_type(step)
         if error_type:
-            detail = " " * len(head)
             lines.extend(_fields([("error_type", error_type)], indent=detail))
+        lines.extend(_step_carries(step, detail))
+        if error_type:
             remedy, avoid = _remediation(step)
             lines.extend(_numbered(remedy, indent=detail))
             lines.extend(_bullets([f"do not: {item}" for item in avoid], indent=detail))
