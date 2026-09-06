@@ -2254,8 +2254,10 @@ def test_both_scripts_merge_the_recorded_extras_into_a_uv_refresh() -> None:
     does not lose it. The PowerShell side has no interpreter in every checkout, so
     this static check is its regression guard: it reads uv's receipt, builds the
     merged spec plus the recorded `--with` arguments, and hands them to
-    `tool install --reinstall` rather than reinstalling the bare name through
-    `tool upgrade` when the receipt is there.
+    `tool install` rather than reinstalling the bare name through `tool upgrade`
+    when the receipt is there. The reinstall flag is what the arm decides, and
+    it is passed as its own value so that reading the record is not something
+    only one arm does.
     """
     shell = _code_only(_shell_source())
     powershell = _code_only(_powershell_source())
@@ -2263,10 +2265,10 @@ def test_both_scripts_merge_the_recorded_extras_into_a_uv_refresh() -> None:
     # Both read the requirement uv recorded, from the receipt beside the tool env.
     assert "uv-receipt.toml" in shell, shell
     assert "uv-receipt.toml" in powershell, powershell
-    # Both build the merged requirement and reinstall from it under --reinstall,
-    # with the recorded --with requirements replayed after it.
-    assert re.search(r'tool install --upgrade --reinstall "\$\(refresh_spec .*\$with_flags', shell), shell
-    assert re.search(r"'tool', 'install', '--upgrade', '--reinstall', \(Get-RefreshSpec", powershell), powershell
+    # Both build the merged requirement and install from it, with the arm's
+    # reinstall flag ahead of it and the recorded --with requirements after it.
+    assert re.search(r'tool install --upgrade \$uv_reinstall "\$\(refresh_spec .*\$with_flags', shell), shell
+    assert re.search(r"'tool', 'install', '--upgrade'\) \+ \$reinstall \+ @\(\(Get-RefreshSpec", powershell), powershell
     assert re.search(r"foreach \(\$recordedWith in \$recorded\.Withs\).*'--with', \$recordedWith", powershell), powershell
     # Both read the whole recorded requirement set, not just the first object, so a
     # multiline receipt's --with requirements are seen.

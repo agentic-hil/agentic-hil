@@ -767,54 +767,64 @@ refresh_spec() {
 }
 
 install_with_uv() {
+    # --reinstall replaces the files even when the version already on disk is
+    # the one being asked for, which is the repair a rerun over an existing
+    # installation and a rerun at a named release both exist for. A first
+    # install has nothing to replace and passes none.
+    uv_reinstall=""
     case "$INSTALL_MODE" in
-        refresh)
-            if uv_manages_tool; then
-                # uv owns this tool. Reinstall from the requirement uv recorded
-                # merged with this run's extras: the recorded `[can,pyocd]`
-                # survives (a `tool install agentic-hil[can]` would drop pyocd)
-                # and a `--can` a bare recorded requirement never had is added (a
-                # `tool upgrade` would never add it). --reinstall replaces the
-                # files even when the recorded version is already current, which is
-                # the repair the anchor exists for. A recorded `--with` requirement
-                # is replayed as its own --with so the reinstall keeps it too; a bare
-                # `tool install agentic-hil[...]` would drop it. The interpreter
-                # uv recorded is replayed as --python for the same reason: a
-                # reinstall without it rewrites the receipt without the key, and
-                # the operator's choice is gone with nothing said. When uv keeps
-                # no readable receipt, or records a requirement this cannot
-                # rebuild without changing it, fall back to the upgrade that
-                # preserves whatever it did record rather than reinstalling from
-                # a set this could not read back in full.
-                if recorded=$(uv_recorded_requirements); then
-                    recorded_extras=$(printf '%s\n' "$recorded" | sed -n '1p')
-                    recorded_python=$(printf '%s\n' "$recorded" | sed -n '2p')
-                    with_flags=$(uv_with_flags "$recorded")
-                    if [ -n "$recorded_python" ]; then
-                        say "package: the receipt records the interpreter $recorded_python, so the reinstall keeps it"
-                    fi
-                    # Word-splitting on with_flags is intended: each replayed
-                    # requirement is a space-free PEP 508 string. The interpreter
-                    # is one argument whatever it holds, so it stays quoted.
-                    # shellcheck disable=SC2086
-                    run_uv tool install --upgrade --reinstall "$(refresh_spec "$recorded_extras")" $with_flags ${recorded_python:+--python "$recorded_python"}
-                else
-                    run_uv tool upgrade --reinstall agentic-hil
-                fi
-                return 0
-            fi
-            run_uv tool install --upgrade --reinstall "$(package_spec)"
-            ;;
-        pin)
-            # A named release sets the requirement outright, so it goes through
-            # install; --reinstall still forces the replacement even when the
-            # installed version already equals the pin.
-            run_uv tool install --upgrade --reinstall "$(package_spec)"
-            ;;
-        *)
-            run_uv tool install --upgrade "$(package_spec)"
-            ;;
+        refresh | pin) uv_reinstall="--reinstall" ;;
     esac
+    if uv_manages_tool; then
+        # uv owns this tool, whatever this run's arm is called. Reinstall from
+        # the requirement uv recorded merged with this run's extras: the
+        # recorded `[can,pyocd]` survives (a `tool install agentic-hil[can]`
+        # would drop pyocd) and a `--can` a bare recorded requirement never had
+        # is added (a `tool upgrade` would never add it). A recorded `--with`
+        # requirement is replayed as its own --with so the reinstall keeps it
+        # too; a bare `tool install agentic-hil[...]` would drop it. The
+        # interpreter uv recorded is replayed as --python for the same reason:
+        # a reinstall without it rewrites the receipt without the key, and the
+        # operator's choice is gone with nothing said.
+        #
+        # The arm decides the flags, not whether the record is read at all. The
+        # arm comes from what step 1 found on PATH and from whether a --version
+        # was named, and neither question is about what uv owns: a newcomer
+        # rerunning the one-liner from a shell whose PATH does not carry uv's
+        # bin yet takes the default arm, and an operator naming the release
+        # they already run takes the pin arm. Both used to hand uv this run's
+        # spec alone, and uv did as it was told: it recorded that requirement
+        # and uninstalled every extra and `--with` the receipt had beside it,
+        # with nothing in the transcript to say so.
+        #
+        # When uv keeps no readable receipt, or records a requirement this
+        # cannot rebuild without changing it, a rerun over an existing
+        # installation falls back to the upgrade that preserves whatever it did
+        # record rather than reinstalling from a set this could not read back
+        # in full. The other arms have a version to reach and fall through to
+        # the line below.
+        if recorded=$(uv_recorded_requirements); then
+            recorded_extras=$(printf '%s\n' "$recorded" | sed -n '1p')
+            recorded_python=$(printf '%s\n' "$recorded" | sed -n '2p')
+            with_flags=$(uv_with_flags "$recorded")
+            if [ -n "$recorded_python" ]; then
+                say "package: the receipt records the interpreter $recorded_python, so the reinstall keeps it"
+            fi
+            # Word-splitting on uv_reinstall and with_flags is intended: the
+            # first is one optional flag, and each replayed requirement is a
+            # space-free PEP 508 string. The interpreter is one argument
+            # whatever it holds, so it stays quoted.
+            # shellcheck disable=SC2086
+            run_uv tool install --upgrade $uv_reinstall "$(refresh_spec "$recorded_extras")" $with_flags ${recorded_python:+--python "$recorded_python"}
+            return 0
+        fi
+        if [ "$INSTALL_MODE" = "refresh" ]; then
+            run_uv tool upgrade --reinstall agentic-hil
+            return 0
+        fi
+    fi
+    # shellcheck disable=SC2086 # uv_reinstall is one optional flag, split on purpose
+    run_uv tool install --upgrade $uv_reinstall "$(package_spec)"
 }
 
 install_with_pip() {

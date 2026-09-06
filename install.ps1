@@ -394,47 +394,53 @@ function Get-RefreshSpec {
 }
 
 function Install-WithUv {
-    if ($script:InstallMode -eq 'refresh') {
-        if (Test-UvManagesTool) {
-            # uv owns this tool. Reinstall from the requirement uv recorded merged
-            # with this run's extras: the recorded `[can,pyocd]` survives (a
-            # `tool install agentic-hil[can]` would drop pyocd) and a `--can` a
-            # bare recorded requirement never had is added (a `tool upgrade` would
-            # never add it). --reinstall replaces the files even when the recorded
-            # version is already current, which is the repair the anchor exists
-            # for. A recorded `--with` requirement is replayed as its own --with so
-            # the reinstall keeps it too; a bare `tool install agentic-hil[...]`
-            # would drop it. The interpreter uv recorded is replayed as --python
-            # for the same reason: a reinstall without it rewrites the receipt
-            # without the key, and the operator's choice is gone with nothing
-            # said. When uv keeps no readable receipt, or records a requirement
-            # this cannot rebuild without changing it, fall back to the upgrade
-            # that preserves whatever it did record.
-            $recorded = Get-UvRecordedRequirements
-            if ($null -ne $recorded) {
-                $uvArgs = @('tool', 'install', '--upgrade', '--reinstall', (Get-RefreshSpec -Recorded $recorded.Extras))
-                foreach ($recordedWith in $recorded.Withs) { $uvArgs += @('--with', $recordedWith) }
-                if ($recorded.Python) {
-                    Write-Say "package: the receipt records the interpreter $($recorded.Python), so the reinstall keeps it"
-                    $uvArgs += @('--python', $recorded.Python)
-                }
-                Invoke-Uv -Arguments $uvArgs
-            } else {
-                Invoke-Uv -Arguments @('tool', 'upgrade', '--reinstall', 'agentic-hil')
+    # --reinstall replaces the files even when the version already on disk is
+    # the one being asked for, which is the repair a rerun over an existing
+    # installation and a rerun at a named release both exist for. A first
+    # install has nothing to replace and passes none.
+    $reinstall = if ($script:InstallMode -eq 'refresh' -or $script:InstallMode -eq 'pin') { @('--reinstall') } else { @() }
+    if (Test-UvManagesTool) {
+        # uv owns this tool, whatever this run's arm is called. Reinstall from
+        # the requirement uv recorded merged with this run's extras: the
+        # recorded `[can,pyocd]` survives (a `tool install agentic-hil[can]`
+        # would drop pyocd) and a `--can` a bare recorded requirement never had
+        # is added (a `tool upgrade` would never add it). A recorded `--with`
+        # requirement is replayed as its own --with so the reinstall keeps it
+        # too; a bare `tool install agentic-hil[...]` would drop it. The
+        # interpreter uv recorded is replayed as --python for the same reason:
+        # a reinstall without it rewrites the receipt without the key, and the
+        # operator's choice is gone with nothing said.
+        #
+        # The arm decides the flags, not whether the record is read at all. The
+        # arm comes from what step 1 found on PATH and from whether a version
+        # was named, and neither question is about what uv owns, so a first-run
+        # arm and a pin arm reached a tool uv already held and handed it this
+        # run's spec alone; uv then recorded that requirement and uninstalled
+        # every extra and `--with` the receipt had beside it, with nothing in
+        # the transcript to say so.
+        #
+        # When uv keeps no readable receipt, or records a requirement this
+        # cannot rebuild without changing it, a rerun over an existing
+        # installation falls back to the upgrade that preserves whatever it did
+        # record. The other arms have a version to reach and fall through to
+        # the line below.
+        $recorded = Get-UvRecordedRequirements
+        if ($null -ne $recorded) {
+            $uvArgs = @('tool', 'install', '--upgrade') + $reinstall + @((Get-RefreshSpec -Recorded $recorded.Extras))
+            foreach ($recordedWith in $recorded.Withs) { $uvArgs += @('--with', $recordedWith) }
+            if ($recorded.Python) {
+                Write-Say "package: the receipt records the interpreter $($recorded.Python), so the reinstall keeps it"
+                $uvArgs += @('--python', $recorded.Python)
             }
+            Invoke-Uv -Arguments $uvArgs
             return
         }
-        Invoke-Uv -Arguments @('tool', 'install', '--upgrade', '--reinstall', (Get-PackageSpec))
-        return
+        if ($script:InstallMode -eq 'refresh') {
+            Invoke-Uv -Arguments @('tool', 'upgrade', '--reinstall', 'agentic-hil')
+            return
+        }
     }
-    if ($script:InstallMode -eq 'pin') {
-        # A named release sets the requirement outright, so it goes through
-        # install; --reinstall forces the replacement even when the installed
-        # version already equals the pin.
-        Invoke-Uv -Arguments @('tool', 'install', '--upgrade', '--reinstall', (Get-PackageSpec))
-        return
-    }
-    Invoke-Uv -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
+    Invoke-Uv -Arguments (@('tool', 'install', '--upgrade') + $reinstall + @((Get-PackageSpec)))
 }
 
 if ($SystemCertsMode -eq 'always') { Enable-SystemCerts }
