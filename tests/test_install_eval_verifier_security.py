@@ -1483,6 +1483,39 @@ def test_a_traceback_on_stderr_is_not_a_document_either(monkeypatch: pytest.Monk
     assert "<no document>" in detail, detail
 
 
+def test_a_document_behind_a_warning_line_on_stderr_is_no_document(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The stream is the document, not a stream with a document somewhere in it.
+
+    The release writes the refusal to stderr and nothing else there; the
+    recording shows the stream beginning with `{`. A stream that carries a line
+    before the document is a release that changed what it writes, and an arm
+    that fished the document out from behind that line would pass a contract the
+    release no longer keeps. So the arm parses the stream whole, and this is
+    reported the way a silent exit is.
+    """
+    other = tmp_path / "other-project"
+    monkeypatch.setattr(verifier, "OTHER_WORKSPACE", other)
+    monkeypatch.setattr(verifier, "PROBE_CONFIG_ROOT", tmp_path / "probe-config")
+    refusal = {
+        "ok": False,
+        "error_type": "config_invalid",
+        "summary": "The authoritative config is bound to a different workspace.",
+        "workspace_root": "/workspace/project",
+        "expected_workspace": str(other),
+    }
+    noisy = SimpleNamespace(returncode=1, stdout="", stderr="UserWarning: something the release did not use to say\n" + json.dumps(refusal, indent=2) + "\n")
+
+    def session(arguments, cwd, requests, *, config=None, config_home=None):  # type: ignore[no-untyped-def]
+        assert config is not None, "the named arm has to stop before the discovered arm runs"
+        return noisy, []
+
+    monkeypatch.setattr(verifier, "one_shot_session", session)
+    ok, detail = verifier.wrong_workspace_fails(["mcp-stdio"], tmp_path / "config.yaml")
+
+    assert not ok
+    assert "<no document>" in detail, detail
+
+
 def test_a_refusal_written_to_stderr_by_a_server_that_exited_zero_still_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The exit code gate is unchanged by which stream the document came from."""
     other = tmp_path / "other-project"

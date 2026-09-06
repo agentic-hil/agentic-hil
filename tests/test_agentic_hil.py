@@ -82,6 +82,7 @@ from agentic_hil.config import (
     user_file_lock_path,
     user_state_root,
 )
+from agentic_hil.gdbmi import intel_hex_record
 from agentic_hil.mcp import MCP_PROTOCOL_VERSION, MCP_TOOL_NAMES, MCP_TOOLS, handle_mcp_message
 from agentic_hil.process import ProcessImage, spawn_managed_process, terminate_process_tree
 from agentic_hil.report import logs_directory
@@ -10272,6 +10273,100 @@ def test_a_bin_flash_without_a_flash_address_runs_no_tool_at_all(tmp_path: Path,
     assert result["ok"] is False, result
     assert result["error_type"] == "invalid_argument"
     assert "log_path" not in result, result
+
+
+@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+def test_a_hex_flash_never_carries_the_flash_address_even_when_configured(tmp_path: Path, backend: str) -> None:
+    """The other format that carries its own addresses: an Intel HEX record names
+    where every byte goes, so a configured `flash_address` is not read for it
+    either, on either backend."""
+    firmware = tmp_path / "build" / "firmware.hex"
+    firmware.parent.mkdir(parents=True)
+    records = [intel_hex_record(0, 0x04, bytes([0x08, 0x00])), intel_hex_record(0, 0x00, b"\x01\x02\x03\x04"), ":00000001FF"]
+    firmware.write_text("\n".join(records) + "\n", encoding="ascii")
+    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.hex"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    arguments = _logged_arguments(tmp_path, result)
+    assert "0x08000000" not in arguments, arguments
+    assert "--base-address" not in arguments, arguments
+    if backend == "stlink":
+        at = arguments.index("-w")
+        assert Path(arguments[at + 1]).suffix == ".hex", arguments
+        assert arguments[at + 2] == "-v", arguments
+    else:
+        assert Path(arguments[-1]).suffix == ".hex", arguments
+
+
+def test_a_bin_flash_with_a_reset_keeps_the_address_between_the_file_and_the_flags(tmp_path: Path) -> None:
+    """`-rst` is one more action on the same STM32CubeProgrammer line, after the
+    write and its verify, and the address stays where the grammar puts it: right
+    after the file, before `-v` and before `-rst`."""
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    config = load_config(str(write_config(tmp_path, debugger_type="stlink", probe_id="STLINK123", flash_address="0x08000000")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin", "reset_after_flash": True})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert result["reset_after_flash"] is True
+    arguments = _logged_arguments(tmp_path, result)
+    at = arguments.index("-w")
+    assert Path(arguments[at + 1]).suffix == ".bin", arguments
+    assert arguments[at + 2 : at + 5] == ["0x08000000", "-v", "-rst"], arguments
+    assert arguments.count("0x08000000") == 1, arguments
+
+
+FLASH_TOOL_HELP_RECORDINGS = Path(__file__).resolve().parent / "fixtures" / "flash_tool_help_recordings.json"
+
+
+def test_the_recorded_help_of_each_flash_tool_puts_the_address_where_the_backends_do() -> None:
+    """The grammar the two argument order tests encode, read off the tools' own `--help`.
+
+    Recorded from the real programs with no probe attached (the recording names
+    the versions and the date). STM32CubeProgrammer documents `-w` as
+    `<file_path>` then `[<address>]`, a positional after the file, and `-rst` as
+    a command of its own; pyOCD documents `-a, --base-address ADDR` as a load
+    option and `<file-path>` as the positional that ends the usage line. A
+    backend that put the address anywhere else would agree with neither tool.
+    """
+    recorded = json.loads(FLASH_TOOL_HELP_RECORDINGS.read_text(encoding="utf-8"))
+    cube = recorded["tools"]["stm32cubeprogrammer"]
+    assert cube["version"] == "2.23.0" and cube["returncode"] == 0
+    cube_lines = [line.strip() for line in cube["help"].splitlines()]
+    write = cube_lines.index("-w,     --write")
+    block = cube_lines[write : cube_lines.index("-w32                   : Write a 32-bits data into device memory")]
+    file_line = next(index for index, line in enumerate(block) if line.startswith("<file_path>"))
+    address_line = next(index for index, line in enumerate(block) if line.startswith("[<address>]"))
+    assert file_line < address_line, block
+    assert block[address_line] == "[<address>]        : Start address of download", block
+    assert "bin" in block[file_line], block
+    assert "-v,     --verify       : Verify if the programming operation is achieved" in cube_lines
+    assert "-rst                   : Reset system" in cube_lines
+
+    pyocd = recorded["tools"]["pyocd"]
+    assert pyocd["version"] == "0.45.1" and pyocd["returncode"] == 0
+    # The recording keeps the line endings the tool printed; the paragraphs are
+    # read with them normalised.
+    pyocd_text = pyocd["help"].replace("\r\n", "\n")
+    usage = pyocd_text.split("\n\n", 1)[0]
+    assert "[-a ADDR]" in usage and usage.rstrip().endswith("[<file-path> ...]"), usage
+    assert usage.index("[-a ADDR]") < usage.index("[<file-path> ...]"), usage
+    load_options = pyocd_text.split("load options:", 1)[1]
+    assert "-a, --base-address ADDR" in load_options, load_options
+    assert "Only allowed if a\n                        single binary file is being loaded." in load_options, load_options
+    assert "--no-reset" in load_options
 
 
 # What each backend puts on the wire for each mode it supports, which is the

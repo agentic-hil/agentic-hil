@@ -271,6 +271,9 @@ def test_a_pipe_is_rendered_like_anything_else(monkeypatch: pytest.MonkeyPatch) 
     assert not out.lstrip().startswith("{"), out
     # A line the document carries and a person acts on, rendered as prose.
     assert "tightened /home/op/.local/bin" in out, out
+    # And one the config step carries: the pipe is held to the same rule as the
+    # terminal, so a pipe that dropped the next steps cannot pass here.
+    assert "Run: agentic-hil doctor" in out, out
 
 
 def test_every_subcommand_accepts_the_json_flag_and_documents_it() -> None:
@@ -1872,7 +1875,8 @@ def test_the_placeholder_remedy_init_writes_reaches_the_person_reading_it(tmp_pa
     assert "Run: agentic-hil doctor" in next_steps
     assert any(step.startswith(("Detected COM ports: ", "No host COM ports detected", "COM port discovery failed")) for step in next_steps), next_steps
 
-    out = _reflowed(_rendered(result, "init"))
+    rendered = _rendered(result, "init")
+    out = _reflowed(rendered)
 
     for step in next_steps:
         assert _reflowed(step) in out, step
@@ -1881,6 +1885,29 @@ def test_the_placeholder_remedy_init_writes_reaches_the_person_reading_it(tmp_pa
     # rows, and the next steps are not what the reader meets before them.
     assert out.startswith("Agentic HIL project configured.")
     assert out.index("Steps") < out.index(_reflowed(next_steps[0]))
+    # There is no `Next step` section: the document has no top-level field for
+    # one to be printed from, and the steps are not lifted out of the step that
+    # carries them into a heading the document does not have.
+    assert not any(line in ("Next step", "Next steps") for line in rendered.splitlines()), rendered
+
+
+def test_the_json_flag_prints_the_real_init_document_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour of the rendering: what `--json` prints is the document, whole.
+
+    The next steps reaching the screen is a change to the rendering and to
+    nothing else; the document a caller parses, the config step's `next_steps`
+    included, is the one the command built.
+    """
+    _no_toolchain_init(tmp_path, monkeypatch)
+    result = cli.init_project()
+    assert result["steps"]["config"]["next_steps"], result
+
+    code, out = _run(monkeypatch, ["init", "--json"], result, tty=False)
+
+    assert code == 0
+    assert out == json.dumps(result, indent=2) + "\n"
+    assert json.loads(out)["steps"]["config"]["next_steps"] == result["steps"]["config"]["next_steps"]
+    assert "next_step" not in json.loads(out)
 
 
 def test_setup_carries_the_config_steps_next_steps_to_the_screen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1955,13 +1982,35 @@ def test_a_step_without_next_steps_renders_exactly_as_it_did() -> None:
 
     INIT_FAILED's three steps carry none, and the rendering they got before is
     the rendering they keep, so the change is confined to steps that have
-    something to say.
+    something to say. The whole rendering is held, reflowed: the headline, the
+    three fields, the three step rows, and under the failed step its error type
+    and the catalogue's advice for `config_stale` and nothing else, then the
+    rollback line. The catalogue's text is read out of the catalogue, so what
+    is pinned is that the failed step shows exactly that advice and that no
+    line was added to any of the three.
     """
     out = _rendered(INIT_FAILED, "init")
     assert "Next step" not in out
     assert "Next steps" not in out
     for step in INIT_FAILED["steps"].values():
         assert "next_step" not in step and "next_steps" not in step
-    assert "not reached" in out
-    assert "config_stale" in out
-    assert "put back the way it found it" in out
+
+    advice = remediation_fields("config_stale")
+    expected = " ".join(
+        [
+            "Agentic HIL project setup failed; its own committed file changes were rolled back.",
+            "config_path /home/op/.config/agentic-hil/projects/blinky/config.yaml",
+            "agent codex",
+            "scope project",
+            "Steps",
+            "config ok Authoritative config written.",
+            "doctor FAILED The configuration changed under this run.",
+            "error_type config_stale",
+            *[f"{number}. {step}" for number, step in enumerate(advice["remediation"], start=1)],
+            *[f"- do not: {item}" for item in advice["do_not"]],
+            "agent write restriction not reached Agent write restriction was not reached.",
+            "Rollback",
+            "Every file this command had written was put back the way it found it.",
+        ]
+    )
+    assert _reflowed(out) == _reflowed(expected)
