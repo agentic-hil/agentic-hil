@@ -30,7 +30,7 @@ from test_run_lifecycle import (
 from test_test_reactor import RecordingService, write_test_config
 
 import agentic_hil.runlifecycle as runlifecycle
-from agentic_hil.config import load_authoritative_config, load_config
+from agentic_hil.config import ConfigError, load_authoritative_config, load_config
 from agentic_hil.test_reactor import TestReactor, declared_devices, load_test_config
 
 SHORT_DELAY_PLAN = "version: 4\nsteps:\n  - {device: dut, action: delay, duration_ms: 20}\n"
@@ -87,8 +87,11 @@ def test_a_worker_that_dies_before_publishing_is_reported_with_its_exit_code_and
     assert result["side_effect_committed"] is False, result
     assert result["run"].startswith("run-")
     assert not runlifecycle.stop_path(config, result["run"]).exists()
-    # Answered off the exit and the grace, not off the whole publication window.
-    assert elapsed_s < runlifecycle.WORKER_PUBLISH_TIMEOUT_S, elapsed_s
+    # Answered off the exit and the grace, not off the whole publication window:
+    # the child exits within a second of starting, the start command notices on
+    # its next poll and waits the grace for a record that never comes. The
+    # margin is interpreter start-up; the window is 30 s away.
+    assert elapsed_s < runlifecycle.WORKER_EXIT_GRACE_S + 3.0, elapsed_s
 
 
 def test_a_worker_that_dies_before_its_record_is_reported_with_its_log_tail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -237,12 +240,47 @@ def test_a_stop_asked_while_the_worker_waits_for_a_held_device_ends_the_wait(tmp
     finally:
         stranger.release_all()
 
-    # Well under the 3 s the wait was granted: the stop ended it.
-    assert elapsed_s < 2.0, (elapsed_s, result.get("error_type"), result.get("summary"))
+    # Under a second, against the 3 s the wait was granted: the mutex polls the
+    # lock every 0.2 s and the stop file is read at most every 0.1 s, so a stop
+    # already on disk ends the first poll that asks.
+    assert elapsed_s < 1.0, (elapsed_s, result.get("error_type"), result.get("summary"))
     assert result["stopped"] is True, result
     assert result["error_type"] == "run_stopped", result
+    assert result["stopped_after_step"] == 0, result
     assert result["steps"] == []
+    assert "No step ran." in result["summary"], result["summary"]
     assert runlifecycle.run_status(config, registration.handle)["state"] == "stopped"
+
+
+def test_a_device_wait_nobody_stops_runs_to_its_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour: without a stop the wait is the wait the caller asked for.
+
+    The same held device and the same registration, and nobody writes a stop:
+    the run waits out its whole bound and ends `device_busy` naming the holder,
+    exactly as before. The stop check inside the wait must cost a wait nothing."""
+    from agentic_hil.bench import BenchMutex
+    from agentic_hil.reactorrun import run_registered_plan
+
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    test_config = load_test_config(str(plan), config.work_dir)
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire(declared_devices(config, test_config))
+    try:
+        registration = runlifecycle.RunRegistration.take(config, runlifecycle.new_run_handle(), name=test_config.name, test_config_path=test_config.path, detached=True)
+        with registration:
+            started = time.monotonic()
+            result = run_registered_plan(config, test_config, wait_s=1.0, registration=registration)
+            elapsed_s = time.monotonic() - started
+            registration.finish(result)
+    finally:
+        stranger.release_all()
+
+    assert elapsed_s >= 1.0, elapsed_s
+    assert result["error_type"] == "device_busy", result
+    assert result.get("stopped") is not True, result
+    assert result["holder"]["label"] == "other-bench-session", result
+    assert runlifecycle.run_status(config, registration.handle)["state"] == "finished"
 
 
 def test_a_stop_asked_of_a_starting_run_does_not_promise_a_step_it_is_not_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -259,13 +297,45 @@ def test_a_stop_asked_of_a_starting_run_does_not_promise_a_step_it_is_not_in(tmp
     with registration:
         status = runlifecycle.run_status(config, registration.handle)
         requested = runlifecycle.request_run_stop(config, registration.handle)
+        pending = runlifecycle.run_status(config, registration.handle)
         registration.finish({"ok": False, "stopped": True, "error_type": "run_stopped"})
 
+    # Pinned by what the sentences have to say, not by their words: a starting
+    # run is still taking its devices and has no step, and a stop asked of it
+    # ends before any step runs.
     assert status["state"] == "starting", status
     assert "its first step" not in status["summary"], status["summary"]
+    assert "taking" in status["summary"] and "devices" in status["summary"], status["summary"]
+    assert "no step" in status["summary"], status["summary"]
     assert requested["ok"] is True, requested
     assert requested["state"] == "starting", requested
+    assert requested["stop_requested"] is True, requested
     assert "the step it is in" not in requested["summary"], requested["summary"]
+    assert "before any step" in requested["summary"], requested["summary"]
+    assert "its first step" not in pending["summary"], pending["summary"]
+    assert "the step it is in" not in pending["summary"], pending["summary"]
+    assert "before any step" in pending["summary"], pending["summary"]
+
+
+def test_a_stop_asked_of_a_running_run_still_promises_the_step_it_is_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour: a run that holds its devices is on a step, and says so."""
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    # The progress write is throttled behind the `running` write it follows
+    # here; the throttle is not what this test is about.
+    monkeypatch.setattr(runlifecycle, "PROGRESS_WRITE_INTERVAL_S", 0.0)
+    registration = runlifecycle.RunRegistration.take(config, runlifecycle.new_run_handle(), name="running", test_config_path=str(plan), detached=True)
+    with registration:
+        registration.running()
+        first = runlifecycle.run_status(config, registration.handle)
+        registration.progress({"step": 2, "action": "delay", "route": "dut"})
+        requested = runlifecycle.request_run_stop(config, registration.handle)
+        pending = runlifecycle.run_status(config, registration.handle)
+        registration.finish({"ok": False, "stopped": True, "error_type": "run_stopped", "stopped_after_step": 2})
+
+    assert first["summary"] == "This run is on its first step."
+    assert requested["summary"] == "A stop was requested; the run finishes the step it is in, closes its devices in the usual order and writes its report."
+    assert pending["summary"] == "This run is on step 2 (delay). A stop has been requested; it ends after the step it is in."
 
 
 # --- the report a status names -----------------------------------------------
@@ -295,6 +365,90 @@ def test_status_of_an_earlier_run_names_that_runs_own_report(tmp_path: Path, mon
     assert report_file.is_file(), named
     assert json.loads(report_file.read_text(encoding="utf-8"))["run"] == first["run"], named
     assert str(named) in status["summary"], status["summary"]
+
+
+def test_a_detached_start_that_ends_inside_the_window_names_the_runs_own_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The detached start's terminal answer sends a reader to the same per-run file.
+
+    A run refused the bench publishes its terminal record before the start
+    command returns, and the start answers with that verdict. The report it
+    names has to be the one that stays this run's after the next run."""
+    from agentic_hil.bench import BenchMutex
+
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    stranger.acquire(declared_devices(config, load_test_config(str(plan), config.work_dir)))
+    try:
+        result = runlifecycle.start_detached_run(config, str(plan), wait_s=0.0)
+    finally:
+        stranger.release_all()
+
+    assert result["state"] == "finished", result
+    assert result["error_type"] == "device_busy", result
+    named = result.get("canonical_report_path") or result["report_path"]
+    report_file = Path(named) if Path(named).is_absolute() else workspace / named
+    assert report_file.is_file(), named
+    assert json.loads(report_file.read_text(encoding="utf-8"))["run"] == result["run"], named
+    assert str(named) in result["summary"], result["summary"]
+
+
+# --- a starting record that cannot be written ---------------------------------
+
+
+def test_a_starting_record_that_cannot_be_written_refuses_the_run_before_the_bench_is_taken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The half of the unwritable runs directory the log open does not catch.
+
+    The first record is what makes a handle mean something: without it the
+    worker takes the bench and runs the whole plan while the start command
+    waits its window and calls the worker unresponsive, and nobody can ask the
+    run to stop by name. So a starting record that cannot be written is a
+    refusal naming the record, raised before any device is taken, with no
+    report written and no record listed."""
+    from agentic_hil.bench import BenchMutex
+    from agentic_hil.reactorrun import run_plan
+
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, SHORT_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+
+    def refused_write(*_: object, **__: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(runlifecycle, "write_run_record", refused_write)
+
+    with pytest.raises(ConfigError) as refused:
+        run_plan(config, str(plan))
+
+    assert refused.value.error_type == "run_state_unwritable", refused.value.to_dict()
+    assert str(runlifecycle.runs_directory(config)) in json.dumps(refused.value.to_dict()), refused.value.to_dict()
+    assert refused.value.details.get("side_effect_committed") is False, refused.value.to_dict()
+    assert not (workspace / ".agentic-hil" / "reports" / "last-report.json").exists()
+    assert runlifecycle.known_runs(config)["runs"] == []
+    # The bench was never taken: a stranger gets the plan's device at once.
+    stranger = BenchMutex(frontend="stranger", label="other-bench-session")
+    try:
+        assert stranger.acquire(declared_devices(config, load_test_config(str(plan), config.work_dir)), wait_s=0.0)
+    finally:
+        stranger.release_all()
+
+
+def test_a_record_write_that_fails_once_the_run_is_going_does_not_end_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour: after the first record, a write that fails is a run nobody can watch, not a run that stops."""
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, SHORT_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    registration = runlifecycle.RunRegistration.take(config, runlifecycle.new_run_handle(), name="going", test_config_path=str(plan), detached=False)
+
+    def refused_write(*_: object, **__: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(runlifecycle, "write_run_record", refused_write)
+    with registration:
+        registration.running()
+        registration.progress({"step": 1, "action": "delay", "route": "dut"})
+        assert registration.stop_requested() is False
+        registration.finish({"ok": True})
+        # Nothing raised, and the record still says what the first write said.
+        assert runlifecycle.run_status(config, registration.handle)["state"] == "starting"
 
 
 # --- records of killed workers -----------------------------------------------
@@ -378,6 +532,9 @@ BREAKPOINT_STEP = "  - {debugger: dut, action: run_until_breakpoint, location: t
         pytest.param("allow_flash", False, LOAD_STEP, "steps[0].mode", False, id="debug_start load without allow_flash"),
         pytest.param("allow_debug_execution", False, ATTACH_STEP + BREAKPOINT_STEP, "steps[1].action", False, id="run_until_breakpoint without allow_debug_execution"),
         pytest.param("allow_raw_debugger_commands", True, FLASH_STEP, "steps[0].action", True, id="flash while raw debugger commands are allowed"),
+        pytest.param("allow_mass_erase", True, FLASH_STEP, "steps[0].action", True, id="flash while mass erase is allowed"),
+        pytest.param("allow_raw_debugger_commands", True, ATTACH_STEP, "steps[0].action", True, id="debug_start while raw debugger commands are allowed"),
+        pytest.param("allow_mass_erase", True, LOAD_STEP, "steps[0].mode", True, id="debug_start load while mass erase is allowed"),
     ],
 )
 def test_debugger_step_permission_refusals_name_the_key_and_no_step_runs(tmp_path: Path, flag: str, value: bool, steps: str, field: str, granted: bool) -> None:
@@ -435,32 +592,63 @@ def test_a_granted_debugger_plan_runs_every_step_the_refusals_above_gate(tmp_pat
 # --- a plan run over MCP inside the server's own bench run -------------------
 
 
-def test_a_plan_run_inside_the_servers_own_bench_run_is_answered_as_its_own_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("detach", [False, True], ids=["synchronous", "detached"])
+def test_a_plan_run_inside_the_servers_own_bench_run_is_answered_as_its_own_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detach: bool) -> None:
     """An agent holding the board through `bench_run_start` asks this server to run a plan.
 
-    The plan needs the same board, and the refusal has to say that this session
-    holds it and that `bench_run_stop` is the way out. Today the answer is
+    A plan is a run of its own, and this owner already has one open: the
+    refusal is `run_already_active`, the catalogue's one-run-per-owner answer,
+    naming the open run and `bench_run_stop` as the way out. Today the answer is
     `device_busy` naming this process's own pid as the holder, with the
     catalogue's advice to wait for another owner's run to end, which is a run
-    that ends when this agent ends it."""
+    that ends when this agent ends it. Decided before anything is spawned or
+    locked, so the detached form is refused the same way and leaves no worker
+    and no record behind."""
     from agentic_hil.tools import AgenticHILToolService
 
     workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
-    service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    config = load_authoritative_config(workspace)
+    service = AgenticHILToolService(config, frontend="mcp")
     try:
         opened = service.call("bench_run_start", {"devices": [{"kind": "debugger", "id": "dut"}], "label": "agent-run"})
         assert opened["ok"] is True, opened
 
-        refused = service.call("test_reactor_run", {"test_config_path": str(plan)})
+        refused = service.call("test_reactor_run", {"test_config_path": str(plan), "detach": detach})
 
         assert refused["ok"] is False, refused
-        assert refused["error_type"] == "run_already_active" or "bench_run_stop" in refused["summary"], refused
+        assert refused["error_type"] == "run_already_active", refused
+        assert refused["run_label"] == "agent-run", refused
+        assert refused["side_effect_committed"] is False, refused
+        assert "bench_run_stop" in refused["summary"], refused["summary"]
+        for text in (refused["summary"], str(refused.get("next_step", "")), " ".join(refused.get("remediation", ()))):
+            assert "another owner" not in text, text
+            assert "wait for that run" not in text, text
         assert refused.get("steps", []) == []
+        assert not str(refused.get("run", "")).startswith("run-"), refused
+        assert runlifecycle.known_runs(config)["runs"] == []
         # The agent's own run is untouched by the refusal and ends when it says so.
         assert service.call("bench_run_status", {})["run_label"] == "agent-run"
         assert service.call("bench_run_stop", {})["ok"] is True
     finally:
         service.close()
+
+
+def test_a_plan_run_after_the_servers_own_bench_run_ended_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour: once `bench_run_stop` has closed the run, the same plan runs."""
+    from agentic_hil.tools import AgenticHILToolService
+
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, SHORT_DELAY_PLAN)
+    service = AgenticHILToolService(load_authoritative_config(workspace), frontend="mcp")
+    try:
+        assert service.call("bench_run_start", {"devices": [{"kind": "debugger", "id": "dut"}], "label": "agent-run"})["ok"] is True
+        assert service.call("bench_run_stop", {})["ok"] is True
+
+        result = service.call("test_reactor_run", {"test_config_path": str(plan)})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    assert [step["action"] for step in result["steps"]] == ["delay"]
 
 
 def test_a_plan_run_over_mcp_against_a_strangers_hold_is_still_device_busy_naming_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

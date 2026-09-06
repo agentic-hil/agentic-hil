@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -35,10 +36,14 @@ pytestmark = [pytest.mark.container, CONTAINER_ONLY]
 
 FAKE_OPENOCD = REPOSITORY_ROOT / "tests" / "fixtures" / "fake_openocd.py"
 DELAY_PLAN = "version: 4\nsteps:\n  - {device: dut, action: delay, duration_ms: 20}\n"
+# The plan the detached attempt is asked to run. Long on purpose: a worker that
+# was spawned despite the refusal is still there when the process table is
+# read, instead of having finished a 20 ms plan before the guard looked.
+LONG_DELAY_PLAN = "version: 4\nsteps:\n  - {device: dut, action: delay, duration_ms: 600000}\n"
 
 
-def fake_probe_tree(user: UnprivilegedUser) -> tuple[UnprivilegedTree, Path]:
-    """A tree the user owns, its debugger the fake OpenOCD, with one delay plan in it."""
+def fake_probe_tree(user: UnprivilegedUser) -> tuple[UnprivilegedTree, Path, Path]:
+    """A tree the user owns, its debugger the fake OpenOCD, with a short and a long delay plan in it."""
     root = Path(tempfile.mkdtemp(prefix="agentic-hil-unprivileged-", dir="/tmp"))
     tree = UnprivilegedTree(root=root, user=user)
     tree.project.mkdir()
@@ -50,8 +55,10 @@ def fake_probe_tree(user: UnprivilegedUser) -> tuple[UnprivilegedTree, Path]:
     plan = tree.project / ".agentic-hil" / "testconfig.yaml"
     plan.parent.mkdir(parents=True)
     plan.write_text(DELAY_PLAN, encoding="utf-8")
+    long_plan = plan.with_name("long-testconfig.yaml")
+    long_plan.write_text(LONG_DELAY_PLAN, encoding="utf-8")
     tree.give_away()
-    return tree, plan
+    return tree, plan, long_plan
 
 
 def reactor_as_the_user(tree: UnprivilegedTree, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -68,7 +75,11 @@ def reactor_as_the_user(tree: UnprivilegedTree, *arguments: str) -> subprocess.C
 
 
 def reactor_workers_still_running() -> list[str]:
-    """Every process on this host running a detached reactor worker, by pid."""
+    """Every process on this host running a detached reactor worker, by pid.
+
+    The long plan keeps such a worker alive for the whole test, so one that is
+    there is one that was spawned despite the refusal, and it has to be ended
+    before the tree is removed under it."""
     found: list[str] = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -82,6 +93,12 @@ def reactor_workers_still_running() -> list[str]:
     return found
 
 
+def end_workers(pids: list[str]) -> None:
+    for pid in pids:
+        with suppress(ProcessLookupError, PermissionError):
+            os.kill(int(pid), signal.SIGKILL)
+
+
 def test_a_state_directory_that_cannot_be_written_refuses_a_detached_start_by_name() -> None:
     """A read-only runs directory is a JSON refusal and exit 1, not a traceback.
 
@@ -92,7 +109,7 @@ def test_a_state_directory_that_cannot_be_written_refuses_a_detached_start_by_na
     plan under a handle nobody can see.
     """
     user = unprivileged_user()
-    tree, plan = fake_probe_tree(user)
+    tree, plan, long_plan = fake_probe_tree(user)
     runs = tree.state / "coordination" / "runs"
     try:
         warmed = reactor_as_the_user(tree, "--test-config", str(plan), "--json")
@@ -100,9 +117,10 @@ def test_a_state_directory_that_cannot_be_written_refuses_a_detached_start_by_na
         assert runs.is_dir(), sorted(str(path) for path in tree.state.rglob("*"))
         os.chmod(runs, 0o500)
 
-        refused = reactor_as_the_user(tree, "--detach", "--test-config", str(plan), "--json")
+        refused = reactor_as_the_user(tree, "--detach", "--test-config", str(long_plan), "--json")
     finally:
         with_workers = reactor_workers_still_running()
+        end_workers(with_workers)
         with suppress(OSError):
             os.chmod(runs, 0o700)
         tree.remove()
