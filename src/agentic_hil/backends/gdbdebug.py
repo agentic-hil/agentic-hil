@@ -15,6 +15,7 @@ from agentic_hil.backends.common import (
     NOT_CONTACTED,
     contains_any,
     invocation,
+    not_executable_refusal,
     spawn_command,
     which,
 )
@@ -1555,6 +1556,12 @@ def resolve_symbol_offline(config: AgenticHILConfig, backend_name: str, tool: st
             # named the way it would have been a moment earlier, not as a
             # configured path when the document configured none.
             return {**gdb_missing_refusal(config, backend_name), "tool": tool, "symbol": symbol, **NOT_CONTACTED}
+        if completed.not_executable:
+            # A GDB that resolved and then would not start. Same boundary, same
+            # classification, and the subject named for what it is: sending a
+            # reader to `debuggers.<name>.executable` when the file that will not
+            # run is `debug.gdb_executable` is the wrong file to repair.
+            return {**not_executable_refusal(backend_name, str(gdb["executable"]), completed, subject="GDB executable"), "tool": tool, "symbol": symbol}
         if completed.timed_out:
             return {"ok": False, "tool": tool, "backend": backend_name, "error_type": "timeout", "summary": "Symbol resolution timed out.", "symbol": symbol, **NOT_CONTACTED}
         output = f"{completed.stdout}{completed.stderr}"

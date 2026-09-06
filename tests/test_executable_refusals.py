@@ -118,10 +118,10 @@ def test_a_debugger_executable_that_will_not_run_is_a_structured_refusal(tmp_pat
 
     assert result["ok"] is False
     assert result["error_type"] == "debugger_not_executable"
-    # The configured path, in the result, because the operator has to be told
-    # which file to look at and a bench has more than one.
-    assert str(tmp_path / "toolchain" / "openocd-broken") in json.dumps(result)
-    assert result["executable"] == str(tmp_path / "toolchain" / "openocd-broken")
+    # The configured path, in the result and in the sentence, because the
+    # operator has to be told which file to look at and a bench has more than one.
+    assert Path(result["executable"]) == tmp_path / "toolchain" / "openocd-broken"
+    assert result["executable"] in result["summary"]
     # The two halves of the sentence the issue asks for: the file is there, and
     # this host will not run it.
     assert "will not run" in result["summary"]
@@ -238,7 +238,8 @@ def test_doctor_reports_it_instead_of_ending_in_a_traceback(tmp_path: Path, monk
     check = report["debuggers"]["dut"]["check"]
     assert check["ok"] is False
     assert check["error_type"] == "debugger_not_executable"
-    assert str(tool) in json.dumps(check)
+    assert Path(check["executable"]) == tool
+    assert check["executable"] in check["summary"]
     assert check["remediation"]
 
 

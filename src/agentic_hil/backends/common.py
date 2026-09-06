@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
@@ -138,6 +139,30 @@ def reset_init_unsupported(backend_name: str, missing: str) -> JsonObject:
     }
 
 
+# The world a configured executable can be in is not "the file exists or it does
+# not". A file can be there, be a regular file, and still not run, and until #479
+# that third state left the backend as an exception: `agentic-hil doctor` ended in
+# a traceback with zero bytes on stdout, `doctor --json` wrote no document at all,
+# and over MCP the same call became a JSON-RPC internal error rather than a
+# refusal an agent can read.
+#
+# These are the errnos that mean exactly that, and the only OSErrors this boundary
+# turns into a result. EACCES is what a toolchain unpacked out of an archive
+# without its execute bit raises, and what Windows raises as ERROR_ACCESS_DENIED;
+# EPERM is the same verdict from a hardened kernel or a `noexec` mount; ENOEXEC is
+# the kernel reaching the file and finding neither an ELF header nor a shebang,
+# which is also how CPython reports Windows' ERROR_BAD_EXE_FORMAT for a file that
+# is not a valid image. Everything else a spawn can raise (a host out of file
+# descriptors or out of memory, a path component that is not a directory) says
+# nothing about the configured file and keeps raising: reporting it as a broken
+# toolchain would send an operator to repair a file that is fine.
+EXEC_REFUSED_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.ENOEXEC})
+# Which of the two the operator is looking at, because the repairs are different:
+# a mode to restore, or an image to replace.
+PERMISSION_DENIED_REASON = "permission_denied"
+NOT_AN_EXECUTABLE_IMAGE_REASON = "not_an_executable_image"
+
+
 @dataclass(frozen=True)
 class CompletedCommand:
     stdout: str
@@ -145,6 +170,14 @@ class CompletedCommand:
     returncode: int | None
     timed_out: bool
     not_found: bool
+    # None for every command that reached a process, so a caller reads the same
+    # object it always did unless the spawn itself was refused.
+    not_executable_reason: str | None = None
+    spawn_error: str = ""
+
+    @property
+    def not_executable(self) -> bool:
+        return self.not_executable_reason is not None
 
 
 def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> CompletedCommand:
@@ -157,6 +190,21 @@ def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> Compl
         )
     except FileNotFoundError:
         return CompletedCommand(stdout="", stderr="", returncode=None, timed_out=False, not_found=True)
+    except OSError as error:
+        # Ordered after FileNotFoundError, which is an OSError carrying ENOENT:
+        # a file that is not there keeps the refusal and the wording it has had
+        # since long before this branch existed.
+        if error.errno not in EXEC_REFUSED_ERRNOS:
+            raise
+        return CompletedCommand(
+            stdout="",
+            stderr="",
+            returncode=None,
+            timed_out=False,
+            not_found=False,
+            not_executable_reason=(NOT_AN_EXECUTABLE_IMAGE_REASON if error.errno == errno.ENOEXEC else PERMISSION_DENIED_REASON),
+            spawn_error=str(error),
+        )
     try:
         stdout, stderr = child.communicate(timeout=max(0.0, timeout_seconds))
         terminate_process_tree(child, CHILD_REAP_TIMEOUT_S)
@@ -188,6 +236,60 @@ def spawn_command(command: list[str], cwd: str, timeout_seconds: float) -> Compl
         timed_out=timed_out,
         not_found=False,
     )
+
+
+NOT_EXECUTABLE_LIKELY_CAUSES: dict[str, list[str]] = {
+    PERMISSION_DENIED_REASON: [
+        "the file was unpacked or copied out of an archive that did not carry its execute bit",
+        "the file's owner or group withholds execute permission from the user this server runs as",
+        "the filesystem the file lives on is mounted noexec",
+    ],
+    NOT_AN_EXECUTABLE_IMAGE_REASON: [
+        "the file is a script whose first line is not a shebang",
+        "the file is a binary built for a different architecture than this host",
+        "the configured path names an archive or an installer rather than the binary it unpacks",
+    ],
+}
+
+
+def not_executable_refusal(backend_name: str, executable_path: str, completed: CompletedCommand, *, subject: str = "debugger executable") -> JsonObject:
+    """Refuse a configured executable that is there and that this host will not run.
+
+    The counterpart of every backend's `*_NOT_FOUND` constant, and deliberately
+    shaped like it: a caller that already reads one of those reads this the same
+    way. What it may not be is the same refusal. "Install the toolchain" and
+    "this toolchain is installed and its execute bit is missing" are different
+    repairs, and an operator told the first while looking at the second goes and
+    installs a second copy of what they already have (#479). So the error_type is
+    its own, `not_executable_reason` says which of the two failing modes this is,
+    and the operating system's own sentence travels with it as the evidence the
+    classification was read out of.
+
+    The configured path is in the result because a bench has more than one entry
+    and a refusal that does not name the file leaves the operator to guess which
+    one it meant. NOT_CONTACTED for the reason the missing-file refusal carries
+    it: the spawn was refused, so no process ever existed that could have touched
+    the board, and the service layer must not quarantine hardware over a call
+    that never started.
+    """
+    reason = completed.not_executable_reason or PERMISSION_DENIED_REASON
+    refused = (
+        "this host refuses to execute it (permission denied)"
+        if reason == PERMISSION_DENIED_REASON
+        else "this host cannot run it as a program (exec format error)"
+    )
+    return {
+        "ok": False,
+        "backend": backend_name,
+        "error_type": "debugger_not_executable",
+        "not_executable_reason": reason,
+        "executable": executable_path,
+        "summary": f"The configured {subject} is present and will not run: {executable_path} exists and {refused}.",
+        "spawn_error": completed.spawn_error,
+        "likely_causes": list(NOT_EXECUTABLE_LIKELY_CAUSES[reason]),
+        **remediation_fields("debugger_not_executable"),
+        **NOT_CONTACTED,
+    }
 
 
 def decode_output(value: str | bytes | None) -> str:
