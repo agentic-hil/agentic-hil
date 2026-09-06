@@ -43,7 +43,7 @@ The image builds that bench from nothing:
 - `uv`, installed before any of that, the way the bench already had it, from the
   installer version and hash `install.sh` itself pins.
 
-Then the entrypoint runs four steps in order and stops at the first one that
+Then the entrypoint runs five steps in order and stops at the first one that
 fails:
 
 1. **Seed.** `UV_SYSTEM_CERTS=1 uv tool install agentic-hil==0.16.0`. This
@@ -80,6 +80,17 @@ fails:
    was switching to this machine's own store, exited zero, and left the current
    release installed and answering `--version`. It is the way through for an
    operator still on a version from before the retry landed.
+5. **Proof 4, the installer under review does it too.** Proof 3 measures the
+   installer as it was published, so a change to the retry in this working tree
+   would reach an operator's proxy before any run of this eval had met it.
+   Proof 2 closed that gap for `agentic-hil upgrade`; this closes it for the
+   installer, which is the half a new operator meets first. The image carries
+   this checkout's `install.sh`, proof 3's installation is removed so the file
+   meets a machine with no agentic-hil on it, and `sh` runs it. A first install
+   has to reach the index for the package itself, so it meets the proxy with
+   nothing to fall back on, and the run asserts the same three things: the
+   trust failure was met, the switch to this machine's own store was announced,
+   and the current release is installed and answering `--version`.
 
 Each step prints a `PASS:` or `FAIL:` line with the decisive evidence line under
 it. The first failure ends the run non-zero.

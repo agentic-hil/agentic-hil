@@ -303,12 +303,15 @@ def test_the_fourth_proof_runs_this_checkouts_installer_on_the_same_bench() -> N
     overlaying this checkout onto the bench; the installer is the other half of
     the same code, and it is the half every new operator meets first.
 
-    So the image carries this checkout's `install.sh`, the entrypoint reseeds
-    the bench to the released version the way proof 3 does and runs that file
-    with `sh`, and the assertions are the same three: the run met the trust
-    failure, it said it was switching to this machine's own store, and the
-    installation moved off the seed. The `.dockerignore` has to let the file
-    into the build context, or the build fails before there is anything to run.
+    So the image carries this checkout's `install.sh` and the entrypoint runs
+    that file with `sh`, on the machine a newcomer has: proof 3's installation
+    is removed first, because a rerun against an installation that is already
+    current never has to reach the index and would meet no proxy. A first
+    install does, so the assertions are the same three proof 3 makes: the run
+    met the trust failure, it said it was switching to this machine's own
+    store, and the current release is installed afterwards. The `.dockerignore`
+    has to let the file into the build context, or the build fails before there
+    is anything to run.
     """
     entrypoint = _code_only(_entrypoint())
     dockerfile = _code_only(_dockerfile())
