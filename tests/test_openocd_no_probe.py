@@ -43,7 +43,14 @@ def a_project_with_an_image(tmp_path: Path):
 
 
 def test_the_recording_is_a_refusal_before_init_and_carries_the_line() -> None:
-    """The premise of every test below, held against the recording itself."""
+    """The recording is internally consistent, which is all this can say.
+
+    A guard against a one sided edit of the fixture module, not a pinned
+    behaviour: both names come out of that module, so no change to the product
+    can make this fail. What holds the recording to the tool is the container
+    tier, which compares this transcript whole against what the installed
+    OpenOCD prints (tests/container/test_openocd_without_a_probe.py).
+    """
     assert THE_LINE_THE_CLASSIFIER_READS in RECORDED_NO_PROBE_STDERR
     assert OPENOCD_INIT_STAGE_MARKER not in RECORDED_NO_PROBE_STDERR
     assert "AGENTIC_HIL_RESULT" not in RECORDED_NO_PROBE_STDERR
