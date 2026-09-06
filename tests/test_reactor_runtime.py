@@ -386,7 +386,9 @@ def test_a_detached_start_that_ends_inside_the_window_names_the_runs_own_report(
 
     assert result["state"] == "finished", result
     assert result["error_type"] == "device_busy", result
-    named = result.get("canonical_report_path") or result["report_path"]
+    # The field itself, not the mirror: with no later run the mirror still
+    # holds this run's report, so the mirror would pass for the wrong reason.
+    named = result["canonical_report_path"]
     report_file = Path(named) if Path(named).is_absolute() else workspace / named
     assert report_file.is_file(), named
     assert json.loads(report_file.read_text(encoding="utf-8"))["run"] == result["run"], named

@@ -46,7 +46,7 @@ from agentic_hil.config import (
     safe_read_text,
 )
 from agentic_hil.process import spawn_detached_process
-from agentic_hil.report import last_report_path
+from agentic_hil.report import CANONICAL_REPORT_KEY, last_report_path
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 RUN_RECORD_VERSION = 1
@@ -436,21 +436,29 @@ class RunRegistration:
             self._pending = None
 
     def finish(self, result: JsonObject) -> None:
-        """The one terminal record, written from the run's own result."""
+        """The one terminal record, written from the run's own result.
+
+        The run's own report travels into the record beside the shared path.
+        `report_path` is the workspace mirror, which the next run overwrites;
+        the per-run copy under the state root is the one that stays this
+        run's, and a status asked after any later run has to be able to name
+        it. It is taken from the result because the report writer is where it
+        is decided, and left off a record whose result did not carry one (a
+        report that could not be written) rather than invented."""
         self._pending = None
         stopped = bool(result.get("stopped"))
-        self._write(
-            RUN_STOPPED if stopped else RUN_FINISHED,
-            {
-                "run_ok": bool(result.get("ok")),
-                "error_type": result.get("error_type"),
-                "failed_step": result.get("failed_step"),
-                "stopped_after_step": result.get("stopped_after_step"),
-                "report_path": result.get("report_path", self.report_path),
-                "finished_at": utc_now_iso(),
-            },
-            force=True,
-        )
+        fields: JsonObject = {
+            "run_ok": bool(result.get("ok")),
+            "error_type": result.get("error_type"),
+            "failed_step": result.get("failed_step"),
+            "stopped_after_step": result.get("stopped_after_step"),
+            "report_path": result.get("report_path", self.report_path),
+            "finished_at": utc_now_iso(),
+        }
+        canonical = result.get(CANONICAL_REPORT_KEY)
+        if isinstance(canonical, str) and canonical:
+            fields[CANONICAL_REPORT_KEY] = canonical
+        self._write(RUN_STOPPED if stopped else RUN_FINISHED, fields, force=True)
         self._terminal = True
 
     def stop_requested(self) -> bool:
@@ -635,9 +643,11 @@ def _detached_terminal_result(handle: str, record: JsonObject, report: str) -> J
         "finished_at": record.get("finished_at"),
         "summary": (
             f"The detached run under handle {handle} {ended} before the start command returned and {verdict}; "
-            f"its report is at {record.get('report_path', report)}."
+            f"its report is at {run_report_named(record) or report}."
         ),
     }
+    if record.get(CANONICAL_REPORT_KEY):
+        result[CANONICAL_REPORT_KEY] = record[CANONICAL_REPORT_KEY]
     if not run_ok:
         result["error_type"] = record.get("error_type") or "unknown"
         for field in ("failed_step", "stopped_after_step"):
@@ -796,11 +806,26 @@ def run_status(config: AgenticHILConfig, handle: str | None = None) -> JsonObjec
     }
 
 
+def run_report_named(record: JsonObject) -> str | None:
+    """The report a reader is sent to for a finished run: its own copy first.
+
+    The per-run copy under the state root is the run's report; the shared
+    workspace path beside it is a mirror the next run replaces, and after any
+    later run a reader sent there finds another run's verdict. The mirror is
+    named only for a record that carries no per-run path, which is a report
+    that could not be written at all."""
+    canonical = record.get(CANONICAL_REPORT_KEY)
+    if isinstance(canonical, str) and canonical:
+        return canonical
+    mirror = record.get("report_path")
+    return mirror if isinstance(mirror, str) and mirror else None
+
+
 def run_status_summary(state: str, record: JsonObject, requested_at: str | None) -> str:
     if state in TERMINAL_RUN_STATES:
         verdict = "passed" if record.get("run_ok") else f"did not pass ({record.get('error_type') or 'unknown'})"
         ended = "was stopped on request" if state == RUN_STOPPED else "ended"
-        return f"This run {ended} and {verdict}; its report is at {record.get('report_path')}."
+        return f"This run {ended} and {verdict}; its report is at {run_report_named(record)}."
     if state == RUN_STARTING:
         # A run that has not published `running` holds nothing yet: it is
         # taking its devices, or waiting for a holder to give one up. Saying it
