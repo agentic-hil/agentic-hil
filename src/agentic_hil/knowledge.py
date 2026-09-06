@@ -1786,6 +1786,44 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "is that nothing has vouched for its secret-named values, which is what both sinks declined to publish.",
         ),
     ),
+    # The one error_type two unlike refusals share by name. Unscoped,
+    # `config_file_not_found` is a workspace with no authoritative
+    # configuration, and its steps write one. The ST-Link backend classifies
+    # STM32CubeProgrammer's report of a file it could not open under the same
+    # name, and its own summary says so ("Debugger input file could not be
+    # found."): the configuration is there, or the call would never have reached
+    # the programmer, and the path that is wrong is one this call passed.
+    # Without this entry that refusal travelled with the other one's steps and
+    # sent an operator whose firmware path was wrong to write a configuration
+    # they already have (#506).
+    "config_file_not_found:stlink": ErrorRemedy(
+        meaning=(
+            "STM32CubeProgrammer reported a file it could not open. It is a path this call passed, not a missing "
+            "configuration: this workspace has an authoritative configuration, or the call would not have reached the "
+            "programmer at all."
+        ),
+        remediation=(
+            "Read `programmer_output` for the name the CLI printed. That is the file it could not open, and it is the "
+            "only path this refusal is about.",
+            "If it is the firmware, check the `image_path` this call passed. It is resolved under `workspace_root` "
+            "before the programmer is started, so a file that was there when the call was accepted and gone when the "
+            "programmer opened it (a build that reran, a clean, an artifact written to another directory) reads "
+            "exactly like this.",
+            "If it is not the firmware, it is a file the programmer went looking for itself: STM32CubeProgrammer reads "
+            "device descriptions and external loaders out of its own installation, so a `debuggers.<name>.executable` "
+            "copied out of that installation and run on its own reports them missing. Point the key at the installed "
+            "programmer rather than at a copy of the binary.",
+            "Report the printed path to the operator and ask which file was meant. Nothing about this workspace's "
+            "configuration has to change to answer that.",
+        ),
+        do_not=(
+            "Do not write or rewrite the authoritative configuration. `project_config_create` and `agentic-hil init` "
+            "answer the other refusal that carries this name, the one about a workspace that has no configuration at "
+            "all, and here they would overwrite a working one over a path in an argument.",
+            "Do not retry the same path expecting another answer. The programmer looked for that file and did not "
+            "find it, and a second attempt reaches the same absent file.",
+        ),
+    ),
     "target_not_detected:openocd": ErrorRemedy(
         meaning="OpenOCD reached the debug adapter but no target answered on the selected transport.",
         remediation=(
