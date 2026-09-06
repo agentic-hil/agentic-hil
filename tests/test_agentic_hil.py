@@ -3822,6 +3822,147 @@ def test_a_pin_refusal_on_a_quiet_machine_still_says_no_restart_is_needed(
     assert "No restart is needed." in result["summary"]
 
 
+# What `pipx upgrade` writes on stderr for a package `pipx pin` is holding,
+# beside the exit code 0 that was read as success. Measured against pipx 1.17.2
+# and recorded in the report of 2026-09-06. pipx names no version in it, because
+# `pipx pin` holds an installation at whatever it already has.
+_PIPX_PIN_REFUSAL = "Not upgrading pinned package agentic-hil. Run `pipx unpin agentic-hil` to unpin it."
+
+_PIPX_UPGRADE_COMMAND = ["pipx.exe", "upgrade", "agentic-hil"]
+
+
+def test_a_pinned_pipx_installation_is_refused_and_names_the_line_that_clears_the_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported defect: a pin reported as a success that blamed the index.
+
+    `pipx pin` holds an installation at one release, and every later
+    `pipx upgrade` exits 0, changes nothing and writes one line saying so. That
+    run came back `ok: true` with no `error_type`, no `pinned_version` and no
+    `reinstall_command`, under a summary offering two explanations that are both
+    false here: a private or unreachable index, and an interpreter the newer
+    release does not accept. The index answered and named the release. The one
+    cause is a pin the operator set, and pipx puts both the cause and the command
+    that clears it into the output the result already carries verbatim.
+
+    The refusal and its remediation already existed; they were reachable for uv
+    alone, because the pin was read out of uv's wording.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="pipx",
+        command=_PIPX_UPGRADE_COMMAND,
+        installed=subprocess.CompletedProcess([], 0, "", _PIPX_PIN_REFUSAL),
+        version_after=__version__,
+        resolution=PIP_WOULD_INSTALL_A_RELEASE,
+    )
+
+    result = upgrade_installation()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    # pipx names no version in its refusal, and the release it holds the
+    # installation at is the one that is installed.
+    assert result["pinned_version"] == __version__
+    assert result["reinstall_command"] == 'pipx install --force "agentic-hil[can]"'
+    assert result["installed_extras"] == ["can"]
+    assert result["install"]["stderr"] == _PIPX_PIN_REFUSAL
+    # The pin named as the reason, and the manager's own one-line fix named with
+    # it: it clears the pin and leaves everything else where it is.
+    assert "pin" in result["summary"]
+    assert "pipx unpin agentic-hil" in result["summary"]
+    # And neither of the two false explanations the success used to offer.
+    assert "index" not in result["summary"]
+    assert "interpreter" not in result["summary"]
+    # uv's hint is uv's; a pipx result must not carry the warning about it.
+    assert "uv tool install" not in result["summary"]
+    assert "pipx unpin agentic-hil" in result["manager_hint_note"]
+    assert "names the bare distribution" not in result["manager_hint_note"]
+    assert entrypoint(["upgrade", "--json"]) == 1
+
+
+def test_a_pipx_installation_pinned_at_the_newest_release_is_a_note_and_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neighbouring direction, and the one a refusal must not swallow.
+
+    A machine pinned to the release it is already on wanted nothing it did not
+    get, and refusing there made `agentic-hil upgrade` exit non-zero on an
+    installation that was exactly where it should be, which breaks the
+    provisioning scripts that run it unconditionally. So the pin is reported as
+    the note it is: exit 0, the pin named, and the line that clears it offered
+    for whenever later releases are to be picked up without it.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="pipx",
+        command=_PIPX_UPGRADE_COMMAND,
+        installed=subprocess.CompletedProcess([], 0, "", _PIPX_PIN_REFUSAL),
+        version_after=__version__,
+        resolution=PIP_WOULD_INSTALL_NOTHING,
+    )
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert result["already_current"] is True
+    assert result["pinned_version"] == __version__
+    assert result["reinstall_command"] == 'pipx install --force "agentic-hil[can]"'
+    assert "note rather than as a refusal" in result["summary"]
+    assert entrypoint(["upgrade", "--json"]) == 0
+
+
+def test_a_pipx_installation_with_no_pin_still_upgrades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neighbour that must not move: an ordinary pipx upgrade is untouched.
+
+    Reading a pin out of pipx's prose is only allowed to change a run pipx
+    refused. A run it performed still reports the two versions it moved between.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="pipx",
+        command=_PIPX_UPGRADE_COMMAND,
+        installed=MANAGER_INSTALLED,
+        version_after="9.9.9",
+    )
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    assert result["version"] == "9.9.9"
+    assert "error_type" not in result
+    assert "pinned_version" not in result
+
+
+@pytest.mark.parametrize(
+    ("output", "pinned"),
+    [
+        (_PIPX_PIN_REFUSAL, True),
+        (_UV_EXACT_PIN_HINT, True),
+        ("Nothing to upgrade\n", False),
+        ("installed\n", False),
+    ],
+)
+def test_the_pin_is_read_out_of_either_managers_own_words(output: str, pinned: bool) -> None:
+    """One reader for both managers, and neither wording taken from the other.
+
+    uv writes `is pinned to ... (installed with an exact version pin)`, pipx
+    writes `Not upgrading pinned package`, and a run that says neither is a run
+    no pin held. Reading uv's two phrases alone is what left every pipx pin with
+    no path to a refusal at all.
+    """
+    from agentic_hil.upgrade import _manager_reports_exact_pin
+
+    assert _manager_reports_exact_pin({"stdout": "", "stderr": output}) is pinned
+
+
 def _table_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
     """A host that publishes no process table: macOS, or a snapshot that raised."""
     monkeypatch.setattr("agentic_hil.upgrade.snapshot_process_images", lambda: None)
