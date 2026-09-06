@@ -4225,15 +4225,19 @@ def _a_node_shaped_interpreter(into: Path) -> Path:
     return node
 
 
-def _a_process_that_lingers(node: Path, script: Path) -> subprocess.Popen[bytes]:
+def _a_process_that_lingers(node: Path, script: Path, *arguments: str) -> subprocess.Popen[bytes]:
     """One real child, asserted to be running before anything is asked about it.
 
     A child that died on the way up would leave the process table empty and
     every branch of step 5 answering the calm sentence, which is the answer
     this test exists to disbelieve.
+
+    `arguments` go on the command line after the script, which is how a
+    caller puts an agent CLI's name somewhere on a stranger's line without
+    that line being the CLI.
     """
     script.write_text(f"import time\n\ntime.sleep({LINGER_S})\n", encoding="utf-8")
-    started = subprocess.Popen([str(node), str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    started = subprocess.Popen([str(node), str(script), *arguments], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
     assert started.poll() is None, f"{node.name} {script.name} exited with {started.returncode} before the install ran"
     return started
@@ -4250,10 +4254,12 @@ def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(
     operator's next question reaches a session that never loaded it.
 
     Two processes run for this: one node whose command line names the CLI, and
-    one node running something else entirely. The first has to be named with
-    its PID, and the second may not appear at all, because a block that names a
-    stranger's process is worse than one that names nothing: it asks an
-    operator to quit whatever else they had running.
+    one node running something else entirely, with the CLI's name sitting in
+    an argument of its own. The first has to be named with its PID, and the
+    second may not appear at all, because a block that names a stranger's
+    process is worse than one that names nothing: it asks an operator to quit
+    whatever else they had running. The name in that argument is what says the
+    match is on the program being run and not on the words on the line.
 
     Everything the run touches is this test's own: its home, its manager bin,
     its tool directory and its two children, and this machine's own
@@ -4266,7 +4272,7 @@ def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(
     (bench.early_bin / f"{STEP_FIVE_AGENT}.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
     node = _a_node_shaped_interpreter(tmp_path / "npm" / "node_modules" / ".bin")
     started = _a_process_that_lingers(node, node.parent / f"{STEP_FIVE_AGENT}.js")
-    unrelated = _a_process_that_lingers(node, node.parent / "some-other-tool.js")
+    unrelated = _a_process_that_lingers(node, node.parent / "some-other-tool.js", "--report", STEP_FIVE_AGENT)
 
     try:
         result, transcript = bench.run("--no-can", manager_bin_on_path=False)
@@ -4295,12 +4301,16 @@ def test_step_five_says_there_is_nothing_to_restart_when_only_an_unrelated_node_
     operator with a build watcher running and no agent CLI open must still be
     told there is nothing to restart, or the block means nothing the next time
     it does name something.
+
+    The watcher here carries the CLI's own name in an argument, which is the
+    case a matcher that reads the line without anchoring the name to the
+    program gets wrong: `--report opencode` is not opencode running.
     """
     bench = _WindowsBench(tmp_path, installed=None, manager_writes="99.0.0")
     (bench.early_bin / "claude.cmd").unlink()
     (bench.early_bin / f"{STEP_FIVE_AGENT}.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
     node = _a_node_shaped_interpreter(tmp_path / "npm" / "node_modules" / ".bin")
-    unrelated = _a_process_that_lingers(node, node.parent / "some-other-tool.js")
+    unrelated = _a_process_that_lingers(node, node.parent / "some-other-tool.js", "--report", STEP_FIVE_AGENT)
 
     try:
         result, transcript = bench.run("--no-can", manager_bin_on_path=False)

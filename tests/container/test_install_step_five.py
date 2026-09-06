@@ -127,13 +127,18 @@ class Machine:
         The failure that costs an operator once step 5 stops matching on the
         process name alone is the other direction, a block telling them to quit
         an editor or a dev server because it happens to run under node.
+
+        Its command line carries `codex` in an argument of its own, because
+        that is the case the anchor exists for: a matcher that looks for the
+        name anywhere on the line names this process, and a matcher that asks
+        which program is running does not.
         """
         node_dir = self._node_runtime()
         script = self.clis.parent / "some-project" / "server.js"
         script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text(f"#!/usr/bin/env node\nsleep {LINGER_S}\n", encoding="utf-8")
         script.chmod(0o755)
-        started = self._start([str(node_dir / "node"), str(script)])
+        started = self._start([str(node_dir / "node"), str(script), "--report", "codex"])
         self.native_children[started.pid] = self._child_of(started.pid)
         return started
 
@@ -312,9 +317,10 @@ def test_step_five_does_not_name_a_node_that_is_running_something_else(machine: 
 
     A `node` is a runtime and most of what runs under it is not an agent CLI.
     A block that told somebody to quit their dev server because it happens to
-    be a node, or because an argument of theirs ends in the CLI's name, is a
+    be a node, or because an argument of theirs carries the CLI's name, is a
     false alarm in the one part of the transcript that asks for an action. The
-    calm branch has to survive a machine with node processes on it.
+    calm branch has to survive a machine with node processes on it, and the
+    process here carries `codex` on its line without being codex.
     """
     running = machine.a_process_that_is_not_an_agent_cli()
     assert comm_of(running.pid) == "node", comm_of(running.pid)
