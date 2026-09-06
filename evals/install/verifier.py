@@ -1539,6 +1539,29 @@ def workspace_binding_named(refusal: dict[str, Any], expected_workspace: Path) -
     return False, f"nothing in the refusal names the workspace binding; keys={sorted(refusal)}"
 
 
+def startup_refusal(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    """The document a protocol command wrote instead of starting, off the stream it is on.
+
+    `mcp-stdio` and `com-stdio` own stdout for framed messages, so since #458
+    a configuration refused before either can start is written to stderr and
+    stdout stays empty; the releases before that wrote the same document to
+    stdout. This arm read stdout alone, so against every release from #458 on
+    it saw no document, failed a sound install, and never reached
+    `workspace_binding_named`, the check that gives it teeth. Both streams are
+    read, stderr first because that is where the release writes it, and each
+    stream is parsed whole: the release writes the document and nothing else on
+    that stream, and a stream that carries anything besides it is a release
+    that changed what it writes, which this eval exists to notice rather than
+    to read around.
+    """
+    for stream in (completed.stderr, completed.stdout):
+        with contextlib.suppress(json.JSONDecodeError, TypeError):
+            parsed = json.loads(stream)
+            if isinstance(parsed, dict):
+                return parsed
+    return {}
+
+
 def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str]:
     """A server started outside the workspace its configuration binds serves nothing of it.
 
@@ -1568,11 +1591,7 @@ def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str
         config=config,
     )
     bound = any(response.get("result", {}).get("serverInfo") for response in named_responses)
-    refusal: dict[str, Any] = {}
-    with contextlib.suppress(json.JSONDecodeError):
-        parsed = json.loads(named.stdout)
-        if isinstance(parsed, dict):
-            refusal = parsed
+    refusal = startup_refusal(named)
     if bound:
         return False, f"the configuration was named from {OTHER_WORKSPACE} and the server initialized anyway; exit={named.returncode}"
     if named.returncode == 0:
@@ -1580,8 +1599,9 @@ def wrong_workspace_fails(arguments: list[str], config: Path) -> tuple[bool, str
     if refusal.get("error_type") != "config_invalid":
         # A `config_file_not_found` here would mean the configuration never
         # reached the server, and the arm proved nothing about the binding. No
-        # document at all is the same nothing: the release prints its refusal on
-        # stdout, so an unparsable exit says only that something went wrong.
+        # document at all is the same nothing: the release writes its refusal
+        # to one of the two streams as one document, so an exit that left none
+        # there says only that something went wrong.
         return False, f"refused for the wrong reason: error_type={refusal.get('error_type', '<no document>')}"
     binding_named, binding = workspace_binding_named(refusal, OTHER_WORKSPACE)
     if not binding_named:
