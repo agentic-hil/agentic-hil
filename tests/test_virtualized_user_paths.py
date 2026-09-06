@@ -26,6 +26,7 @@ import argparse
 import errno
 import json
 import os
+import pathlib
 from pathlib import Path
 
 import pytest
@@ -2473,6 +2474,15 @@ def refuse_creation_in(monkeypatch: pytest.MonkeyPatch, directory: Path, error: 
         real(path, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "mkdir", mkdir)
+    # Python 3.10 and older route `Path.mkdir` through an accessor that bound
+    # `os.mkdir` when pathlib was imported, so the patch above never reaches
+    # the product's `component.mkdir(...)` there: the platform root was created
+    # after all, the fallback was never asked, and the test that pins the walk
+    # failed on exactly the interpreter the matrix runs first. Later versions
+    # call `os.mkdir` directly and carry no such accessor.
+    accessor = getattr(pathlib, "_NormalAccessor", None)
+    if accessor is not None and hasattr(accessor, "mkdir"):
+        monkeypatch.setattr(accessor, "mkdir", staticmethod(mkdir))
 
 
 def refuse_directory_walk(monkeypatch: pytest.MonkeyPatch, directory: Path, error: OSError) -> None:
