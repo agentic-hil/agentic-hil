@@ -2767,6 +2767,271 @@ def test_upgrade_selects_manager_owning_running_installation(
     assert command == expected
 
 
+# The receipt of an installation created with an exact requirement, in the shape
+# `uv tool install "agentic-hil[can]==0.7.1"` writes it. The version matches the
+# one uv's own pin hint names above, so a run driven by both is one machine.
+_RECEIPT_PINNED_EXACTLY = """
+[tool]
+requirements = [
+    { name = "agentic-hil", extras = ["can"], specifier = "==0.7.1" },
+]
+"""
+
+
+def _relocated_uv_tool_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> Path:
+    """A uv tool environment somewhere other than uv's default tool directory.
+
+    Where uv keeps its tool directory is a setting, and `UV_TOOL_DIR` moves it:
+    the environment is then `<that directory>/agentic-hil`, with no `uv/tools`
+    component in the path at all. Everything else is unchanged, and the receipt
+    uv writes into every tool environment is still sitting inside it.
+    """
+    environment = tmp_path / "relocated-tools" / "agentic-hil"
+    environment.mkdir(parents=True)
+    (environment / "uv-receipt.toml").write_text(body, encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "uv")
+    return environment
+
+
+def test_a_uv_tool_installation_outside_the_default_tool_directory_is_still_uv_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reported defect: the manager was read off the shape of the path.
+
+    `owning_manager()` recognised a uv tool installation by the substring
+    `/uv/tools/agentic-hil` in `sys.prefix` and by nothing else, so an
+    installation made under a relocated tool directory fell through to the
+    `INSTALLER` file, answered `uv-pip`, and every surface that reads the answer
+    was wrong at once: the upgrade ran `uv pip install --upgrade`, the receipt
+    beside it was never read, the removal line named `uv pip uninstall` (which
+    leaves the environment, the receipt and the launcher standing), and the
+    environment stopped counting as this package's own.
+
+    The definitive marker is the file uv writes into every tool environment and
+    nothing else writes.
+    """
+    from agentic_hil.upgrade import (
+        _dedicated_environment_root,
+        _recorded_install,
+        _upgrade_command,
+        _uv_receipt,
+        owning_manager,
+        reinstall_command_with_extras,
+        removal_command,
+    )
+
+    environment = _relocated_uv_tool_environment(monkeypatch, tmp_path, _RECEIPT_PINNED_EXACTLY)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda name: f"{name}.exe")
+
+    assert owning_manager() == "uv-tool"
+    assert _upgrade_command() == ("uv", ["uv.exe", "tool", "upgrade", "agentic-hil"])
+    # The receipt is read, so the pin it records can be reported at all.
+    assert _uv_receipt() is not None
+    assert _recorded_install().exact_pin == "==0.7.1"
+    assert removal_command() == "uv tool uninstall agentic-hil"
+    assert reinstall_command_with_extras(("can",)) == 'uv tool install "agentic-hil[can]@latest"'
+    assert _dedicated_environment_root() == environment
+
+
+def _upgrade_through_the_manager_this_installation_names(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    installed: subprocess.CompletedProcess[str],
+    version_after: str,
+    resolution: subprocess.CompletedProcess[str] | None = None,
+) -> list[list[str]]:
+    """One upgrade with the manager choice left to the code under test.
+
+    `_upgrade_reporting` hands the manager and the command in, which is what
+    every outcome test wants and exactly what a test about the choice itself must
+    not do. Here only the subprocesses are answered, so the command that runs is
+    the one `_upgrade_command()` built out of this installation.
+    """
+    calls: list[list[str]] = []
+
+    def run(invoked: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+        calls.append(invoked)
+        if invoked[-1] == "--version":
+            return subprocess.CompletedProcess(invoked, 0, f"{version_after}\n", "")
+        if "--dry-run" in invoked and resolution is not None:
+            return resolution
+        return installed
+
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", list)
+    monkeypatch.setattr("agentic_hil.upgrade._run_upgrade_process", run)
+    monkeypatch.setattr("agentic_hil.upgrade.shutil.which", lambda name: f"{name}.exe")
+    return calls
+
+
+def test_a_relocated_uv_tool_installation_is_not_upgraded_across_its_recorded_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The whole of the reported defect, end to end.
+
+    On a relocated tool directory `agentic-hil upgrade` ran
+    `uv pip install --upgrade`, which uninstalls the pinned release, installs the
+    newest one, exits 0 and leaves uv's receipt still recording the old exact
+    requirement. The run reported `ok: true` and `upgraded_on_disk: true` over an
+    installation the operator had deliberately pinned, and said nothing about the
+    requirement it had just overridden.
+
+    The command that runs is `uv tool upgrade`, which honours the pin, and the
+    refusal that already exists for a pin is the one this reaches.
+    """
+    _relocated_uv_tool_environment(monkeypatch, tmp_path, _RECEIPT_PINNED_EXACTLY)
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    calls = _upgrade_through_the_manager_this_installation_names(
+        monkeypatch,
+        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_EXACT_PIN_HINT),
+        version_after=__version__,
+    )
+
+    result = upgrade_installation()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_blocked_by_pin"
+    assert result["pinned_version"] == "0.7.1"
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    # The one command that could have replaced this installation, and the shape
+    # it must never have here.
+    assert ["uv.exe", "tool", "upgrade", "agentic-hil"] in calls
+    assert not any("pip" in invoked for invoked in calls if invoked[0] == "uv.exe")
+
+
+def test_a_uv_tool_installation_in_the_default_directory_still_upgrades(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The neighbour: nothing about the ordinary installation moves.
+
+    The default tool directory keeps answering `uv-tool`, the manager it runs is
+    still `uv tool upgrade`, and an unpinned installation is still replaced and
+    reported as replaced.
+    """
+    from agentic_hil.upgrade import owning_manager
+
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST)
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "uv")
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    calls = _upgrade_through_the_manager_this_installation_names(
+        monkeypatch,
+        installed=MANAGER_INSTALLED,
+        version_after="9.9.9",
+    )
+
+    assert owning_manager() == "uv-tool"
+
+    result = upgrade_installation()
+
+    assert result["ok"] is True
+    assert result["upgraded_on_disk"] is True
+    assert result["version"] == "9.9.9"
+    assert ["uv.exe", "tool", "upgrade", "agentic-hil"] in calls
+
+
+def test_a_leftover_receipt_in_a_pipx_environment_does_not_make_it_a_uv_tool_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The guarantee the receipt read must not take away.
+
+    A `uv-receipt.toml` that ended up inside a pipx venv is a file in a place
+    that is not uv's, and reading it as ownership would send an operator to
+    rebuild or empty an environment pipx is holding. The pipx prefix is decided
+    before the receipt is looked for, exactly as it was before.
+    """
+    from agentic_hil.upgrade import _uv_receipt, owning_manager, removal_command
+
+    environment = tmp_path / "pipx" / "venvs" / "agentic-hil"
+    environment.mkdir(parents=True)
+    (environment / "uv-receipt.toml").write_text(_RECEIPT_PINNED_EXACTLY, encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "uv")
+
+    assert owning_manager() == "pipx"
+    assert _uv_receipt() is None
+    assert removal_command() == "pipx uninstall agentic-hil"
+
+
+def test_an_ordinary_environment_uv_pip_installed_into_is_still_a_uv_pip_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The other neighbour: no receipt is no tool installation, and that is right.
+
+    `uv pip install agentic-hil` into a virtual environment writes `INSTALLER` =
+    `uv` and no receipt, because there is no tool installation to record. That
+    environment keeps the `uv pip` answer it had, and it has to: `uv tool
+    upgrade` would refuse to act on an environment uv does not manage as a tool.
+    """
+    from agentic_hil.upgrade import _dedicated_environment_root, owning_manager
+
+    environment = tmp_path / "venv"
+    environment.mkdir()
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    monkeypatch.setattr(sys, "executable", "PYTHON")
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "uv")
+
+    assert owning_manager() == "uv-pip"
+    assert _dedicated_environment_root() is None
+
+
+def test_a_prefix_whose_receipt_cannot_be_looked_for_refuses_instead_of_guessing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manager that cannot be established is not a manager to hand the machine to.
+
+    "The receipt is not there" and "nobody here can tell whether it is" are
+    different facts, and only the first says this is not a uv tool installation.
+    Answering the second with `uv-pip` is what runs `uv pip install --upgrade`
+    over a receipt that is lying right there, which is the defect itself with one
+    extra step. So the upgrade refuses and nothing that could replace the
+    installation is run.
+    """
+    from agentic_hil.config import ConfigError
+    from agentic_hil.upgrade import _upgrade_command, owning_manager
+
+    monkeypatch.setattr("agentic_hil.upgrade._uv_tool_receipt_present", lambda: None)
+    monkeypatch.setattr(sys, "prefix", "PREFIX")
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "uv")
+    monkeypatch.setattr("agentic_hil.upgrade._run_upgrade_process", lambda *_args, **_kwargs: pytest.fail("no manager was established, so none may run"))
+
+    assert owning_manager() == "unknown"
+    with pytest.raises(ConfigError) as refusal:
+        _upgrade_command()
+    assert refusal.value.error_type == "upgrade_manager_not_established"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a directory that refuses to be listed needs POSIX permission bits")
+def test_a_prefix_that_refuses_to_be_listed_is_not_read_as_having_no_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reader itself: absent and unreadable are two answers, not one.
+
+    `Path.is_file()` swallows the refusal and answers False for both, which is
+    the answer "this is not a uv tool installation" given about a directory
+    nobody looked inside.
+    """
+    from agentic_hil.upgrade import _uv_tool_receipt_present
+
+    environment = tmp_path / "relocated-tools" / "agentic-hil"
+    environment.mkdir(parents=True)
+    (environment / "uv-receipt.toml").write_text(_RECEIPT_PINNED_EXACTLY, encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    environment.chmod(0o000)
+    try:
+        if os.access(environment, os.R_OK):
+            pytest.skip("this user reads a directory with no read bit, so the refusal cannot be reproduced here")
+        assert _uv_tool_receipt_present() is None
+    finally:
+        environment.chmod(0o700)
+
+
 @pytest.mark.parametrize(
     ("prefix", "installer", "expected"),
     [
