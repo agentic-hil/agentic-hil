@@ -3445,11 +3445,33 @@ def init_next_steps(available_com_ports: JsonObject, config_path: Path, *, narro
     return next_steps
 
 
-def schema(output: str | None = None, force: bool = False) -> JsonObject:
+def _printed_document(text: str) -> int:
+    """Print one document to stdout and answer with the exit code, nothing else.
+
+    The three commands that print a document (`schema`, `test-schema`,
+    `mcp-config`) are the ones a shell redirects into a file, so what they write
+    has to be one parseable document and the verdict has to travel as the exit
+    code alone. A result returned here would be printed after the document by
+    the entrypoint, in whichever spelling the reader asked for.
+    """
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+def schema(output: str | None = None, force: bool = False) -> JsonObject | int:
+    """The bundled configuration schema, written to a file or printed as it is.
+
+    Without `--output` the document is the whole of stdout and the answer is the
+    exit code: a result printed after it made `agentic-hil schema >
+    agentic-hil.schema.json` a file that does not load, because the redirect
+    captured the schema and then `OK.` (or `{"ok": true}` under `--json`), and
+    the exit code said 0 over both (#504).
+    """
     text = config_schema_text()
     if output is None:
-        sys.stdout.write(text)
-        return {"ok": True}
+        return _printed_document(text)
     output_path = Path(output)
     if output_path.exists() and not force:
         return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL configuration schema already exists. Use --force to overwrite it.", "path": output}
@@ -3458,11 +3480,10 @@ def schema(output: str | None = None, force: bool = False) -> JsonObject:
     return {"ok": True, "summary": "Agentic HIL configuration schema written.", "path": output}
 
 
-def test_schema(output: str | None = None, force: bool = False) -> JsonObject:
+def test_schema(output: str | None = None, force: bool = False) -> JsonObject | int:
     text = resources.files("agentic_hil").joinpath("schemas", "testconfig.schema.json").read_text(encoding="utf-8")
     if output is None:
-        sys.stdout.write(text)
-        return {"ok": True}
+        return _printed_document(text)
     output_path = Path(output)
     if output_path.exists() and not force:
         return {"ok": False, "error_type": "schema_exists", "summary": "Agentic HIL test configuration schema already exists. Use --force to overwrite it.", "path": output}
@@ -3692,11 +3713,10 @@ def mcp_config_text() -> str:
     return json.dumps({"mcpServers": {"agentic-hil": {"command": mcp_server_command(), "args": ["mcp-stdio"]}}}, indent=2) + "\n"
 
 
-def mcp_config(output: str | None = None, force: bool = False) -> JsonObject:
+def mcp_config(output: str | None = None, force: bool = False) -> JsonObject | int:
     text = mcp_config_text()
     if output is None:
-        sys.stdout.write(text)
-        return {"ok": True}
+        return _printed_document(text)
     workspace = absolute_without_symlinks(Path.cwd())
     requested = Path(output).expanduser()
     output_path = absolute_without_symlinks(requested if requested.is_absolute() else workspace / requested)
