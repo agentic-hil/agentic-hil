@@ -201,8 +201,7 @@ def test_the_shipped_server_round_trips_a_non_ascii_value_through_real_byte_pipe
     finished = subprocess.run(
         [sys.executable, "-m", "agentic_hil", "mcp-stdio"],
         input=request_bytes(1, NON_ASCII_URI),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         cwd=tmp_path,
         env=child_environment(),
         timeout=180,
