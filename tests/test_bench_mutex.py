@@ -568,6 +568,30 @@ def test_a_live_run_inside_a_repeat_block_keeps_its_heartbeat_fresh(tmp_path: Pa
     _assert_the_holder_read_as_live(before, after, refusal)
 
 
+def test_a_hold_survives_a_heartbeat_pump_that_cannot_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refresh is best effort like the record it writes: a host that cannot
+    start one more thread (`Thread.start` raises RuntimeError) still holds the
+    device exclusively, still names itself to a contender, and still releases.
+    Only the freshness of the record is lost."""
+    import threading
+
+    def cannot_start(thread: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", cannot_start)
+    mutex = BenchMutex(frontend="cramped")
+    mutex.acquire([BOARD])
+    try:
+        assert mutex.holds(BOARD)
+        record = mutex.holder(BOARD)
+        assert record is not None and record["state"] == "held"
+        assert _contender_refusal(BOARD)["holder"]["frontend"] == "cramped"
+    finally:
+        mutex.release([BOARD])
+    released = mutex.holder(BOARD)
+    assert released is not None and released["state"] == "released"
+
+
 def test_a_holder_that_stopped_heartbeating_still_reads_as_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The other direction, pinned so the fix cannot be a contender that stopped
     looking: a holder whose refreshes no longer reach the disk is exactly the
