@@ -1,0 +1,21 @@
+# The bootstrap tools the container test image installs before the locked
+# dependency set (tools/container/Dockerfile).
+#
+# uv and pyOCD are pinned exactly because the tests read what these two
+# programs print and write: uv's receipt layout and pyOCD's no-probe refusal
+# are what the fixtures under tests/fixtures reproduce, so a release that
+# changes either should fail the drift tests on a deliberate bump with a test
+# run behind it, not on a rebuild. setuptools and wheel are the build backend
+# this project declares, and the tests build wheels of the checkout with
+# `--no-isolation`, so the build needs no network of its own.
+#
+# The lock file beside this one carries the hashes the image installs with, so
+# a compromised release of any of these or of anything they pull in cannot
+# enter the image that the required container check runs in.
+#
+# Regenerate the hash-pinned lock file after editing:
+#   uv pip compile --generate-hashes --universal --python-version 3.12 requirements/container.in -o requirements/container.txt
+uv==0.12.9
+pyocd==0.45.1
+setuptools>=77
+wheel
