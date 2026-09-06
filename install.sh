@@ -185,6 +185,15 @@ trust_failure() {
     return 1
 }
 
+# uv 0.12.9's line for a console script in its bin that it did not write:
+# `error: Executable already exists: agentic-hil (use --force to overwrite)`.
+refuses_existing_executable() {
+    case "$1" in
+        *"Executable already exists"*) return 0 ;;
+    esac
+    return 1
+}
+
 use_system_certs() {
     UV_SYSTEM_CERTS=1
     export UV_SYSTEM_CERTS
@@ -448,7 +457,11 @@ fetch_uv() {
         printf 'agentic-hil install:   found    %s\n' "$found_hash" >&2
         fail "the pin in this script may be stale: check for a newer uv release, then refresh UV_INSTALLER_VERSION and UV_INSTALLER_SHA256 together. Until then, install uv or Python 3.10 or newer yourself and run this again."
     fi
-    if sh "$installer_path"; then
+    # Astral's installer appends `. "$HOME/.local/bin/env"` to ~/.profile and
+    # ~/.bashrc and creates ~/.zshrc unless it is told not to, which is what the
+    # fourth line of this script promises it never does; step 3 names the one
+    # line to add, once, from the PATH this run was handed (#488).
+    if UV_NO_MODIFY_PATH=1 sh "$installer_path"; then
         rm -f "$installer_path"
         return 0
     fi
@@ -477,6 +490,23 @@ run_uv() {
         return 0
     fi
     printf '%s\n' "$uv_output" >&2
+    if refuses_existing_executable "$uv_output"; then
+        # uv refuses to overwrite an executable it did not write, and on Linux
+        # and macOS its bin is the same `~/.local/bin` a `pip install --user` or
+        # a pipx install writes the console script into. That is the machine
+        # TROUBLESHOOTING.md section 1 first describes, meeting the anchor after
+        # it gained uv, so uv is told to replace the file; the reader is told
+        # which copy went and what its manager still believes, because
+        # uninstalling the package there removes this launcher too (#488).
+        uv_bin_dir=$(uv tool dir --bin 2>/dev/null) || uv_bin_dir="its bin directory"
+        say "package: uv refused to overwrite an agentic-hil in $uv_bin_dir that it did not write (pip --user, pipx or another manager put it there), so it was told to replace it; that manager still records the old package, and uninstalling it there removes this launcher too, so run this script again if you do"
+        if uv_output=$(uv "$@" --force 2>&1); then
+            printf '%s\n' "$uv_output"
+            return 0
+        fi
+        printf '%s\n' "$uv_output" >&2
+        fail "package: uv could not replace that copy either; TROUBLESHOOTING.md section 1 has the fallbacks"
+    fi
     if [ "$SYSTEM_CERTS" = "auto" ] && trust_failure "$uv_output"; then
         say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
         use_system_certs

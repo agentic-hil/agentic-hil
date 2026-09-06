@@ -141,6 +141,13 @@ function Test-TrustFailure {
     return $Output -match 'invalid peer certificate|UnknownIssuer|self.signed certificate|certificate verify failed|CERTIFICATE_VERIFY_FAILED|unable to get local issuer certificate'
 }
 
+# uv 0.12.9's line for a console script in its bin that it did not write:
+# `error: Executable already exists: agentic-hil (use --force to overwrite)`.
+function Test-RefusedExistingExecutable {
+    param([string]$Output)
+    return $Output -match 'Executable already exists'
+}
+
 function Enable-SystemCerts {
     $env:UV_SYSTEM_CERTS = '1'
     Write-Say "certificates: uv reads this machine's own certificate store"
@@ -167,6 +174,20 @@ function Invoke-Uv {
     $result = Invoke-Captured -File 'uv' -Arguments $Arguments
     Write-Host $result.Output.TrimEnd()
     if ($result.ExitCode -eq 0) { return }
+    if (Test-RefusedExistingExecutable $result.Output) {
+        # uv refuses to overwrite an executable it did not write, and its bin
+        # here is the `%USERPROFILE%\.local\bin` a pipx install writes its
+        # launchers into. So uv is told to replace the file, and the reader is
+        # told which copy went and what its manager still believes, because
+        # uninstalling the package there removes this launcher too (#488).
+        $binDirectory = Get-UvBinDirectory
+        if (-not $binDirectory) { $binDirectory = 'its bin directory' }
+        Write-Say "package: uv refused to overwrite an agentic-hil in $binDirectory that it did not write (pip --user, pipx or another manager put it there), so it was told to replace it; that manager still records the old package, and uninstalling it there removes this launcher too, so run this script again if you do"
+        $forced = Invoke-Captured -File 'uv' -Arguments ($Arguments + @('--force'))
+        Write-Host $forced.Output.TrimEnd()
+        if ($forced.ExitCode -eq 0) { return }
+        throw 'uv could not replace that copy either; TROUBLESHOOTING.md section 1 has the fallbacks'
+    }
     if ($script:SystemCertsMode -eq 'auto' -and (Test-TrustFailure $result.Output)) {
         Write-Say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
         Enable-SystemCerts
@@ -621,6 +642,11 @@ function Install-Uv {
         Write-Say "  found    $foundHash"
         throw 'the pin in this script may be stale: check for a newer uv release, then refresh $UvInstallerVersion and $UvInstallerSha256 together. Until then, install uv or Python 3.10 or newer yourself and run this again.'
     }
+    # Astral's installer writes the install directory into HKCU\Environment\Path
+    # unless it is told not to, which is what the fourth line of this script
+    # promises it never does; step 3 prints the one line to run, once, from the
+    # PATH this run was handed (#488).
+    $env:UV_NO_MODIFY_PATH = '1'
     Invoke-Expression ([Text.Encoding]::UTF8.GetString($bytes))
     Add-UserBinToPath
 }
