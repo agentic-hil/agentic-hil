@@ -20,25 +20,23 @@ install` and a PATH from which every directory holding a `uv` has been taken.
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 import pytest
 
 from agentic_hil.upgrade import SERVER_UPGRADE
 
-from .conftest import ABOVE_EVERY_RELEASE, CONTAINER_ONLY, LiveServer, UvTool, Wheelhouse, fixture_configuration
+from .conftest import (
+    ABOVE_EVERY_RELEASE,
+    CONTAINER_ONLY,
+    LiveServer,
+    UvTool,
+    Wheelhouse,
+    a_path_without,
+    fixture_configuration,
+)
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
-
-
-def a_path_without(name: str, path: str) -> str:
-    """`path` with every directory that resolves `name` taken out, checked rather than assumed."""
-    kept = [directory for directory in path.split(os.pathsep) if directory and shutil.which(name, path=directory) is None]
-    stripped = os.pathsep.join(kept)
-    assert shutil.which(name, path=stripped) is None, stripped
-    assert stripped, "nothing was left on PATH, so the child could not start at all"
-    return stripped
 
 
 def test_upgrade_without_the_manager_on_path_is_a_named_refusal(uv_tool: UvTool, wheelhouse: Wheelhouse) -> None:

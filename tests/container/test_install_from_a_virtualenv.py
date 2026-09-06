@@ -79,14 +79,22 @@ def a_fetch_route_that_delivers(real_uv: str, into: Path, home: Path) -> None:
     executable(into / "sha256sum", f'echo "{pinned_installer_digest()}  $1"\nexit 0\n')
 
 
-def test_an_activated_virtualenv_does_not_end_the_run_on_pips_user_refusal(uv_tool: UvTool, wheelhouse: Wheelhouse, tmp_path: Path) -> None:
-    """The venv's python3 first on PATH, `VIRTUAL_ENV` set, no uv anywhere on it.
+@pytest.mark.parametrize("activated", [True, False], ids=["with-virtual-env-exported", "with-nothing-in-the-environment"])
+def test_an_activated_virtualenv_does_not_end_the_run_on_pips_user_refusal(uv_tool: UvTool, wheelhouse: Wheelhouse, tmp_path: Path, activated: bool) -> None:
+    """The venv's python3 first on PATH and no uv anywhere on it, run twice over.
 
     What is asserted: the run does not stop on pip's refusal, step 2 says
     which interpreter is a virtual environment's and that it is falling back
     to uv, and the package lands where uv puts tools. The pip route is not
     forbidden from being tried; what is forbidden is ending the run on a
     refusal the script can read.
+
+    Once with `VIRTUAL_ENV` exported, which is the activated shell, and once
+    without it, which is a PATH that reaches a venv's `bin` for any other
+    reason: a wrapper, a `direnv` that edited PATH alone, a Makefile. pip
+    refuses `--user` in both, because what it reads is the interpreter's own
+    prefixes and not the environment, so a script that answered this question
+    out of `$VIRTUAL_ENV` would still end the second run on the refusal.
     """
     real_uv = shutil.which("uv")
     assert real_uv is not None
@@ -108,7 +116,10 @@ def test_an_activated_virtualenv_does_not_end_the_run_on_pips_user_refusal(uv_to
     path = f"{venv / 'bin'}{os.pathsep}{stand_ins}{os.pathsep}/usr/bin:/bin"
     assert shutil.which("uv", path=path) is None, path
     assert shutil.which("python3", path=path) == str(venv_python), path
-    environment = uv_tool.environment(PATH=path, VIRTUAL_ENV=str(venv), UV_FIND_LINKS=str(wheelhouse.only(ONE_RELEASE_ABOVE_THAT)))
+    environment = uv_tool.environment(PATH=path, UV_FIND_LINKS=str(wheelhouse.only(ONE_RELEASE_ABOVE_THAT)))
+    environment.pop("VIRTUAL_ENV", None)
+    if activated:
+        environment["VIRTUAL_ENV"] = str(venv)
 
     installed = subprocess.run(
         ["sh", str(SHELL_SCRIPT), "--no-agent-install", "--no-can"],

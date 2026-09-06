@@ -410,7 +410,7 @@ def test_an_installation_that_is_already_current_is_not_reported_as_an_upgrade(
     about at the other end."""
     fake_manager(
         monkeypatch,
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        installed=subprocess.CompletedProcess([], 0, "", "Nothing to upgrade\n"),
         version_after=__version__,
     )
     tools = AgenticHILToolService(upgradable_config(tmp_path))

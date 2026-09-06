@@ -293,6 +293,39 @@ def test_proof_two_runs_this_checkouts_upgrade_and_asserts_the_retry() -> None:
     assert "'invalid peer certificate' 'UnknownIssuer'" in entrypoint, entrypoint
 
 
+def test_the_fourth_proof_runs_this_checkouts_installer_on_the_same_bench() -> None:
+    """The installer under review, measured where the released one is measured.
+
+    Proof 3 fetches the installer off the releases page, so what it measures is
+    the certificate retry as it was published: a change to the retry in this
+    working tree ships and reaches an operator's proxy before any run of this
+    eval has met it. Proof 2 closed that gap for `agentic-hil upgrade` by
+    overlaying this checkout onto the bench; the installer is the other half of
+    the same code, and it is the half every new operator meets first.
+
+    So the image carries this checkout's `install.sh`, the entrypoint reseeds
+    the bench to the released version the way proof 3 does and runs that file
+    with `sh`, and the assertions are the same three: the run met the trust
+    failure, it said it was switching to this machine's own store, and the
+    installation moved off the seed. The `.dockerignore` has to let the file
+    into the build context, or the build fails before there is anything to run.
+    """
+    entrypoint = _code_only(_entrypoint())
+    dockerfile = _code_only(_dockerfile())
+    dockerignore = (REPOSITORY_ROOT / ".dockerignore").read_text(encoding="utf-8")
+
+    assert "COPY install.sh /opt/tls-proxy/candidate/install.sh" in dockerfile, dockerfile
+    assert "!install.sh" in dockerignore, dockerignore
+    assert "CANDIDATE_INSTALLER=/opt/tls-proxy/candidate/install.sh" in entrypoint, entrypoint
+    assert 'sh "$CANDIDATE_INSTALLER"' in entrypoint, entrypoint
+    # Measured, not merely run: the same signature and the same switch sentence
+    # proof 3 reads off the released installer, and a verdict line of its own.
+    assert '"proof 4, ' in entrypoint, entrypoint
+    assert entrypoint.count('switch="retrying once against this machine\'s own store"') == 1, entrypoint
+    assert entrypoint.count('contains "$CANDIDATE_INSTALLER_LOG" "$switch"') == 1, entrypoint
+    assert 'contains "$CANDIDATE_INSTALLER_LOG" \'invalid peer certificate\'' in entrypoint, entrypoint
+
+
 def test_the_container_carries_this_checkouts_package_for_the_candidate_proof() -> None:
     """Proof 2 can only run this checkout if the image is built with it inside.
 
@@ -320,7 +353,7 @@ def test_every_proof_prints_a_verdict_line() -> None:
 
     assert "printf 'PASS: %s\\n'" in entrypoint, entrypoint
     assert "printf 'FAIL: %s\\n'" in entrypoint, entrypoint
-    for label in ('"seed, ', '"proof 1, ', '"proof 2, ', '"proof 3, '):
+    for label in ('"seed, ', '"proof 1, ', '"proof 2, ', '"proof 3, ', '"proof 4, '):
         assert label in entrypoint, label
 
 

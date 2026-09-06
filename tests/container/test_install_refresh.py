@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import CONTAINER_ONLY, INSTALL_TIMEOUT_S, UvTool
+from .conftest import CONTAINER_ONLY, INSTALL_TIMEOUT_S, UvTool, recording_uv
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
 
@@ -42,15 +42,6 @@ def receipt_document(uv_tool: UvTool) -> dict:
     except ModuleNotFoundError:  # pragma: no cover - only a 3.10 collection reaches this
         import tomli as tomllib  # type: ignore[no-redef]
     return tomllib.loads(uv_tool.receipt.read_text(encoding="utf-8"))
-
-
-def recording_uv(into: Path, real_uv: str, log: Path) -> Path:
-    """A `uv` that writes each argument list it is given to `log`, then runs the real one."""
-    into.mkdir(parents=True)
-    wrapper = into / "uv"
-    wrapper.write_text(f'#!/bin/sh\nprintf \'%s\n\' "$*" >> "{log}"\nexec "{real_uv}" "$@"\n', encoding="utf-8")
-    wrapper.chmod(0o755)
-    return wrapper
 
 
 def test_a_refresh_keeps_the_interpreter_the_real_uv_recorded(uv_tool: UvTool, tmp_path: Path) -> None:

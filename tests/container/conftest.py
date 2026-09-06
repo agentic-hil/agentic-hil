@@ -408,6 +408,36 @@ def uv_tool(tmp_path: Path, uv_binary: str, uv_cache: Path) -> UvTool:
     return UvTool(directory=directory, bin_directory=bin_directory, cache=uv_cache, uv=uv_binary)
 
 
+def a_path_without(name: str, path: str) -> str:
+    """``path`` with every directory that resolves ``name`` taken out, checked rather than assumed.
+
+    The image installs this checkout editable, so ``/usr/local/bin`` carries an
+    ``agentic-hil`` console script, and every uv these tests use is on PATH too.
+    A test about a machine where one of those does not resolve has to build that
+    machine rather than assume it: the assertion here is what makes the premise
+    part of the test instead of a property of whichever image it runs in.
+    """
+    kept = [directory for directory in path.split(os.pathsep) if directory and shutil.which(name, path=directory) is None]
+    stripped = os.pathsep.join(kept)
+    assert shutil.which(name, path=stripped) is None, stripped
+    assert stripped, "nothing was left on PATH, so the child could not start at all"
+    return stripped
+
+
+def recording_uv(into: Path, real_uv: str, log: Path) -> Path:
+    """A ``uv`` that writes each argument list it is given to ``log``, then runs the real one.
+
+    A test that reads only the end state cannot tell a receipt reached by the
+    route it means from one reached by another, so the commands are recorded
+    beside the outcome and asserted with it.
+    """
+    into.mkdir(parents=True, exist_ok=True)
+    wrapper = into / "uv"
+    wrapper.write_text(f'#!/bin/sh\nprintf \'%s\n\' "$*" >> "{log}"\nexec "{real_uv}" "$@"\n', encoding="utf-8")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
 def _yaml_scalar(value: object) -> str:
     """One configuration value the way an operator writes it: quoted text, a bare number, a lowercase boolean."""
     if isinstance(value, bool):

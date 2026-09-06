@@ -16,24 +16,36 @@ release over it".
 The default arm is the shape #430 described: a newcomer runs the one-liner
 again from a shell whose PATH does not yet carry uv's bin, step 1 finds no
 `agentic-hil` and calls the run fresh, and the tool uv already owns is rebuilt
-from the bare spec.
+from the bare spec. Building that shell is part of the test: this image
+installs the checkout editable, so `agentic-hil` resolves from
+`/usr/local/bin` unless the PATH the run is handed is one no directory on it
+resolves it from, and a test that skipped that step would watch step 1 find
+the editable copy, call the run a development installation and install
+nothing at all.
 
 Both cases run here against the real uv and the real index: the receipt
 writer and the uninstaller are what is under test, and a stub uv that kept
-the `--with` would only prove the stub kind. `iniconfig` stands in for the
-issue's `requests`: one small pure-Python package with nothing beneath it.
+the `--with` would only prove the stub kind. Both are run through a uv that
+records every argument list it is handed before handing it on, because a
+receipt that came out right by a route nobody intended reads as a pass
+otherwise. `iniconfig` stands in for the issue's `requests`: one small
+pure-Python package with nothing beneath it. The `[can]` extra is recorded by
+the install and then *not* asked for by the run (`--no-can`), so that what
+survives is something this run's own spec does not carry, which is the whole
+difference between a merge and a reinstall from the line as typed.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from .conftest import CONTAINER_ONLY, INSTALL_TIMEOUT_S, REPOSITORY_ROOT, UvTool
+from .conftest import CONTAINER_ONLY, INSTALL_TIMEOUT_S, REPOSITORY_ROOT, UvTool, a_path_without, recording_uv
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
 
@@ -58,20 +70,44 @@ def installed_version(uv_tool: UvTool) -> str:
     return answered.stdout.strip()
 
 
-def run_install(uv_tool: UvTool, project: Path, *arguments: str, tool_bin_on_path: bool) -> subprocess.CompletedProcess[str]:
-    """This checkout's install.sh, with the real uv on PATH and the tool's bin on it or not."""
-    path = os.environ.get("PATH", "")
-    if tool_bin_on_path:
-        path = f"{uv_tool.bin_directory}{os.pathsep}{path}"
-    return subprocess.run(
-        ["sh", str(SHELL_SCRIPT), "--no-agent-install", *arguments],
-        cwd=str(project),
-        capture_output=True,
-        text=True,
-        env=uv_tool.environment(PATH=path),
-        timeout=INSTALL_TIMEOUT_S,
-        check=False,
-    )
+class Rerun:
+    """This checkout's install.sh over `uv_tool`, with a recording uv on PATH and the log it wrote."""
+
+    def __init__(self, uv_tool: UvTool, tmp_path: Path) -> None:
+        self.uv_tool = uv_tool
+        self.log = tmp_path / "uv-invocations"
+        self.wrappers = tmp_path / "wrappers"
+        recording_uv(self.wrappers, uv_tool.uv, self.log)
+        self.project = tmp_path / "project"
+        self.project.mkdir()
+
+    def path(self, *, launcher_resolves: bool) -> str:
+        """A PATH carrying the recording uv, and this tool's launcher only where a test wants one.
+
+        Where it wants none, every directory that resolves an `agentic-hil` is
+        taken off, this image's editable console script included, so step 1
+        really meets a machine with none.
+        """
+        rest = os.environ.get("PATH", "")
+        if launcher_resolves:
+            return os.pathsep.join([str(self.wrappers), str(self.uv_tool.bin_directory), rest])
+        return os.pathsep.join([str(self.wrappers), a_path_without("agentic-hil", rest)])
+
+    def run(self, *arguments: str, launcher_resolves: bool) -> tuple[subprocess.CompletedProcess[str], str, str]:
+        path = self.path(launcher_resolves=launcher_resolves)
+        if not launcher_resolves:
+            assert shutil.which("agentic-hil", path=path) is None, path
+        result = subprocess.run(
+            ["sh", str(SHELL_SCRIPT), "--no-agent-install", *arguments],
+            cwd=str(self.project),
+            capture_output=True,
+            text=True,
+            env=self.uv_tool.environment(PATH=path),
+            timeout=INSTALL_TIMEOUT_S,
+            check=False,
+        )
+        invocations = self.log.read_text(encoding="utf-8") if self.log.is_file() else ""
+        return result, f"{result.stdout}{result.stderr}", invocations
 
 
 def a_tool_with_an_extra_and_a_with(uv_tool: UvTool) -> dict:
@@ -89,24 +125,28 @@ def a_tool_with_an_extra_and_a_with(uv_tool: UvTool) -> dict:
 
 
 def test_a_pinned_rerun_keeps_the_recorded_extras_and_with_requirements(uv_tool: UvTool, tmp_path: Path) -> None:
-    """`install.sh --version <the release already installed>` over a tool with a `--with`.
+    """`install.sh --no-can --version <the release already installed>` over a tool with a `--with`.
 
     The pin is the release the tool already runs, so the only thing this run
     can change is the record: the version stays, the extra stays, and the
     `--with` requirement stays, because a repair that removed a package the
     operator installed beside the tool would be a different installation
-    wearing the same command. The receipt is uv's own, read after the run.
+    wearing the same command. `--no-can` is what separates a merge from a
+    reinstall of the line as typed: this run's own spec carries no extra at
+    all, so a `[can]` in the receipt afterwards can only have come from the
+    record. The receipt is uv's own, read after the run.
     """
     a_tool_with_an_extra_and_a_with(uv_tool)
     release = installed_version(uv_tool)
-    project = tmp_path / "project"
-    project.mkdir()
+    rerun = Rerun(uv_tool, tmp_path)
 
-    pinned = run_install(uv_tool, project, "--version", release, tool_bin_on_path=True)
+    pinned, transcript, invocations = rerun.run("--no-can", "--version", release, launcher_resolves=True)
 
-    transcript = f"{pinned.stdout}{pinned.stderr}"
     assert pinned.returncode == 0, transcript
     assert f"--version {release} was asked for" in transcript, transcript
+    installs = [line for line in invocations.splitlines() if line.startswith("tool install")]
+    assert len(installs) == 1, invocations
+    assert "--with iniconfig>=2" in installs[0], invocations
     after = recorded_names(receipt_document(uv_tool))
     assert "iniconfig" in after, (after, transcript)
     assert after["iniconfig"].get("specifier") == ">=2", after
@@ -119,23 +159,25 @@ def test_a_pinned_rerun_keeps_the_recorded_extras_and_with_requirements(uv_tool:
 
 
 def test_a_rerun_that_finds_no_launcher_on_path_still_keeps_what_uv_recorded(uv_tool: UvTool, tmp_path: Path) -> None:
-    """The #430 shape: uv on PATH, uv's bin not, so step 1 calls the run fresh.
+    """The #430 shape: uv on PATH, no `agentic-hil` anywhere on it, so step 1 calls the run fresh.
 
     Step 1 decides `fresh` by whether `agentic-hil` resolves and not by asking
     uv whether it owns one. The default arm's `uv tool install --upgrade
-    agentic-hil[can]` then rebuilds the tool uv already holds from that spec
+    agentic-hil` then rebuilds the tool uv already holds from that spec
     alone. Whatever step 1 calls the run, the tool uv owns has a receipt, and
     the reinstall has to carry it.
     """
     a_tool_with_an_extra_and_a_with(uv_tool)
     release = installed_version(uv_tool)
-    project = tmp_path / "project"
-    project.mkdir()
+    rerun = Rerun(uv_tool, tmp_path)
 
-    rerun = run_install(uv_tool, project, tool_bin_on_path=False)
+    fresh, transcript, invocations = rerun.run("--no-can", launcher_resolves=False)
 
-    transcript = f"{rerun.stdout}{rerun.stderr}"
-    assert rerun.returncode == 0, transcript
+    assert fresh.returncode == 0, transcript
+    assert "no agentic-hil on this PATH" in transcript, transcript
+    installs = [line for line in invocations.splitlines() if line.startswith("tool install")]
+    assert len(installs) == 1, invocations
+    assert "--with iniconfig>=2" in installs[0], invocations
     after = recorded_names(receipt_document(uv_tool))
     assert "iniconfig" in after, (after, transcript)
     assert after["iniconfig"].get("specifier") == ">=2", after
