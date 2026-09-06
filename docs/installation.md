@@ -173,8 +173,9 @@ agentic-hil --version` is a diagnostic only.
 For direct PEAK/SocketCAN adapters add the CAN extra (`uv tool install
 'agentic-hil[can]'`), and for the pyOCD backend `agentic-hil[pyocd]`. Both are
 optional because they carry platform-specific drivers that flashing and UART do
-not need; without them those tools refuse with `can_backend_not_available`
-rather than failing at import.
+not need; without them those tools refuse by name rather than failing at
+import: the CAN tools with `can_backend_not_available`, and a pyOCD probe
+with `debugger_not_found` carrying `backend_error_type: pyocd_not_found`.
 
 Adding one of them to an installation that already exists means rewriting that
 environment, so stop the agent host first (it runs the MCP server out of that
