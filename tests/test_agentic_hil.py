@@ -10160,6 +10160,120 @@ def test_stlink_requires_flash_address_for_bin_artifacts(tmp_path: Path) -> None
     assert "debuggers.<name>.flash_address" in result["summary"]
 
 
+# Where the configured `flash_address` stands in the line each backend hands its
+# tool for a raw image (#490). A .bin carries no load address, so the address is
+# the whole safety of the write: STM32CubeProgrammer's grammar is `-w <file>
+# <address>`, with the address a positional after the file, and pyOCD's is
+# `flash -a/--base-address <address> <file>` ("Base address used for the address
+# where to write a binary ... Only allowed if a single binary file is being
+# loaded", pyocd 0.45.1 `pyocd flash --help`, recorded 2026-09-06 from a pip
+# installation with no probe attached). The two branches that append it were
+# never taken by any test. The command the backend ran is read back out of the
+# log it wrote, parsed with the same quoting `command_for_log` applies, so what
+# is asserted is the argument list the tool received and not a substring of it.
+
+
+def _logged_arguments(tmp_path: Path, result: dict) -> list[str]:
+    """The argument list the backend ran, out of its own log."""
+    logged = json.loads((tmp_path / result["log_path"]).read_text(encoding="utf-8"))["command"]
+    return shlex.split(logged, posix=True)
+
+
+@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+def test_bin_flash_carries_the_flash_address_in_the_tool_argument_order(tmp_path: Path, backend: str) -> None:
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    arguments = _logged_arguments(tmp_path, result)
+    if backend == "stlink":
+        at = arguments.index("-w")
+        assert Path(arguments[at + 1]).suffix == ".bin", arguments
+        assert arguments[at + 2] == "0x08000000", arguments
+        # The verify flag follows the address; it is not what the address
+        # displaced.
+        assert arguments[at + 3] == "-v", arguments
+        assert arguments.count("0x08000000") == 1, arguments
+    else:
+        # The fake is a script, so the interpreter and the script stand in
+        # front of pyOCD's own subcommand; the order asserted starts there.
+        subcommand = arguments.index("flash")
+        at = arguments.index("--base-address")
+        assert subcommand < at, arguments
+        assert arguments[at + 1] == "0x08000000", arguments
+        assert Path(arguments[-1]).suffix == ".bin", arguments
+        assert at + 1 < len(arguments) - 1, "the address option stands before the file, which is the last argument"
+        assert "--no-reset" in arguments[subcommand:at], arguments
+        assert arguments.count("0x08000000") == 1, arguments
+
+
+@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+def test_an_elf_flash_never_carries_the_flash_address_even_when_configured(tmp_path: Path, backend: str) -> None:
+    """The neighbour: the address is for a raw image and is not read for an ELF.
+
+    An ELF carries its own load addresses, and a configured `flash_address`
+    handed to the tool beside it would either be refused or, worse, move the
+    image. The knowledge the product publishes says the field is not read for
+    .elf or .hex; this is that sentence held against the argument list.
+    """
+    firmware = tmp_path / "build" / "firmware.elf"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x7fELFfake")
+    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type, flash_address="0x08000000")))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.elf"})
+    finally:
+        service.close()
+
+    assert result["ok"] is True, result
+    arguments = _logged_arguments(tmp_path, result)
+    assert "0x08000000" not in arguments, arguments
+    assert "--base-address" not in arguments, arguments
+    if backend == "stlink":
+        at = arguments.index("-w")
+        assert Path(arguments[at + 1]).suffix == ".elf", arguments
+        assert arguments[at + 2] == "-v", arguments
+    else:
+        assert Path(arguments[-1]).suffix == ".elf", arguments
+
+
+@pytest.mark.parametrize("backend", ["stlink", "pyocd"])
+def test_a_bin_flash_without_a_flash_address_runs_no_tool_at_all(tmp_path: Path, backend: str) -> None:
+    """The other neighbour: the refusal stays, and it stays before the tool runs.
+
+    The two tests above this section pin the refusal's type and summary; this
+    one pins that no log was written, because a refusal that had already handed
+    the tool a write with no address would be the defect in another shape.
+    """
+    firmware = tmp_path / "build" / "firmware.bin"
+    firmware.parent.mkdir(parents=True)
+    firmware.write_bytes(b"\x01\x02\x03\x04")
+    probe = {"stlink": "STLINK123", "pyocd": "PYOCD123"}[backend]
+    target_type = {"stlink": None, "pyocd": "stm32f446re"}[backend]
+    config = load_config(str(write_config(tmp_path, debugger_type=backend, probe_id=probe, target_type=target_type)))
+    service = AgenticHILToolService(config)
+    try:
+        result = mcp_tool_call(service, "flash_firmware", {"image_path": "build/firmware.bin"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "invalid_argument"
+    assert "log_path" not in result, result
+
+
 # What each backend puts on the wire for each mode it supports, which is the
 # only place the three can be compared. `run` and `halt` are two different
 # commands on both; `init` is OpenOCD's alone, and OPENOCD_RESET_COMMANDS above

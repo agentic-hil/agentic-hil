@@ -1,0 +1,35 @@
+{
+  "what": "What `agentic-hil mcp-stdio` and `agentic-hil com-stdio` write on each stream when the configuration named by AGENTIC_HIL_CONFIG is bound to a workspace other than the directory the process was started in. Recorded, not typed: the install eval's wrong-workspace arm and its unit tests read a startup refusal off stdout, which is the stream #458 emptied, and nothing in the suite recorded what the shipped server writes (#481, #490). The paths are the recording's own temporary directories and identify no machine.",
+  "recorded_with": {
+    "agentic_hil_version": "0.21.5.dev0",
+    "python": "3.12.14",
+    "image": "tools/container/Dockerfile (python:3.12-slim, uv 0.12.9), the container test tier's image",
+    "recorded_on": "2026-09-06",
+    "how": "A configuration in the shape tests/container/conftest.py:fixture_configuration writes, with workspace_root set to config_workspace_root, named through AGENTIC_HIL_CONFIG; the command started with cwd set to the other directory and one `initialize` request on stdin."
+  },
+  "config_workspace_root": "/tmp/recording/project",
+  "runs": {
+    "mcp-stdio": {
+      "argv": [
+        "agentic-hil",
+        "mcp-stdio"
+      ],
+      "cwd": "/tmp/recording/other-project",
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "{\n  \"ok\": false,\n  \"error_type\": \"config_invalid\",\n  \"summary\": \"The authoritative config is bound to a different workspace.\",\n  \"path\": \"/tmp/recording/config/config.yaml\",\n  \"workspace_root\": \"/tmp/recording/project\",\n  \"expected_workspace\": \"/tmp/recording/other-project\",\n  \"remediation\": [\n    \"Read `written_by_release` first. When the refusal carries it, the file is not wrong and there is nothing in it to correct: a newer Agentic HIL than the one reading it wrote those keys. Run `agentic-hil upgrade` on this machine and start Agentic HIL again.\",\n    \"Otherwise fix the file at `field` in `path`. `rejected_fields` names the keys that were thrown out, `allowed_fields` the keys that section accepts, and a misspelling is usually visible between the two. `allowed_values` and `expected_type` do the same job where the key is right and what it holds is not.\",\n    \"`agentic-hil schema` prints the whole schema this installation validates against, which is the authority on what a section may carry when the two field lists are not enough.\",\n    \"Nothing is loaded, so nothing needs recovering and no hardware was touched. Run `agentic-hil doctor` once the file is corrected or the upgrade is done; it parses the file fresh and reports the next thing that is wrong with it.\"\n  ],\n  \"do_not\": [\n    \"Do not delete the offending keys to make a newer release's file load here. They are the policy that release wrote, and dropping them silently narrows or widens a bench nobody reviewed; upgrade the installation instead.\",\n    \"Do not write the configuration again from scratch to get past this. `agentic-hil init --force` replaces the whole file, every narrowed permission included, so it throws away the operator's own decisions in order to fix one key.\"\n  ]\n}\n"
+    },
+    "com-stdio --port dut": {
+      "argv": [
+        "agentic-hil",
+        "com-stdio",
+        "--port",
+        "dut"
+      ],
+      "cwd": "/tmp/recording/other-project",
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "{\n  \"ok\": false,\n  \"error_type\": \"config_invalid\",\n  \"summary\": \"The authoritative config is bound to a different workspace.\",\n  \"path\": \"/tmp/recording/config/config.yaml\",\n  \"workspace_root\": \"/tmp/recording/project\",\n  \"expected_workspace\": \"/tmp/recording/other-project\",\n  \"remediation\": [\n    \"Read `written_by_release` first. When the refusal carries it, the file is not wrong and there is nothing in it to correct: a newer Agentic HIL than the one reading it wrote those keys. Run `agentic-hil upgrade` on this machine and start Agentic HIL again.\",\n    \"Otherwise fix the file at `field` in `path`. `rejected_fields` names the keys that were thrown out, `allowed_fields` the keys that section accepts, and a misspelling is usually visible between the two. `allowed_values` and `expected_type` do the same job where the key is right and what it holds is not.\",\n    \"`agentic-hil schema` prints the whole schema this installation validates against, which is the authority on what a section may carry when the two field lists are not enough.\",\n    \"Nothing is loaded, so nothing needs recovering and no hardware was touched. Run `agentic-hil doctor` once the file is corrected or the upgrade is done; it parses the file fresh and reports the next thing that is wrong with it.\"\n  ],\n  \"do_not\": [\n    \"Do not delete the offending keys to make a newer release's file load here. They are the policy that release wrote, and dropping them silently narrows or widens a bench nobody reviewed; upgrade the installation instead.\",\n    \"Do not write the configuration again from scratch to get past this. `agentic-hil init --force` replaces the whole file, every narrowed permission included, so it throws away the operator's own decisions in order to fix one key.\"\n  ]\n}\n"
+    }
+  }
+}

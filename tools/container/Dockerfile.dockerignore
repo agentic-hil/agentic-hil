@@ -27,6 +27,13 @@
 # And the installer the refresh test under tests/container runs against the
 # real uv, so that what it reads out of uv's receipt is read in the image too.
 !install.sh
+# And the install eval's verifier, whose wrong-workspace arm one test under
+# tests/container runs against the real server: the arm reads a startup
+# refusal off a stream, and which stream the release writes it to is a fact
+# only the real server can give (#481). The modules the verifier imports come
+# with it; the eval's cases, artifacts and scripts do not.
+!evals/__init__.py
+!evals/install/*.py
 
 # And not what a build leaves behind inside those.
 **/__pycache__
