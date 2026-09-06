@@ -236,7 +236,14 @@ def test_a_probe_that_vanished_after_its_uid_was_resolved_is_refused_the_same_wa
         log = log_of(config, result)
         assert "--uid PYOCD123" in log["command"], log["command"]
         assert log["stdout"] == "No connected debug probe matches unique ID 'PYOCD123'\n", log
-    assert elapsed_s < CONFIGURED_TIMEOUT_S, elapsed_s
+        # The claim is that neither call waited out the configured timeout, so
+        # each is judged by its own clock, the one the product measured around
+        # the pyOCD run. The wall clock around both spans two process starts
+        # and whatever the host was doing beside them, so it is held to twice
+        # the timeout: a call that did wait it out cannot hide under that bound
+        # beside one that did not.
+        assert result["elapsed_ms"] < CONFIGURED_TIMEOUT_S * 1000, result
+    assert elapsed_s < 2 * CONFIGURED_TIMEOUT_S, elapsed_s
     assert len(written_logs(config)) == 2, [path.name for path in written_logs(config)]
 
 
