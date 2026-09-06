@@ -725,6 +725,48 @@ function Get-ProcessNameForAgent {
     return $AgentId
 }
 
+function Get-RunningAgentProcessId {
+    <#
+        The PID of a running agent CLI, or $null. Two questions, because an
+        agent CLI is not always a process wearing its own name.
+
+        Get-Process -Name is the first and the exact one: a native binary's
+        process name is its own, and a match on that can name no stranger's
+        process.
+
+        npm installs the other kind, and the process Windows then holds is
+        called node. An npm-installed CLI is a JavaScript launcher run by the
+        node runtime, so the only place the CLI's own name appears is the
+        command line, and a machine with the CLI open in the next window was
+        told there was nothing to restart; the operator restarted nothing, and
+        the MCP registration this run had just written was read by no session.
+
+        The second question therefore reads command lines, anchored so that it
+        stays a question about which program is running rather than about which
+        words appear in an argument: the name has to begin a path segment and
+        end its argument or the line, optionally through the .js the launcher
+        carries. A false alarm costs an operator a restart of something that was
+        never ours, in the one part of the transcript that asks them to act.
+    #>
+    param([string]$ProcessName)
+    $exact = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue) | Select-Object -First 1
+    if ($exact) { return $exact.Id }
+    $pattern = '[\\/]' + [regex]::Escape($ProcessName) + '(\.js)?(["'' ]|$)'
+    try {
+        # Lowest PID first, so a machine running two of them names the same one
+        # twice rather than whichever the enumeration happened to reach first.
+        $listed = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Sort-Object ProcessId)
+    } catch {
+        return $null
+    }
+    foreach ($candidate in $listed) {
+        if ($candidate.CommandLine -and $candidate.CommandLine -match $pattern) {
+            return $candidate.ProcessId
+        }
+    }
+    return $null
+}
+
 # Step 1: what is already here, and what does this run call itself.
 #
 # An installation found here goes through step 2 either way. This line is the
@@ -977,9 +1019,9 @@ if (-not $WithAgentInstall) {
 $running = @()
 foreach ($agentId in $configured) {
     $processName = Get-ProcessNameForAgent $agentId
-    $process = @(Get-Process -Name $processName -ErrorAction SilentlyContinue) | Select-Object -First 1
-    if ($process) {
-        $running += [pscustomobject]@{ Name = $processName; ProcessId = $process.Id }
+    $agentProcessId = Get-RunningAgentProcessId -ProcessName $processName
+    if ($null -ne $agentProcessId) {
+        $running += [pscustomobject]@{ Name = $processName; ProcessId = $agentProcessId }
     }
 }
 if ($running.Count -eq 0 -and $env:CLAUDECODE) {

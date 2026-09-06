@@ -1045,9 +1045,38 @@ process_name_for() {
     esac
 }
 
+# The PID of a running agent CLI, or nothing. Two questions, because an agent
+# CLI is not always a process wearing its own name.
+#
+# `pgrep -x` is the first and the exact one: a native binary's `comm` is its own
+# name, and a match on that can name no stranger's process.
+#
+# npm installs the other kind, and the process the kernel then holds is called
+# `node`. `@openai/codex` declares its `codex` command as `bin/codex.js`, that
+# file opens with `#!/usr/bin/env node`, and the launcher's path is the
+# argument; the platform binary started under it is called `codex-x86_64-un...`,
+# which is `comm` cut at the fifteen characters it holds. `pgrep -x codex`
+# matches neither, so a machine with codex open in the next window was told
+# there was nothing to restart, the operator restarted nothing, and the MCP
+# registration this run had just written was read by no session.
+#
+# The second question therefore reads command lines, anchored so that it stays a
+# question about which program is running rather than about which words appear
+# in an argument: the name has to begin a path segment and end its argument or
+# the line, optionally through the `.js` npm's launcher carries. So
+# `/usr/local/bin/codex` and `.../@openai/codex/bin/codex.js` match, while a dev
+# server under node, the native child called `codex-x86_64-...`, and this
+# script's own `--agent codex` do not. A false alarm costs an operator a restart
+# of something that was never ours, in the one part of the transcript that asks
+# them to act.
 running_pid() {
     if have pgrep; then
-        pgrep -x "$1" 2>/dev/null | head -n 1
+        running_exact=$(pgrep -x "$1" 2>/dev/null | head -n 1)
+        if [ -n "$running_exact" ]; then
+            printf '%s\n' "$running_exact"
+            return 0
+        fi
+        pgrep -f "(^|/)$1(\.js)?( |\$)" 2>/dev/null | head -n 1
     fi
 }
 

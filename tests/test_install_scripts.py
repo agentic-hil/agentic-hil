@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -4198,24 +4199,44 @@ def _a_node_shaped_interpreter(into: Path) -> Path:
     produces exactly the pair `Get-Process -Name opencode` cannot see: a
     process called node whose command line names opencode.
 
-    The DLLs and any `pyvenv.cfg` beside the interpreter come along, because a
-    Windows python.exe on its own finds neither its runtime nor its home.
+    The copy is taken from the base interpreter and not from `sys.executable`.
+    A virtual environment's `python.exe` on Windows is a launcher that starts
+    the interpreter its `home` names with the very same command line, so a copy
+    of it puts two processes in the table for one child, both carrying the
+    argument this test asks about and only one of them the PID it holds. The
+    real interpreter starts once.
+
+    A Windows python.exe carried off on its own finds neither its runtime nor
+    its home and exits 106 before it runs a line, so the DLLs beside it come
+    along and a `pyvenv.cfg` naming the interpreter it was copied from is
+    written next to it. Without that file there is no process at all, and every
+    assertion below would be about a table that never held one.
     """
     into.mkdir(parents=True, exist_ok=True)
-    beside = Path(sys.executable).parent
+    beside = Path(sys.base_prefix)
     node = into / "node.exe"
-    shutil.copy2(sys.executable, node)
+    shutil.copy2(beside / "python.exe", node)
     for library in beside.glob("*.dll"):
         shutil.copy2(library, into / library.name)
-    configuration = beside / "pyvenv.cfg"
-    if configuration.is_file():
-        shutil.copy2(configuration, into / "pyvenv.cfg")
+    (into / "pyvenv.cfg").write_text(
+        f"home = {beside}\ninclude-system-site-packages = false\n",
+        encoding="utf-8",
+    )
     return node
 
 
 def _a_process_that_lingers(node: Path, script: Path) -> subprocess.Popen[bytes]:
+    """One real child, asserted to be running before anything is asked about it.
+
+    A child that died on the way up would leave the process table empty and
+    every branch of step 5 answering the calm sentence, which is the answer
+    this test exists to disbelieve.
+    """
     script.write_text(f"import time\n\ntime.sleep({LINGER_S})\n", encoding="utf-8")
-    return subprocess.Popen([str(node), str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    started = subprocess.Popen([str(node), str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    assert started.poll() is None, f"{node.name} {script.name} exited with {started.returncode} before the install ran"
+    return started
 
 
 @WINDOWS_ONLY
