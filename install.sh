@@ -489,7 +489,6 @@ run_uv() {
         printf '%s\n' "$uv_output"
         return 0
     fi
-    printf '%s\n' "$uv_output" >&2
     if refuses_existing_executable "$uv_output"; then
         # uv refuses to overwrite an executable it did not write, and on Linux
         # and macOS its bin is the same `~/.local/bin` a `pip install --user` or
@@ -507,6 +506,13 @@ run_uv() {
         printf '%s\n' "$uv_output" >&2
         fail "package: uv could not replace that copy either; TROUBLESHOOTING.md section 1 has the fallbacks"
     fi
+    # uv's own words about the attempt that failed, printed here rather than the
+    # moment it failed. The branch above turns its refusal into a second attempt
+    # that succeeds, and a run that ends well must not leave `error: Executable
+    # already exists` in the transcript for the reader to act on. Every path from
+    # here ends the run, so every failure this script does not itself resolve
+    # still carries uv's text, ahead of the sentence the script closes on.
+    printf '%s\n' "$uv_output" >&2
     if [ "$SYSTEM_CERTS" = "auto" ] && trust_failure "$uv_output"; then
         say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
         use_system_certs

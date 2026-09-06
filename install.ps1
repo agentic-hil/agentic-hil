@@ -172,8 +172,10 @@ function Invoke-Uv {
     # fresh and pin paths hand their own argument list to this one retry.
     param([string[]]$Arguments)
     $result = Invoke-Captured -File 'uv' -Arguments $Arguments
-    Write-Host $result.Output.TrimEnd()
-    if ($result.ExitCode -eq 0) { return }
+    if ($result.ExitCode -eq 0) {
+        Write-Host $result.Output.TrimEnd()
+        return
+    }
     if (Test-RefusedExistingExecutable $result.Output) {
         # uv refuses to overwrite an executable it did not write, and its bin
         # here is the `%USERPROFILE%\.local\bin` a pipx install writes its
@@ -188,6 +190,13 @@ function Invoke-Uv {
         if ($forced.ExitCode -eq 0) { return }
         throw 'uv could not replace that copy either; TROUBLESHOOTING.md section 1 has the fallbacks'
     }
+    # uv's own words about the attempt that failed, printed here rather than the
+    # moment it failed. The branch above turns its refusal into a second attempt
+    # that succeeds, and a run that ends well must not leave `error: Executable
+    # already exists` in the transcript for the reader to act on. Every path from
+    # here ends the run, so every failure this script does not itself resolve
+    # still carries uv's text, ahead of the sentence the script closes on.
+    Write-Host $result.Output.TrimEnd()
     if ($script:SystemCertsMode -eq 'auto' -and (Test-TrustFailure $result.Output)) {
         Write-Say "certificates: that is a certificate uv cannot get to a root it carries, which is what a TLS-intercepting proxy looks like from inside uv; retrying once against this machine's own store, with verification still on"
         Enable-SystemCerts
