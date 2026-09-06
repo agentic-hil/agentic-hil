@@ -440,8 +440,26 @@ def load_authoritative_config(expected_workspace: str | Path | None = None) -> A
         requested = project_config_path(expected)
     requested = absolute_without_symlinks(requested)
     resolved = requested.resolve()
-    if not resolved.is_file():
-        raise ConfigError("config_file_not_found", "Agentic HIL configuration file could not be found.", {"path": str(resolved)})
+    # Asked of the stat rather than of `is_file()`, which answers False for a
+    # directory, a socket or a path it could not stat exactly as it does for
+    # nothing at all. Only the genuinely absent path is "no configuration", the
+    # one state that starts the unprovisioned server and that `check-plan`
+    # tolerates as the board-free case; everything else that exists at the
+    # path is a configuration location that could not be read, the same answer
+    # `load_config` gives for it, so a directory left there by a bind mount or
+    # by hand is refused instead of being read as an invitation to generate.
+    try:
+        state = os.stat(resolved)
+    except (FileNotFoundError, NotADirectoryError) as error:
+        raise ConfigError("config_file_not_found", "Agentic HIL configuration file could not be found.", {"path": str(resolved)}) from error
+    except OSError as error:
+        raise ConfigError(
+            "config_unreadable",
+            "Agentic HIL configuration file could not be read.",
+            {"path": str(resolved), "backend_error": str(error)},
+        ) from error
+    if not stat.S_ISREG(state.st_mode):
+        raise ConfigError("config_unreadable", "Agentic HIL configuration file could not be read.", {"path": str(resolved)})
     if os.lstat(resolved).st_nlink != 1:
         raise ConfigError(
             "config_invalid",
