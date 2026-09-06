@@ -369,11 +369,69 @@ def _process_group_exists(pgid: int) -> bool:
     """
     try:
         os.killpg(pgid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    # The kernel said the group has a member. It counts a zombie as one, and a
+    # zombie is what every descendant the signal killed becomes until its parent
+    # waits for it. Where the process table can be read, the members are read
+    # off it and a group with nothing but zombies left in it is emptied.
+    running = _running_process_group_members(pgid)
+    return True if running is None else bool(running)
+
+
+def _running_process_group_members(pgid: int) -> list[int] | None:
+    """The pids in group `pgid` that still run, or None where no table can say.
+
+    ``killpg(pgid, 0)`` asks whether the group has a member and the kernel
+    counts a zombie as one. Under an init that reaps orphans the distinction
+    never shows: a descendant whose parent died in the same signal is handed to
+    init and collected within a scheduler tick. Under a parent that adopts
+    orphans and never waits for them, which is any process running as PID 1 of
+    a container, ``agentic-hil mcp-stdio`` as an entrypoint included, the
+    zombie keeps its group for the life of that parent, ``killpg`` keeps
+    answering that somebody is there, and a teardown that had already ended
+    everything reported the tree as still active after both of its deadlines
+    (#485). A zombie runs nothing and holds nothing: not the probe, not the
+    port, not the bus. So on a host that publishes ``/proc`` the members are
+    read out of it, ``stat``'s state and process group fields, split after the
+    command name's closing parenthesis for the reason ``_proc_parent_pid``
+    gives, and only a member that is not a zombie counts.
+
+    A zombie this process adopted is collected here as well, because nobody
+    else will: it is the orphan of a tree this module ended, and a server that
+    is PID 1 would otherwise carry one per hung debugger until it exits. The
+    group leader is left alone whatever its state; it is ``Popen``'s child and
+    ``Popen`` collects it, and a ``waitpid`` from here would take the exit
+    status the log is about to record.
+
+    None where there is no readable table, which is a POSIX host without
+    ``/proc``; there the kernel's answer stands as it always did.
+    """
+    if not os.path.isdir(_PROC) or not _proc_lists_this_process():
+        return None
+    own_pid = os.getpid()
+    running: list[int] = []
+    for name in os.listdir(_PROC):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        try:
+            with open(f"{_PROC}/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+                fields = handle.read().rsplit(")", 1)[1].split()
+            state, parent_pid, group = fields[0], int(fields[1]), int(fields[2])
+        except (OSError, IndexError, ValueError):
+            continue
+        if group != pgid:
+            continue
+        if state in ("Z", "X"):
+            if parent_pid == own_pid and pid != pgid:
+                with suppress(ChildProcessError, OSError):
+                    os.waitpid(pid, os.WNOHANG)
+            continue
+        running.append(pid)
+    return running
 
 
 def _create_windows_kill_job(child: subprocess.Popen) -> int:
