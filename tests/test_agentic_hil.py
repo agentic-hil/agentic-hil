@@ -3318,14 +3318,16 @@ def _proc_lists_the_reader(proc: Path) -> None:
     what tells a table that was read from a directory that merely exists
     (#475). Created after whatever `os.getpid` a test has patched in, so it is
     the reader as the code under test sees it, and without an `exe`, so the
-    reader is never mistaken for a holder of the installation.
+    reader is never mistaken for a holder of the installation. `self` links to
+    the bare pid the way procfs links it, so a reader that compares the link
+    target with the pid string sees here what it sees on a real host.
     """
     own = proc / str(os.getpid())
     own.mkdir(parents=True, exist_ok=True)
     (own / "status").write_text("Name:\tpytest\nPPid:\t1\n", encoding="utf-8")
     link = proc / "self"
     if not link.exists() and not link.is_symlink():
-        link.symlink_to(own, target_is_directory=True)
+        link.symlink_to(str(os.getpid()), target_is_directory=True)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the /proc reader needs the symlinks a POSIX host makes without privileges")
@@ -4390,7 +4392,10 @@ def test_the_half_changed_endings_name_the_running_processes_as_a_notice_and_not
     what the reinstall exists to replace, so neither ending may ask for one:
     the field stays false and the list that means `restart these` stays off.
     The running processes are still facts about the operator's machine, so
-    they gain the notice that names them and nothing more.
+    they gain the notice that names them and nothing more. Nothing more means
+    the notice may not ask for the restart either: the clause the upgraded
+    outcome closes on, that the restart "is the whole of what is left to do",
+    would sit in the same result as "Do not restart onto it".
     """
     monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
     monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
@@ -4405,6 +4410,10 @@ def test_the_half_changed_endings_name_the_running_processes_as_a_notice_and_not
     assert "restart_required_by_count" not in result
     assert "pid 4242" in result["restart_notice"]
     assert __version__ in result["restart_notice"]
+    assert "whole of what is left to do" not in result["restart_notice"]
+    assert "Restarting the host" not in result["restart_notice"]
+    if ending == "installation_changed_after_failed_upgrade":
+        assert "Do not restart onto it" in result["summary"]
 
 
 @pytest.mark.parametrize(("version", "ending"), _HALF_CHANGED_ENDINGS)
@@ -4413,7 +4422,14 @@ def test_the_half_changed_endings_keep_refusing_the_restart_where_the_table_coul
     ending: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The neighbour that must not move: an unreadable table changes nothing here."""
+    """The neighbour that must not move: an unreadable table changes nothing here.
+
+    No notice either, on purpose. The cannot-read sentence says that whether a
+    process still answers with an earlier release cannot be said, and these two
+    endings already say what to do about every process there is: do not restart
+    it onto this tree, run the reinstall. A sentence about what cannot be known
+    beside one that settles the question would be two answers to it.
+    """
     monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
     monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
     _manager_fails(monkeypatch, version=version)
@@ -4424,6 +4440,83 @@ def test_the_half_changed_endings_keep_refusing_the_restart_where_the_table_coul
     assert result["error_type"] == ending
     assert result["restart_required"] is False
     assert "restart_required_by" not in result
+    assert "restart_notice" not in result
+
+
+# The human rendering of the same results. #475 observed that it printed no
+# Restart section at all for the failed upgrade, on a host with a live holder
+# and on one that could not read its table alike. Rendered from the document
+# the command really produces, not from one written by hand: the renderer
+# prints whatever list it is given, and the gap was in the document.
+
+
+def _reflowed(text: str) -> str:
+    """The rendering with the wrapper's line breaks taken back out."""
+    return " ".join(text.split())
+
+
+def test_a_failed_upgrade_renders_the_processes_it_read_under_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Restart section, with the pid on a bullet, the way the upgraded outcome prints it."""
+    from agentic_hil.humanize import render_result
+
+    _manager_fails(monkeypatch, version=_version_answer(__version__))
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+    out = render_result(result, "upgrade")
+
+    assert "\nRestart\n" in out
+    assert "\n  - 4242\n" in out
+    assert f"image  {_LIVE_SERVER['image']}" in out
+    # Once: the notice is in the summary as well, and the section may not repeat it.
+    assert _reflowed(out).count(_reflowed(result["restart_notice"])) == 1
+    assert "No restart is needed" not in out
+
+
+def test_a_failed_upgrade_on_a_host_that_cannot_read_its_table_renders_the_sentence_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cannot-read sentence, printed, and printed once."""
+    from agentic_hil.humanize import render_result
+
+    _manager_fails(monkeypatch, version=_version_answer(__version__))
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+    out = render_result(result, "upgrade")
+
+    assert _CANNOT_SAY in _reflowed(out)
+    assert _reflowed(out).count(_reflowed(result["restart_notice"])) == 1
+    assert "No restart is needed" not in out
+    assert "\n  - " not in out
+
+
+@pytest.mark.parametrize(("version", "ending"), _HALF_CHANGED_ENDINGS)
+def test_the_half_changed_endings_render_the_processes_as_a_notice_and_not_as_a_restart_list(
+    version: subprocess.CompletedProcess[str],
+    ending: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The processes are named in prose, and no bullet list asks for their restart."""
+    from agentic_hil.humanize import render_result
+
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
+    _manager_fails(monkeypatch, version=version)
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+    out = render_result(result, "upgrade")
+
+    assert result["error_type"] == ending
+    assert "pid 4242" in _reflowed(out)
+    assert _reflowed(out).count(_reflowed(result["restart_notice"])) == 1
+    assert "\n  - 4242\n" not in out
+    assert "whole of what is left to do" not in _reflowed(out)
+    if ending == "installation_changed_after_failed_upgrade":
+        assert "Do not restart onto it" in _reflowed(out)
 
 
 # ---------------------------------------------------------------------------

@@ -104,6 +104,12 @@ def test_a_refresh_keeps_the_interpreter_the_real_uv_recorded(uv_tool: UvTool, t
     assert len(reinstalls) == 1, invocations
     assert f"--python {interpreter}" in reinstalls[0], invocations
     assert not any(line.startswith("tool upgrade") for line in invocations.splitlines()), invocations
+    # Said on screen, which #476 observed nothing was.
+    assert f"records the interpreter {interpreter}" in transcript, transcript
     after = receipt_document(uv_tool)
     assert after["tool"]["python"] == interpreter, after
     assert "python" not in after["tool"].get("options", {}), after
+    # And the consequence the issue names, read the way the product reads it:
+    # the reinstall line `agentic-hil upgrade` prints still has an interpreter
+    # to carry.
+    assert uv_tool.recorded_install()["python"] == interpreter
