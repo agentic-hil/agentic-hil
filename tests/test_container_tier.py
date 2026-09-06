@@ -157,11 +157,13 @@ def test_the_base_image_is_pinned_by_digest() -> None:
 
 def test_the_image_installs_the_dependency_set_the_repository_already_locked() -> None:
     """The matrix job installs this set with hashes; the required check resolved it live."""
-    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    commands = [line for line in DOCKERFILE.read_text(encoding="utf-8").splitlines() if line.startswith("RUN ")]
 
-    assert "requirements/dev.txt" in dockerfile
-    assert "--require-hashes" in dockerfile
-    assert "--no-deps" in dockerfile
+    assert "requirements/dev.txt" in DOCKERFILE.read_text(encoding="utf-8")
+    locked = next(line for line in commands if "dev.txt" in line)
+    assert "--require-hashes" in locked, locked
+    checkout = next(line for line in commands if line.rstrip().endswith("-e ."))
+    assert "--no-deps" in checkout, checkout
 
 
 def test_the_readme_claims_only_the_pinning_the_file_has() -> None:
