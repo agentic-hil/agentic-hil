@@ -97,14 +97,22 @@ Pinned:
 - the base image, by digest, with the tag it was resolved from on the line
   beside it. Two builds of one commit therefore carry the same interpreter, the
   same distribution release and the same debugger;
-- uv at one exact version, named in the Dockerfile as `UV_VERSION`. The receipts
+- uv at one exact version, named in `requirements/container.in`. The receipts
   these tests read are written by that program, and a different version may
   write them differently, which is the whole reason the tests exist. Moving the
   pin is a deliberate change with a test run behind it;
-- pyOCD at one exact version, named as `PYOCD_VERSION`, for the same reason:
-  the suite's fixture reproduces what that version prints when nothing is on
-  USB, and a release that rewords it should fail the drift test here on a
-  deliberate bump rather than on a rebuild;
+- pyOCD at one exact version, named in the same file, for the same reason: the
+  suite's fixture reproduces what that version prints when nothing is on USB,
+  and a release that rewords it should fail the drift test here on a deliberate
+  bump rather than on a rebuild;
+- both of those, the build backend beside them and everything the three pull
+  in, by hash: `requirements/container.txt` is the lock compiled from that
+  input, and the image installs it with `--require-hashes` the way it installs
+  the dependency set below. A version pin on its own still takes whatever the
+  index serves under that name, which is what Scorecard's pinned-dependencies
+  check read off the old build. Regenerate the lock after editing the input
+  with `uv pip compile --generate-hashes --universal --python-version 3.12
+  requirements/container.in -o requirements/container.txt`;
 - the dependency set, installed with `--require-hashes` from
   `requirements/dev.txt`, which is the same locked file the hosted matrix job
   installs from. This checkout goes on top of it with `--no-deps`.

@@ -67,23 +67,26 @@ RUN apt-get update \
     && apt-get install --no-install-recommends --yes openocd ca-certificates procps curl socat iproute2 can-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# One version, named here, because the receipts these tests read are written by
-# this program and a different one may write them differently: that is the whole
-# reason the tests exist. Moving the pin is a deliberate change with a test run
-# behind it, not something a rebuild does by itself.
-ARG UV_VERSION=0.12.9
-# pyOCD, pinned for the same reason. The suite's fixture reproduces what this
-# version prints when nothing is on USB, `No connected debug probes` and the
-# `--uid` form of it, and the classifier reads those words; a release that
-# rewords them should fail the drift test in this tier on a deliberate bump,
-# not on a rebuild. The mirror argument above does not reach it: the package
-# index keeps every release.
-ARG PYOCD_VERSION=0.45.1
-# setuptools and wheel are the build backend this project declares, and the
-# tests build wheels of this checkout with `--no-isolation` so the build needs
-# no network of its own.
-RUN python -m pip install --no-cache-dir --disable-pip-version-check \
-    "uv==${UV_VERSION}" "pyocd==${PYOCD_VERSION}" "setuptools>=77" "wheel"
+# The tools the tier drives, from a lock file of their own, with their hashes.
+# uv and pyOCD are each held at one version in `requirements/container.in`,
+# because the receipts and the refusals these tests read are written by those
+# two programs and a different release may write them differently: that is the
+# whole reason the tests exist. The suite's fixture reproduces what this pyOCD
+# prints when nothing is on USB, `No connected debug probes` and the `--uid`
+# form of it, and the classifier reads those words. Moving a pin is a deliberate
+# change with a test run behind it, not something a rebuild does by itself.
+# setuptools and wheel are here because they are the build backend this project
+# declares and the tests build wheels of this checkout with `--no-isolation`, so
+# the build needs no network of its own.
+#
+# The hashes are the other half of it, and `--require-hashes` is what makes them
+# binding, over this set and everything it pulls in. A version pin on its own
+# still takes whatever the index serves under that name, and this layer is the
+# environment the required container check reaches its verdict in. The mirror
+# argument that leaves the distribution's packages unpinned above does not reach
+# here either: the package index keeps every release.
+COPY requirements/container.txt /tmp/container.txt
+RUN python -m pip install --no-cache-dir --disable-pip-version-check --require-hashes -r /tmp/container.txt
 
 WORKDIR /work
 
