@@ -121,15 +121,18 @@ jobs:
   # above already covers. It needs the network, because uv resolves this
   # distribution's dependency set from the package index and one test reads the
   # release index over HTTPS to establish that a currency claim is only made
-  # after the index has answered.
+  # after the index has answered. It needs NET_ADMIN and the host's `vcan` and
+  # `can_raw` modules, because the CAN sub-tier binds the product's SocketCAN
+  # transport to a virtual interface it creates.
   #
-  # Measured cold, with no layer cache, which is what a hosted runner has: two
-  # minutes to build the image, most of it apt and the locked dependency set
-  # over the network, and 78 seconds to run the 63 tests, of which the serial
-  # tests over the pseudo-terminal pair are the larger half because they wait
-  # out the read and write timeouts they prove. About three and a half minutes
-  # in total; the limit below is margin for a slow runner and a slow index
-  # rather than a deadline a slow runner beats.
+  # Measured cold, with no layer cache and the base image pulled, which is what
+  # a hosted runner has: about two minutes to build the image, most of it apt
+  # and the locked dependency set over the network, and a few minutes to run
+  # the tests, whose wall clock is set by the serial reads over the
+  # pseudo-terminal pair and the CAN reads over the virtual interface that
+  # prove their own timeouts rather than by any single tool. The limit below
+  # is margin for a slow runner and a slow index rather than a deadline a slow
+  # runner beats.
   container_tests:
     name: Container tests
     runs-on: ubuntu-latest
@@ -177,15 +180,16 @@ jobs:
             python -m pytest tests/container -m container -q --junitxml=/report/container-tests.xml
 
       # This job's whole claim is that it ran the real uv, the real OpenOCD,
-      # the real /proc, a real terminal device and a real CAN interface, and
-      # pytest exits 0 for a tier in which every test skipped. Green over
+      # the real /proc, a real terminal device and a real SocketCAN transport,
+      # and pytest exits 0 for a tier in which every test skipped. Green over
       # fifteen skips and green over fifteen passes are indistinguishable to a
       # workflow that reads only the status, so the report is what the claim
       # is read out of: tests ran, none of them skipped, none of them errored.
-      # A transport that could not be created (no socat, no devpts, no `vcan`,
-      # no NET_ADMIN, no `nobody` to drop to) is a skip with that reason in
-      # its fixture, and a skip is what this step turns red, with the reasons
-      # printed so the cause is on the job page.
+      # A transport that could not be created (no socat, no devpts, no `vcan`
+      # or `can_raw` on the runner, no NET_ADMIN on the run, no `nobody` to
+      # drop to) is a skip with that reason in its fixture, and a skip is what
+      # this step turns red, with the reasons printed so the cause is on the
+      # job page rather than a tier gone green having proved nothing.
       - name: Check the container tests actually ran
         shell: python
         run: |
