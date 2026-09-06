@@ -24,6 +24,9 @@
 !requirements
 !src
 !tests
+# And the installer the refresh test under tests/container runs against the
+# real uv, so that what it reads out of uv's receipt is read in the image too.
+!install.sh
 
 # And not what a build leaves behind inside those.
 **/__pycache__

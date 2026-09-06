@@ -138,6 +138,11 @@ def test_the_configuration_can_close_this_tool_and_the_refusal_names_the_key(
     assert refused["permission"] == "permissions.allow_upgrade"
     assert resolve_permission_key(refused["permission"])[0] is not None
     assert refused["running_version"] == __version__
+    # Nothing here read the process table, so nothing here may answer for it:
+    # `restart_required` is absent, not false (#475). A false would be read as
+    # the table having been read and held none, which is a claim this refusal
+    # never had the evidence for.
+    assert "restart_required" not in refused
     assert refused["side_effect_status"] == "not_started"
     assert refused["hardware_state"] == "unchanged"
     # The way out is a person's, and the result says which one: the command line
@@ -167,7 +172,9 @@ def test_the_upgrade_is_refused_while_a_run_holds_the_bench(
         assert refused["error_type"] == "upgrade_in_open_run"
         assert refused["held_devices"], refused
         assert refused["running_version"] == __version__
-        assert refused["restart_required"] is False
+        # Refused before the process table was read, so the result does not
+        # answer for it (#475): the field is absent rather than false.
+        assert "restart_required" not in refused
         assert refused["retry_safe"] is True
         assert refused["remediation"] == list(ERROR_CATALOGUE["upgrade_in_open_run"].remediation)
         # Refused before the manager, not after it: a refusal that had already
@@ -213,7 +220,10 @@ def test_a_host_that_locks_running_files_is_told_the_upgrade_is_the_command_line
     assert refused["upgrade_command"] == "agentic-hil upgrade"
     assert refused["installed_extras"] == ["can"]
     assert refused["running_version"] == __version__
-    assert refused["restart_required"] is False
+    # This refusal names this very server as one that goes on answering with
+    # the old release, and it never read the table to say who else does, so it
+    # answers neither true nor false (#475).
+    assert "restart_required" not in refused
     assert refused["side_effect_status"] == "not_started"
     # Retrying is pointless here and the result says so: this is about the host,
     # not about what the bench happens to be doing.

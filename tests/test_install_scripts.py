@@ -2313,6 +2313,183 @@ def test_refreshing_a_uv_tool_with_a_recorded_index_option_falls_back_to_the_upg
     assert marker.read_text(encoding="utf-8").strip() == "damaged", transcript
 
 
+# uv's receipt for `uv tool install --python 3.10 "agentic-hil[can]"`, recorded with
+# uv 0.11.27 on 2026-09-06: the interpreter is a `[tool]`-level key beside
+# `requirements`, not a `[tool.options]` entry, and the entrypoints array closes
+# the file. The container tier reads the same layout off uv 0.12.9
+# (tests/container/test_uv_receipt.py). The install path is a neutral one in
+# place of the recorded one, which named the recording machine's directories.
+_RECEIPT_WITH_A_RECORDED_INTERPRETER = (
+    "[tool]\n"
+    'requirements = [{ name = "agentic-hil", extras = ["can"] }]\n'
+    'python = "3.10"\n'
+    "entrypoints = [\n"
+    '    { name = "agentic-hil", install-path = "/opt/uv/bin/agentic-hil", from = "agentic-hil" },\n'
+    "]\n"
+)
+# The spelling older uv used, which the upgrade path reads second
+# (`_recorded_python` in upgrade.py) and which the suite already carries as a
+# fixture (tests/test_agentic_hil.py, `recorded-under-tool-options`): receipts
+# written that way are still on disk, so both installers read both levels.
+_RECEIPT_WITH_THE_INTERPRETER_UNDER_OPTIONS = (
+    "[tool]\n"
+    'requirements = [{ name = "agentic-hil", extras = ["can"] }]\n'
+    "\n"
+    "[tool.options]\n"
+    'python = "3.10"\n'
+)
+# Both spellings, one case each, in both installers.
+_RECORDED_INTERPRETER_RECEIPTS = [
+    pytest.param(_RECEIPT_WITH_A_RECORDED_INTERPRETER, id="under-tool-as-uv-writes-it-now"),
+    pytest.param(_RECEIPT_WITH_THE_INTERPRETER_UNDER_OPTIONS, id="under-tool-options-as-older-uv-wrote-it"),
+]
+
+
+def _uv_refresh_interpreter_stub(release: str, uv_log: Path, pycan_marker: Path, marker: Path) -> str:
+    """A uv stub for the recorded-interpreter refresh path. Like ``_uv_refresh_stub``
+    it answers the probes and repairs the console script under --reinstall, and its
+    `tool install` models what uv records about the interpreter: the receipt it
+    rewrites carries `python = "<value>"` at the `[tool]` level when the install
+    line handed it `--python <value>`, and no `python` key at all when it did not.
+    Both measured with uv 0.11.27 on 2026-09-06: `uv tool install --upgrade
+    --reinstall` without `--python` left no `python` key in the receipt, and with
+    `--python 3.10` it recorded `python = "3.10"` again; #476 measured the same
+    on uv 0.12.9. `tool upgrade` leaves the receipt exactly as it is, which is
+    the preserving behaviour the fallback relies on (measured the same way), and
+    leaves the copy damaged, so taking it wrongly is caught by the marker."""
+    return (
+        f'echo "$*" >> "{uv_log}"\n'
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  if [ "$3" = "--bin" ]; then echo "$UV_TOOL_BIN_DIR"; else echo "$UV_TOOL_ROOT"; fi\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "list" ]; then\n'
+        f'  echo "agentic-hil v{release}"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  case "$*" in\n'
+        "    *--reinstall*) : ;;\n"
+        "    *) exit 0 ;;\n"
+        "  esac\n"
+        # The reconstructed root spec and the interpreter the line replays, if any.
+        '  spec=""; python=""; prev=""\n'
+        '  for a in "$@"; do\n'
+        '    if [ "$prev" = "--python" ]; then python="$a"; fi\n'
+        '    case "$a" in agentic-hil*) spec="$a" ;; esac\n'
+        '    prev="$a"\n'
+        "  done\n"
+        '  extras=$(printf \'%s\' "$spec" | sed -n \'s/[^[]*\\[\\([^]]*\\)\\].*/\\1/p\' | tr \',\' \' \')\n'
+        '  quoted=""\n'
+        '  for e in $extras; do\n'
+        '    if [ -z "$quoted" ]; then quoted="\\"$e\\""; else quoted="$quoted, \\"$e\\""; fi\n'
+        "  done\n"
+        "  {\n"
+        '    echo "[tool]"\n'
+        '    if [ -n "$quoted" ]; then\n'
+        '      echo "requirements = [{ name = \\"agentic-hil\\", extras = [$quoted] }]"\n'
+        "    else\n"
+        '      echo "requirements = [{ name = \\"agentic-hil\\" }]"\n'
+        "    fi\n"
+        '    if [ -n "$python" ]; then echo "python = \\"$python\\""; fi\n'
+        '    echo "entrypoints = ["\n'
+        '    echo "    { name = \\"agentic-hil\\", install-path = \\"$UV_TOOL_BIN_DIR/agentic-hil\\", from = \\"agentic-hil\\" },"\n'
+        '    echo "]"\n'
+        '  } > "$UV_TOOL_ROOT/agentic-hil/uv-receipt.toml"\n'
+        '  case " $extras " in\n'
+        f'    *" can "*) echo installed > "{pycan_marker}" ;;\n'
+        "  esac\n"
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        f'  --version) echo "{release}" ;;\n'
+        f'  agent-install) echo "fresh" > "{marker}"; printf \'{{\\n  "ok": true\\n}}\\n\' ;;\n'
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "upgrade" ]; then\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+def _reinstall_lines(invocations: str) -> list[str]:
+    """The `tool install --upgrade --reinstall agentic-hil[can] ...` lines a refresh ran."""
+    return [line for line in invocations.splitlines() if line.startswith("tool install --upgrade --reinstall agentic-hil[can]")]
+
+
+@pytest.mark.parametrize("recorded_receipt", _RECORDED_INTERPRETER_RECEIPTS)
+def test_refreshing_a_uv_tool_installed_with_an_interpreter_replays_it(tmp_path: Path, recorded_receipt: str) -> None:
+    """#476: the recorded interpreter survives the refresh, and is on the line that rebuilds it.
+
+    `uv tool install --python 3.10 "agentic-hil[can]"` records the interpreter,
+    and current uv records it as a `[tool]`-level key. The reader refused only a
+    `[tool.options]` table, so that receipt passed straight through and the
+    refresh reached `uv tool install --upgrade --reinstall agentic-hil[can]` with
+    no `--python`: uv then rewrote the receipt without the key, and the
+    operator's choice of interpreter was gone from the record, with nothing said
+    on screen. The refresh now reads the interpreter at either level and replays
+    it as `--python`, which is what the upgrade path already does with the same
+    receipt, so the reinstall keeps the extras, the `--with` packages and the
+    interpreter alike. The older spelling under `[tool.options]` used to be
+    refused outright and sent to the preserving upgrade, which kept the record
+    but never repaired the copy; it is replayed now too.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(tmp_path, recorded_receipt, stub=_uv_refresh_interpreter_stub)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    reinstalls = _reinstall_lines(invocations)
+    assert len(reinstalls) == 1, invocations
+    assert "--python 3.10" in reinstalls[0], invocations
+    assert "tool upgrade" not in invocations, invocations
+    # The repair happened out of the reconstruction, not out of the fallback.
+    assert marker.is_file(), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "fresh", transcript
+    # And what uv recorded afterwards still names the interpreter and the extra.
+    recorded = receipt.read_text(encoding="utf-8")
+    assert 'python = "3.10"' in recorded, recorded
+    assert '"can"' in recorded, recorded
+    assert pycan_marker.is_file(), transcript
+
+
+def test_a_recorded_interpreter_does_not_make_a_recorded_index_replayable(tmp_path: Path) -> None:
+    """The neighbour that must not move: a `[tool.options]` index is still refused.
+
+    Reading `python` out of `[tool.options]` must not turn the table into one
+    the reconstruction accepts. An index recorded beside the interpreter cannot
+    be replayed, so the refresh keeps to the preserving upgrade, which keeps the
+    interpreter along with everything else.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    result, invocations, receipt, pycan_marker, marker = _run_uv_refresh(
+        tmp_path,
+        "[tool]\n"
+        'requirements = [{ name = "agentic-hil", extras = ["can"] }]\n'
+        'python = "3.10"\n'
+        "\n"
+        "[tool.options]\n"
+        'index = ["https://buildbot:tok3n@packages.example.internal/simple/"]\n',
+        stub=_uv_refresh_interpreter_stub,
+    )
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "tool upgrade --reinstall agentic-hil" in invocations, invocations
+    assert _reinstall_lines(invocations) == [], invocations
+    assert marker.read_text(encoding="utf-8").strip() == "damaged", transcript
+    assert 'python = "3.10"' in receipt.read_text(encoding="utf-8")
+
+
 def test_refreshing_a_uv_tool_with_an_empty_receipt_falls_back_to_the_upgrade(tmp_path: Path) -> None:
     """An empty receipt has no `requirements = [` anchor, so the reader must return
     failure rather than accept it as `no extras` and reinstall a bare `agentic-hil`
@@ -2380,6 +2557,127 @@ def test_both_scripts_refuse_a_receipt_they_cannot_replay_in_full() -> None:
     # one is refused before it is indexed as a string.
     assert re.search(r"try \{\s*\$text = Get-Content -LiteralPath \$receipt -Raw\s*\} catch \{\s*return \$null", powershell), powershell
     assert "[string]::IsNullOrEmpty($text)" in powershell, powershell
+
+
+def _shell_function(source: str, name: str) -> str:
+    """One `name() { ... }` function of install.sh, closed at the first `}` in column 0."""
+    found = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+    assert found is not None, f"install.sh defines no {name}()"
+    return found.group(0)
+
+
+def _powershell_function(source: str, name: str) -> str:
+    """One `function Name { ... }` of install.ps1, closed at the first `}` in column 0."""
+    found = re.search(rf"^function {re.escape(name)} \{{\n.*?^\}}\n", source, re.MULTILINE | re.DOTALL)
+    assert found is not None, f"install.ps1 defines no {name}"
+    return found.group(0)
+
+
+def test_both_scripts_replay_the_recorded_interpreter_on_a_refresh() -> None:
+    """The #476 contract, pinned on both scripts where the refresh line is built.
+
+    The shell side is exercised end to end above and the PowerShell side below,
+    on the machines that have the interpreter; this is the guard that runs
+    everywhere. Both refresh paths hand uv a `--python`, so a receipt that
+    records an interpreter is rebuilt on that interpreter and not on whichever
+    one uv would resolve on the day.
+    """
+    shell = _shell_function(_code_only(_shell_source()), "install_with_uv")
+    powershell = _powershell_function(_code_only(_powershell_source()), "Install-WithUv")
+
+    assert "--python" in shell, shell
+    assert "'--python'" in powershell, powershell
+
+
+# The functions install.ps1 reaches on a uv-managed refresh, from the decision
+# down to the uv line, in the order the script defines them. `Invoke-Captured`
+# is deliberately not among them: the harness below supplies one that records
+# what uv was asked and answers the two probes, so the decision is driven
+# against a receipt on disk without a uv on the machine.
+_POWERSHELL_REFRESH_FUNCTIONS = ("Invoke-Uv", "Test-UvManagesTool", "Get-UvRecordedRequirements", "Get-RefreshSpec", "Install-WithUv")
+
+
+def _run_powershell_uv_refresh(tmp_path: Path, recorded_receipt: str) -> str:
+    """Drive install.ps1's refresh decision in Windows PowerShell against a receipt.
+
+    `Install-WithUv` and the functions it reads through are taken out of the
+    script verbatim and run with the script-scope state a refresh has (`refresh`
+    mode, the `can` extra wanted, no version pin). Returns the uv invocation
+    log, one line per call, the way the shell harness returns its own.
+    """
+    powershell = _windows_powershell()
+    tool_root = tmp_path / "tools"
+    receipt_dir = tool_root / "agentic-hil"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "uv-receipt.toml").write_text(recorded_receipt, encoding="utf-8")
+    log = tmp_path / "uv-invocations"
+    functions = "".join(_powershell_function(_powershell_source(), name) for name in _POWERSHELL_REFRESH_FUNCTIONS)
+    harness = (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"$toolRoot = '{tool_root}'\n"
+        f"$log = '{log}'\n"
+        "$InstallMode = 'refresh'\n"
+        "$WithCan = $true\n"
+        "$Version = ''\n"
+        "$SystemCertsMode = 'never'\n"
+        "$UvInstallFailure = 'uv could not install agentic-hil'\n"
+        "function Write-Say { param([string]$Text) }\n"
+        "function Invoke-Captured {\n"
+        "    param([string]$File, [string[]]$Arguments)\n"
+        "    Add-Content -LiteralPath $log -Value ($Arguments -join ' ') -Encoding utf8\n"
+        "    if ($Arguments[0] -eq 'tool' -and $Arguments[1] -eq 'dir') { return @{ ExitCode = 0; Output = \"$toolRoot`n\" } }\n"
+        "    if ($Arguments[0] -eq 'tool' -and $Arguments[1] -eq 'list') { return @{ ExitCode = 0; Output = \"agentic-hil v0.1.0`n- agentic-hil`n\" } }\n"
+        "    return @{ ExitCode = 0; Output = '' }\n"
+        "}\n"
+        f"{functions}"
+        "Install-WithUv\n"
+    )
+    script = tmp_path / "refresh-harness.ps1"
+    script.write_text(harness, encoding="utf-8")
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    return log.read_text(encoding="utf-8-sig") if log.is_file() else ""
+
+
+@pytest.mark.parametrize("recorded_receipt", _RECORDED_INTERPRETER_RECEIPTS)
+def test_the_powershell_refresh_replays_the_recorded_interpreter(tmp_path: Path, recorded_receipt: str) -> None:
+    """#476 on the PowerShell side: `Get-UvRecordedRequirements` had the same gap.
+
+    The same receipt, the same decision, the same line: the reconstruction is
+    taken, and it carries `--python 3.10`, at either level the interpreter was
+    recorded at.
+    """
+    invocations = _run_powershell_uv_refresh(tmp_path, recorded_receipt)
+
+    reinstalls = _reinstall_lines(invocations)
+    assert len(reinstalls) == 1, invocations
+    assert "--python 3.10" in reinstalls[0], invocations
+    assert "tool upgrade" not in invocations, invocations
+
+
+def test_the_powershell_refresh_still_keeps_to_the_upgrade_for_a_recorded_index(tmp_path: Path) -> None:
+    """The neighbour on the PowerShell side: an index beside the interpreter is still refused."""
+    invocations = _run_powershell_uv_refresh(
+        tmp_path,
+        "[tool]\n"
+        'requirements = [{ name = "agentic-hil", extras = ["can"] }]\n'
+        'python = "3.10"\n'
+        "\n"
+        "[tool.options]\n"
+        'index = ["https://buildbot:tok3n@packages.example.internal/simple/"]\n',
+    )
+
+    assert "tool upgrade --reinstall agentic-hil" in invocations, invocations
+    assert _reinstall_lines(invocations) == [], invocations
 
 
 def test_refreshing_a_pip_installation_forces_the_reinstall(tmp_path: Path) -> None:

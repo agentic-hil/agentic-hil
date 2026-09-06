@@ -3310,6 +3310,24 @@ def test_a_process_whose_host_answered_neither_carries_neither_field(
     assert _processes_holding_installation() == [{"pid": 400, "image": f"{_TOOL_ENV}/Scripts/python.exe"}]
 
 
+def _proc_lists_the_reader(proc: Path) -> None:
+    """The entry every real procfs carries: the process that is reading it.
+
+    A `/proc` with nothing mounted on it lists no process at all, and one that
+    is mounted lists at least its reader, so the entry for this very process is
+    what tells a table that was read from a directory that merely exists
+    (#475). Created after whatever `os.getpid` a test has patched in, so it is
+    the reader as the code under test sees it, and without an `exe`, so the
+    reader is never mistaken for a holder of the installation.
+    """
+    own = proc / str(os.getpid())
+    own.mkdir(parents=True, exist_ok=True)
+    (own / "status").write_text("Name:\tpytest\nPPid:\t1\n", encoding="utf-8")
+    link = proc / "self"
+    if not link.exists() and not link.is_symlink():
+        link.symlink_to(own, target_is_directory=True)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the /proc reader needs the symlinks a POSIX host makes without privileges")
 def test_a_linux_host_reads_its_process_table_out_of_proc(
     monkeypatch: pytest.MonkeyPatch,
@@ -3349,7 +3367,7 @@ def test_a_linux_host_reads_its_process_table_out_of_proc(
     # A process whose executable this user may not read, and the non-numeric
     # entries every /proc carries.
     (proc / "99").mkdir()
-    (proc / "self").mkdir()
+    _proc_lists_the_reader(proc)
     (proc / "uptime").write_text("1 1\n", encoding="utf-8")
     monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
 
@@ -3362,6 +3380,72 @@ def test_a_linux_host_reads_its_process_table_out_of_proc(
     assert filetime_epoch_seconds(snapshot[0].created_ns) == pytest.approx(1700000000 + 4200 / os.sysconf("SC_CLK_TCK"))
     assert process_working_directory(4242) == str(project)
     assert process_working_directory(99) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+def test_a_proc_with_nothing_mounted_on_it_is_not_a_table_that_was_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#475, the first path: an empty `/proc` was read as "nothing is running".
+
+    A chroot and a minimal container image carry a `/proc` with nothing mounted
+    on it. The directory exists, so the reader accepted it, and it lists no
+    process, so the reader answered the empty tuple: the claim that the table
+    was read and none of ours was in it, which the upgrade turned into
+    `restart_required: false`. Nothing raised on the way, because `os.listdir`
+    on an empty directory does not, so the `OSError` guard beside it never
+    fired. No real procfs is ever empty, since the reading process is in it: a
+    listing without the reader is a table that was not read, and the answer is
+    the same None a host with no table at all gives.
+    """
+    from agentic_hil.process import snapshot_process_images
+
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+
+    assert snapshot_process_images() is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+def test_a_proc_that_does_not_list_the_reading_process_was_not_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The same rule where the directory is not empty.
+
+    Entries for other processes and a `stat` file are not evidence that this
+    process was looked at by the table it is reading: the one entry a mounted
+    procfs cannot lack is the reader's own, so a listing without it was not
+    read either, whatever else it holds.
+    """
+    from agentic_hil.process import snapshot_process_images
+
+    proc = tmp_path / "proc"
+    interpreter = tmp_path / "tools" / "agentic-hil" / "bin" / "python3"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("", encoding="utf-8")
+    somebody_else = 4242 if os.getpid() != 4242 else 4243
+    _proc_entry(proc, somebody_else, exe=interpreter)
+    (proc / "stat").write_text("cpu  1 2 3\nbtime 1700000000\nprocesses 12\n", encoding="utf-8")
+    (proc / "uptime").write_text("1 1\n", encoding="utf-8")
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+
+    assert snapshot_process_images() is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+def test_a_host_with_no_proc_at_all_still_answers_that_it_cannot_say(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The neighbour that must not move: no directory is still None, not a raise."""
+    from agentic_hil.process import snapshot_process_images
+
+    monkeypatch.setattr("agentic_hil.process._PROC", str(tmp_path / "no-proc-here"))
+
+    assert snapshot_process_images() is None
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="a real child's start time is read out of /proc, which only Linux publishes")
@@ -3450,6 +3534,7 @@ def test_a_linux_server_started_by_the_environments_own_python_is_found(
     monkeypatch.setattr(sys, "prefix", str(environment))
     monkeypatch.setattr(sys, "executable", str(venv_python))
     monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+    _proc_lists_the_reader(proc)
 
     assert _processes_holding_installation() == [{"pid": 4242, "image": str(system_python)}]
 
@@ -3488,6 +3573,7 @@ def test_a_linux_server_is_found_by_its_console_script_or_by_virtual_env(
     monkeypatch.setattr(sys, "prefix", str(environment))
     monkeypatch.setattr(sys, "executable", str(venv_python))
     monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+    _proc_lists_the_reader(proc)
 
     assert [holder["pid"] for holder in _processes_holding_installation() or []] == [4242]
 
@@ -3523,6 +3609,7 @@ def test_a_linux_process_of_another_installation_is_still_not_claimed(
     monkeypatch.setattr(sys, "prefix", str(environment))
     monkeypatch.setattr(sys, "executable", str(environment / "bin" / "python"))
     monkeypatch.setattr("agentic_hil.upgrade.os.getpid", lambda: 1)
+    _proc_lists_the_reader(proc)
 
     assert _processes_holding_installation() == []
 
@@ -3573,6 +3660,7 @@ def test_a_start_time_that_cannot_be_read_leaves_the_field_off_rather_than_inven
     live.mkdir(parents=True)
     (live / "exe").symlink_to(interpreter)
     (live / "status").write_text("Name:\tpython3\nPPid:\t7\n", encoding="utf-8")
+    _proc_lists_the_reader(proc)
     monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
 
     snapshot = snapshot_process_images()
@@ -4140,6 +4228,202 @@ def test_an_upgrade_with_nothing_running_out_of_it_says_nothing_about_restarting
     assert "restart_required_by_count" not in result
     assert "restart_notice" not in result
     assert "restart" not in result["summary"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the /proc reader answers only on a host that publishes one")
+def test_an_empty_proc_reaches_the_upgrade_as_a_table_that_could_not_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#475 end to end: the container answer, through the real holder reader.
+
+    The same upgrade the cannot-read tests above drive, with the process table
+    read by the real reader out of a `/proc` that exists and publishes nothing.
+    That is the machine the issue measured, and it used to answer
+    `restart_required: false` with "No restart is needed" beside it.
+    """
+    from agentic_hil.upgrade import _processes_holding_installation as reads_the_real_table
+
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "install": MANAGER_INSTALLED, "version": _version_answer("9.9.9")},
+    )
+    # After `_recording_manager`, which replaces the reader with an empty list.
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", reads_the_real_table)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr("agentic_hil.process._PROC", str(proc))
+
+    result = upgrade_installation()
+
+    assert result["upgraded_on_disk"] is True
+    assert "restart_required" not in result
+    assert "restart_required_by" not in result
+    assert _CANNOT_SAY in result["summary"]
+    assert "No restart is needed" not in result["summary"]
+
+
+# ---------------------------------------------------------------------------
+# #475, the second path: a failed upgrade, and the processes it read before the
+# manager ran. `replace_installation` reads them first and hands them to every
+# outcome except the failures, which answered `restart_required: false` on any
+# host, including one whose table could not be read at all.
+
+
+def _manager_fails(monkeypatch: pytest.MonkeyPatch, *, version: subprocess.CompletedProcess[str]) -> None:
+    """A manager that exits non-zero, over an installation that then answers `version`."""
+    _recording_manager(
+        monkeypatch,
+        answers={
+            "resolution": PIP_WOULD_INSTALL_A_RELEASE,
+            "install": subprocess.CompletedProcess([], 1, "", "network failed"),
+            "version": version,
+        },
+    )
+
+
+def test_a_failed_upgrade_that_left_the_installation_intact_names_the_processes_it_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The intact failure carries the holders, the way every other outcome does.
+
+    Measured with a live holder present and a manager exiting non-zero:
+    `restart_required: false`, no `restart_required_by`, no `restart_notice`,
+    and a summary saying the installation was not replaced. It was not, and the
+    server started out of it before the run is still up and still answering
+    with the release it imported, which is exactly what `restart_required`
+    already means on the upgraded and the already-current outcomes. The rule
+    since #459: true where a holder was found, and the holder named.
+    """
+    _manager_fails(monkeypatch, version=_version_answer(__version__))
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["ok"] is False
+    assert result["error_type"] == "upgrade_failed"
+    assert result["installation_intact"] is True
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [_LIVE_SERVER]
+    assert result["restart_required_by_count"] == 1
+    assert "pid 4242" in result["restart_notice"]
+    assert __version__ in result["restart_notice"]
+    # And on the line a person reads first, the same as on the upgraded outcome.
+    assert "pid 4242" in result["summary"]
+
+
+def test_a_manager_that_could_not_be_run_still_names_the_processes_it_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other door into the same failure: the manager never started.
+
+    An `OSError` out of the manager run reaches `_failed_upgrade` the same way
+    a non-zero exit does, and the holders were read before either, so both
+    failures owe them to the operator.
+    """
+    _recording_manager(
+        monkeypatch,
+        answers={"resolution": PIP_WOULD_INSTALL_A_RELEASE, "version": _version_answer(__version__)},
+    )
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    def cannot_run(manager: str, command: list[str]) -> object:
+        raise OSError("the package manager could not be executed")
+
+    monkeypatch.setattr("agentic_hil.upgrade._manager_run", cannot_run)
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == "upgrade_failed"
+    assert result["exception_type"] == "OSError"
+    assert result["installation_intact"] is True
+    assert result["restart_required"] is True
+    assert result["restart_required_by"] == [_LIVE_SERVER]
+    assert "pid 4242" in result["restart_notice"]
+
+
+def test_a_failed_upgrade_on_a_host_that_cannot_read_its_process_table_says_so_rather_than_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same failure on a host with no table: the sentence, and no `restart_required`.
+
+    The rest of the module already draws this line, so that no result claims a
+    restart is unnecessary on the strength of a question nobody could put. The
+    failure was the one outcome that escaped it and answered false.
+    """
+    _manager_fails(monkeypatch, version=_version_answer(__version__))
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == "upgrade_failed"
+    assert result["installation_intact"] is True
+    assert "restart_required" not in result
+    assert "restart_required_by" not in result
+    assert _CANNOT_SAY in result["restart_notice"]
+    assert _CANNOT_SAY in result["summary"]
+
+
+_HALF_CHANGED_ENDINGS = [
+    pytest.param(
+        _version_answer("9.9.9"),
+        "installation_changed_after_failed_upgrade",
+        id="changed-on-disk",
+    ),
+    pytest.param(
+        subprocess.CompletedProcess([], 1, "", "ModuleNotFoundError: No module named 'agentic_hil'"),
+        "installation_broken",
+        id="broken",
+    ),
+]
+
+
+@pytest.mark.parametrize(("version", "ending"), _HALF_CHANGED_ENDINGS)
+def test_the_half_changed_endings_name_the_running_processes_as_a_notice_and_not_as_a_restart_request(
+    version: subprocess.CompletedProcess[str],
+    ending: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`restart_required: false` stays on both, on purpose, and the processes are named.
+
+    A restart onto a half-changed tree, or onto one that no longer loads, adopts
+    what the reinstall exists to replace, so neither ending may ask for one:
+    the field stays false and the list that means `restart these` stays off.
+    The running processes are still facts about the operator's machine, so
+    they gain the notice that names them and nothing more.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
+    _manager_fails(monkeypatch, version=version)
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == ending
+    assert result["restart_required"] is False
+    assert "restart_required_by" not in result
+    assert "restart_required_by_count" not in result
+    assert "pid 4242" in result["restart_notice"]
+    assert __version__ in result["restart_notice"]
+
+
+@pytest.mark.parametrize(("version", "ending"), _HALF_CHANGED_ENDINGS)
+def test_the_half_changed_endings_keep_refusing_the_restart_where_the_table_could_not_be_read(
+    version: subprocess.CompletedProcess[str],
+    ending: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neighbour that must not move: an unreadable table changes nothing here."""
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    monkeypatch.setattr("agentic_hil.upgrade._distribution_installer", lambda: "pip")
+    _manager_fails(monkeypatch, version=version)
+    _table_cannot_be_read(monkeypatch)
+
+    result = upgrade_installation()
+
+    assert result["error_type"] == ending
+    assert result["restart_required"] is False
+    assert "restart_required_by" not in result
 
 
 # ---------------------------------------------------------------------------
