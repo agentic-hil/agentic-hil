@@ -749,6 +749,28 @@ def _plain_line_would_remove(manager: str, installed_extras: tuple[str, ...], re
     )
 
 
+def _preferred_user_scheme() -> str:
+    """The scheme name pip installs a `--user` install into on this interpreter.
+
+    Not `f"{os.name}_user"`. On a framework macOS Python, the kind python.org
+    and Homebrew ship, `os.name` is `posix` while the scheme pip uses is
+    `osx_framework_user`, and the two name different directories: the
+    distribution sits in one and a lookup built out of `os.name` reads the
+    other, finds nothing of ours, and calls a per-user installation
+    system-wide. `--user` is then dropped, and pip uninstalls from the
+    framework site while installing into the system one, which is the shim over
+    a missing package this whole check exists to prevent.
+
+    `get_preferred_scheme` is what pip itself asks, and it has answered since
+    3.10, which is this package's floor. The fallback is the old name, for an
+    interpreter whose sysconfig does not answer at all.
+    """
+    try:
+        return sysconfig.get_preferred_scheme("user")
+    except (AttributeError, KeyError, OSError):
+        return f"{os.name}_user"
+
+
 def _user_site_installation() -> bool:
     """Whether the distribution about to be replaced lives in this user's own site.
 
@@ -780,7 +802,7 @@ def _user_site_installation() -> bool:
     except Exception:
         return False
     try:
-        user_site = sysconfig.get_path("purelib", f"{os.name}_user")
+        user_site = sysconfig.get_path("purelib", _preferred_user_scheme())
     except (KeyError, OSError):
         return False
     if located is None or not user_site:
