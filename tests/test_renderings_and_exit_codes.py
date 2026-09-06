@@ -582,9 +582,10 @@ def test_adopt_hardware_refused_for_a_missing_toolchain_does_not_say_attach_the_
     assert "Attach the board" not in result["next_step"], result["next_step"]
     assert re.search(r"OpenOCD|STM32CubeProgrammer", result["next_step"]), result["next_step"]
     # The neighbours: discovery's own reason is still the summary, and the
-    # promise that nothing was written stands.
+    # promise that nothing was written stands (the summary spells it in lower
+    # case, at the end of its own sentence).
     assert "Neither STM32CubeProgrammer" in result["summary"]
-    assert "Nothing was written" in result["summary"]
+    assert "nothing was written" in result["summary"].lower()
 
     code, out, _ = _shell(["adopt-hardware", "--dry-run"])
 
