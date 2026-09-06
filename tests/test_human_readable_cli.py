@@ -1637,7 +1637,7 @@ def test_a_probe_listing_says_which_enumeration_produced_the_ids() -> None:
         "tool": "debugger_probes_list",
         "backend": "openocd",
         "discovered_by": "usb_serial_inventory",
-        "probes": [{"probe_id": "066AFF303435554157113106"}],
+        "probes": [{"probe_id": "066BFF505050505050505050"}],
         "summary": "1 connected debugger probe(s) read from this host's USB serial inventory.",
     }
 
@@ -1645,7 +1645,7 @@ def test_a_probe_listing_says_which_enumeration_produced_the_ids() -> None:
 
     assert "discovered_by" in out
     assert "usb_serial_inventory" in out
-    assert "066AFF303435554157113106" in out
+    assert "066BFF505050505050505050" in out
 
 
 def test_a_probe_listing_refused_on_an_adapter_nothing_enumerates_says_which_script() -> None:
@@ -1677,7 +1677,7 @@ ADOPT_DRY_RUN = {
     "path": "/home/op/.config/agentic-hil/projects/blinky/config.yaml",
     "debugger_id": "dut",
     "com_port_id": "dut_uart",
-    "carried": [{"key": "debuggers.dut.probe_id", "value": "066AFF303435554157113106", "previous_value": None}],
+    "carried": [{"key": "debuggers.dut.probe_id", "value": "066BFF505050505050505050", "previous_value": None}],
     "already_current": [{"key": "debug.gdb_executable", "value": "/usr/bin/arm-none-eabi-gdb"}],
     "kept": [
         {
@@ -1726,7 +1726,7 @@ def test_the_plan_still_renders_the_boxes_the_comparison_is_not_in() -> None:
     out = _reflowed(_rendered(ADOPT_DRY_RUN, "adopt-hardware"))
 
     assert "Would be filled in" in out
-    assert "debuggers.dut.probe_id 066AFF303435554157113106" in out
+    assert "debuggers.dut.probe_id 066BFF505050505050505050" in out
     assert "Already match the attached hardware" in out
     assert "debug.gdb_executable" in out
 
@@ -1762,7 +1762,7 @@ def test_a_healthy_probe_listing_is_not_rendered_as_a_containment() -> None:
         "tool": "debugger_probes_list",
         "backend": "openocd",
         "discovered_by": "usb_serial_inventory",
-        "probes": [{"probe_id": "066AFF303435554157113106"}],
+        "probes": [{"probe_id": "066BFF505050505050505050"}],
         "complete": False,
         "summary": "1 connected debugger probe(s) read from this host's USB serial inventory, which is not an authoritative count.",
     }

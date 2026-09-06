@@ -99,10 +99,10 @@ NUCLEO_VCP_PORT: dict = {
     "description": "STM32 STLink - ST-Link VCP Ctrl",
     "manufacturer": "STMicroelectronics",
     "product": "STM32 STLink",
-    "serial_number": "066AFF303435554157113106",
+    "serial_number": "066BFF505050505050505050",
     "vid": 0x0483,
     "pid": 0x374B,
-    "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066AFF303435554157113106-if02",
+    "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066BFF505050505050505050-if02",
 }
 
 

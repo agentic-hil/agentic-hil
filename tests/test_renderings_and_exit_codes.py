@@ -380,7 +380,7 @@ def test_a_bootstrap_probe_listing_prints_the_tools_it_searched() -> None:
             {"name": "STM32_Programmer_CLI", "provided_by": "STM32CubeProgrammer", "path": None, "found": False},
             {"name": "openocd", "provided_by": "OpenOCD", "path": "/usr/bin/openocd", "found": True},
         ],
-        "probes": [{"probe_id": "066AFF303435554157113106"}],
+        "probes": [{"probe_id": "066BFF505050505050505050"}],
         "stlink_ports": [],
         "complete": False,
         "summary": "1 connected debugger probe(s) read from this host's USB serial inventory.",
@@ -391,7 +391,7 @@ def test_a_bootstrap_probe_listing_prints_the_tools_it_searched() -> None:
     assert "STM32_Programmer_CLI" in out
     assert "OpenOCD" in out
     assert "found" in out
-    assert "066AFF303435554157113106" in out
+    assert "066BFF505050505050505050" in out
 
 
 # ---------------------------------------------------------------------------
@@ -657,7 +657,7 @@ def _registered_agent_host(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> 
 def _bound_bench(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
     """A configuration whose debugger names a toolchain that answers: the fake
     OpenOCD the rest of the suite drives, so `doctor` has a check to pass."""
-    write_authoritative_config(workspace, monkeypatch, debugger_executable=FAKE_OPENOCD, probe_id="066AFF303435554157113106")
+    write_authoritative_config(workspace, monkeypatch, debugger_executable=FAKE_OPENOCD, probe_id="066BFF505050505050505050")
 
 
 def _quarantined_bench(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:

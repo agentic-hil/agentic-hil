@@ -1663,14 +1663,14 @@ NUCLEO_VCP: JsonObject = {
     "device": "/dev/ttyACM0",
     "name": "ttyACM0",
     "description": "STM32 STLink - ST-Link VCP Ctrl",
-    "hwid": "USB VID:PID=0483:374B SER=066AFF303435554157113106 LOCATION=1-2:1.2",
+    "hwid": "USB VID:PID=0483:374B SER=066BFF505050505050505050 LOCATION=1-2:1.2",
     "manufacturer": "STMicroelectronics",
     "product": "STM32 STLink",
     "interface": "ST-Link VCP Ctrl",
-    "serial_number": "066AFF303435554157113106",
+    "serial_number": "066BFF505050505050505050",
     "vid": 0x0483,
     "pid": 0x374B,
-    "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066AFF303435554157113106-if02",
+    "stable_device": "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066BFF505050505050505050-if02",
 }
 
 # The 32 ttyS entries the same host lists, abbreviated: motherboard UARTs with
@@ -1747,15 +1747,15 @@ def test_an_stlink_is_enumerated_from_the_usb_inventory_without_the_cube_cli(mon
     (round 1, finding 1)."""
     _linux_openocd_host(monkeypatch)
 
-    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile=STARTER_PROFILE)
+    result = discover_attached_hardware(probe_id="066BFF505050505050505050", profile=STARTER_PROFILE)
 
     assert result["ok"] is True, result
     assert result["backend"] == "openocd"
     assert result["discovered_by"] == DISCOVERED_BY_USB_INVENTORY
     assert result["executable"] == FAKE_OPENOCD_PATH
-    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["probe_id"] == "066BFF505050505050505050"
     assert result["target"] == {
-        "probe_id": "066AFF303435554157113106",
+        "probe_id": "066BFF505050505050505050",
         "controller": "stm32f446ret6",
         "source": "workspace_profile",
     }
@@ -1778,13 +1778,13 @@ def test_only_the_stlink_usb_products_are_read_as_probe_serials() -> None:
         "ok": True,
         "ports": [
             NUCLEO_VCP,
-            {"device": "/dev/ttyUSB0", "serial_number": "066AFF303435554157113106", "vid": 0x1A86, "pid": 0x7523},
+            {"device": "/dev/ttyUSB0", "serial_number": "066BFF505050505050505050", "vid": 0x1A86, "pid": 0x7523},
             {"device": "/dev/ttyACM7", "serial_number": "SOMEOTHER", "vid": 0x0483, "pid": 0x5740},
             {"device": "/dev/ttyACM8", "vid": 0x0483, "pid": 0x374B},
         ],
     }
 
-    assert usb_stlink_probe_ids(inventory) == ["066AFF303435554157113106"]
+    assert usb_stlink_probe_ids(inventory) == ["066BFF505050505050505050"]
     # An inventory that could not be taken enumerates nothing rather than
     # guessing at an empty bench.
     assert usb_stlink_probe_ids({"ok": False, "summary": "pyserial is not installed"}) == []
@@ -1796,12 +1796,12 @@ def test_one_probe_on_several_interfaces_is_one_probe(monkeypatch: pytest.Monkey
     Folded with the identity rule everything else here selects and locks by, so
     two interfaces of one probe are one probe rather than `ambiguous_hardware`,
     and the spelling written down is the one the host published."""
-    second = {**NUCLEO_VCP, "device": "/dev/ttyACM1", "stable_device": None, "serial_number": "066aff303435554157113106"}
+    second = {**NUCLEO_VCP, "device": "/dev/ttyACM1", "stable_device": None, "serial_number": "066bff505050505050505050"}
     _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP, second])
 
     listed = enumerate_attached_probes(com_ports={"ok": True, "ports": [NUCLEO_VCP, second]})
 
-    assert [entry["probe_id"] for entry in listed["probes"]] == ["066AFF303435554157113106"]
+    assert [entry["probe_id"] for entry in listed["probes"]] == ["066BFF505050505050505050"]
 
 
 def test_two_attached_stlinks_are_still_ambiguous_on_the_usb_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1813,7 +1813,7 @@ def test_two_attached_stlinks_are_still_ambiguous_on_the_usb_path(monkeypatch: p
 
     assert result["ok"] is False
     assert result["error_type"] == "ambiguous_hardware"
-    assert sorted(entry["probe_id"] for entry in result["probes"]) == ["0669FF495451", "066AFF303435554157113106"]
+    assert sorted(entry["probe_id"] for entry in result["probes"]) == ["0669FF495451", "066BFF505050505050505050"]
     # And naming one selects it, exactly as it does with the CLI.
     selected = discover_attached_hardware(probe_id="0669ff495451", profile=STARTER_PROFILE)
     assert selected["ok"] is True, selected
@@ -1829,10 +1829,10 @@ def test_naming_the_probe_reads_it_as_the_operators_own_explicit_choice(monkeypa
     the answer is exact and adds no caveat."""
     _linux_openocd_host(monkeypatch)
 
-    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile=STARTER_PROFILE)
+    result = discover_attached_hardware(probe_id="066BFF505050505050505050", profile=STARTER_PROFILE)
 
     assert result["ok"] is True, result
-    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["probe_id"] == "066BFF505050505050505050"
     assert "probe_inventory_complete" not in result
     assert "not an authoritative count" not in result["summary"]
 
@@ -1858,12 +1858,12 @@ def test_the_sole_visible_probe_is_bound_and_carries_the_blind_spot(monkeypatch:
     assert result["ok"] is True, result
     assert overall_success(result) is True
     # The board is chosen, and it is the one the inventory showed.
-    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["probe_id"] == "066BFF505050505050505050"
     assert result["backend"] == "openocd"
     # The caveat rides the answer rather than blocking it.
     assert result["discovered_by"] == DISCOVERED_BY_USB_INVENTORY
     assert result["probe_inventory"] == "incomplete"
-    assert "066AFF303435554157113106" in result["probe_inventory_note"]
+    assert "066BFF505050505050505050" in result["probe_inventory_note"]
     assert "no VCP" in result["probe_inventory_note"]
     assert "adopt-hardware --probe-id" in result["probe_inventory_note"]
     # And the summary a person reads carries the same sentence.
@@ -1887,7 +1887,7 @@ def test_the_no_config_probe_listing_states_its_scope_and_still_exits_zero(monke
     assert listing["ok"] is True
     assert listing["source"] == "bootstrap"
     assert listing["backend"] == "openocd"
-    assert [entry["probe_id"] for entry in listing["probes"]] == ["066AFF303435554157113106"]
+    assert [entry["probe_id"] for entry in listing["probes"]] == ["066BFF505050505050505050"]
     assert listing["complete"] is False
     assert agentic_hil.cli.result_succeeded(listing) is True
     assert "not an authoritative count" in listing["summary"]
@@ -1938,8 +1938,8 @@ def test_the_cube_programmer_path_is_untouched_where_that_cli_is_installed(monke
     commands: list[list[str]] = []
     responses = iter(
         [
-            CompletedCommand("ST-LINK SN : 066AFF303435554157113106\n", "", 0, False, False),
-            CompletedCommand("ST-LINK SN : 066AFF303435554157113106\nDevice name : STM32F446RE\n", "", 0, False, False),
+            CompletedCommand("ST-LINK SN : 066BFF505050505050505050\n", "", 0, False, False),
+            CompletedCommand("ST-LINK SN : 066BFF505050505050505050\nDevice name : STM32F446RE\n", "", 0, False, False),
         ]
     )
 
@@ -1958,9 +1958,9 @@ def test_the_cube_programmer_path_is_untouched_where_that_cli_is_installed(monke
     assert result["discovered_by"] == DISCOVERED_BY_STLINK_CLI
     assert result["executable"].endswith("STM32_Programmer_CLI.exe")
     # The board named itself, and the profile did not decide it.
-    assert result["target"] == {"probe_id": "066AFF303435554157113106", "controller": "STM32F446RE"}
+    assert result["target"] == {"probe_id": "066BFF505050505050505050", "controller": "STM32F446RE"}
     assert commands[0][-3:] == ["-q", "-l", "st-link-only"]
-    assert commands[1][-4:] == ["-c", "port=SWD", "mode=HOTPLUG", "sn=066AFF303435554157113106"]
+    assert commands[1][-4:] == ["-c", "port=SWD", "mode=HOTPLUG", "sn=066BFF505050505050505050"]
 
 
 def test_openocd_names_the_target_when_the_profile_does_not(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1978,10 +1978,10 @@ def test_openocd_names_the_target_when_the_profile_does_not(monkeypatch: pytest.
 
     # Named explicitly: the USB inventory binds only a named probe now, so this is
     # how discovery reaches the target read at all (round 1, finding 1).
-    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile={"target": {"name": "demo"}})
+    result = discover_attached_hardware(probe_id="066BFF505050505050505050", profile={"target": {"name": "demo"}})
 
     assert result["ok"] is True, result
-    assert result["target"] == {"probe_id": "066AFF303435554157113106", "controller": "stm32f4x", "source": "openocd"}
+    assert result["target"] == {"probe_id": "066BFF505050505050505050", "controller": "stm32f4x", "source": "openocd"}
     assert commands == [
         [
             sys.executable,
@@ -1989,7 +1989,7 @@ def test_openocd_names_the_target_when_the_profile_does_not(monkeypatch: pytest.
             "-f",
             "interface/stlink.cfg",
             "-c",
-            "adapter serial 066AFF303435554157113106",
+            "adapter serial 066BFF505050505050505050",
             "-f",
             "target/stm32f4x.cfg",
             "-c",
@@ -2023,10 +2023,10 @@ def test_a_probe_that_answers_with_no_target_still_configures_the_bench(monkeypa
 
     # Named explicitly: the USB inventory binds only a named probe now, so this is
     # how discovery reaches the target read at all (round 1, finding 1).
-    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile={"target": {"name": "demo"}})
+    result = discover_attached_hardware(probe_id="066BFF505050505050505050", profile={"target": {"name": "demo"}})
 
     assert result["ok"] is True, result
-    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["probe_id"] == "066BFF505050505050505050"
     assert result["target"] is None
     assert "target was not identified" in result["summary"]
     assert "no target" in result["target_discovery"]["summary"]
@@ -2051,7 +2051,7 @@ def test_a_timed_out_openocd_read_is_a_failure_not_an_unnamed_target(monkeypatch
 
     # Named explicitly: the USB inventory binds only a named probe now, so this is
     # how discovery reaches the target read at all (round 1, finding 1).
-    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile={"target": {"name": "demo"}})
+    result = discover_attached_hardware(probe_id="066BFF505050505050505050", profile={"target": {"name": "demo"}})
 
     assert result["ok"] is False, result
     assert result["error_type"] == "timeout"
@@ -2061,7 +2061,7 @@ def test_a_timed_out_openocd_read_is_a_failure_not_an_unnamed_target(monkeypatch
     assert overall_success(result) is False
     # The probe and toolchain are still named, so the failure says which board it
     # was about, and the timeout is carried where a reader can see it.
-    assert result["probe_id"] == "066AFF303435554157113106"
+    assert result["probe_id"] == "066BFF505050505050505050"
     assert result["timed_out"] is True
     assert result["source"] == "openocd"
 
@@ -2081,7 +2081,7 @@ def test_openocd_gone_before_the_read_is_a_pre_contact_failure(monkeypatch: pyte
 
     # Named explicitly: the USB inventory binds only a named probe now, so this is
     # how discovery reaches the target read at all (round 1, finding 1).
-    result = discover_attached_hardware(probe_id="066AFF303435554157113106", profile={"target": {"name": "demo"}})
+    result = discover_attached_hardware(probe_id="066BFF505050505050505050", profile={"target": {"name": "demo"}})
 
     assert result["ok"] is False, result
     assert result["error_type"] == "debugger_not_found"
@@ -2105,7 +2105,7 @@ def test_the_generated_entry_names_the_backend_that_actually_answered() -> None:
         {
             "backend": "openocd",
             "executable": FAKE_OPENOCD_PATH,
-            "probe_id": "066AFF303435554157113106",
+            "probe_id": "066BFF505050505050505050",
             "target": {"controller": "stm32f446ret6"},
             "com_port": NUCLEO_VCP,
         },
@@ -2114,7 +2114,7 @@ def test_the_generated_entry_names_the_backend_that_actually_answered() -> None:
     entry = configured["debuggers"]["dut"]
     assert entry["type"] == "openocd"
     assert entry["executable"] == FAKE_OPENOCD_PATH
-    assert entry["probe_id"] == "066AFF303435554157113106"
+    assert entry["probe_id"] == "066BFF505050505050505050"
     assert entry["interface_cfg"] == "interface/stlink.cfg"
     assert entry["target_cfg"] == "target/stm32f4x.cfg"
     assert configured["target"] == {"name": "nucleo-f446re-starter", "controller": "stm32f446ret6"}
@@ -2123,7 +2123,7 @@ def test_the_generated_entry_names_the_backend_that_actually_answered() -> None:
     assert configured["com_ports"]["dut_uart"] == {
         "device": NUCLEO_VCP["stable_device"],
         "baudrate": 115200,
-        "serial_number": "066AFF303435554157113106",
+        "serial_number": "066BFF505050505050505050",
         "vid": 0x0483,
         "pid": 0x374B,
         "permissions": {"allow_write": True},
@@ -2138,7 +2138,7 @@ def test_a_discovery_that_found_the_cube_cli_still_writes_an_stlink_entry() -> N
         {
             "backend": "stlink",
             "executable": "C:/ST/STM32_Programmer_CLI.exe",
-            "probe_id": "066AFF303435554157113106",
+            "probe_id": "066BFF505050505050505050",
             "target": {"controller": "STM32F446RE"},
             "com_port": None,
         },
@@ -2171,7 +2171,7 @@ def test_init_on_a_linux_openocd_host_binds_the_one_visible_probe(tmp_path: Path
     assert result["ok"] is True, result
     # The bench is bound, off the inventory alone.
     written = load_authoritative_config(workspace)
-    assert written.debuggers["dut"].probe_id == "066AFF303435554157113106"
+    assert written.debuggers["dut"].probe_id == "066BFF505050505050505050"
     assert written.debuggers["dut"].type == "openocd"
     assert com_port_is_unbound(written.com_ports["dut_uart"]) is False
     assert written.target.controller == "stm32f446ret6"
@@ -2180,7 +2180,7 @@ def test_init_on_a_linux_openocd_host_binds_the_one_visible_probe(tmp_path: Path
     entry = yaml.safe_load(Path(str(result["path"])).read_text(encoding="utf-8"))["debuggers"]["dut"]
     assert entry["discovered_by"] == "usb_serial_inventory"
     assert entry["probe_inventory"] == "incomplete"
-    assert "066AFF303435554157113106" in entry["probe_inventory_note"]
+    assert "066BFF505050505050505050" in entry["probe_inventory_note"]
     # And in the report: one sentence saying the visible probe was bound and how to
     # name another one if a VCP-less probe is attached beside it.
     assert result["hardware_discovery"]["probe_inventory"] == "incomplete"
@@ -2192,7 +2192,7 @@ def test_init_on_a_linux_openocd_host_binds_the_one_visible_probe(tmp_path: Path
     assert result["next_steps"][1] == (
         "Discovery looked for STM32_Programmer_CLI (STM32CubeProgrammer): not on this host; "
         f"openocd (OpenOCD): found at {FAKE_OPENOCD_PATH}. ST-Link serial port(s) on this host: "
-        f"066AFF303435554157113106 on {NUCLEO_VCP['stable_device']}."
+        f"066BFF505050505050505050 on {NUCLEO_VCP['stable_device']}."
     )
 
 
@@ -2220,7 +2220,7 @@ def test_a_serial_carried_from_the_file_is_not_the_operator_naming_a_probe(tmp_p
     first = init_config()
     assert first["ok"] is True, first
     bound = load_authoritative_config(workspace)
-    assert bound.debuggers["dut"].probe_id == "066AFF303435554157113106"
+    assert bound.debuggers["dut"].probe_id == "066BFF505050505050505050"
     assert yaml.safe_load(Path(str(first["path"])).read_text(encoding="utf-8"))["debuggers"]["dut"]["probe_inventory"] == "incomplete"
 
     # The same command again over the file it just wrote. The bound serial selects
@@ -2229,11 +2229,11 @@ def test_a_serial_carried_from_the_file_is_not_the_operator_naming_a_probe(tmp_p
 
     assert forced["ok"] is True, forced
     regenerated = load_authoritative_config(workspace)
-    assert regenerated.debuggers["dut"].probe_id == "066AFF303435554157113106"
+    assert regenerated.debuggers["dut"].probe_id == "066BFF505050505050505050"
     entry = yaml.safe_load(Path(str(forced["path"])).read_text(encoding="utf-8"))["debuggers"]["dut"]
     assert entry["discovered_by"] == "usb_serial_inventory"
     assert entry["probe_inventory"] == "incomplete"
-    assert "066AFF303435554157113106" in entry["probe_inventory_note"]
+    assert "066BFF505050505050505050" in entry["probe_inventory_note"]
     assert "no VCP" in entry["probe_inventory_note"]
     # And the person who ran it is told, in the same sentence the first `init` said.
     assert forced["hardware_discovery"]["probe_inventory"] == "incomplete"
@@ -2249,11 +2249,11 @@ def test_a_serial_carried_from_the_file_is_not_the_operator_naming_a_probe(tmp_p
     # adds no caveat. Over MCP the controller is read off the board, so this one
     # spawns.
     _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP], spawn=openocd_reads_the_target)
-    named = adopt_hardware(com_port_id="dut_uart", probe_id="066AFF303435554157113106")
+    named = adopt_hardware(com_port_id="dut_uart", probe_id="066BFF505050505050505050")
 
     assert named["ok"] is True, named
     discovery = named["hardware_discovery"]
-    assert discovery["probe_id"] == "066AFF303435554157113106"
+    assert discovery["probe_id"] == "066BFF505050505050505050"
     assert "probe_inventory" not in discovery
     assert "probe_inventory_note" not in discovery
     assert "no VCP" not in discovery["summary"]
@@ -2284,7 +2284,7 @@ def test_project_config_create_binds_the_visible_probe_and_carries_the_caveat(tm
 
     assert result["ok"] is True, result
     written = load_authoritative_config(workspace)
-    assert written.debuggers["dut"].probe_id == "066AFF303435554157113106"
+    assert written.debuggers["dut"].probe_id == "066BFF505050505050505050"
     # The same three fields the CLI path writes, in the file the agent will drive.
     entry = yaml.safe_load(Path(written.config_path).read_text(encoding="utf-8"))["debuggers"]["dut"]
     assert entry["discovered_by"] == "usb_serial_inventory"
@@ -2307,7 +2307,7 @@ def test_naming_a_serial_this_host_cannot_see_is_still_refused(monkeypatch: pyte
     _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP])
 
     # The bare call binds the visible probe on this very host.
-    assert discover_attached_hardware(profile=STARTER_PROFILE)["probe_id"] == "066AFF303435554157113106"
+    assert discover_attached_hardware(profile=STARTER_PROFILE)["probe_id"] == "066BFF505050505050505050"
 
     refused = discover_attached_hardware(probe_id="0669FF495451", profile=STARTER_PROFILE)
 
@@ -2315,7 +2315,7 @@ def test_naming_a_serial_this_host_cannot_see_is_still_refused(monkeypatch: pyte
     assert refused["error_type"] == "adapter_not_found"
     assert refused.get("probe_id") is None
     assert refused["requested_probe_id"] == "0669FF495451"
-    assert [found["probe_id"] for found in refused["probes"]] == ["066AFF303435554157113106"]
+    assert [found["probe_id"] for found in refused["probes"]] == ["066BFF505050505050505050"]
     assert "does not add one" in refused["summary"]
 
 
@@ -2344,9 +2344,9 @@ def test_project_config_create_regenerates_an_already_bound_openocd_config(tmp_p
     assert init_config()["ok"] is True
     assert load_authoritative_config(workspace).debuggers["dut"].probe_id is None
     _linux_openocd_host(monkeypatch, spawn=openocd_reads_the_target)
-    assert adopt_hardware(com_port_id="dut_uart", probe_id="066AFF303435554157113106")["ok"] is True
+    assert adopt_hardware(com_port_id="dut_uart", probe_id="066BFF505050505050505050")["ok"] is True
     bound = load_authoritative_config(workspace)
-    assert bound.debuggers["dut"].probe_id == "066AFF303435554157113106"
+    assert bound.debuggers["dut"].probe_id == "066BFF505050505050505050"
 
     # Regenerate against exactly the one visible probe. Before the fix this refused
     # `probe_inventory_incomplete`; the bound serial is now the explicit selection.
@@ -2354,7 +2354,7 @@ def test_project_config_create_regenerates_an_already_bound_openocd_config(tmp_p
     result = project_config_create(workspace, bound)
 
     assert result["ok"] is True, result
-    assert load_authoritative_config(workspace).debuggers["dut"].probe_id == "066AFF303435554157113106"
+    assert load_authoritative_config(workspace).debuggers["dut"].probe_id == "066BFF505050505050505050"
 
 
 def test_the_unprovisioned_create_refusal_points_past_the_adopt_that_would_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2462,7 +2462,7 @@ def test_the_empty_inventory_next_step_reaches_a_bound_bench(tmp_path: Path, mon
     _linux_openocd_host(monkeypatch, ports=[NUCLEO_VCP], spawn=openocd_reads_the_target)
     bare = adopt_hardware(com_port_id="dut_uart")
     assert bare["ok"] is True, bare
-    assert load_authoritative_config(workspace).debuggers["dut"].probe_id == "066AFF303435554157113106"
+    assert load_authoritative_config(workspace).debuggers["dut"].probe_id == "066BFF505050505050505050"
 
 
 def test_the_incomplete_inventory_error_is_in_the_reference_contract() -> None:
@@ -2592,12 +2592,12 @@ def test_adopt_hardware_fills_a_placeholder_on_a_host_with_only_openocd(tmp_path
         return CompletedCommand(OPENOCD_TARGETS_OUTPUT, "", 0, False, False)
 
     _linux_openocd_host(monkeypatch, spawn=openocd_reads_the_target)
-    result = adopt_hardware(com_port_id="dut_uart", probe_id="066AFF303435554157113106")
+    result = adopt_hardware(com_port_id="dut_uart", probe_id="066BFF505050505050505050")
 
     assert result["ok"] is True, result
     assert result["applied"] is True
     carried = {item["key"]: item["value"] for item in result["carried"]}
-    assert carried["debuggers.dut.probe_id"] == "066AFF303435554157113106"
+    assert carried["debuggers.dut.probe_id"] == "066BFF505050505050505050"
     assert carried["debuggers.dut.executable"] == FAKE_OPENOCD_PATH
     # The board read (`stm32f4x`) and the operator's exact part (`stm32f446ret6`)
     # differ, so the operator's value is kept and the coarser read is reported
@@ -2606,7 +2606,7 @@ def test_adopt_hardware_fills_a_placeholder_on_a_host_with_only_openocd(tmp_path
     assert kept["target.controller"]["configured_value"] == "stm32f446ret6"
     assert kept["target.controller"]["discovered_value"] == "stm32f4x"
     assert carried["com_ports.dut_uart.device"] == NUCLEO_VCP["stable_device"]
-    assert carried["com_ports.dut_uart.serial_number"] == "066AFF303435554157113106"
+    assert carried["com_ports.dut_uart.serial_number"] == "066BFF505050505050505050"
     # And nothing under `unavailable` is about the toolchain: the entry the
     # skeleton wrote is `type: openocd`, and this discovery ran on openocd, so
     # the executable belongs in it.
@@ -2779,7 +2779,7 @@ def test_a_bound_port_is_untouched_by_any_of_it(tmp_path: Path) -> None:
             "  dut_uart:\n"
             '    device: "COM7"\n'
             "    baudrate: 115200\n"
-            '    serial_number: "066AFF303435554157113106"\n'
+            '    serial_number: "066BFF505050505050505050"\n'
         ),
     )
     config = load_config(str(path))
@@ -2787,7 +2787,7 @@ def test_a_bound_port_is_untouched_by_any_of_it(tmp_path: Path) -> None:
     port = config.com_ports["dut_uart"]
     assert port.device == "COM7"
     assert com_port_is_unbound(port) is False
-    assert uart_device(config, "dut_uart").lock_key == "com:serial:066aff303435554157113106"
+    assert uart_device(config, "dut_uart").lock_key == "com:serial:066bff505050505050505050"
 
 
 def test_an_unbound_port_locks_under_its_own_name_and_says_what_it_is(tmp_path: Path) -> None:
@@ -2881,7 +2881,7 @@ def test_debugger_probes_lists_the_stlink_on_a_host_with_only_openocd(tmp_path: 
     assert result["source"] == "bootstrap"
     assert result["backend"] == "openocd"
     assert result["discovered_by"] == DISCOVERED_BY_USB_INVENTORY
-    assert [entry["probe_id"] for entry in result["probes"]] == ["066AFF303435554157113106"]
+    assert [entry["probe_id"] for entry in result["probes"]] == ["066BFF505050505050505050"]
     assert result["stlink_ports"][0]["stable_device"] == NUCLEO_VCP["stable_device"]
 
 

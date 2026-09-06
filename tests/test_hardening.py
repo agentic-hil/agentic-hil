@@ -4574,7 +4574,7 @@ def test_incomplete_single_probe_listing_exits_zero_and_keeps_saying_so(tmp_path
             pass
 
         def call(self, name: str, arguments: dict | None = None) -> dict:
-            return _incomplete_probe_answer("066AFF303435554157113106")
+            return _incomplete_probe_answer("066BFF505050505050505050")
 
         def close(self) -> None:
             return None
@@ -4585,7 +4585,7 @@ def test_incomplete_single_probe_listing_exits_zero_and_keeps_saying_so(tmp_path
 
     # The partial listing is retained exactly as the backend returned it...
     assert result["complete"] is False
-    assert result["probes"] == [{"probe_id": "066AFF303435554157113106"}]
+    assert result["probes"] == [{"probe_id": "066BFF505050505050505050"}]
     # ...and it is a success everywhere a success is read: no failure is filed,
     # the MCP call is no error, and the shell gets 0.
     assert result["ok"] is True
@@ -4609,7 +4609,7 @@ def test_a_probe_listing_that_failed_still_exits_nonzero(tmp_path: Path, monkeyp
     write_authoritative_config(workspace, monkeypatch)
     monkeypatch.chdir(workspace)
 
-    failed = {**_incomplete_probe_answer("066AFF303435554157113106"), "ok": False, "error_type": "probe_discovery_failed"}
+    failed = {**_incomplete_probe_answer("066BFF505050505050505050"), "ok": False, "error_type": "probe_discovery_failed"}
 
     class FakeService:
         def __init__(self, config, *args, **kwargs) -> None:
@@ -4639,7 +4639,7 @@ def test_a_quarantine_under_an_incomplete_listing_still_exits_nonzero(tmp_path: 
     """
     from agentic_hil.cli import result_succeeded
 
-    quarantined = {**_incomplete_probe_answer("066AFF303435554157113106"), "quarantined": True, "quarantine_id": "q-7f3a"}
+    quarantined = {**_incomplete_probe_answer("066BFF505050505050505050"), "quarantined": True, "quarantine_id": "q-7f3a"}
 
     assert quarantined["ok"] is True
     assert result_succeeded(quarantined) is False
