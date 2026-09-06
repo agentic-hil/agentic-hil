@@ -20,12 +20,14 @@ not move are pinned beside the defects.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import FAKE_OPENOCD, write_authoritative_config
 
-from agentic_hil.cli import entrypoint
+from agentic_hil.cli import debugger_probes, entrypoint
 from agentic_hil.config import ConfigError, load_authoritative_config, project_config_path
 from agentic_hil.tools import UnprovisionedToolService
 
@@ -191,6 +193,59 @@ def test_check_plan_strict_fails_on_a_directory_at_the_configuration_path(
     assert "could not be loaded" in result["summary"]
 
 
+def test_debugger_probes_refuses_a_directory_at_the_configuration_path_instead_of_bootstrapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The setup path routes only the missing file to bootstrap discovery.
+
+    `debugger-probes` answers through bootstrap discovery before the first
+    `setup`, and only then: a configuration that is there and will not load is
+    a bench somebody already set up. The directory is that case, so the answer
+    is the loader's refusal and bootstrap discovery is never reached."""
+    workspace = _discovered_configuration_root(tmp_path, monkeypatch)
+    occupied = project_config_path(workspace)
+    occupied.mkdir(parents=True)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr(
+        "agentic_hil.cli.bootstrap_probe_listing",
+        lambda: pytest.fail("bootstrap discovery was reached over an unreadable configuration"),
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        debugger_probes()
+
+    assert refused.value.error_type == "config_unreadable"
+    assert refused.value.details["path"] == str(occupied.resolve())
+
+
+def test_a_configuration_file_without_read_permission_is_unreadable_with_the_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other shape of "exists but is not a readable regular file".
+
+    A regular file the process may not read is there, so it is not the absent
+    case either; `load_config` already reports the read failure as
+    `config_unreadable` with the operating system's own words, and the
+    authoritative loader keeps that answer rather than misreading the state
+    before the read is attempted."""
+    if os.name == "nt":
+        pytest.skip("POSIX permission bits")
+    if os.geteuid() == 0:
+        pytest.skip("root reads a file whatever its mode says")
+    workspace = _discovered_configuration_root(tmp_path, monkeypatch)
+    occupied = project_config_path(workspace)
+    occupied.parent.mkdir(parents=True)
+    occupied.write_text(f"workspace_root: {workspace.as_posix()!r}\n", encoding="utf-8")
+    occupied.chmod(0)
+    try:
+        with pytest.raises(ConfigError) as refused:
+            load_authoritative_config(workspace)
+    finally:
+        occupied.chmod(0o600)
+
+    assert refused.value.error_type == "config_unreadable"
+    assert refused.value.details["path"] == str(occupied.resolve())
+    assert refused.value.details["backend_error"]
+
+
 # ---------------------------------------------------------------------------
 # #482: a configured executable is held to the trust rule of its scripts
 # ---------------------------------------------------------------------------
@@ -316,27 +371,57 @@ def test_a_can_bridge_executable_is_refused_under_temporary_storage(tmp_path: Pa
     assert "temporary storage" in refused.value.summary
 
 
-@pytest.mark.parametrize(
-    "cache",
-    ["uv_cache_dir", "xdg_cache_home", "home_dot_cache"],
-)
+# The cache roots the MCP launcher is measured against, each one alone.
+CACHE_ROOTS = ["uv_cache_dir", "xdg_cache_home", "home_dot_cache", "home_library_caches", "localappdata_uv_cache"]
+
+
+def _cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cache: str) -> Path:
+    """One cache root of the launcher's list, proven on its own.
+
+    The suite's isolation points `XDG_CACHE_HOME` at the isolated home's
+    `.cache`, so with both variables left standing a rule that read only the
+    environment and never added the `~/.cache` default would pass the
+    `~/.cache` case by accident. Both variables are unset unless the case is
+    about one of them, and `LOCALAPPDATA` is moved to a root of the test's own
+    for the case that is about it."""
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    if cache == "uv_cache_dir":
+        root = tmp_path / "uv-cache"
+        monkeypatch.setenv("UV_CACHE_DIR", str(root))
+    elif cache == "xdg_cache_home":
+        root = tmp_path / "xdg-cache"
+        monkeypatch.setenv("XDG_CACHE_HOME", str(root))
+    elif cache == "home_dot_cache":
+        root = Path.home() / ".cache"
+    elif cache == "home_library_caches":
+        root = Path.home() / "Library" / "Caches"
+    else:
+        local_app_data = tmp_path / "local-app-data"
+        monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+        root = local_app_data / "uv" / "cache"
+    return root
+
+
+@pytest.mark.parametrize("cache", CACHE_ROOTS)
 def test_a_debugger_executable_under_a_package_manager_cache_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cache: str) -> None:
     """A cache is not an installation boundary, for the toolchain either.
 
     The MCP launcher is refused from these roots and `docs/mcp-hosts.md` says
     why. The debugger toolchain, which is the thing that reaches the board, is
-    measured against the same list: `UV_CACHE_DIR`, `XDG_CACHE_HOME` and the
-    user's `~/.cache` here, each named by the refusal as the root the path was
-    found under. The temporary root is not injected: these roots are their own,
-    and the configuration under the suite's `tmp_path` sits in none of them."""
-    if cache == "uv_cache_dir":
-        cache_root = tmp_path / "uv-cache"
-        monkeypatch.setenv("UV_CACHE_DIR", str(cache_root))
-    elif cache == "xdg_cache_home":
-        cache_root = tmp_path / "xdg-cache"
-        monkeypatch.setenv("XDG_CACHE_HOME", str(cache_root))
-    else:
-        cache_root = Path.home() / ".cache"
+    measured against the same list: `UV_CACHE_DIR`, `XDG_CACHE_HOME`, the
+    user's `~/.cache` and `~/Library/Caches`, and `LOCALAPPDATA/uv/cache`, each
+    named by the refusal under `cache_root` as the root the path was found
+    under.
+
+    The temporary root is injected as `tmp_path` itself, so the configuration
+    lives in temporary storage on every platform (on POSIX it does anyway,
+    `tmp_path` being under `/tmp`). The exemption is per root: the objection
+    to a cache is that it is not an installation boundary, not that it is
+    ephemeral, so a configuration exempt for the temporary root it lives in is
+    still refused for a cache root it does not live in."""
+    monkeypatch.setattr("agentic_hil.config.temporary_roots", lambda: (tmp_path,))
+    cache_root = _cache_root(tmp_path, monkeypatch, cache)
     executable = _program(cache_root / "archive-v0" / "openocd" / "bin", "openocd")
     write_authoritative_config(
         tmp_path / "workspace",
@@ -351,9 +436,208 @@ def test_a_debugger_executable_under_a_package_manager_cache_is_refused(tmp_path
     assert refused.value.error_type == "config_invalid"
     assert refused.value.details["field"] == "debuggers.dut.executable"
     assert refused.value.details["path"] == str(executable)
-    assert str(cache_root) in refused.value.details.values(), refused.value.details
+    assert refused.value.details["cache_root"] == str(cache_root)
+    assert set(refused.value.details) == {"field", "path", "cache_root"}
     assert "cache" in refused.value.summary.lower()
     assert "single-link regular file" not in refused.value.summary
+
+
+def test_the_gdb_executable_is_refused_under_a_package_manager_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cache half is pinned per field as the temporary half is."""
+    _injected_temporary_root(tmp_path, monkeypatch)
+    cache_root = _cache_root(tmp_path, monkeypatch, "uv_cache_dir")
+    gdb = _program(cache_root / "toolchain", "arm-none-eabi-gdb")
+    write_authoritative_config(
+        tmp_path / "workspace",
+        monkeypatch,
+        debugger_executable=FAKE_OPENOCD,
+        gdb_executable=gdb,
+        permissions={"allow_probe": True},
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        load_authoritative_config(tmp_path / "workspace")
+
+    assert refused.value.error_type == "config_invalid"
+    assert refused.value.details["field"] == "debug.gdb_executable"
+    assert refused.value.details["cache_root"] == str(cache_root)
+    assert "cache" in refused.value.summary.lower()
+
+
+def test_a_can_bridge_executable_is_refused_under_a_package_manager_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The third field, under the cache half of the rule."""
+    _injected_temporary_root(tmp_path, monkeypatch)
+    cache_root = _cache_root(tmp_path, monkeypatch, "xdg_cache_home")
+    bridge = _program(cache_root / "bridges", "can-bridge")
+    write_authoritative_config(
+        tmp_path / "workspace",
+        monkeypatch,
+        debugger_executable=FAKE_OPENOCD,
+        permissions={"allow_probe": True},
+        can_buses_yaml=(
+            "can_buses:\n"
+            "  bench:\n"
+            '    adapter: "process"\n'
+            '    channel: "vcan0"\n'
+            f'    executable: "{bridge.as_posix()}"\n'
+        ),
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        load_authoritative_config(tmp_path / "workspace")
+
+    assert refused.value.error_type == "config_invalid"
+    assert refused.value.details["field"] == "can_buses.bench.executable"
+    assert refused.value.details["cache_root"] == str(cache_root)
+    assert "cache" in refused.value.summary.lower()
+
+
+def _program_on_path(directory: Path, name: str, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A program `shutil.which` finds under `name`, in a directory put first on PATH."""
+    program = _program(directory, f"{name}.exe" if os.name == "nt" else name)
+    program.chmod(0o755)
+    monkeypatch.setenv("PATH", str(directory) + os.pathsep + os.environ.get("PATH", ""))
+    return program
+
+
+def test_a_bare_executable_name_is_refused_where_it_resolves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rule measures the program that would be started, not the spelling.
+
+    The script refusal measures absolute values only, because a script's other
+    spelling is a search name that OpenOCD resolves for itself against its own
+    tree. An executable's other spelling is resolved here, at load, through
+    PATH, and the result is what is pinned and later started. So a bare
+    `openocd` that PATH resolves into the temporary root is refused for the
+    same reason as an absolute one, naming the field and the resolved path
+    under the root it was found in."""
+    temporary_root = _injected_temporary_root(tmp_path, monkeypatch)
+    program = _program_on_path(temporary_root / "openocd-bin", "openocd", monkeypatch)
+    write_authoritative_config(
+        tmp_path / "workspace",
+        monkeypatch,
+        debugger_executable=Path(program.name),
+        permissions={"allow_probe": True},
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        load_authoritative_config(tmp_path / "workspace")
+
+    assert refused.value.error_type == "config_invalid"
+    assert "temporary storage" in refused.value.summary
+    assert refused.value.details == {
+        "field": "debuggers.dut.executable",
+        "path": str(program),
+        "temporary_root": str(temporary_root),
+    }
+
+
+def test_a_bare_executable_name_is_refused_where_it_resolves_into_a_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same resolution, landing in a cache root instead."""
+    _injected_temporary_root(tmp_path, monkeypatch)
+    cache_root = _cache_root(tmp_path, monkeypatch, "uv_cache_dir")
+    program = _program_on_path(cache_root / "archive-v0" / "openocd" / "bin", "openocd", monkeypatch)
+    write_authoritative_config(
+        tmp_path / "workspace",
+        monkeypatch,
+        debugger_executable=Path(program.name),
+        permissions={"allow_probe": True},
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        load_authoritative_config(tmp_path / "workspace")
+
+    assert "cache" in refused.value.summary.lower()
+    assert refused.value.details == {
+        "field": "debuggers.dut.executable",
+        "path": str(program),
+        "cache_root": str(cache_root),
+    }
+
+
+def test_an_autodetected_gdb_under_temporary_storage_is_refused_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Autodetection fills an unset field with a program, and that program is held to the rule.
+
+    `debug.gdb_executable: null` is filled from PATH at every load, and what
+    is filled in is pinned and started exactly like a value the document
+    named. A PATH that resolves the debugger into temporary storage is the
+    same ephemeral toolchain as a configured path there, found later rather
+    than written, so it is refused under the field it would have been pinned
+    to rather than adopted silently."""
+    temporary_root = _injected_temporary_root(tmp_path, monkeypatch)
+    gdb = _program_on_path(temporary_root / "toolchain", "arm-none-eabi-gdb", monkeypatch)
+    write_authoritative_config(
+        tmp_path / "workspace",
+        monkeypatch,
+        debugger_executable=FAKE_OPENOCD,
+        permissions={"allow_probe": True},
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        load_authoritative_config(tmp_path / "workspace")
+
+    assert "temporary storage" in refused.value.summary
+    assert refused.value.details == {
+        "field": "debug.gdb_executable",
+        "path": str(gdb),
+        "temporary_root": str(temporary_root),
+    }
+
+
+def test_a_link_outside_temporary_storage_to_a_program_inside_it_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A symbolic link is measured where it points, because that is what is pinned.
+
+    `configured_executable` resolves the value before pinning it, so the
+    pinned path, the one the backend starts, is the link's target; a link in a
+    durable directory does not make a program under the temporary root any
+    less swept. The script rule reads the unresolved value, and that is the
+    scripts' business; the executable rule reads what it pins."""
+    if os.name == "nt":
+        pytest.skip("symbolic links need a privilege on Windows")
+    temporary_root = _injected_temporary_root(tmp_path, monkeypatch)
+    target = _program(temporary_root / "openocd-bin", "openocd")
+    link = tmp_path / "durable-bin" / "openocd"
+    link.parent.mkdir()
+    link.symlink_to(target)
+    write_authoritative_config(
+        tmp_path / "workspace",
+        monkeypatch,
+        debugger_executable=link,
+        permissions={"allow_probe": True},
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        load_authoritative_config(tmp_path / "workspace")
+
+    assert "temporary storage" in refused.value.summary
+    assert refused.value.details == {
+        "field": "debuggers.dut.executable",
+        "path": str(target),
+        "temporary_root": str(temporary_root),
+    }
+
+
+def test_a_windows_style_temporary_executable_is_refused_in_either_spelling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both separators name one file for the executable as for the scripts."""
+    if os.name != "nt":
+        pytest.skip("both separators name one path only on Windows")
+    temporary_root = _injected_temporary_root(tmp_path, monkeypatch)
+    program = _program(temporary_root / "openocd-bin", "openocd.exe")
+    for spelling in (program.as_posix(), str(program)):
+        workspace = tmp_path / f"workspace-{spelling.count(chr(92))}"
+        write_authoritative_config(
+            workspace,
+            monkeypatch,
+            debugger_executable=FAKE_OPENOCD,
+            permissions={"allow_probe": True},
+            debuggers_yaml=yaml.safe_dump({"debuggers": {"spelled": {"type": "openocd", "executable": spelling}}}),
+        )
+
+        with pytest.raises(ConfigError) as refused:
+            load_authoritative_config(workspace)
+
+        assert refused.value.details["field"] == "debuggers.spelled.executable", spelling
+        assert refused.value.details["temporary_root"] == str(temporary_root), spelling
+        assert "temporary storage" in refused.value.summary, spelling
 
 
 def test_a_configuration_in_temporary_storage_is_not_refused_for_its_own_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
