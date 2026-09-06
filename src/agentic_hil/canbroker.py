@@ -136,6 +136,11 @@ BROKER_EXIT_OK = 0
 BROKER_EXIT_BUS_BUSY = 3
 BROKER_EXIT_ADAPTER = 4
 BROKER_EXIT_CONFIG = 5
+# The exits a broker explains on its log before it goes, and which the attach
+# loop therefore ends on rather than spawning another broker to meet the same
+# adapter or the same file. `BROKER_EXIT_BUS_BUSY` is not one: the bus may be
+# about to be published by the broker that won it.
+BROKER_EXITS_EXPLAINED = frozenset({BROKER_EXIT_ADAPTER, BROKER_EXIT_CONFIG})
 
 
 # ---------------------------------------------------------------------------
@@ -1320,6 +1325,16 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
                 started = None
                 time.sleep(BROKER_POLL_INTERVAL_S)
                 continue
+            if started is not None and started.poll() in BROKER_EXITS_EXPLAINED:
+                # The broker took the bus and said why it could not keep it:
+                # its adapter would not open, or its configuration would not
+                # load. Another broker would meet the same adapter and the same
+                # file, so spawning one per failed handshake until the deadline
+                # only multiplied the log and left the participant with the
+                # generic "could not be reached or started" and no cause. The
+                # cause is the last line of the broker's log, and it is the
+                # refusal here.
+                raise ParticipantError(_explained_exit_refusal(started.poll(), bus_id, participant, bus_key, lock_root))
             # Validate the IPC address only now, immediately before a broker is
             # spawned. A broker started on an address that cannot fit
             # `sockaddr_un` would fail at bind time in its own process, and the
@@ -1395,6 +1410,67 @@ def _attach_once(config: AgenticHILConfig, bus_id: str, participant: str, bus_ke
         refusal = answer if isinstance(answer, dict) else {"ok": False, "error_type": "can_broker_invalid_message", "summary": "The CAN broker answered the attach with a message this client cannot read."}
         return {**refusal, "bus_id": bus_id, "participant": participant}
     return Participant(config, bus_id, participant, connection, answer, owner, lock_key, broker_process=started)
+
+
+def _last_broker_document(log_path: Path) -> JsonObject:
+    """The last JSON object a broker wrote to its log, or an empty one.
+
+    The log is appended by every broker ever started for the bus, and a broker
+    that exits explained writes its refusal as one JSON line right before it
+    goes, so the last object in the file is the one the exit code belongs to.
+    Read from the end because an earlier broker's document is somebody else's
+    failure. Anything else on the last lines (a traceback the interpreter added
+    after the document, a warning) is skipped rather than parsed.
+    """
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            document = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(document, dict):
+            return document
+    return {}
+
+
+def _explained_exit_refusal(exit_code: int, bus_id: str, participant: str, bus_key: str, lock_root: Path) -> JsonObject:
+    """The refusal a broker that explained its own exit leaves for the participant.
+
+    The broker's document is the adapter's own refusal, the same one a
+    single-owner `can_session_start` on that bus would answer, so its error
+    type and fields are kept: a reader of `can_adapter_timeout` gets the same
+    name whichever route reached the adapter. Around it: which broker exit it
+    was, where the whole log is, the bridge's last words as `backend_error`
+    when the document carried them, and `retry_safe` stated. Retrying is safe
+    for the participant because the broker is gone and released the bus with
+    it; whether the retry succeeds is up to whoever fixes the adapter.
+    """
+    log_path = broker_log_path(bus_key, lock_root)
+    document = _last_broker_document(log_path)
+    what = "could not open its adapter" if exit_code == BROKER_EXIT_ADAPTER else "could not load its configuration"
+    detail = document.get("summary")
+    refusal: JsonObject = {
+        **{key: value for key, value in document.items() if key not in {"ok", "tool"}},
+        "ok": False,
+        "error_type": document.get("error_type") if isinstance(document.get("error_type"), str) else "can_broker_unavailable",
+        "summary": f"The CAN broker started for this bus {what}: {detail}" if isinstance(detail, str) and detail else f"The CAN broker started for this bus {what}; its log carries the refusal.",
+        "bus_id": bus_id,
+        "participant": participant,
+        "bus_key": bus_key,
+        "broker_exit_code": exit_code,
+        "broker_log": str(log_path),
+        "retry_safe": True,
+    }
+    backend_error = document.get("backend_error") or document.get("stderr_tail")
+    if isinstance(backend_error, str) and backend_error.strip():
+        refusal["backend_error"] = backend_error.strip()
+    return refusal
 
 
 def _spawn_broker(config: AgenticHILConfig, bus_id: str, bus_key: str, lock_root: Path) -> subprocess.Popen:
