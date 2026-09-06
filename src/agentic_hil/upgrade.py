@@ -118,12 +118,14 @@ def _dedicated_environment_root() -> Path | None:
     installation. A `pip install --user` prefix or a system Python holds every
     other Python program on the machine as well, and reading its executables as
     ours would refuse an upgrade because some unrelated script is running.
+
+    Through `owning_manager`, so a tool environment under a relocated tool
+    directory counts as this package's own here too. Reading the default path
+    shape a second time answered None for such an environment, and the check for
+    servers still running out of this installation then stopped treating it as
+    ours.
     """
-    prefix = Path(sys.prefix)
-    location = _normalized_location(prefix)
-    if any(marker in location for marker in ("/uv/tools/agentic-hil", "/pipx/venvs/agentic-hil")):
-        return prefix
-    return None
+    return Path(sys.prefix) if owning_manager() in {"uv-tool", "pipx"} else None
 
 
 def _declared_extras() -> dict[str, list[str]]:
@@ -730,6 +732,38 @@ def _pip_upgrade_command() -> list[str]:
     return [*command, _upgrade_requirement()]
 
 
+# The file `uv tool install` writes inside every environment it creates, and
+# the one thing that identifies such an environment wherever uv keeps it. Where
+# uv's tool directory sits is a setting: `UV_TOOL_DIR` moves it, and the
+# environment is then `<that directory>/agentic-hil` with no `uv/tools`
+# component in its path at all. Every other surface in this module already
+# treats uv's directories as configurable rather than fixed, which is what
+# `_manager_bin_directory` reads `UV_TOOL_BIN_DIR` and `XDG_DATA_HOME` for.
+_UV_TOOL_RECEIPT = "uv-receipt.toml"
+
+
+def _uv_tool_receipt_present() -> bool | None:
+    """Whether uv's receipt sits in this environment, or None where that cannot be told.
+
+    Three answers, because there are three states and two of them used to be
+    one. "The receipt is not there" says this is not a uv tool installation;
+    "this prefix cannot be listed" says nobody here can tell, which is not the
+    same claim and must not be answered with the first. `Path.is_file()` folds
+    them together, swallowing the refusal and answering False, so the directory
+    is listed instead, where a refusal raises.
+
+    A prefix that is not there at all, or is not a directory, is a definite
+    answer and not a refusal: whatever else it is, it holds no receipt.
+    """
+    try:
+        entries = os.listdir(sys.prefix)
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return False
+    except OSError:
+        return None
+    return _UV_TOOL_RECEIPT in entries
+
+
 def owning_manager() -> str:
     """Which package manager holds the installation this process is running out of.
 
@@ -739,18 +773,38 @@ def owning_manager() -> str:
     Two answers to it would send an operator to rebuild or empty an environment a
     different manager is holding.
 
-    The prefix decides first, because a uv tool environment and a pipx venv are
-    recognisable from the path this interpreter lives in whatever any receipt
-    says. Only then the receipt, which is what tells a `uv pip` installation from
-    a plain `pip` one inside an ordinary environment. It reads no PATH: whether
-    the manager is reachable right now is a separate question, and one that only
-    a caller about to *run* it has to ask.
+    The pipx prefix decides first, and it has to keep doing so: a `uv-receipt.toml`
+    that ended up inside a pipx venv is a file in a place that is not uv's, and
+    reading it as ownership would name pipx's environment to a uv command.
+
+    Then the receipt, which is what a uv tool installation records about itself.
+    The default path shape is still read, because an environment sitting exactly
+    where uv puts one is a tool environment whatever a file inside it says, but it
+    is no longer the only thing read: an installation made under a relocated tool
+    directory has no `uv/tools` component in its path and was answered `uv-pip`,
+    so `agentic-hil upgrade` ran `uv pip install --upgrade` on it. That command
+    ignores uv's receipt, so it uninstalled a deliberately pinned release,
+    installed the newest one, exited 0 and left the receipt still recording the
+    old exact requirement.
+
+    `unknown` where the receipt could not be looked for at all. Falling through
+    to `uv-pip` there is the same wrong command over a receipt that may be lying
+    right in the directory nobody could read, and a manager this cannot establish
+    is not one to hand the installation to: `_upgrade_command` refuses on it.
+
+    It reads no PATH: whether the manager is reachable right now is a separate
+    question, and one that only a caller about to *run* it has to ask.
     """
     prefix = _normalized_location(sys.prefix)
-    if "/uv/tools/agentic-hil" in prefix:
-        return "uv-tool"
     if "/pipx/venvs/agentic-hil" in prefix:
         return "pipx"
+    if "/uv/tools/agentic-hil" in prefix:
+        return "uv-tool"
+    receipt = _uv_tool_receipt_present()
+    if receipt is None:
+        return "unknown"
+    if receipt:
+        return "uv-tool"
     if _distribution_installer() == "uv":
         return "uv-pip"
     return "pip"
@@ -759,6 +813,17 @@ def owning_manager() -> str:
 def _upgrade_command() -> tuple[str, list[str]]:
     """Select the manager that owns the running installation, never another PATH copy."""
     manager = owning_manager()
+    if manager == "unknown":
+        # Nothing here knows which manager holds this installation, and the
+        # command each of them takes replaces it. The one that would have run
+        # otherwise, `uv pip install --upgrade`, crosses a recorded exact pin
+        # without reading it and reports success, so a guess costs the operator
+        # the release they chose to stay on.
+        raise ConfigError(
+            "upgrade_manager_not_established",
+            "Which package manager holds this installation could not be established, so nothing was upgraded.",
+            {"prefix": sys.prefix, "python": sys.executable},
+        )
     if manager in {"uv-tool", "uv-pip"}:
         uv = shutil.which("uv")
         if uv is None:
@@ -780,11 +845,16 @@ def reinstall_command_with_extras(extras: tuple[str, ...]) -> str:
     Named and never run, like every other reinstall command this package
     produces: which requirement a machine records is the operator's decision.
 
-    The same four answers `owning_manager` gives the upgrade itself, so a machine
-    is never told to rebuild an environment a different manager is holding. It
+    The same answers `owning_manager` gives the upgrade itself, so a machine is
+    never told to rebuild an environment a different manager is holding. It
     differs in taking no PATH lookup: this is a line to print, and a `uv` that is
     missing right now says nothing about whether the operator will have one when
     they run it.
+
+    An `unknown` answer lands on the last line here, the running interpreter's
+    own pip, which installs into whatever environment that interpreter belongs
+    to. That is a line and not a command this runs: the upgrade itself refuses on
+    `unknown` rather than choosing for the operator.
     """
     requirement = f"agentic-hil[{','.join(extras)}]" if extras else "agentic-hil"
     manager = owning_manager()
@@ -808,11 +878,13 @@ def removal_command() -> str:
     this one, because the image this interpreter has mapped stays undeletable
     until it exits.
 
-    The same four answers as the upgrade and the reinstall line, through
+    The same answers as the upgrade and the reinstall line, through
     `owning_manager`, and no extras on any of them: a requirement names what to
     install, and a removal takes the distribution whole whatever it was installed
     with. No `--yes` either. The line is read before it is run, and a removal
-    that asks once is the right shape for one somebody pasted.
+    that asks once is the right shape for one somebody pasted. An `unknown`
+    answer lands on the running interpreter's own pip, which removes the
+    distribution from whatever environment that interpreter belongs to.
     """
     manager = owning_manager()
     if manager == "uv-tool":
