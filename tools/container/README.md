@@ -81,14 +81,19 @@ Pinned:
   these tests read are written by that program, and a different version may
   write them differently, which is the whole reason the tests exist. Moving the
   pin is a deliberate change with a test run behind it;
+- pyOCD at one exact version, named as `PYOCD_VERSION`, for the same reason:
+  the suite's fixture reproduces what that version prints when nothing is on
+  USB, and a release that rewords it should fail the drift test here on a
+  deliberate bump rather than on a rebuild;
 - the dependency set, installed with `--require-hashes` from
   `requirements/dev.txt`, which is the same locked file the hosted matrix job
   installs from. This checkout goes on top of it with `--no-deps`.
 
 Not pinned, deliberately:
 
-- the distribution's OpenOCD and `procps`, which are the debugger backend and
-  the second opinion on a process's start time. The mirror drops superseded
+- the distribution's OpenOCD, `procps` and `curl`, which are the debugger
+  backend, the second opinion on a process's start time, and what install.sh
+  fetches the pinned uv installer with. The mirror drops superseded
   package versions, so a version pin here without a snapshot mirror would turn a
   stable job red days later for a reason nothing in the change under it can
   explain. What fixes the versions a build gets is the base digest above.

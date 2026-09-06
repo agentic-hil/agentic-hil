@@ -10,17 +10,17 @@ time is the moment of the first lookup rather than the process's start, and
 OpenOCD prints a failure-worded line after a reset that succeeded. A fake cannot
 tell anyone any of that.
 
-So this tier runs the real tools. It needs uv, an OpenOCD binary, ``/proc`` and
-the package index, and it needs no probe and no board: what needs those is the
-bench tier under ``tests/bench``. ``tools/container/Dockerfile`` is the image it
+So this tier runs the real tools. It needs uv, an OpenOCD binary, pyOCD, curl,
+``/proc`` and the package index, and it needs no probe and no board: what needs
+those is the bench tier under ``tests/bench``. ``tools/container/Dockerfile`` is the image it
 is published with and the image the hosted CI job builds.
 
 The gate has two halves, because a skip and an error are different answers.
 ``AGENTIC_HIL_CONTAINER_TESTS=1`` says a run means to be in the image, and every
 test here skips without it, so a developer's ``pytest`` and the hosted matrix
 are unaffected. A run that does set it and cannot find the marker the image
-build writes, or uv, or the debugger, or ``/proc``, ends the collection with an
-error naming what is missing. A required check that reported success over
+build writes, or uv, or either debugger, or curl, or ``/proc``, ends the
+collection with an error naming what is missing. A required check that reported success over
 fifteen skipped tests would be a check measuring nothing and saying nothing
 about it, and a machine that satisfied the variable outside the image could be a
 bench with a probe attached.
@@ -133,6 +133,10 @@ def missing_from_the_image(which: Callable[[str], str | None] | None = None, pro
         return "uv is not on PATH, and this tier reads receipts uv writes"
     if which("openocd") is None:
         return "openocd is not on PATH, and this tier drives the real debugger backend"
+    if which("pyocd") is None:
+        return "pyocd is not on PATH, and this tier drives the pyOCD backend against nothing on USB"
+    if which("curl") is None:
+        return "curl is not on PATH, and this tier runs install.sh's fetch route, which downloads the pinned uv installer with it"
     if not proc_root.is_dir():
         return f"this host publishes no {proc_root}, and this tier reads the process table out of it"
     return None

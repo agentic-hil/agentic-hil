@@ -11,10 +11,10 @@
 # OpenOCD prints a failure-worded line after a reset that succeeded. Every one
 # of them is invisible to a fake and obvious to the real tool.
 #
-# So this image carries the real tools and nothing that needs hardware: uv at
-# one pinned version, the distribution's OpenOCD, this project's dev and can
-# dependency set installed from the locked file the hosted matrix uses, and this
-# checkout on top of it. What still needs a probe or a board is the bench tier
+# So this image carries the real tools and nothing that needs hardware: uv and
+# pyOCD at one pinned version each, the distribution's OpenOCD and curl, this
+# project's dev and can dependency set installed from the locked file the hosted
+# matrix uses, and this checkout on top of it. What still needs a probe or a board is the bench tier
 # under tests/bench, which never runs here.
 #
 # Build and run it from the repository root:
@@ -37,13 +37,15 @@ FROM python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e18
 # ^ python:3.12-slim
 
 # OpenOCD is the debugger backend the no-probe tests drive, ca-certificates is
-# what lets uv and the release-index read verify anything at all, and procps is
+# what lets uv and the release-index read verify anything at all, procps is
 # `ps`: one test reads a process's start time out of procfs and checks it
-# against what a program with no stake in the answer says. Nothing else: an
-# image that grew a toolchain would be an image whose results depend on which
-# toolchain.
+# against what a program with no stake in the answer says, and curl is what
+# install.sh fetches Astral's pinned uv installer with on the route that has
+# no uv and no Python, which one test runs for real to read the shell rc files
+# back. Nothing else: an image that grew a toolchain would be an image whose
+# results depend on which toolchain.
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes openocd ca-certificates procps \
+    && apt-get install --no-install-recommends --yes openocd ca-certificates procps curl \
     && rm -rf /var/lib/apt/lists/*
 
 # One version, named here, because the receipts these tests read are written by
@@ -51,11 +53,18 @@ RUN apt-get update \
 # reason the tests exist. Moving the pin is a deliberate change with a test run
 # behind it, not something a rebuild does by itself.
 ARG UV_VERSION=0.12.9
+# pyOCD, pinned for the same reason. The suite's fixture reproduces what this
+# version prints when nothing is on USB, `No connected debug probes` and the
+# `--uid` form of it, and the classifier reads those words; a release that
+# rewords them should fail the drift test in this tier on a deliberate bump,
+# not on a rebuild. The mirror argument above does not reach it: the package
+# index keeps every release.
+ARG PYOCD_VERSION=0.45.1
 # setuptools and wheel are the build backend this project declares, and the
 # tests build wheels of this checkout with `--no-isolation` so the build needs
 # no network of its own.
 RUN python -m pip install --no-cache-dir --disable-pip-version-check \
-    "uv==${UV_VERSION}" "setuptools>=77" "wheel"
+    "uv==${UV_VERSION}" "pyocd==${PYOCD_VERSION}" "setuptools>=77" "wheel"
 
 WORKDIR /work
 
