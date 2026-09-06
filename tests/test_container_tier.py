@@ -285,3 +285,25 @@ def test_the_image_carries_pyocd_and_curl() -> None:
     assert pinned is not None, "pyocd is not pinned by an ARG the way uv is"
     pip_lines = [line for line in dockerfile.splitlines() if "pip install" in line or line.strip().startswith('"')]
     assert any("pyocd==${PYOCD_VERSION}" in line for line in pip_lines), pip_lines
+
+
+def test_the_pinned_pyocd_is_the_one_the_locked_dependency_set_installs() -> None:
+    """Two pins on one package, and the later one wins.
+
+    The `ARG` above installs pyOCD before the checkout is copied in; the locked
+    dependency set is installed after it and pins pyOCD too, so whatever
+    `requirements/dev.txt` says is the release that ends up in the image and the
+    release the recorded refusals in this tier were taken from. Let the two
+    drift and the `ARG` documents a version the image does not have, which is
+    the one thing a pin is for. Regenerating the lock and bumping the `ARG` are
+    the same decision, and this is what says so.
+    """
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    argument = re.search(r"^ARG PYOCD_VERSION=(\d+\.\d+\.\d+)$", dockerfile, re.MULTILINE)
+    assert argument is not None, "pyocd is not pinned by an ARG the way uv is"
+
+    lock = (REPOSITORY_ROOT / "requirements" / "dev.txt").read_text(encoding="utf-8")
+    locked = re.search(r"^pyocd==(\S+)", lock, re.MULTILINE)
+
+    assert locked is not None, "requirements/dev.txt pins no pyocd, so the image's ARG is the only pin and the hosted legs have no pyOCD at all"
+    assert locked.group(1) == argument.group(1), (locked.group(1), argument.group(1))
