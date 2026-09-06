@@ -16,6 +16,7 @@ from conftest import DEFAULT_TEST_PERMISSIONS, write_config
 from support import PUBLISH_ATOMICALLY_SOURCE, publish_atomically, published
 
 from agentic_hil import process as process_module
+from agentic_hil import tools as tools_module
 from agentic_hil.bridge import BRIDGE_PROTOCOL_VERSION, BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.can import CanBusService, normalize_received_frames, payload_frame
 from agentic_hil.cli import debugger_probes, entrypoint
@@ -2200,45 +2201,89 @@ def test_resolve_retryable_incident_rejects_a_reason_that_is_not_the_open_one(tm
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DUT_UART_YAML = 'com_ports:\n  dut_uart:\n    device: "COM_TEST"\n'
+# The one field the three texts name. Spelled once here and compared against
+# the result and the texts, so a rename on any side fails in this file rather
+# than in an agent's transcript.
+AUTO_RECOVERY_FIELD = "auto_recovery_attempted"
 
 
-def standing_incident_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **config_kwargs) -> AgenticHILToolService:
-    """A service whose incident *stands* (the audit-broken family) with a reset
-    that will not confirm, so the automatic attempt runs and settles nothing."""
+def recording_backend(service: AgenticHILToolService, monkeypatch: pytest.MonkeyPatch, reset: dict) -> list[str]:
+    """Record what the automatic attempt drives, in order: the evidence that an
+    attempt ran is the reset and the probe on the backend, not a flag."""
+    calls: list[str] = []
+
+    def reset_target(mode: str = "run") -> dict:
+        calls.append(f"reset:{mode}")
+        return dict(reset)
+
+    def probe_target() -> dict:
+        calls.append("probe")
+        return dict(DETECTED_PROBE)
+
+    monkeypatch.setattr(service.backend, "reset_target", reset_target)
+    monkeypatch.setattr(service.backend, "probe_target", probe_target)
+    return calls
+
+
+def standing_incident_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **config_kwargs) -> tuple[AgenticHILToolService, list[str]]:
+    """A service on the one path where the automatic attempt demonstrably runs
+    and the incident still stands afterwards.
+
+    The incident is retryable (an unconfirmed reset, audit intact), the reset
+    into halt and the probe both confirm, and then the recovery's own report
+    cannot be written: a quarantine is never cleared without a durable record of
+    what attested the safe state, so the attempt aborts as
+    `machine_recovery_audit_broken`, which is the audit-broken family and
+    stands. Every other failed attempt stands down at the end of the call (see
+    the proceeding-call test below), so this is the refusal the promise in
+    AGENTS.md is about."""
     service = AgenticHILToolService(config_for(tmp_path, **config_kwargs))
-    monkeypatch.setattr(service.backend, "reset_target", lambda mode="run": dict(UNCONFIRMED_RESET))
-    monkeypatch.setattr(service.backend, "probe_target", lambda: dict(DETECTED_PROBE))
+    calls = recording_backend(service, monkeypatch, HALTED_RESET)
+    original_write_report = tools_module.write_report
+
+    def unwritable_recovery_report(config, record: dict) -> dict:
+        if record.get("recovery") == "machine_attested":
+            return {**record, "audit_ok": False}
+        return original_write_report(config, record)
+
+    monkeypatch.setattr(tools_module, "write_report", unwritable_recovery_report)
     lease = service.coordinator.acquire(*debugger_effect_resources(service.config))
-    lease.quarantine("debugger_result_unconfirmed", audit_broken=True)
+    lease.quarantine("debugger_result_unconfirmed")
     service._quarantined_lease = lease
     assert service.coordinator.blocked is True
-    assert service.coordinator.incident_stands is True
-    return service
+    assert service.hardware_lease_status()["auto_recoverable"] is True
+    return service, calls
 
 
 def test_a_stimulus_after_a_failed_automatic_recovery_carries_auto_recovery_attempted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    service = standing_incident_service(tmp_path, monkeypatch, auto_recover="reset_halt", com_ports_yaml=DUT_UART_YAML)
+    service, calls = standing_incident_service(tmp_path, monkeypatch, auto_recover="reset_halt", com_ports_yaml=DUT_UART_YAML)
     try:
         refused = service.call("com_write", {"port_id": "dut_uart", "text": "hello"})
 
+        # The attempt ran: the reset into halt and the probe re-read both
+        # reached the backend, in that order, before the report failed.
+        assert calls == ["reset:halt", "probe"]
         assert refused["ok"] is False
         assert refused["error_type"] == "resource_quarantined"
         assert refused["quarantined"] is True
         assert refused["cleanup_required"] is True
         # The sentence the agent acts on: do not retry, the attempt already ran.
         assert refused["retry_safe"] is False
-        assert refused["auto_recovery_attempted"] is True
+        assert refused[AUTO_RECOVERY_FIELD] is True
         assert refused["quarantine_id"] == service.coordinator.quarantine_id
         assert isinstance(refused["quarantine_id"], str)
-        assert "debugger_result_unconfirmed" in refused["cleanup_reasons"]
-        # And the incident did stand: nothing about the refusal cleared it.
+        # Both reasons: the one the attempt was for, and the one it left.
+        assert refused["cleanup_reasons"] == ["debugger_result_unconfirmed", "machine_recovery_audit_broken"]
+        # And the incident did stand: nothing about the refusal cleared it, and
+        # nothing about it is machine-recoverable any more.
         assert service.coordinator.blocked is True
+        assert service.hardware_lease_status()["auto_recoverable"] is False
     finally:
         service.close()
 
 
 def test_a_refusal_after_the_automatic_attempt_says_so_over_mcp_and_in_every_text_that_promises_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    service = standing_incident_service(tmp_path, monkeypatch, auto_recover="reset_halt", com_ports_yaml=DUT_UART_YAML)
+    service, calls = standing_incident_service(tmp_path, monkeypatch, auto_recover="reset_halt", com_ports_yaml=DUT_UART_YAML)
     try:
         response = handle_mcp_message(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "com_session_start", "arguments": {"port_id": "dut_uart"}}},
@@ -2246,26 +2291,85 @@ def test_a_refusal_after_the_automatic_attempt_says_so_over_mcp_and_in_every_tex
         )
         assert isinstance(response, dict)
         refused = response["result"]["structuredContent"]
+        assert calls == ["reset:halt", "probe"]
         assert refused["error_type"] == "resource_quarantined"
-        assert refused["auto_recovery_attempted"] is True
+        assert refused[AUTO_RECOVERY_FIELD] is True
         assert refused["retry_safe"] is False
         assert isinstance(refused["quarantine_id"], str)
 
-        # The field the result carries is the field the texts name, verbatim, so
-        # a rename on either side fails here rather than in an agent's transcript.
-        field = next(key for key in refused if key == "auto_recovery_attempted")
         resource = handle_mcp_message({"jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": {"uri": LEASE_LIFECYCLE_URI}}, service)
         assert isinstance(resource, dict)
         served = resource["result"]["contents"][0]["text"]
-        assert f"`{field}`" in served
+        assert f"`{AUTO_RECOVERY_FIELD}`" in served
         assert "Do not retry again" in served
     finally:
         service.close()
     agents = (REPOSITORY_ROOT / "AGENTS.md").read_text(encoding="utf-8")
     troubleshooting = (REPOSITORY_ROOT / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
-    assert f"`{field}: true`" in agents
+    assert f"`{AUTO_RECOVERY_FIELD}: true`" in agents
     assert "do not retry it again" in agents
-    assert f"`{field}: true`" in troubleshooting
+    assert f"`{AUTO_RECOVERY_FIELD}: true`" in troubleshooting
+
+
+def test_a_refusal_where_no_attempt_could_run_carries_no_auto_recovery_attempted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An incident that was audit-broken from the start is never retryable, so
+    the automatic attempt does not run at all: no reset, no probe. The refusal
+    then must not say one ran. `auto_recoverable: false` on the status already
+    says why nothing was tried; a `true` here would send the agent to the
+    operator with the wrong story about what the machine did to the board."""
+    service = AgenticHILToolService(config_for(tmp_path, auto_recover="reset_halt", com_ports_yaml=DUT_UART_YAML))
+    calls = recording_backend(service, monkeypatch, HALTED_RESET)
+    try:
+        lease = service.coordinator.acquire(*debugger_effect_resources(service.config))
+        # A product reason: every `audit_broken=True` call site in src carries a
+        # reason of the `*_audit_broken` family.
+        lease.quarantine("com_write_audit_broken", audit_broken=True)
+        service._quarantined_lease = lease
+        assert service.hardware_lease_status()["auto_recoverable"] is False
+
+        refused = service.call("com_write", {"port_id": "dut_uart", "text": "hello"})
+
+        assert calls == []
+        assert refused["error_type"] == "resource_quarantined"
+        assert refused["retry_safe"] is False
+        assert refused["cleanup_reasons"] == ["com_write_audit_broken"]
+        assert AUTO_RECOVERY_FIELD not in refused, refused
+        assert service.coordinator.blocked is True
+    finally:
+        service.close()
+
+
+def test_a_retryable_incident_whose_reset_does_not_confirm_proceeds_with_a_failed_recovery_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The attempt ran and its predicate did not confirm. Since #216 that
+    incident does not stand: it stands down at the end of the call, and the
+    call proceeds, answering for itself with a `recovery` block that says the
+    attempt failed and on which action. No `resource_quarantined`, and no
+    `auto_recovery_attempted`: the block is where that story is told here.
+    TROUBLESHOOTING.md said this path returned `resource_quarantined`; it is
+    pinned to say what the call does."""
+    service = AgenticHILToolService(config_for(tmp_path, auto_recover="reset_halt", com_ports_yaml=DUT_UART_YAML))
+    calls = recording_backend(service, monkeypatch, UNCONFIRMED_RESET)
+    try:
+        lease = service.coordinator.acquire(*debugger_effect_resources(service.config))
+        lease.quarantine("debugger_result_unconfirmed")
+        service._quarantined_lease = lease
+
+        result = service.call("com_write", {"port_id": "dut_uart", "text": "hello"})
+
+        assert calls[:1] == ["reset:halt"]
+        assert "probe" not in calls
+        # The call itself ran and answered for itself (no session is open).
+        assert result["error_type"] == "session_not_active"
+        assert result["recovery"]["attempted"] is True
+        assert result["recovery"]["outcome"] == "failed"
+        assert result["recovery"]["failed_action"] == "reset_halt"
+        assert AUTO_RECOVERY_FIELD not in result, result
+        assert service.coordinator.blocked is False
+    finally:
+        service.close()
+    troubleshooting = (REPOSITORY_ROOT / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+    assert "If verification fails the call returns `resource_quarantined`" not in troubleshooting
+    assert "`recovery` block" in troubleshooting and "`outcome: failed`" in troubleshooting
 
 
 def test_a_refusal_that_attempted_no_recovery_carries_no_auto_recovery_attempted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2277,11 +2381,11 @@ def test_a_refusal_that_attempted_no_recovery_carries_no_auto_recovery_attempted
         monkeypatch.setattr(service.backend, "probe_target", lambda: {**UNCONFIRMED_PROBE, "audit_ok": False})
         born = service.call("probe_target")
         assert born["quarantined"] is True
-        assert "auto_recovery_attempted" not in born
+        assert AUTO_RECOVERY_FIELD not in born
 
         status = service.hardware_lease_status()
         assert status["blocked"] is True
-        assert "auto_recovery_attempted" not in status
+        assert AUTO_RECOVERY_FIELD not in status
         assert "auto_recoverable" in status
     finally:
         service.close()

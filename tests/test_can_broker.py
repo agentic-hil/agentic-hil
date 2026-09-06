@@ -1394,6 +1394,8 @@ def test_an_attach_after_the_last_detach_stop_decision_is_refused(tmp_path: Path
 # a session and in the refusal it meets when it did not.
 
 SHARING_NOTE_FRAGMENT = "takes the whole bus"
+# A second, single-owner entry beside the shared one, for the mixed listing.
+SOLO_BUS_YAML = '  solo:\n    adapter: "peak"\n    channel: "PCAN_USBBUS2"\n    bitrate: 500000\n'
 
 
 def test_a_shared_bus_says_sessions_still_take_it_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1428,6 +1430,25 @@ def test_a_single_owner_bus_carries_no_sharing_note(tmp_path: Path) -> None:
     assert listed["summary"] == "1 configured CAN bus(es)."
 
 
+def test_a_mixed_listing_counts_the_shared_buses_in_its_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # One bus with `shares:` beside one without: the summary counts the buses
+    # and says how many of them are declared shareable, and the note lands on
+    # the shared entry only.
+    workspace = tmp_path / "project"
+    write_authoritative_config(workspace, monkeypatch, can_buses_yaml=shared_bus_yaml() + SOLO_BUS_YAML)
+    from agentic_hil.config import load_authoritative_config
+
+    service = CanBusService(load_authoritative_config(workspace))
+    try:
+        listed = service.list_buses()
+    finally:
+        service.close()
+    assert listed["summary"].startswith("2 configured CAN bus(es). 1 declared shareable")
+    assert SHARING_NOTE_FRAGMENT in listed["summary"]
+    assert listed["buses"]["bench"]["shares_declared"] is True
+    assert "sharing_note" not in listed["buses"]["solo"]
+
+
 def test_a_second_session_on_a_shared_bus_is_refused_and_told_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = shared_config(tmp_path, monkeypatch)
     first = CanBusService(config)
@@ -1440,7 +1461,9 @@ def test_a_second_session_on_a_shared_bus_is_refused_and_told_why(tmp_path: Path
         refused = second.session_start("bench")
 
         assert refused["ok"] is False, refused
-        assert refused["error_type"] in {"device_busy", "resource_busy"}, refused
+        # The project lock answers first for a second owner of the same
+        # configuration, so this is the refusal a second run in fact meets.
+        assert refused["error_type"] == "resource_busy", refused
         assert refused["side_effect_committed"] is False
         assert refused["shares_declared"] is True
         assert refused["session_takes_whole_bus"] is True
@@ -1448,3 +1471,24 @@ def test_a_second_session_on_a_shared_bus_is_refused_and_told_why(tmp_path: Path
     finally:
         second.close()
         first.close()
+
+
+def test_a_participant_argument_is_refused_by_the_schema_until_sharing_lands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The design document plans a participant vocabulary for `can_session_start`
+    (Phase 2). An agent that read it and passes `participant` today is told the
+    argument does not exist, rather than being admitted onto a surface whose
+    sessions are still keyed by bus alone. Pinned so the advertisement fields
+    are not half-joined by an argument the sessions map cannot honour."""
+    from agentic_hil.mcp import call_tool
+    from agentic_hil.tools import AgenticHILToolService
+
+    service = AgenticHILToolService(shared_config(tmp_path, monkeypatch))
+    try:
+        response = call_tool({"name": "can_session_start", "arguments": {"bus_id": "bench", "participant": "alpha"}}, service)
+        refused = response["structuredContent"]
+        assert refused["ok"] is False
+        assert refused["error_type"] == "invalid_argument", refused
+        assert "participant" in json.dumps(refused)
+        assert service.can_buses.sessions == {}
+    finally:
+        service.close()

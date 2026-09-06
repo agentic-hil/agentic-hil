@@ -445,9 +445,31 @@ def _contender_refusal(resource: str) -> dict:
     return excinfo.value.result
 
 
-def _run_plan_inside_a_declared_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plan_text: str, **config_kwargs) -> tuple[dict, dict, dict]:
+def _contender_run_refusal(tmp_path: Path) -> dict:
+    """What an agent's `bench_run_start` reads: a second owner, on its own
+    configuration of the same machine, declaring the same board through the
+    coordinator. The refusal is the mutex's busy result as the coordinator
+    hands it on, heartbeat fields included."""
+    contender = HardwareCoordinator(config_for(tmp_path / "contender"), "contender")
+    try:
+        with pytest.raises(CoordinationError) as excinfo:
+            contender.begin_run([BOARD], label="contender")
+    finally:
+        contender.close()
+    return excinfo.value.result
+
+
+QUIET_CAN_BUS_YAML = 'can_buses:\n  dut_can:\n    adapter: "socketcan"\n    channel: "can0"\n    bitrate: 500000\n'
+
+
+def _run_plan_inside_a_declared_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plan_text: str, **config_kwargs) -> tuple[dict, dict, dict, dict]:
     """Run one plan while a real run holds BOARD, and return the holder record
-    before, the holder record after, and a contender's refusal after."""
+    before, the holder record after, a stranger's refusal off the mutex after,
+    and a contender's refusal through the coordinator after.
+
+    The reactor is driven through RecordingService, which never touches the
+    coordinator, so no accidental lease acquire can refresh the record: what
+    moves it has to be the run's own beat."""
     monkeypatch.setattr(bench_module, "HEARTBEAT_INTERVAL_S", 0.2)
     config = config_for(tmp_path, **config_kwargs)
     plan_path = tmp_path / ".agentic-hil" / "testconfig.yaml"
@@ -455,9 +477,6 @@ def _run_plan_inside_a_declared_run(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     plan_path.write_text(plan_text, encoding="utf-8")
     coordinator = HardwareCoordinator(config, "owner")
     service = RecordingService()
-    # The reactor's service double carries the coordinator the way the real
-    # service does, so a step loop that beats through it has something to reach.
-    service.coordinator = coordinator
     coordinator.begin_run([BOARD], label="long-step")
     try:
         before = coordinator.bench.holder(BOARD)
@@ -466,34 +485,48 @@ def _run_plan_inside_a_declared_run(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         after = coordinator.bench.holder(BOARD)
         assert after is not None
         refusal = _contender_refusal(BOARD)
+        run_refusal = _contender_run_refusal(tmp_path)
     finally:
         coordinator.end_run()
         coordinator.close()
-    return before, after, refusal
+    return before, after, refusal, run_refusal
 
 
-def test_a_live_run_in_a_long_delay_keeps_its_heartbeat_fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    before, after, refusal = _run_plan_inside_a_declared_run(
-        tmp_path,
-        monkeypatch,
-        "version: 3\nname: long-delay\nsteps:\n  - {device: dut, action: delay, duration_ms: 2000}\n",
-    )
-
+def _assert_the_holder_read_as_live(before: dict, after: dict, refusal: dict) -> None:
     # The step took no lease, and the record moved anyway.
     assert _heartbeat_time(after) > _heartbeat_time(before), (before["heartbeat_at"], after["heartbeat_at"])
     # What a contender reads: a holder that is busy, not hung. The age is the
     # tooth: a record last written at begin_run is two seconds old here, one
-    # written during the step is at most a few intervals old.
+    # written during the step is at most a few intervals old. The stale flag
+    # cannot trip inside two seconds (its window is never under a minute), so
+    # it is pinned in the hung-holder test, not here.
     assert refusal["error_type"] == "device_busy"
     assert refusal["holder"]["label"] == "long-step"
     assert refusal["heartbeat_age_s"] < 1.0, refusal
     assert refusal.get("holder_heartbeat_stale") is not True, refusal
 
 
+def test_a_live_run_in_a_long_delay_keeps_its_heartbeat_fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    before, after, refusal, run_refusal = _run_plan_inside_a_declared_run(
+        tmp_path,
+        monkeypatch,
+        "version: 3\nname: long-delay\nsteps:\n  - {device: dut, action: delay, duration_ms: 2000}\n",
+    )
+
+    _assert_the_holder_read_as_live(before, after, refusal)
+    # And through the coordinator, which is what `bench_run_start` answers with:
+    # the same record, the same age, and no hung verdict.
+    assert run_refusal["error_type"] == "device_busy"
+    assert run_refusal["holder"]["label"] == "long-step"
+    assert _heartbeat_time(run_refusal) >= _heartbeat_time(after)
+    assert run_refusal["heartbeat_age_s"] < 1.0, run_refusal
+    assert run_refusal.get("holder_heartbeat_stale") is not True, run_refusal
+
+
 def test_a_live_run_in_a_long_uart_expect_keeps_its_heartbeat_fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A silent port: the expect waits out its whole timeout, and the run is
     # alive for every millisecond of it.
-    before, after, refusal = _run_plan_inside_a_declared_run(
+    before, after, refusal, _ = _run_plan_inside_a_declared_run(
         tmp_path,
         monkeypatch,
         "version: 3\nname: long-expect\nsteps:\n"
@@ -503,9 +536,36 @@ def test_a_live_run_in_a_long_uart_expect_keeps_its_heartbeat_fresh(tmp_path: Pa
         com_ports_yaml='com_ports:\n  dut_uart:\n    device: "COM_TEST"\n',
     )
 
-    assert _heartbeat_time(after) > _heartbeat_time(before), (before["heartbeat_at"], after["heartbeat_at"])
-    assert refusal["heartbeat_age_s"] < 1.0, refusal
-    assert refusal.get("holder_heartbeat_stale") is not True, refusal
+    _assert_the_holder_read_as_live(before, after, refusal)
+
+
+def test_a_live_run_waiting_on_a_quiet_can_bus_keeps_its_heartbeat_fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A quiet bus: the comparator polls `can_read` until its deadline, and the
+    # frame it waits for never comes. The loop is the reactor's own idle poll,
+    # so a beat that hung off one step kind would miss this one.
+    before, after, refusal, _ = _run_plan_inside_a_declared_run(
+        tmp_path,
+        monkeypatch,
+        "version: 3\nname: quiet-bus\nsteps:\n"
+        "  - {device: dut_can, action: can_open}\n"
+        '  - {device: dut_can, action: can_read, comparator: {id: 1, equals: "01"}, timeout_s: 2}\n'
+        "  - {device: dut_can, action: can_close}\n",
+        can_buses_yaml=QUIET_CAN_BUS_YAML,
+    )
+
+    _assert_the_holder_read_as_live(before, after, refusal)
+
+
+def test_a_live_run_inside_a_repeat_block_keeps_its_heartbeat_fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The step the issue names: a bounded loop of short waits, none of which
+    # takes a lease, adding up to a long stretch the run is alive for.
+    before, after, refusal, _ = _run_plan_inside_a_declared_run(
+        tmp_path,
+        monkeypatch,
+        "version: 4\nname: long-repeat\nsteps:\n  - {action: repeat, count: 4, steps: [{device: dut, action: delay, duration_ms: 500}]}\n",
+    )
+
+    _assert_the_holder_read_as_live(before, after, refusal)
 
 
 def test_a_holder_that_stopped_heartbeating_still_reads_as_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
