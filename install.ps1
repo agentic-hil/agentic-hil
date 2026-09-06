@@ -96,10 +96,18 @@ $ShowHelp = [bool]$Help
 $SystemCertsMode = if ($NoSystemCerts) { 'never' } elseif ($SystemCerts) { 'always' } else { 'auto' }
 
 # Two spellings carry an inner dash, which no PowerShell parameter name can, so
-# they arrive here rather than bound. Everything else binds by itself.
+# they arrive here rather than bound, and so does every `--name=value` form:
+# PowerShell binds `--agent claude-code` as two tokens and leaves
+# `--agent=claude-code` whole. install.sh accepts both spellings and this
+# script's own usage text documents the flags without saying which half of them
+# Windows would refuse, so an operator copying a line from the same
+# documentation met `unknown option` and exit 2. Everything else binds by
+# itself.
 foreach ($token in @($Rest)) {
     if ($null -eq $token) { continue }
     switch -Regex ($token) {
+        '^--agent=(.+)$' { $Agent = $Matches[1] }
+        '^--version=(.+)$' { $Version = $Matches[1] }
         '^--no-agent-install$' { $WithAgentInstall = $false }
         '^--no-can$' { $WithCan = $false }
         '^--can$' { $WithCan = $true }
@@ -282,8 +290,17 @@ function Get-UvRecordedRequirements {
         } elseif ($line -match '^\s*\[') {
             $inOptions = $false
             $section = if ($line -match '^\s*\[tool\]\s*$') { 'tool' } else { 'other' }
-        } elseif ($line -match '^\s*python\s*=\s*"([^"]*)"\s*$') {
-            if ($inOptions -or $section -eq 'tool') { $python = $Matches[1] }
+        } elseif ($line -match '^\s*python\s*=\s*(?:"([^"]*)"|''([^'']*)'')\s*$') {
+            # Both TOML string forms, because uv writes a literal string (single
+            # quotes, backslashes kept as they are) for any path that carries a
+            # backslash, which is every interpreter path on Windows. Reading only
+            # the basic form found nothing on such a receipt, so the reinstall ran
+            # with no --python, uv resolved an interpreter of its own and dropped
+            # the key, and the operator's interpreter was forgotten with nothing
+            # said about it.
+            if ($inOptions -or $section -eq 'tool') {
+                $python = if ($Matches.ContainsKey(1)) { $Matches[1] } else { $Matches[2] }
+            }
         } elseif ($inOptions) {
             if ($line -match '\S' -and $line -notmatch '^\s*#') { return $null }
         }
