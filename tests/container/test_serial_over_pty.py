@@ -28,9 +28,8 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
-import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -42,8 +41,11 @@ from .conftest import (
     PtyPair,
     fixture_configuration,
     json_document,
+    make_pty_pair,
     run_cli,
     start_responder,
+    unprivileged_tree,
+    unprivileged_user,
 )
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
@@ -445,7 +447,7 @@ def test_a_device_whose_link_leads_nowhere_is_refused_as_open_failed(pty_pair: P
     assert refused["cleanup_confirmed"] is True, refused
 
 
-def test_a_device_this_user_cannot_read_is_refused_as_open_failed_and_not_as_busy(pty_pair: PtyPair, tmp_path: Path) -> None:
+def test_a_device_this_user_cannot_read_is_refused_as_open_failed_and_not_as_busy(pty_pair: PtyPair) -> None:
     """EACCES on a root-owned slave, met by a server running as an unprivileged user.
 
     Root opens everything, so the server is started under `setpriv` as the
@@ -461,69 +463,18 @@ def test_a_device_this_user_cannot_read_is_refused_as_open_failed_and_not_as_bus
     is traversable by everyone, so the EACCES the server meets is the
     device's own, which is the case this test exists for.
     """
-    if os.geteuid() != 0:
-        pytest.skip("needs root: the device has to be one the server's user cannot open, and only root can arrange that here")
-    setpriv = shutil.which("setpriv")
-    if setpriv is None:
-        pytest.skip("setpriv is not on PATH, and it is what drops the server to an unprivileged user")
-    import pwd
-
-    try:
-        unprivileged = pwd.getpwnam("nobody")
-    except KeyError:
-        pytest.skip("this image has no `nobody` user to drop the server to")
-
+    user = unprivileged_user()
     os.chmod(pty_pair.dut_slave, 0o600)
     assert os.stat(pty_pair.dut_slave).st_uid == 0
 
-    # Directly under /tmp and not under this test's own temporary directory:
-    # that one sits inside the root-owned pytest tree, which the unprivileged
-    # user cannot traverse, and a configuration it cannot read is refused
-    # long before the port is reached.
-    tree = Path(tempfile.mkdtemp(prefix="agentic-hil-unprivileged-", dir="/tmp"))
+    tree = unprivileged_tree(user, str(pty_pair.dut_slave))
     try:
-        project = tree / "project"
-        project.mkdir()
-        home = tree / "home"
-        home.mkdir()
-        temporary = tree / "tmp"
-        temporary.mkdir()
-        config = fixture_configuration(project, tree / "config" / "config.yaml", tree / "state", com_port_device=str(pty_pair.dut_slave))
-        for path in [tree, *tree.rglob("*")]:
-            os.chown(path, unprivileged.pw_uid, unprivileged.pw_gid)
-
-        environment = {
-            **os.environ,
-            "HOME": str(home),
-            "XDG_CONFIG_HOME": str(home / ".config"),
-            "XDG_CACHE_HOME": str(home / ".cache"),
-            "XDG_DATA_HOME": str(home / ".local" / "share"),
-            "XDG_STATE_HOME": str(home / ".local" / "state"),
-            "TMPDIR": str(temporary),
-            "TEMP": str(temporary),
-            "TMP": str(temporary),
-            "AGENTIC_HIL_CONFIG": str(config),
-        }
-        requests = [
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "container-tier", "version": "1"}}},
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "com_session_start", "arguments": {"port_id": PORT}}},
-        ]
-        server = subprocess.run(
-            [setpriv, f"--reuid={unprivileged.pw_uid}", f"--regid={unprivileged.pw_gid}", "--clear-groups", sys.executable, "-m", "agentic_hil", "mcp-stdio"],
-            cwd=str(project),
-            env=environment,
-            input="".join(json.dumps(request) + "\n" for request in requests),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
+        with tree.server() as server:
+            server.initialize()
+            refused = server.call("com_session_start", {"port_id": PORT})
     finally:
-        shutil.rmtree(tree, ignore_errors=True)
+        tree.remove()
 
-    answers = {json.loads(line)["id"]: json.loads(line) for line in server.stdout.splitlines() if line.strip()}
-    assert 2 in answers, f"no answer to com_session_start (exit {server.returncode}):\n{server.stdout}\n{server.stderr}"
-    refused = answers[2]["result"]["structuredContent"]
     assert refused["ok"] is False, refused
     assert refused["error_type"] == "com_port_open_failed", refused
     assert "[Errno 13]" in refused["backend_error"], refused
@@ -531,6 +482,108 @@ def test_a_device_this_user_cannot_read_is_refused_as_open_failed_and_not_as_bus
     assert str(pty_pair.dut_slave) in refused["backend_error"], refused
     assert refused["side_effect_committed"] is False, refused
     assert refused["retry_safe"] is True, refused
+
+
+def test_a_logs_directory_the_server_cannot_write_refuses_the_start_before_the_port_is_touched(pty_pair: PtyPair) -> None:
+    """`audit_unavailable`: no log can be opened for the session, so no session is opened.
+
+    The logs directory is root-owned and read-only, the server runs as
+    `nobody`, and the refusal comes before the open: the slave still reads
+    the kernel's default rate afterwards, which is the proof the port was
+    never reached, and the refusal carries the operating system's own error.
+    """
+    user = unprivileged_user()
+    os.chmod(pty_pair.dut_slave, 0o666)
+    tree = unprivileged_tree(user, str(pty_pair.dut_slave))
+    try:
+        logs = tree.project / ".agentic-hil" / "logs"
+        logs.mkdir(parents=True)
+        os.chown(logs.parent, user.uid, user.gid)
+        os.chmod(logs, 0o555)
+        assert os.stat(logs).st_uid == 0
+        with tree.server() as server:
+            server.initialize()
+            refused = server.call("com_session_start", {"port_id": PORT})
+        assert stty_speed(pty_pair.dut_slave) == UNOPENED_BAUDRATE
+    finally:
+        tree.remove()
+
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "audit_unavailable", refused
+    assert refused["side_effect_committed"] is False, refused
+    assert refused["audit_ok"] is False, refused
+    assert "[Errno 13]" in json.dumps(refused["audit_error"]), refused
+
+
+def test_a_session_log_that_stops_taking_lines_ends_the_reader_with_the_audit_broken(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """`com_reader_audit_broken`: feedback arrived and could not be recorded, so the session is quarantined.
+
+    The stimulus is logged and sent, then the session's log is made read-only
+    underneath the server (as `nobody`, which cannot append to a file whose
+    mode says no), and the peer's delayed answer arrives against that. The
+    reader records the audit failure as its own error, the lease is
+    quarantined under the reader's reason, and the next `com_read` is refused
+    by the incident gate, naming that reason and its guidance, rather than
+    answered as a quiet empty read.
+    """
+    user = unprivileged_user()
+    os.chmod(pty_pair.dut_slave, 0o666)
+    tree = unprivileged_tree(user, str(pty_pair.dut_slave))
+    responder = start_responder(pty_pair, tmp_path, PING_PONG, delay_s=1.0)
+    try:
+        with tree.server() as server:
+            server.initialize()
+            started = server.call("com_session_start", {"port_id": PORT})
+            assert started["ok"] is True, started
+            log = Path(started["session"]["log_path"])
+            log = log if log.is_absolute() else tree.project / log
+            assert log.is_file(), log
+
+            assert server.call("com_write", {"port_id": PORT, "text": "PING\r\n"})["ok"] is True
+            assert responder.wait_for(b"PING\r\n") == b"PING\r\n"
+            os.chmod(log, 0o444)
+
+            # The answer lands after its delay. The reader buffers what arrived
+            # before it reaches its append, and a read in that window hands
+            # those bytes out as the feedback they are, so the refusal is
+            # read off the first `com_read` after the reader has met the
+            # read-only log.
+            deadline = time.monotonic() + READ_TIMEOUT_S
+            while True:
+                refused = server.call("com_read", {"port_id": PORT, "wait_timeout_s": 1.0})
+                if refused["ok"] is False or time.monotonic() > deadline:
+                    break
+            assert refused["ok"] is False, refused
+            assert refused["error_type"] == "resource_quarantined", refused
+            assert refused["quarantined"] is True and refused["cleanup_required"] is True, refused
+            assert refused["retry_safe"] is False, refused
+            guidance = {item["reason"]: item for item in refused["quarantine_guidance"]}
+            assert "audit log" in guidance["com_reader_audit_broken"]["attempted"], guidance
+            # The one thing that broke is the reader's append. The reports
+            # directory is writable, every report of this session landed, and
+            # a reason saying a report could not be persisted would send the
+            # operator to a failure that did not happen.
+            assert refused["cleanup_reasons"] == ["com_reader_audit_broken"], refused
+
+            # The listing is not a hardware effect, so it still answers, and
+            # it carries the reader's own error beside the session it ended.
+            listed = server.call("com_ports_list")["ports"][PORT]
+            assert listed["session_active"] is False, listed
+            assert listed["reader_error"]["error_type"] == "audit_write_failed", listed
+            assert "[Errno 13]" in listed["reader_error"]["backend_error"], listed
+
+            # The stop cannot write its closing line either, and says so under
+            # its own reason; its report was persisted, and the file says so.
+            stopped = server.call("com_session_stop", {"port_id": PORT})
+            assert stopped["ok"] is False, stopped
+            assert stopped["quarantined"] is True, stopped
+            assert "com_audit_broken" in stopped["cleanup_reasons"], stopped
+            persisted = json.loads((tree.project / ".agentic-hil" / "reports" / "last-report.json").read_text(encoding="utf-8"))
+            assert persisted["tool"] == "com_session_stop" and persisted["lease_id"] == stopped["lease_id"], persisted
+            assert "com_report_audit_broken" not in stopped["cleanup_reasons"], stopped
+    finally:
+        responder.stop()
+        tree.remove()
 
 
 # ---------------------------------------------------------------------------
@@ -712,3 +765,525 @@ def test_the_session_writes_an_event_log_in_the_order_things_happened(pty_pair: 
     ledger = [json.loads(line) for line in mirrored[0].read_text(encoding="utf-8").splitlines() if line.strip()]
     ledger_kinds = [entry.get("event") or entry.get("direction") for entry in ledger]
     assert ledger_kinds[0] == "start" and "tx" in ledger_kinds and ledger_kinds[-1] == "stop", ledger_kinds
+
+
+# ---------------------------------------------------------------------------
+# The line going away, and the line refusing to take more.
+
+
+def test_a_device_that_vanishes_under_a_session_ends_the_reader_as_a_failed_read_and_a_fresh_device_opens_again(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """`serial_read_failed`: socat is killed under an open session, and the slave with it.
+
+    pyserial's read on a hung-up terminal returns nothing while the device
+    reported readiness, which it raises as a disconnect; the reader records
+    that as its error, the session is no longer active, and `com_read` says
+    so with the reader's error nested rather than answering a quiet empty
+    read. The stop still confirms, and a fresh pair behind the same
+    configured link opens again, so the failed session held nothing back.
+    """
+    project, config, _state = a_project(tmp_path, pty_pair)
+    responder = start_responder(pty_pair, tmp_path, PING_PONG)
+    with LiveServer(config, project) as server:
+        server.initialize()
+        assert server.call("com_session_start", {"port_id": PORT})["ok"] is True
+        assert server.call("com_write", {"port_id": PORT, "text": "PING\r\n"})["ok"] is True
+        received, _reads = read_until(server, b"PONG\r\n")
+        assert received == b"PONG\r\n"
+
+        responder.stop()
+        pty_pair.stop()
+        # The reader notices on its next read: its timeout plus a margin.
+        time.sleep(0.6)
+
+        failed = server.call("com_read", {"port_id": PORT, "wait_timeout_s": 1.0})
+        assert failed["ok"] is False, failed
+        assert failed["error_type"] == "session_not_active", failed
+        assert failed["reader_error"]["error_type"] == "serial_read_failed", failed
+        assert "returned no data" in failed["reader_error"]["backend_error"], failed
+        assert "Start it again" in failed["summary"], failed
+
+        listed = server.call("com_ports_list")["ports"][PORT]
+        assert listed["session_active"] is False, listed
+        assert listed["reader_error"]["error_type"] == "serial_read_failed", listed
+
+        stopped = server.call("com_session_stop", {"port_id": PORT})
+        assert stopped["ok"] is True and stopped["was_active"] is True, stopped
+
+        for link in (pty_pair.dut, pty_pair.peer):
+            link.unlink(missing_ok=True)
+        fresh = make_pty_pair(shutil.which("socat") or "socat", pty_pair.dut, pty_pair.peer)
+        try:
+            again = server.call("com_session_start", {"port_id": PORT})
+            assert again["ok"] is True and again["already_active"] is False, again
+            assert stty_speed(fresh.dut) == CONFIGURED_BAUDRATE
+            assert server.call("com_session_stop", {"port_id": PORT})["was_active"] is True
+        finally:
+            fresh.stop()
+
+    entries = [json.loads(line) for log in event_logs(project) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    errors = [entry for entry in entries if entry.get("event") == "error"]
+    assert [entry["error_type"] for entry in errors] == ["serial_read_failed"], entries
+
+
+def test_a_line_that_stops_draining_fails_the_write_that_no_longer_fits_and_carries_the_rest_once_it_drains(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """`serial_write_failed` under back pressure, and the write after the line drains.
+
+    socat is stopped, so nothing leaves the slave's output queue; writes are
+    accepted until the queue is full and the next one runs out its
+    `write_timeout_s` and fails. With socat continued, the queued bytes reach
+    the peer in the order they were written and a further write succeeds, so
+    the session is usable again without being restarted.
+    """
+    project, config, _state = a_project(tmp_path, pty_pair)
+    responder = start_responder(pty_pair, tmp_path, PING_PONG)
+    try:
+        with LiveServer(config, project) as server:
+            server.initialize()
+            assert server.call("com_session_start", {"port_id": PORT})["ok"] is True
+            os.kill(pty_pair.socat.pid, signal.SIGSTOP)
+            try:
+                accepted: list[bytes] = []
+                failed: dict | None = None
+                for index in range(8):
+                    block = bytes([ord("0") + index]) * 4096
+                    written = server.call("com_write", {"port_id": PORT, "text": block.decode("ascii")})
+                    if written["ok"] is False:
+                        failed = written
+                        break
+                    accepted.append(block)
+                assert failed is not None, f"eight writes of 4 KiB were all accepted against a line that cannot drain: {accepted!r}"
+                assert len(accepted) >= 1, failed
+                assert failed["error_type"] == "serial_write_failed", failed
+                assert "timeout" in failed["backend_error"].lower(), failed
+                assert failed["side_effect_status"] == "unknown", failed
+                assert failed["retry_safe"] is False, failed
+
+                again = server.call("com_write", {"port_id": PORT, "text": "PING\r\n"})
+                assert again["ok"] is False and again["error_type"] == "serial_write_failed", again
+            finally:
+                os.kill(pty_pair.socat.pid, signal.SIGCONT)
+
+            after = server.call("com_write", {"port_id": PORT, "text": "PING\r\n"})
+            assert after["ok"] is True, after
+            received = responder.wait_for(b"PING\r\n")
+            assert received.startswith(b"".join(accepted)), received[:64]
+            assert received.endswith(b"PING\r\n"), received[-64:]
+            answer, _reads = read_until(server, b"PONG\r\n")
+            assert answer.endswith(b"PONG\r\n"), answer
+    finally:
+        responder.stop()
+
+
+# ---------------------------------------------------------------------------
+# The receive buffer: its size, what overflows it, and what a second start does.
+
+# The peer's answer to `FLOOD`: 200 bytes on a port whose buffer holds 64.
+FLOOD_LINE = "0123456789" * 20
+FLOOD_REPLY = f"FLOOD={FLOOD_LINE}"
+BUFFER_BYTES = 64
+
+
+def wait_for_buffer(server: LiveServer, buffered: int, overflow: int) -> dict:
+    deadline = time.monotonic() + READ_TIMEOUT_S
+    while True:
+        status = server.call("com_ports_list")["ports"][PORT]
+        if (status["rx_buffer_bytes"], status["overflow_bytes"]) == (buffered, overflow) or time.monotonic() > deadline:
+            return status
+
+
+def test_the_receive_buffer_keeps_the_newest_bytes_up_to_its_size_and_a_second_start_clears_it_unless_told_not_to(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """`max_buffer_bytes`, `overflow_bytes`, `buffer_remaining_bytes`, and `clear_buffer` on an already active session.
+
+    The peer answers with more than the buffer holds, so the oldest bytes are
+    dropped and counted as overflow and what is kept is the newest. A read
+    of part of it leaves the rest, counted. A second `com_session_start` on
+    the active session clears both the buffer and the count by default and
+    keeps both when told `clear_buffer: false`, which is the one place the
+    flag is observable: the open itself always discards what the line had
+    buffered before it.
+    """
+    project, config, _state = a_project(tmp_path, pty_pair)
+    config = fixture_configuration(project, config, tmp_path / "state", com_port_device=str(pty_pair.dut), com_port_fields={"max_buffer_bytes": BUFFER_BYTES})
+    responder = start_responder(pty_pair, tmp_path, FLOOD_REPLY + "\\r\\n")
+    flood = (FLOOD_LINE + "\r\n").encode("ascii")
+    kept = flood[-BUFFER_BYTES:]
+    overflow = len(flood) - BUFFER_BYTES
+    try:
+        with LiveServer(config, project) as server:
+            server.initialize()
+            assert server.call("com_ports_list")["ports"][PORT]["max_buffer_bytes"] == BUFFER_BYTES
+            assert server.call("com_session_start", {"port_id": PORT})["ok"] is True
+            assert server.call("com_write", {"port_id": PORT, "text": "FLOOD\r\n"})["ok"] is True
+            status = wait_for_buffer(server, BUFFER_BYTES, overflow)
+            assert (status["rx_buffer_bytes"], status["overflow_bytes"]) == (BUFFER_BYTES, overflow), status
+
+            part = server.call("com_read", {"port_id": PORT, "max_bytes": 16})
+            assert part["ok"] is True, part
+            assert part["bytes_read"] == 16, part
+            assert bytes.fromhex(part["data"]["hex"]) == kept[:16], part
+            assert part["buffer_remaining_bytes"] == BUFFER_BYTES - 16, part
+            assert part["overflow_bytes"] == overflow, part
+
+            cleared = server.call("com_session_start", {"port_id": PORT})
+            assert cleared["ok"] is True and cleared["already_active"] is True, cleared
+            assert cleared["session"]["rx_buffer_bytes"] == 0, cleared
+            assert cleared["session"]["overflow_bytes"] == 0, cleared
+            empty = server.call("com_read", {"port_id": PORT})
+            assert (empty["bytes_read"], empty["buffer_remaining_bytes"], empty["overflow_bytes"]) == (0, 0, 0), empty
+
+            assert server.call("com_write", {"port_id": PORT, "text": "FLOOD\r\n"})["ok"] is True
+            status = wait_for_buffer(server, BUFFER_BYTES, overflow)
+            assert (status["rx_buffer_bytes"], status["overflow_bytes"]) == (BUFFER_BYTES, overflow), status
+            untouched = server.call("com_session_start", {"port_id": PORT, "clear_buffer": False})
+            assert untouched["ok"] is True and untouched["already_active"] is True, untouched
+            assert untouched["session"]["rx_buffer_bytes"] == BUFFER_BYTES, untouched
+            assert untouched["session"]["overflow_bytes"] == overflow, untouched
+            whole = server.call("com_read", {"port_id": PORT})
+            assert whole["bytes_read"] == BUFFER_BYTES and whole["buffer_remaining_bytes"] == 0, whole
+            assert bytes.fromhex(whole["data"]["hex"]) == kept, whole
+    finally:
+        responder.stop()
+
+
+# ---------------------------------------------------------------------------
+# Encodings: a configured one that is not UTF-8, and bytes that decode in none.
+
+
+def test_a_configured_encoding_is_applied_to_what_is_written_and_to_what_is_read(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """`encoding: latin-1` on the entry decides the bytes of a text write and the text of a read.
+
+    The stimulus's `ü` and `ß` go out as one byte each and the peer's record
+    holds exactly those bytes; the peer's answer carries a byte that is `Ü`
+    in Latin-1 and nothing in UTF-8, and the read decodes it under the
+    configured encoding. A text the encoding cannot carry is refused before
+    the line, with the encoding named and nothing on the wire.
+    """
+    project, config, _state = a_project(tmp_path, pty_pair)
+    config = fixture_configuration(project, config, tmp_path / "state", com_port_device=str(pty_pair.dut), com_port_fields={"encoding": "latin-1"})
+    stimulus = "Grüße\r\n"
+    on_the_wire = stimulus.encode("latin-1")
+    responder = start_responder(pty_pair, tmp_path, "Gr\\xfc\\xdfe=\\xdcber\\r\\n")
+    try:
+        with LiveServer(config, project) as server:
+            server.initialize()
+            assert server.call("com_ports_list")["ports"][PORT]["encoding"] == "latin-1"
+            assert server.call("com_session_start", {"port_id": PORT})["ok"] is True
+
+            written = server.call("com_write", {"port_id": PORT, "text": stimulus})
+            assert written["ok"] is True, written
+            assert written["bytes_written"] == len(on_the_wire) == 7, written
+            assert written["data"] == {"hex": on_the_wire.hex(), "text": stimulus, "encoding": "latin-1"}, written
+            assert responder.wait_for(on_the_wire) == on_the_wire
+
+            received, reads = read_until(server, b"\xdcber\r\n")
+            assert received == b"\xdcber\r\n", (received, reads)
+            assert "".join(read["data"]["text"] for read in reads) == "Über\r\n", reads
+            assert all(read["data"]["encoding"] == "latin-1" for read in reads), reads
+
+            refused = server.call("com_write", {"port_id": PORT, "text": "€\r\n"})
+            assert refused["ok"] is False, refused
+            assert refused["error_type"] == "invalid_argument", refused
+            assert refused["encoding"] == "latin-1", refused
+            assert "cannot be encoded" in refused["summary"], refused
+            time.sleep(0.2)
+            assert responder.received() == on_the_wire, responder.received()
+    finally:
+        responder.stop()
+
+    entries = [json.loads(line) for line in event_logs(project)[0].read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [entry["text"] for entry in entries if entry.get("direction") == "tx"] == [stimulus], entries
+    assert "".join(entry["text"] for entry in entries if entry.get("direction") == "rx") == "Über\r\n", entries
+
+
+def test_bytes_that_do_not_decode_are_reported_as_hex_with_replacement_characters_in_the_text(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """A `hex` write and an answer that is not UTF-8, on a UTF-8 port.
+
+    The bytes go out exactly as given and come back exactly as sent: `hex` is
+    the wire, and `text` is a best-effort decoding in which each byte that
+    is not UTF-8 is a replacement character rather than an exception or a
+    dropped byte.
+    """
+    project, config, _state = a_project(tmp_path, pty_pair)
+    # The peer's table key is the whole line as received, prefix bytes and all.
+    responder = start_responder(pty_pair, tmp_path, "\\xff\\xfe\\x00RAW=\\xff\\xfePONG\\r\\n")
+    try:
+        with LiveServer(config, project) as server:
+            server.initialize()
+            assert server.call("com_session_start", {"port_id": PORT})["ok"] is True
+
+            written = server.call("com_write", {"port_id": PORT, "hex": "ff fe 00 52 41 57 0d 0a"})
+            assert written["ok"] is True, written
+            assert written["bytes_written"] == 8, written
+            assert written["data"] == {"hex": "fffe005241570d0a", "text": "��\x00RAW\r\n", "encoding": "utf-8"}, written
+            assert responder.wait_for(b"\xff\xfe\x00RAW\r\n") == b"\xff\xfe\x00RAW\r\n"
+
+            received, reads = read_until(server, b"PONG\r\n")
+            assert received == b"\xff\xfePONG\r\n", (received, reads)
+            assert "".join(read["data"]["text"] for read in reads) == "��PONG\r\n", reads
+            assert all(read["data"]["encoding"] == "utf-8" for read in reads), reads
+    finally:
+        responder.stop()
+
+
+# ---------------------------------------------------------------------------
+# Entries the tools refuse before any open.
+
+
+@pytest.mark.parametrize(
+    ("fields", "declared", "identity_source", "claimed"),
+    [
+        # A serial number identifies the entry by itself; version 3 asks for
+        # no declaration beside it.
+        ({"serial_number": "FIXTURE0001"}, None, "serial_number", {"expected_serial_number": "FIXTURE0001", "expected_from": "com_ports.dut.serial_number"}),
+        # USB ids name a kind of adapter, and version 3 asks the entry to say
+        # so, the way the loader's own rule spells it.
+        ({"vid": "0483", "pid": "374b"}, "vid_pid", "vid_pid", {"expected_vid": 0x0483, "expected_pid": 0x374B}),
+    ],
+    ids=["serial_number", "vid_pid"],
+)
+def test_an_entry_that_names_hardware_is_not_opened_on_a_device_the_inventory_does_not_enumerate(pty_pair: PtyPair, tmp_path: Path, fields: dict, declared: str | None, identity_source: str, claimed: dict) -> None:
+    """`com_port_identity_unverified` with `port_not_enumerated`, before the open.
+
+    An entry carrying a serial number or USB ids asks that the name be
+    proved to still lead to that hardware before use. A pseudo-terminal is
+    in no inventory, so the check cannot run, and the port is refused rather
+    than opened on a check that did not happen: the slave still reads the
+    kernel's default rate afterwards. The listing says what the entry
+    claims, so the refusal is readable beside it.
+    """
+    project, config, _state = a_project(tmp_path, pty_pair)
+    config = fixture_configuration(project, config, tmp_path / "state", com_port_device=str(pty_pair.dut), com_port_fields=fields, com_port_identity_source=declared)
+
+    with LiveServer(config, project) as server:
+        server.initialize()
+        entry = server.call("com_ports_list")["ports"][PORT]
+        assert entry["identity_source"] == identity_source, entry
+        for key in fields:
+            assert key in entry, entry
+
+        refused = server.call("com_session_start", {"port_id": PORT})
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "com_port_identity_unverified", refused
+        assert refused["identity"]["status"] == "port_not_enumerated", refused
+        assert refused["identity"]["device"] == str(pty_pair.dut), refused
+        assert refused["configured_device"] == str(pty_pair.dut), refused
+        for key, value in claimed.items():
+            assert refused[key] == value, refused
+            assert refused["identity"][key] == value, refused
+        assert refused["side_effect_committed"] is False, refused
+        assert refused["retry_safe"] is True, refused
+        assert "adopt-hardware" in refused["next_step"], refused
+        assert stty_speed(pty_pair.dut) == UNOPENED_BAUDRATE
+
+        assert server.call("com_ports_list")["ports"][PORT]["session_active"] is False
+
+
+def test_a_port_the_configuration_does_not_declare_is_refused_by_every_tool_with_the_declared_ones_named(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """`com_port_not_configured`, from `com_session_start`, `com_write`, `com_read` and `com_session_stop` alike."""
+    project, config, _state = a_project(tmp_path, pty_pair)
+
+    with LiveServer(config, project) as server:
+        server.initialize()
+        for tool, arguments in (
+            ("com_session_start", {"port_id": "ghost"}),
+            ("com_write", {"port_id": "ghost", "text": "PING\r\n"}),
+            ("com_read", {"port_id": "ghost"}),
+            ("com_session_stop", {"port_id": "ghost"}),
+        ):
+            refused = server.call(tool, arguments)
+            assert refused["ok"] is False, (tool, refused)
+            assert refused["error_type"] == "com_port_not_configured", (tool, refused)
+            assert refused["port_id"] == "ghost", (tool, refused)
+            assert refused["configured_ports"] == [PORT], (tool, refused)
+            assert refused.get("side_effect_committed") is not True, (tool, refused)
+        assert stty_speed(pty_pair.dut) == UNOPENED_BAUDRATE
+
+
+# ---------------------------------------------------------------------------
+# The other shapes a plan's claim takes, and the ones it does not meet.
+
+# The peer's `COUNT` answer, for the range claims below.
+COUNT_LINE = "COUNT=COUNT=42\\r\\n"
+
+SHAPES_PLAN = """version: 3
+name: pty-claim-shapes
+steps:
+  - {port_id: dut, action: uart_open}
+  - {port_id: dut, action: uart_write, text: "VERSION\\r\\n"}
+  - {port_id: dut, action: uart_read, comparator: {pattern: "^v\\\\d+\\\\.\\\\d+\\\\.\\\\d+"}, timeout_s: 5}
+  - {port_id: dut, action: uart_write, text: "VERSION\\r\\n"}
+  - {port_id: dut, action: uart_read, comparator: {equals: "v1.2.3"}, timeout_s: 5}
+  - {port_id: dut, action: uart_write, text: "COUNT\\r\\n"}
+  - {port_id: dut, action: uart_read, comparator: {pattern: "COUNT=(\\\\d+)", range: {min: 40, max: 50}}, timeout_s: 5}
+  - {port_id: dut, action: uart_close}
+"""
+SHAPES_ACTIONS = ["uart_open", "uart_write", "uart_read", "uart_write", "uart_read", "uart_write", "uart_read", "uart_close"]
+
+RANGE_UNMET_PLAN = """version: 3
+name: pty-range-unmet
+steps:
+  - {port_id: dut, action: uart_open}
+  - {port_id: dut, action: uart_write, text: "COUNT\\r\\n"}
+  - {port_id: dut, action: uart_read, comparator: {pattern: "COUNT=(\\\\d+)", range: {min: 100, max: 200}}, timeout_s: 2}
+"""
+
+EXPECT_TIMEOUT_PLAN = """version: 3
+name: pty-expect-timeout
+steps:
+  - {port_id: dut, action: uart_open}
+  - {port_id: dut, action: uart_write, text: "PING\\r\\n"}
+  - {port_id: dut, action: uart_expect, text: "NEVER", timeout_s: 1.5}
+"""
+
+RANGE_WITHOUT_PATTERN_PLAN = """version: 3
+name: pty-range-alone
+steps:
+  - {port_id: dut, action: uart_open}
+  - {port_id: dut, action: uart_read, comparator: {range: {min: 1, max: 2}}, timeout_s: 2}
+"""
+
+V2_EXPECT_PLAN = """version: 2
+name: pty-v2-expect
+steps:
+  - {port_id: dut, action: uart_open}
+  - {port_id: dut, action: uart_expect, pattern: "^v(\\\\d+)\\\\.\\\\d+\\\\.\\\\d+", timeout_s: 5}
+  - {port_id: dut, action: uart_close}
+"""
+
+
+def run_plan(project: Path, config: Path, plan: str, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    (project / "testconfig.yaml").write_text(plan, encoding="utf-8")
+    return run_cli(project, config, "test-reactor", "--test-config", "testconfig.yaml", *arguments)
+
+
+def test_a_pattern_an_equals_and_a_range_claim_are_each_met_by_the_line_they_describe(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """The three claim shapes, green, each reporting what met it.
+
+    `pattern` alone matches where it matches, `equals` is one complete line,
+    and `pattern` with `range` is the number in the capture held to inclusive
+    bounds. Each met claim carries the text that met it, so a green report
+    shows the line the step passed on.
+    """
+    project, config, _state = a_project(tmp_path, pty_pair)
+    responder = start_responder(pty_pair, tmp_path, VERSION_LINE, COUNT_LINE)
+    try:
+        ran = run_plan(project, config, SHAPES_PLAN, "--json")
+    finally:
+        received = responder.stop()
+
+    assert ran.returncode == 0, ran.stdout.decode("utf-8", errors="replace") + ran.stderr.decode("utf-8", errors="replace")
+    result = json_document(ran)
+    assert result["ok"] is True, result
+    assert received == b"VERSION\r\nVERSION\r\nCOUNT\r\n", received
+    assert [step["action"] for step in result["steps"]] == SHAPES_ACTIONS, result["steps"]
+    assert all(step["result"]["ok"] is True for step in result["steps"]), result["steps"]
+
+    by_pattern = result["steps"][2]["result"]
+    assert by_pattern["comparator"] == {"pattern": "^v\\d+\\.\\d+\\.\\d+"}, by_pattern
+    assert by_pattern["matched_text"]["text"] == "v1.2.3", by_pattern
+    assert by_pattern["summary"] == "Expected pattern matched the COM port output.", by_pattern
+
+    by_equals = result["steps"][4]["result"]
+    assert by_equals["comparator"] == {"equals": "v1.2.3"}, by_equals
+    assert by_equals["matched_text"]["text"].strip() == "v1.2.3", by_equals
+    assert by_equals["summary"] == "The COM port output equalled the expected value.", by_equals
+
+    by_range = result["steps"][6]["result"]
+    assert by_range["comparator"] == {"pattern": "COUNT=(\\d+)", "range": {"min": 40, "max": 50}}, by_range
+    assert by_range["captured_text"] == "42" and by_range["captured_value"] == 42.0, by_range
+    assert by_range["matched_text"]["text"] == "COUNT=42", by_range
+    assert by_range["summary"] == "A value captured from the COM port output fell inside the expected range.", by_range
+
+
+def test_a_range_claim_the_captured_value_falls_outside_is_headed_failed_with_the_value_it_did_capture(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """`comparator_unmet` on a range: the number was read and was out of bounds, and the report says which number."""
+    project, config, _state = a_project(tmp_path, pty_pair)
+    responder = start_responder(pty_pair, tmp_path, COUNT_LINE)
+    try:
+        ran = run_plan(project, config, RANGE_UNMET_PLAN)
+    finally:
+        received = responder.stop()
+
+    rendered = ran.stdout.decode("utf-8")
+    assert ran.returncode == 1, rendered + ran.stderr.decode("utf-8", errors="replace")
+    assert received == b"COUNT\r\n", received
+    assert rendered.splitlines()[0].startswith("Failed: comparator_unmet"), rendered
+    assert "42" in rendered, rendered
+
+    report = last_report(project)
+    assert report["ok"] is False, report
+    failed = report["steps"][2]["result"]
+    assert failed["error_type"] == "comparator_unmet", failed
+    assert failed["captured_text"] == "42" and failed["captured_value"] == 42.0, failed
+    assert failed["received_tail"]["text"].endswith("COUNT=42\r\n"), failed
+    assert failed["summary"] == "No value captured from the COM port output fell inside the expected range before this step's timeout.", failed
+
+
+def test_an_expectation_the_line_never_meets_is_a_failed_step_that_waited_its_timeout_and_quotes_the_line(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """`uart_expect_timeout`: the port answered something else, the step failed after its timeout, and the answer is in the report."""
+    project, config, _state = a_project(tmp_path, pty_pair)
+    responder = start_responder(pty_pair, tmp_path, PING_PONG)
+    try:
+        ran = run_plan(project, config, EXPECT_TIMEOUT_PLAN)
+    finally:
+        received = responder.stop()
+
+    rendered = ran.stdout.decode("utf-8")
+    assert ran.returncode == 1, rendered + ran.stderr.decode("utf-8", errors="replace")
+    assert received == b"PING\r\n", received
+    assert rendered.splitlines()[0].startswith("Failed: uart_expect_timeout"), rendered
+    assert "PONG" in rendered, rendered
+
+    report = last_report(project)
+    assert report["ok"] is False, report
+    assert [step["action"] for step in report["steps"]] == ["uart_open", "uart_write", "uart_expect"], report["steps"]
+    step = report["steps"][2]
+    assert step["elapsed_ms"] >= 1500, step
+    failed = step["result"]
+    assert failed["error_type"] == "uart_expect_timeout", failed
+    assert failed["expected_text"] == "NEVER" and failed["timeout_s"] == 1.5, failed
+    assert failed["received_tail"]["text"] == "PONG\r\n", failed
+    assert failed["received_tail_truncated"] is False, failed
+    assert failed["summary"] == "Expected text did not appear on the COM port before this step's timeout.", failed
+
+
+def test_a_range_without_a_pattern_is_refused_before_the_port_is_opened(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """A claim the plan format does not allow is refused before the run, so nothing reaches the line."""
+    project, config, _state = a_project(tmp_path, pty_pair)
+    responder = start_responder(pty_pair, tmp_path, PING_PONG)
+    try:
+        ran = run_plan(project, config, RANGE_WITHOUT_PATTERN_PLAN)
+    finally:
+        received = responder.stop()
+
+    rendered = ran.stdout.decode("utf-8")
+    assert ran.returncode == 1, rendered + ran.stderr.decode("utf-8", errors="replace")
+    assert rendered.splitlines()[0].startswith("Refused:"), rendered
+    assert received == b"", received
+    assert stty_speed(pty_pair.dut) == UNOPENED_BAUDRATE
+
+
+def test_a_version_2_plan_waits_for_a_pattern_the_line_says_on_its_own(pty_pair: PtyPair, tmp_path: Path) -> None:
+    """The version 2 `uart_expect` with `pattern`, against a peer that talks unprompted.
+
+    Version 2 has no write step, so the peer announces its line on its own
+    every so often; the plan opens the port and the next announcement is
+    what it waits for. The result reports the claim under `expected_pattern`
+    and the run is green.
+    """
+    project, config, _state = a_project(tmp_path, pty_pair)
+    responder = start_responder(pty_pair, tmp_path, announce="v1.2.3\\r\\n", announce_every_s=0.2)
+    try:
+        ran = run_plan(project, config, V2_EXPECT_PLAN, "--json")
+    finally:
+        responder.stop()
+
+    assert ran.returncode == 0, ran.stdout.decode("utf-8", errors="replace") + ran.stderr.decode("utf-8", errors="replace")
+    result = json_document(ran)
+    assert result["ok"] is True, result
+    assert [step["action"] for step in result["steps"]] == ["uart_open", "uart_expect", "uart_close"], result["steps"]
+    expect = result["steps"][1]["result"]
+    assert expect["ok"] is True, expect
+    assert expect["expected_pattern"] == "^v(\\d+)\\.\\d+\\.\\d+", expect
+    assert expect["bytes_received"] >= len(b"v1.2.3\r\n"), expect
+    assert expect["summary"] == "Expected pattern matched the COM port output.", expect

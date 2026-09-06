@@ -20,12 +20,18 @@ Usage:
 
     python pty_responder.py --device PATH --record PATH --ready PATH
         [--reply REQUEST=RESPONSE ...] [--delay-s SECONDS]
+        [--announce TEXT --announce-every-s SECONDS]
 
 `REQUEST` is matched against each received line with its line ending removed;
 `RESPONSE` is written verbatim. Both are read through Python's escape rules, so
 a test writes `PING=PONG\\r\\n` and the bytes `PONG\r\n` go on the wire. A line
 that matches nothing gets no answer. With no `--reply` at all the peer is
 silent and only records, which is how a test proves a read timeout.
+
+`--announce` is a line the peer writes on its own, every `--announce-every-s`
+seconds from the moment its end is open, without being asked. It is how a test
+reaches a plan format that has no write step: the plan opens the port and waits,
+and the next unprompted line is what it waits for.
 
 `--ready` names a file this writes once the device is open, so the test can
 wait for the peer to be listening before it drives the product. The record
@@ -67,8 +73,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ready", required=True, help="written once the device is open")
     parser.add_argument("--reply", action="append", default=[], metavar="REQUEST=RESPONSE")
     parser.add_argument("--delay-s", type=float, default=0.0, help="wait this long before each answer")
+    parser.add_argument("--announce", default=None, help="a line written unprompted, under the same escape rules")
+    parser.add_argument("--announce-every-s", type=float, default=0.0, help="how often the unprompted line is written")
     args = parser.parse_args(argv)
     replies = _parse_replies(args.reply)
+    announce = None if args.announce is None else _unescape(args.announce)
+    if announce is not None and args.announce_every_s <= 0:
+        raise SystemExit("--announce needs --announce-every-s above zero")
 
     stop = False
 
@@ -90,7 +101,11 @@ def main(argv: list[str] | None = None) -> int:
             ready.write("ready\n")
             ready.flush()
             pending = b""
+            next_announcement = time.monotonic()
             while not stop:
+                if announce is not None and time.monotonic() >= next_announcement:
+                    _write_all(fd, announce)
+                    next_announcement = time.monotonic() + args.announce_every_s
                 readable, _, _ = select.select([fd], [], [], 0.05)
                 if not readable:
                     continue
@@ -112,12 +127,16 @@ def main(argv: list[str] | None = None) -> int:
                         continue
                     if args.delay_s > 0:
                         time.sleep(args.delay_s)
-                    written = 0
-                    while written < len(answer):
-                        written += os.write(fd, answer[written:])
+                    _write_all(fd, answer)
     finally:
         os.close(fd)
     return 0
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    written = 0
+    while written < len(data):
+        written += os.write(fd, data[written:])
 
 
 if __name__ == "__main__":

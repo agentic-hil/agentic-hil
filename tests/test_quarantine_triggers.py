@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,6 +46,7 @@ from agentic_hil.knowledge import (
     attach_quarantine_guidance,
     quarantine_reason_details,
 )
+from agentic_hil.report import read_last_report
 from agentic_hil.tools import AgenticHILToolService
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "agentic_hil"
@@ -770,6 +772,35 @@ def test_a_failed_direct_can_read_refuses_without_quarantining_the_bus(tmp_path:
         bus.fail = False
     finally:
         service.close()
+
+
+def test_a_can_report_that_landed_is_not_reported_as_unpersisted_because_the_lease_was_already_audit_broken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CAN twin of the COM attribution: a lease already audit-broken says
+    `audit_ok: false` in every report it rides on, and that is the lease's
+    flag, not the report write failing. The next call's report lands and the
+    reasons name only what broke."""
+    config = can_config(tmp_path)
+    service = AgenticHILToolService(config)
+    bus = FlakyRecvBus()
+    monkeypatch.setitem(sys.modules, "can", SimpleNamespace(Bus=lambda **kwargs: bus, CanInitializationError=FakeCanInitializationError))
+    try:
+        assert service.call("can_session_start", {"bus_id": "bench"})["ok"] is True
+        session = service.can_buses.sessions["bench"]
+        session.audit_broken = True
+        session.lease.quarantine("can_reader_audit_broken", OSError(13, "Permission denied", "can-bench.jsonl"), audit_broken=True)
+
+        refused = service.can_buses.read("bench")
+
+        assert refused["ok"] is False and refused["error_type"] == "resource_quarantined", refused
+        persisted = read_last_report(config)
+        assert persisted["tool"] == "can_read" and persisted["lease_id"] == session.lease.lease_id, persisted
+        assert session.lease.reported_cleanup_reasons() == ["can_reader_audit_broken"]
+        assert refused["cleanup_reasons"] == ["can_reader_audit_broken"], refused
+    finally:
+        # The session's ledger is broken by arrangement, so its stop refuses
+        # to confirm; that refusal is the product's and not this test's.
+        with suppress(RuntimeError):
+            service.close()
 
 
 # ---------------------------------------------------------------------------

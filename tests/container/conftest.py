@@ -404,6 +404,15 @@ def uv_tool(tmp_path: Path, uv_binary: str, uv_cache: Path) -> UvTool:
     return UvTool(directory=directory, bin_directory=bin_directory, cache=uv_cache, uv=uv_binary)
 
 
+def _yaml_scalar(value: object) -> str:
+    """One configuration value the way an operator writes it: quoted text, a bare number, a lowercase boolean."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return repr(str(value))
+
+
 def fixture_configuration(
     workspace: Path,
     config_path: Path,
@@ -412,6 +421,8 @@ def fixture_configuration(
     executable: str | None = None,
     timeout_s: int = 20,
     com_port_device: str | None = None,
+    com_port_fields: dict[str, object] | None = None,
+    com_port_identity_source: str | None = "device",
 ) -> Path:
     """A configuration for a project with no hardware behind it.
 
@@ -428,9 +439,15 @@ def fixture_configuration(
     bridge in this project that carries bytes into a port has to have a port.
     The port declares ``identity_source: device``: version 3 refuses a port that
     is identified by its device name alone unless the operator has said so, and
-    a pseudo-terminal has no other identity to offer.
+    a pseudo-terminal has no other identity to offer. ``com_port_fields`` adds
+    further keys to that entry as an operator would write them (an encoding, a
+    buffer size, a serial number), and ``com_port_identity_source`` is the
+    declaration to write, or None to write none, for an entry whose identity
+    one of those added keys carries instead.
     """
     executable_value = repr(shutil.which("openocd")) if executable is None else executable
+    entry_lines = "".join(f"    {key}: {_yaml_scalar(value)}\n" for key, value in (com_port_fields or {}).items())
+    identity_line = "" if com_port_identity_source is None else f"    identity_source: {com_port_identity_source}\n"
     com_ports = (
         "com_ports: {}\n"
         if com_port_device is None
@@ -438,8 +455,7 @@ def fixture_configuration(
   dut:
     device: {com_port_device!r}
     baudrate: 115200
-    identity_source: device
-    permissions:
+{identity_line}{entry_lines}    permissions:
       allow_write: true
 """
     )
@@ -581,8 +597,23 @@ def pty_pair(tmp_path: Path) -> Iterator[PtyPair]:
     socat = shutil.which("socat")
     if socat is None:
         pytest.skip("socat is not on PATH, and the pseudo-terminal pair this module drives is made by it")
-    dut = tmp_path / "dut"
-    peer = tmp_path / "peer"
+    try:
+        pair = make_pty_pair(socat, tmp_path / "dut", tmp_path / "peer")
+    except RuntimeError as error:
+        pytest.skip(f"the pseudo-terminal pair could not be created here: {error}")
+    try:
+        yield pair
+    finally:
+        pair.stop()
+
+
+def make_pty_pair(socat: str, dut: Path, peer: Path) -> PtyPair:
+    """One socat pair with its two links at the given paths, or a RuntimeError naming why not.
+
+    Separate from the fixture so a test that made its device vanish by ending
+    the pair can put a fresh one behind the same configured link and prove
+    the product opens it again.
+    """
     process = subprocess.Popen(
         [socat, "-d", "-d", f"pty,raw,echo=0,link={dut}", f"pty,raw,echo=0,link={peer}"],
         stdin=subprocess.DEVNULL,
@@ -592,13 +623,10 @@ def pty_pair(tmp_path: Path) -> Iterator[PtyPair]:
     pair = PtyPair(dut=dut, peer=peer, socat=process)
     try:
         _wait_until(lambda: dut.exists() and peer.exists(), PTY_SETUP_TIMEOUT_S, "waiting for socat's two links", process)
-    except RuntimeError as error:
+    except RuntimeError:
         pair.stop()
-        pytest.skip(f"the pseudo-terminal pair could not be created here: {error}")
-    try:
-        yield pair
-    finally:
-        pair.stop()
+        raise
+    return pair
 
 
 @dataclass
@@ -632,20 +660,24 @@ class Responder:
         return self.received()
 
 
-def start_responder(pair: PtyPair, tmp_path: Path, *replies: str, delay_s: float = 0.0) -> Responder:
+def start_responder(pair: PtyPair, tmp_path: Path, *replies: str, delay_s: float = 0.0, announce: str | None = None, announce_every_s: float = 0.0) -> Responder:
     """Put the peer on the far end of ``pair`` with the given answer table.
 
     Each reply is ``REQUEST=RESPONSE`` under Python's escape rules, so
     ``PING=PONG\\r\\n`` answers the line ``PING`` with the bytes ``PONG\\r\\n``.
     No replies at all is a peer that listens and records and never answers.
-    Returns once the peer has opened its end, so a test that writes next is
-    writing to a listener.
+    ``announce`` is a line the peer writes on its own every ``announce_every_s``
+    without being asked, which is how a test reaches a plan format that has no
+    write step. Returns once the peer has opened its end, so a test that
+    writes next is writing to a listener.
     """
     record = tmp_path / "responder-received.bin"
     ready = tmp_path / "responder-ready"
     arguments = [sys.executable, str(RESPONDER), "--device", str(pair.peer), "--record", str(record), "--ready", str(ready), "--delay-s", str(delay_s)]
     for reply in replies:
         arguments += ["--reply", reply]
+    if announce is not None:
+        arguments += ["--announce", announce, "--announce-every-s", str(announce_every_s)]
     process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     _wait_until(ready.exists, PTY_SETUP_TIMEOUT_S, "waiting for the responder to open its end of the pair", process)
     return Responder(process=process, record=record)
@@ -764,3 +796,115 @@ def json_document(completed: subprocess.CompletedProcess[bytes]) -> dict:
     text = completed.stdout.decode("utf-8")
     assert text.strip(), f"no document on stdout (exit {completed.returncode}):\n{completed.stderr.decode('utf-8', errors='replace')}"
     return json.loads(text)
+
+
+# ---------------------------------------------------------------------------
+# An unprivileged user for the cases the kernel's permission checks decide.
+#
+# The container runs its tests as root, and root passes every mode bit, so a
+# device this user cannot open, a log this user cannot append to and a logs
+# directory this user cannot write into are only reachable by a server that is
+# not root. `setpriv` drops one child to `nobody`; the tree that child works in
+# is made under /tmp and handed to that user, because pytest's own temporary
+# tree is created with mode 0o700 and cannot even be traversed by anyone else.
+
+
+@dataclass(frozen=True)
+class UnprivilegedUser:
+    """The `nobody` uid and gid, and the `setpriv` that starts a process as them."""
+
+    uid: int
+    gid: int
+    setpriv: str
+
+    def command(self, *argv: str) -> list[str]:
+        return [self.setpriv, f"--reuid={self.uid}", f"--regid={self.gid}", "--clear-groups", *argv]
+
+
+def unprivileged_user() -> UnprivilegedUser:
+    """The user a server is dropped to, or a skip naming what this run lacks for it."""
+    if os.geteuid() != 0:
+        pytest.skip("needs root: a device or a file the server's user cannot open is something only root can arrange here")
+    setpriv = shutil.which("setpriv")
+    if setpriv is None:
+        pytest.skip("setpriv is not on PATH, and it is what drops the server to an unprivileged user")
+    import pwd
+
+    try:
+        entry = pwd.getpwnam("nobody")
+    except KeyError:
+        pytest.skip("this image has no `nobody` user to drop the server to")
+    return UnprivilegedUser(uid=entry.pw_uid, gid=entry.pw_gid, setpriv=setpriv)
+
+
+@dataclass
+class UnprivilegedTree:
+    """A workspace, configuration, state root and HOME an unprivileged server can use.
+
+    Everything under ``root`` is handed to the user by ``give_away``, which a
+    test calls once the configuration is written; what a test then wants
+    root-owned it makes afterwards.
+    """
+
+    root: Path
+    user: UnprivilegedUser
+
+    @property
+    def project(self) -> Path:
+        return self.root / "project"
+
+    @property
+    def home(self) -> Path:
+        return self.root / "home"
+
+    @property
+    def state(self) -> Path:
+        return self.root / "state"
+
+    @property
+    def config_path(self) -> Path:
+        return self.root / "config" / "config.yaml"
+
+    def give_away(self) -> None:
+        for path in [self.root, *self.root.rglob("*")]:
+            os.chown(path, self.user.uid, self.user.gid)
+
+    def environment(self) -> dict[str, str]:
+        """HOME and the XDG roots under the tree, and temporary storage the user can write."""
+        temporary = self.root / "tmp"
+        return {
+            "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "XDG_CACHE_HOME": str(self.home / ".cache"),
+            "XDG_DATA_HOME": str(self.home / ".local" / "share"),
+            "XDG_STATE_HOME": str(self.home / ".local" / "state"),
+            "TMPDIR": str(temporary),
+            "TEMP": str(temporary),
+            "TMP": str(temporary),
+        }
+
+    def server(self) -> LiveServer:
+        """A live server in the project, running as the unprivileged user."""
+        return LiveServer(
+            self.config_path,
+            self.project,
+            command=self.user.command(sys.executable, "-m", "agentic_hil", "mcp-stdio"),
+            environment=self.environment(),
+        )
+
+    def remove(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+def unprivileged_tree(user: UnprivilegedUser, com_port_device: str) -> UnprivilegedTree:
+    """A fresh tree under /tmp with the configuration written and everything handed to ``user``."""
+    import tempfile
+
+    root = Path(tempfile.mkdtemp(prefix="agentic-hil-unprivileged-", dir="/tmp"))
+    tree = UnprivilegedTree(root=root, user=user)
+    tree.project.mkdir()
+    tree.home.mkdir()
+    (root / "tmp").mkdir()
+    fixture_configuration(tree.project, tree.config_path, tree.state, com_port_device=com_port_device)
+    tree.give_away()
+    return tree
