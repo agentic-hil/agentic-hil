@@ -703,22 +703,21 @@ def test_clearing_a_breakpoint_the_target_is_sitting_on_leaves_the_stop_reason_a
     assert "already stopped" not in resumed["summary"].lower(), resumed
 
 
-@pytest.mark.xfail(reason="#492", strict=True)
 def test_halting_a_target_already_stopped_at_a_breakpoint_answers_that_it_was_already_stopped(session: McpServer) -> None:
     """Halt at a breakpoint, which an agent asks for whenever it is unsure.
 
     Asking a stopped core to stop is the ordinary shape of a cautious caller: it
     hit a breakpoint, it is about to read memory, and it makes sure. The answer
     owed is the state the target is already in, and the tool has a path for
-    exactly that. What happens instead is that the halt waits for a stop event
-    the target has no reason to emit twice, times out, and quarantines the bench
-    over a core that never moved, so a correct sequence ends with an operator
-    being asked to inspect a board that is sitting exactly where it was told to
-    sit.
+    exactly that. What happened instead (#492) was that the halt waited for a
+    stop event the target had no reason to emit twice, timed out, and
+    quarantined the bench over a core that never moved, so a correct sequence
+    ended with an operator being asked to inspect a board that was sitting
+    exactly where it was told to sit.
 
-    The quarantine that leaves behind is cleared by this file's own teardown,
-    through `agentic-hil recover`, so the tests after it meet a bench with
-    nothing standing.
+    Should that come back, the quarantine it leaves behind is cleared by this
+    file's own teardown, through `agentic-hil recover`, so the tests after it
+    meet a bench with nothing standing.
     """
     _, set_result = session.call("debug_set_breakpoint", {"location": ENTRY_FUNCTION})
     _, stopped = session.call("debug_continue", {"timeout_s": REACHABLE_STOP_TIMEOUT_S})

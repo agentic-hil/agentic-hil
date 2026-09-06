@@ -573,6 +573,23 @@ class GdbDebugSessions:
         session = session_result["session"]
         if self._refresh_session_stop(session) is not None:
             return self._report(self._stopped_result(tool, session, "Target was already stopped"))
+        # Nothing new arrived, so the decision is the session's own record. A
+        # stop the session already consumed (the breakpoint a debug_continue
+        # waited for, a fault, a confirmed halt) is the stop the target is in,
+        # and it is answered as it stands. A session that has recorded no stop
+        # but says halted is one that has not run since it started: every mode
+        # ends debug_start_session with the target halted. Neither gets an
+        # interrupt: on a target that never resumed the interrupt is
+        # acknowledged and no stop ever follows, and the wait for one timed out
+        # and quarantined a board that was sitting where it was told to (#492).
+        if session.status == "halted":
+            if session.stop_reason is not None:
+                return self._report(self._stopped_result(tool, session, "Target was already stopped"))
+            session.stop_reason = {"stop_reason": "halted", "backend_stop_reason": "session_start"}
+            self._write_session_log(session)
+            result = self._stopped_result(tool, session, "Target was already stopped")
+            result["summary"] += " The session started with the target halted and nothing has resumed it since."
+            return self._report(result)
         timeout = min(self.config.debugger.timeout_s, GDB_COMMAND_TIMEOUT_CAP_S)
         if timeout_s is not None:
             timeout = min(timeout, max(0.1, timeout_s))
