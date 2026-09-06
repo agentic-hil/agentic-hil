@@ -71,12 +71,20 @@ def blocking_record_states(config) -> set[str]:
 
 
 def test_the_installed_tools_are_the_ones_the_recording_names() -> None:
-    """The premise of every comparison below, asserted rather than noted."""
+    """The premise of every comparison below, asserted rather than noted.
+
+    All three strings are compared for equality, the package revision included.
+    OpenOCD's own banner says `0.12.0` for every Debian build of that release,
+    so the banner alone cannot notice a rebuild that reworded a message, and the
+    revision the recording names is only a claim as long as nothing reads it.
+    """
     versions = RECORDINGS["tool_versions"]
     openocd = subprocess.run([shutil.which("openocd"), "--version"], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
     pyocd = subprocess.run([shutil.which("pyocd"), "--version"], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
+    package = subprocess.run(["dpkg-query", "--showformat=${Version}", "--show", "openocd"], capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S, check=False)
 
-    assert versions["openocd"].startswith(openocd.stderr.splitlines()[0]), (versions["openocd"], openocd.stderr)
+    assert versions["openocd"] == openocd.stderr.splitlines()[0], (versions["openocd"], openocd.stderr)
+    assert versions["openocd_debian_package"] == package.stdout.strip(), (versions["openocd_debian_package"], package.stdout, package.stderr)
     assert versions["pyocd"] == pyocd.stdout.strip(), (versions["pyocd"], pyocd.stdout)
 
 

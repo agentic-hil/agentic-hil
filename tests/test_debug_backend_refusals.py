@@ -260,6 +260,63 @@ def test_debugger_info_refuses_when_the_configured_tool_vanished(tmp_path: Path,
     assert "version" not in result, result
 
 
+@pytest.mark.parametrize("backend_name", BACKENDS)
+def test_debugger_info_refuses_a_tool_that_went_between_the_resolve_and_the_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str) -> None:
+    """The same refusal from the other side of a window nothing can close.
+
+    `info()` resolves the executable and then spawns it, and nothing holds the
+    file between the two: an upgrade, a cleanup or an operator can take it away
+    in that window, and what the spawn reports then is a program that is not
+    there. That report has a branch of its own, and it has to answer the same
+    not-found refusal the resolve does rather than let a spawn failure out. The
+    resolve here answers what it answered while the file was there, which is
+    exactly what it would have answered a moment before the file went.
+    """
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    # No `.py` suffix: a fake with one is spawned as an argument to this
+    # interpreter, and the interpreter is what the operating system would then
+    # find. The path under test is the one where the tool itself is the program.
+    executable = toolchain / f"{backend_name}-tool"
+    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    config = config_for(tmp_path, backend_name, executable)
+    backend = BACKEND_CLASS[backend_name](config)
+    resolved = backend._resolve_executable()
+    assert resolved["ok"] is True, resolved
+    executable.unlink()
+    monkeypatch.setattr(backend, "_resolve_executable", lambda: dict(resolved))
+
+    result = backend.info()
+
+    assert result["ok"] is False, result
+    assert result["tool"] == "debugger_info"
+    assert result["error_type"] == "debugger_not_found", result
+    assert result["backend_error_type"] == NOT_FOUND_BACKEND_ERROR[backend_name], result
+    assert "version" not in result, result
+
+
+@pytest.mark.parametrize("backend_name", BACKENDS)
+def test_a_failure_whose_words_match_no_bucket_is_the_same_public_error_everywhere(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str) -> None:
+    """The neighbour of the version check: one public name for "the debugger failed and said no more".
+
+    The version check above publishes `debugger_error` for a failure no bucket
+    matched, which is the name the debug-session backend has always given an
+    unclassified server failure. This pins that the name is the backend's answer
+    for that classification wherever it is reached, not a special case of the
+    version check: the same unmatched words through `probe_target` publish it
+    too, with the backend's own `unknown_debugger_error` still carried beside it
+    for a caller that reads the backend layer.
+    """
+    play_transcript(monkeypatch, stderr="Error: the tool gave up and said nothing about why\n", returncode=1)
+    config = config_for(tmp_path, backend_name, FAKE_TRANSCRIPT)
+
+    result = call(config, "probe_target")
+
+    assert result["ok"] is False, result
+    assert result["backend_error_type"] == "unknown_debugger_error", result
+    assert result["error_type"] == "debugger_error", result
+
+
 @pytest.mark.parametrize("backend_name", ["openocd", "pyocd"])
 def test_debugger_info_reads_the_version_the_real_tool_prints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str) -> None:
     """The happy path, pinned to the world rather than to the fake's own idea of it.
@@ -462,6 +519,13 @@ def test_classifier_buckets_from_recorded_tool_output(tmp_path: Path, backend_na
 # quarantines (the tool reached it and the effect is unconfirmed). The pyOCD
 # memory read is driven below on its own, because a read needs a flashed ELF
 # to resolve its symbol against, which no single transcript can provide.
+#
+# Five of these pairs have no catalogue entry at all today (verify_failed on
+# ST-Link and on pyOCD, flash_failed on pyOCD and on OpenOCD, memory_read_failed
+# on pyOCD), so what the row pins for them is the bucket and the absence of
+# steps. Writing those entries is owed and is not #506's subject: an operator
+# who meets a failed verify gets no next step, and that is a gap in the
+# catalogue rather than a wrong classification.
 TOOL_RESULT_ROWS = [
     ("stlink", "probe_target", {}, "Error: No ST-LINK detected!\n", "probe_not_found", "adapter_not_found", "refused"),
     ("stlink", "probe_target", {}, "ST-LINK SN  : STLINK123\nError: no device found\n", "target_not_detected", "target_not_detected", "refused"),
@@ -509,6 +573,13 @@ def test_a_missing_input_file_on_stlink_is_not_answered_with_the_missing_configu
     and its own summary says so (`Debugger input file could not be found.`), so
     the result must not carry the steps of the other refusal: an operator whose
     firmware path was wrong must not be sent to `agentic-hil init`.
+
+    #506 lists `config_file_not_found` among the public error_types these
+    phrases map to, so the name stays and the catalogue is what has to tell the
+    two apart: the backend-scoped entry, the same mechanism the running-server
+    variant of this error_type already uses. What the operator gets instead is
+    asserted here rather than only what they must not get, so no fix can be had
+    by publishing an undocumented error_type or by leaving the result silent.
     """
     play_transcript(monkeypatch, stderr="ST-LINK SN  : STLINK123\nError: File build/firmware.elf not found\n", returncode=1)
     config = config_for(tmp_path, "stlink", FAKE_TRANSCRIPT)
@@ -517,9 +588,16 @@ def test_a_missing_input_file_on_stlink_is_not_answered_with_the_missing_configu
 
     assert result["ok"] is False, result
     assert result["backend_error_type"] == "config_file_not_found", result
+    assert result["error_type"] == "config_file_not_found", result
     assert result["summary"] == "Debugger input file could not be found.", result
-    assert result.get("remediation") != remediation_fields("config_file_not_found")["remediation"], result.get("remediation")
-    assert "agentic-hil init" not in json.dumps(result.get("remediation", [])), result.get("remediation")
+    scoped = remediation_fields("config_file_not_found", "stlink")
+    assert result.get("remediation") == scoped["remediation"], result.get("remediation")
+    assert scoped["remediation"] != remediation_fields("config_file_not_found")["remediation"], scoped
+    steps = json.dumps(scoped["remediation"])
+    assert "agentic-hil init" not in steps, steps
+    # The argument that was wrong, named, so the steps are about this refusal
+    # and not a second copy of the configuration route under another name.
+    assert "image_path" in steps, steps
 
 
 def read_service(tmp_path: Path, executable: Path) -> AgenticHILToolService:
@@ -609,16 +687,36 @@ def debug_service(tmp_path: Path, *, server: Path = FAKE_OPENOCD, fake_gdb_behav
 def closed_reporting_its_own_failure(service: AgenticHILToolService) -> BaseException | None:
     """`service.close()`'s own error, if it has one, instead of an exception that hides the test.
 
-    A session whose GDB died is still a session the caller has to be able to
-    close. Raising out of `close` in a `finally` replaces every assertion the
-    test came to make with the cleanup's own complaint, so the error is
-    returned and asserted on with the rest.
+    Raising out of `close` in a `finally` replaces every assertion the test came
+    to make with the cleanup's own complaint, so the error is returned and
+    asserted on with the rest.
     """
     try:
         service.close()
     except BaseException as error:  # noqa: BLE001 - asserted on by the caller
         return error
     return None
+
+
+# What closing a session whose GDB died has to keep doing. The target was last
+# seen resumed and the debugger then died, so whether the core is halted is
+# genuinely unknown, and the close contract already answers that: the session is
+# left `cleanup_required` with `hardware_state_unconfirmed` set and the close
+# raises rather than reporting a tidy end (`GdbDebugSessions.close`, pinned by
+# tests/test_debug_sessions.py and tests/test_debug_session_run_state.py). #506
+# asks nothing about `close`, so it is pinned here as unchanged: no fix for a
+# GDB that dies may buy its green by skipping the halt reconfirmation for a
+# board that may still be running.
+UNCONFIRMED_CLOSE_SENTENCE = "reconfirming the target was halted"
+
+
+def assert_close_refused_to_call_the_target_settled(closing: BaseException | None, service: AgenticHILToolService) -> None:
+    assert isinstance(closing, RuntimeError), f"closing a session whose GDB exited answered {closing!r}"
+    assert UNCONFIRMED_CLOSE_SENTENCE in str(closing), closing
+    session = service.backend._debug.session
+    assert session is not None, "the unsettled session was cleared by the close that could not settle it"
+    assert session.status == "cleanup_required", session.status
+    assert session.hardware_state_unconfirmed is True, session
 
 
 @pytest.mark.parametrize(
@@ -658,16 +756,18 @@ def test_a_server_that_dies_at_startup_is_classified_from_its_output(tmp_path: P
 
 
 def test_a_gdb_that_dies_after_acknowledging_the_resume_ends_the_session_in_error(tmp_path: Path) -> None:
-    """`^running`, then the pipe closes: a `debugger_error` stop, and a session nobody may go on using.
+    """`^running`, then the pipe closes: a `debugger_error` stop naming the status GDB left with.
 
-    The stop the product waited for never comes; what comes is the exit, and it
-    is read as a debugger failure rather than as a target that did not stop
-    before the timeout, so the caller is not told to wait longer. The session
-    is over: its status is `error`, a halt asked for afterwards is refused
-    instead of being sent into a closed pipe, and closing the service that lost
-    its GDB is an answer too, not an exception the caller cannot handle. The
-    exit code itself belongs to the two timings below, where the transport has
-    something pending to report it on.
+    This is the timing #506 names. The stop the product waited for never comes;
+    what comes is the exit, and it is read as a debugger failure rather than as
+    a target that did not stop before the timeout, so the caller is not told to
+    wait longer. The pipe closed before the wait began, which is a fact about
+    this run's timing and not about what the caller has to be told: a stop that
+    never comes because the debugger died names the code it died with, here as
+    in the two timings below, or a log reader cannot tell a GDB that crashed
+    from one that was never there. The session is over: its status is `error`
+    and a halt asked for afterwards is refused instead of being sent into a
+    closed pipe.
     """
     service = debug_service(tmp_path, fake_gdb_behavior="gdb_exits_after_running")
     try:
@@ -681,12 +781,16 @@ def test_a_gdb_that_dies_after_acknowledging_the_resume_ends_the_session_in_erro
     assert continued["ok"] is False, continued
     assert continued["error_type"] == "debugger_error", continued
     assert continued["stop_reason"] == "debugger_error", continued
-    assert continued["stop"]["backend_error"] == "GDB process is not running.", continued["stop"]
+    assert continued["stop"]["backend_error"] == "GDB process exited with code 0.", continued["stop"]
     assert continued["session"]["status"] == "error", continued
     assert status["status"] == "error", status
     assert halted["ok"] is False, halted
+    # The session layer answers first: a session already in `error` takes no
+    # further commands, so the transport's own "GDB process is not running." is
+    # what a caller reaching past the session meets, and that is pinned on the
+    # transport itself in test_the_transport_answers_an_exited_gdb_in_its_own_words.
     assert halted["error_type"] == "session_not_active", halted
-    assert closing is None, f"closing a session whose GDB exited raised {type(closing).__name__}: {closing}"
+    assert_close_refused_to_call_the_target_settled(closing, service)
 
 
 def test_a_gdb_that_dies_while_the_stop_wait_is_pending_reports_the_exit_code(tmp_path: Path) -> None:
@@ -709,7 +813,7 @@ def test_a_gdb_that_dies_while_the_stop_wait_is_pending_reports_the_exit_code(tm
     assert continued["error_type"] == "debugger_error", continued
     assert continued["stop_reason"] == "debugger_error", continued
     assert continued["stop"]["backend_error"] == "GDB process exited with code 0.", continued["stop"]
-    assert closing is None, f"closing a session whose GDB exited raised {type(closing).__name__}: {closing}"
+    assert_close_refused_to_call_the_target_settled(closing, service)
 
 
 def test_a_gdb_that_dies_with_the_command_pending_answers_the_exit_code(tmp_path: Path) -> None:
@@ -725,7 +829,7 @@ def test_a_gdb_that_dies_with_the_command_pending_answers_the_exit_code(tmp_path
     assert continued["error_type"] == "debugger_error", continued
     assert continued["backend_error_type"] == "gdb_error", continued
     assert continued["summary"] == "GDB process exited with code 0.", continued
-    assert closing is None, f"closing a session whose GDB exited raised {type(closing).__name__}: {closing}"
+    assert_close_refused_to_call_the_target_settled(closing, service)
 
 
 def test_the_transport_answers_an_exited_gdb_in_its_own_words(tmp_path: Path) -> None:

@@ -3,7 +3,8 @@
   "recorded_on": "2026-09-06",
   "image": "tools/container/Dockerfile (python:3.12-slim), no probe attached",
   "tool_versions": {
-    "openocd": "Open On-Chip Debugger 0.12.0 (Debian package openocd 0.12.0-3+b2)",
+    "openocd": "Open On-Chip Debugger 0.12.0",
+    "openocd_debian_package": "0.12.0-3+b2",
     "pyocd": "0.45.1"
   },
   "recordings": {
