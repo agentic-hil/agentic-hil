@@ -207,7 +207,14 @@ class CanBusService:
 
     def list_buses(self) -> JsonObject:
         buses = {bus_id: self._bus_status(bus_config, self.sessions.get(bus_id)) for bus_id, bus_config in self.config.can_buses.items()}
-        return {"ok": True, "tool": "can_buses_list", "buses": buses, "supported_adapters": SUPPORTED_CAN_ADAPTERS, "summary": f"{len(buses)} configured CAN bus(es)."}
+        summary = f"{len(buses)} configured CAN bus(es)."
+        shared = sum(1 for bus_config in self.config.can_buses.values() if bus_config.shares)
+        if shared:
+            # Said in the summary as well as per bus: the summary is the line an
+            # agent reads first, and "shareable" without the rest of the sentence
+            # is the claim this listing must not make.
+            summary += f" {shared} declared shareable through shares:, and a session still takes the whole bus."
+        return {"ok": True, "tool": "can_buses_list", "buses": buses, "supported_adapters": SUPPORTED_CAN_ADAPTERS, "summary": summary}
 
     def session_start(self, bus_id: str, clear_rx_queue: bool = True) -> JsonObject:
         if not isinstance(bus_id, str) or not isinstance(clear_rx_queue, bool):
@@ -242,7 +249,10 @@ class CanBusService:
         try:
             lease = self.coordinator.acquire(can_device(self.config, bus_id))
         except CoordinationError as error:
-            return self._write_report({"tool": "can_session_start", "bus_id": bus_id, "side_effect_committed": False, **error.result})
+            # A second session on a bus with `shares:` meets exactly this refusal,
+            # and it is where the agent that trusted the advertisement finds out
+            # why: the fields say the bus is declared shareable and taken whole.
+            return self._write_report({"tool": "can_session_start", "bus_id": bus_id, "side_effect_committed": False, **error.result, **sharing_advertisement(bus_config)})
         contact = ContactMarker()
         try:
             with managed_process_owner(self.coordinator.owner_marker):
@@ -498,6 +508,7 @@ class CanBusService:
             from agentic_hil.canbroker import listen_only_proof, share_view
 
             result["shares"] = {name: share_view(share) for name, share in bus_config.shares.items()}
+            result.update(sharing_advertisement(bus_config))
             result["listen_only_enforcement_level"] = bus_config.listen_only_enforcement
             result["listen_only_proof"] = listen_only_proof(bus_config)
             if bus_config.listen_only_enforcement == "service":
@@ -800,6 +811,28 @@ def peak_channel_uses_socketcan(channel: str) -> bool:
     `False`.
     """
     return os.name != "nt" and not is_windows_peak_channel(channel) and PEAK_LINUX_NETDEV_CHANNEL.fullmatch(channel) is not None
+
+
+# What a bus with `shares:` says about itself while a session still takes it
+# whole. The broker's participant path exists (`canbroker.attach_participant`)
+# and no tool or plan step reaches it: `can_session_start` leases the bus's own
+# key and opens the adapter itself, so a second session on a shared bus is
+# refused exactly as on a single-owner one. Until a session can attach as a
+# participant, the listing an agent reads before starting a session, and the
+# refusal it meets when it did not, both say so. A bus without `shares:` carries
+# none of these fields: the vocabulary appears where shares are declared and
+# nowhere else.
+SHARING_NOTE = (
+    "This bus declares shares:, and a session still takes the whole bus: can_session_start holds the bus lock itself "
+    "and opens no participant view yet, so a second session on this bus is refused until participant sessions land. "
+    "The declared shares are configuration only for now."
+)
+
+
+def sharing_advertisement(bus_config: CanBusConfig) -> JsonObject:
+    if not bus_config.shares:
+        return {}
+    return {"shares_declared": True, "session_takes_whole_bus": True, "sharing_note": SHARING_NOTE}
 
 
 def effective_can_adapter(bus_config: CanBusConfig) -> str:
