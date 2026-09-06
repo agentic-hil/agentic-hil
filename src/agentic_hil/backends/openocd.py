@@ -15,6 +15,7 @@ from agentic_hil.backends.common import (
     contains_failure_text,
     failure_text_lines,
     invocation,
+    not_executable_refusal,
     programmer_output_fields,
     reports_reset_failure,
     spawn_command,
@@ -197,6 +198,8 @@ class OpenOCDBackend:
         completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), min(self.config.debugger.timeout_s, 10))
         if completed.not_found:
             return {"tool": "debugger_info", **OPENOCD_NOT_FOUND}
+        if completed.not_executable:
+            return {"tool": "debugger_info", **not_executable_refusal(self.backend_name, str(resolved["executable_path"]), completed)}
         if completed.timed_out:
             return {
                 "ok": False,
@@ -547,6 +550,18 @@ class OpenOCDBackend:
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         if completed.not_found:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **OPENOCD_NOT_FOUND, "finished_at": finished_at, "elapsed_ms": elapsed_ms}
+        if completed.not_executable:
+            # Before the log is written, exactly where the missing-file branch
+            # returns: no process ran, so there is no transcript to record and
+            # nothing was said to the board.
+            return {
+                "tool": tool,
+                "backend": self.backend_name,
+                "started_at": started_at,
+                **not_executable_refusal(self.backend_name, str(resolved["executable_path"]), completed),
+                "finished_at": finished_at,
+                "elapsed_ms": elapsed_ms,
+            }
 
         audit_error = self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
         if completed.timed_out:

@@ -20,6 +20,7 @@ from agentic_hil.backends.common import (
     debug_session_unsupported,
     find_stm32_programmer_cli,
     invocation,
+    not_executable_refusal,
     programmer_output_fields,
     reports_reset_failure,
     reset_init_unsupported,
@@ -268,6 +269,8 @@ class STLinkBackend:
         completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), min(self.config.debugger.timeout_s, 10))
         if completed.not_found:
             return {"tool": "debugger_info", **STLINK_NOT_FOUND}
+        if completed.not_executable:
+            return {"tool": "debugger_info", **not_executable_refusal(self.backend_name, str(resolved["executable_path"]), completed)}
         if completed.timed_out:
             return {"ok": False, "tool": "debugger_info", "backend": self.backend_name, "executable": resolved["executable"], "error_type": "timeout", "summary": "Debugger version check timed out."}
         output = f"{completed.stdout}{completed.stderr}".strip()
@@ -292,6 +295,8 @@ class STLinkBackend:
         completed = spawn_command(command, str(Path(str(resolved["executable_path"])).parent), self.config.debugger.timeout_s)
         if completed.not_found:
             return {"tool": tool, **STLINK_NOT_FOUND}
+        if completed.not_executable:
+            return {"tool": tool, **not_executable_refusal(self.backend_name, str(resolved["executable_path"]), completed)}
         if completed.timed_out:
             return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "timeout", "summary": "Debugger probe discovery timed out.", **NOT_CONTACTED}
         output = f"{completed.stdout}{completed.stderr}"
@@ -606,6 +611,17 @@ class STLinkBackend:
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         if completed.not_found:
             return {"tool": tool, "backend": self.backend_name, "started_at": started_at, **STLINK_NOT_FOUND, "finished_at": finished_at, "elapsed_ms": elapsed_ms}
+        if completed.not_executable:
+            # Before the log is written, exactly where the missing-file branch
+            # returns: no process ran, so there is no transcript to record.
+            return {
+                "tool": tool,
+                "backend": self.backend_name,
+                "started_at": started_at,
+                **not_executable_refusal(self.backend_name, str(resolved["executable_path"]), completed),
+                "finished_at": finished_at,
+                "elapsed_ms": elapsed_ms,
+            }
         audit_error = self._write_log(log_path, args, completed.stdout, completed.stderr, completed.returncode, completed.timed_out)
         if completed.timed_out:
             return self._finish_log_audit({"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": "timeout", "summary": "Debugger command timed out.", "likely_causes": self._likely_causes("timeout"), "log_path": display_path(self.config, log_path)}, audit_error)

@@ -1232,6 +1232,35 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "or CAN adapter driven outside Agentic HIL defeats the policy this refusal enforces.",
         ),
     ),
+    "debugger_not_executable": ErrorRemedy(
+        meaning=(
+            "The toolchain executable this entry names is present on this host and will not run. The path resolves, it "
+            "is a regular file, and the operating system refused to execute it: either its mode withholds the execute "
+            "bit, or its contents are not something this machine can run as a program. Nothing was spawned, so the "
+            "bench was not touched and the board is where the last call that did reach it left it."
+        ),
+        remediation=(
+            "Read `not_executable_reason` in the refusal, because the two cases have different repairs. "
+            "`permission_denied` means the file is there and may not be executed, which is what a toolchain unpacked or "
+            "copied out of an archive that did not carry its execute bit looks like: restore it with `chmod +x` on the "
+            "path the refusal names, and check that the filesystem it lives on is not mounted `noexec`.",
+            "`not_an_executable_image` means the file was reached and is not a program this machine can run: a script "
+            "whose first line is not a shebang, an archive or installer configured instead of the binary it unpacks, or "
+            "a binary built for another architecture. `file <path>` on the path the refusal names says which, and the "
+            "fix is to point the configuration at the real binary for this machine.",
+            "Correct `debuggers.<name>.executable` (or `debug.gdb_executable` where the refusal names GDB) with "
+            "`project_config_set`, then run `agentic-hil doctor`, which repeats this check and reports the toolchain's "
+            "version once the file runs.",
+        ),
+        do_not=(
+            "Do not copy the toolchain binary into the workspace to get a copy you can change. A configured executable "
+            "inside the workspace is repository-controlled code running as the debugger, and the configuration refuses "
+            "such a path at load.",
+            "Do not run the debugger by hand to get past it. The refusal is about the file this configuration names, "
+            "and a different binary that happens to be on PATH would leave the bench describing a toolchain it does not "
+            "drive.",
+        ),
+    ),
     "debugger_config_not_found": ErrorRemedy(
         meaning=(
             "A debugger script this entry names could not be used: the interface or target configuration file the "

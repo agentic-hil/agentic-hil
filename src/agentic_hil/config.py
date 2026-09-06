@@ -1248,10 +1248,31 @@ def safe_writable_directory(directory: str | Path, *, field: str, config_path: s
     entry is a directory rather than a file so that ``mkdir``/``rmdir`` prove
     create *and* delete rights in the one round trip, and it is created through
     the same no-symlink walk as everything else here.
+
+    The reachability walk is inside the same ``try`` as the probe, because a
+    caller choosing between locations cannot act on two different kinds of
+    answer about one directory. It used to be on the line above: a directory that
+    existed and refused the probe came back as this refusal and was skipped for
+    the next candidate, and one that could not be created at all, an unreadable
+    projects directory, a mode of 0500 with the leaf absent, a read-only mount,
+    left as the raw ``OSError`` the walk raises. ``EACCES``, ``EPERM`` and
+    ``EROFS`` are not among the two error numbers the walk converts, so
+    ``authoritative_config_target`` and ``provisionable_state_root``, which
+    select on ``ConfigError``, lost the candidate loop to it and the CLI
+    entrypoint, which catches ``ConfigError`` and ``CoordinationError``, let it
+    reach the interpreter. ``agentic-hil init`` answered with a traceback and no
+    file on exactly the profile the fallback root exists for (#478). Both halves
+    are the same statement, that this location cannot hold what is about to be
+    written, so both leave as the same refusal.
+
+    The path is spelled before the walk rather than taken from it, so the
+    refusal names the directory whether or not the walk got far enough to reach
+    it. ``absolute_without_symlinks`` touches nothing.
     """
-    path = safe_directory(directory)
+    path = absolute_without_symlinks(Path(directory))
     probe = f"{WRITE_PROBE_PREFIX}{os.getpid()}"
     try:
+        safe_directory(path)
         if os.name != "nt":
             descriptor = _open_directory_fd(path, create=True)
             try:

@@ -23,8 +23,10 @@ profile exactly, on either platform, with nothing timing-dependent in it.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
+import pathlib
 from pathlib import Path
 
 import pytest
@@ -2435,3 +2437,210 @@ def test_every_flag_init_offers_is_explained_in_its_own_help() -> None:
     assert "--force" in help_text
     assert "state_root" in help_text
     assert "agentic-hil grant" in help_text
+
+
+# ---------------------------------------------------------------------------
+# #478: the candidate walk skipped a root that refused the write probe and
+# raised out of one that refused to be created at all, so the command that sets
+# a bench up ended in a traceback on the profile the second root exists for.
+
+
+def refuse_creation_in(monkeypatch: pytest.MonkeyPatch, directory: Path, error: OSError) -> None:
+    """Refuse every entry created directly in one directory, and nothing else.
+
+    The stand-in for two of the three profiles #478 names, a projects directory
+    whose mode permits reading and not creating and a configuration home on a
+    read-only mount, plus the write probe's own refusal. A mode of 0500 and a
+    read-only mount are not instruments this suite has on every platform it runs
+    on, and all three reach the product as one call: the `os.mkdir` the
+    no-symlink walk makes for the component it is creating, or the one the write
+    probe makes for its private entry. That call is refused here, with the error
+    number the profile really produces, so `safe_directory`,
+    `safe_writable_directory`, the candidate walk and the command above them all
+    run for real.
+
+    Scoped by the directory the entry is created in rather than by its name,
+    because the POSIX walk creates through the descriptor it is holding and hands
+    `os.mkdir` a bare component name with no path in it at all; the descriptor is
+    the directory, and `samestat` is what says which one it is.
+    """
+    real = os.mkdir
+    parent = absolute_without_symlinks(Path(directory))
+    marker = parent.stat()
+
+    def mkdir(path: object, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        if os.path.samestat(os.fstat(dir_fd), marker) if dir_fd is not None else os.path.normcase(str(absolute_without_symlinks(Path(str(path)).parent))) == os.path.normcase(str(parent)):
+            raise error
+        real(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "mkdir", mkdir)
+    # Python 3.10 and older route `Path.mkdir` through an accessor that bound
+    # `os.mkdir` when pathlib was imported, so the patch above never reaches
+    # the product's `component.mkdir(...)` there: the platform root was created
+    # after all, the fallback was never asked, and the test that pins the walk
+    # failed on exactly the interpreter the matrix runs first. Later versions
+    # call `os.mkdir` directly and carry no such accessor.
+    accessor = getattr(pathlib, "_NormalAccessor", None)
+    if accessor is not None and hasattr(accessor, "mkdir"):
+        monkeypatch.setattr(accessor, "mkdir", staticmethod(mkdir))
+
+
+def refuse_directory_walk(monkeypatch: pytest.MonkeyPatch, directory: Path, error: OSError) -> None:
+    """Refuse to reach one directory at all, with a real filesystem error.
+
+    The third profile #478 names: a projects directory this account cannot read,
+    where the walk stops on the way down and the per-workspace directory below is
+    never reached, whether it exists or not. Injected at the call `safe_directory`
+    makes to walk the chain, which is `_open_directory_fd` on POSIX and the held
+    handle chain on Windows, because an unreadable directory is a mode on one
+    platform and a deny ACE on the other and neither exists on both.
+    """
+    from agentic_hil import config as config_module
+
+    name = "_windows_hold_directory_chain" if os.name == "nt" else "_open_directory_fd"
+    real = getattr(config_module, name)
+    refused = os.path.normcase(str(absolute_without_symlinks(Path(directory))))
+
+    def walk(target: Path, *, create: bool = False) -> object:
+        if os.path.normcase(str(absolute_without_symlinks(Path(target)))) == refused:
+            raise error
+        return real(target, create=create)
+
+    monkeypatch.setattr(f"agentic_hil.config.{name}", walk)
+
+
+def test_an_unreadable_projects_directory_is_skipped_for_the_next_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first of the three profiles, stated as the walk itself.
+
+    A projects directory under the configuration home that this account cannot
+    read stops the chain walk before the per-workspace directory, and that is one
+    root failing to hold the file, which is the exact condition the second root
+    is in the list for.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    projects = project_config_directory()
+    projects.mkdir(parents=True)
+    refuse_directory_walk(monkeypatch, projects / project_config_leaf(workspace), PermissionError(errno.EACCES, "Permission denied"))
+
+    target = authoritative_config_target(workspace)
+
+    assert target.parent.parent == fallback_config_root()
+    assert not (projects / project_config_leaf(workspace)).exists()
+
+
+def test_a_projects_directory_that_refuses_the_leaf_is_skipped_for_the_next_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second profile: mode 0500, and the per-workspace directory absent.
+
+    The directory reads and lists, so the walk gets that far, and the `mkdir` for
+    the component below it is refused. This is the shape the existing fallback
+    test could never reach, because it only ever made an existing directory
+    refuse the write probe.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    projects = project_config_directory()
+    projects.mkdir(parents=True)
+    refuse_creation_in(monkeypatch, projects, PermissionError(errno.EACCES, "Permission denied"))
+
+    target = authoritative_config_target(workspace)
+
+    assert target.parent.parent == fallback_config_root()
+    assert not (projects / project_config_leaf(workspace)).exists()
+
+
+def test_a_read_only_configuration_home_is_skipped_for_the_next_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The third profile: the configuration home is mounted read-only.
+
+    Nothing under it can be created, `agentic-hil` included, so the walk is
+    refused at the first component it has to make. The fallback root lives under
+    the home directory, which is a different mount and fully writable, and that
+    is the whole reason it is on the list.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    config_home = project_config_directory().parent.parent
+    config_home.mkdir(parents=True, exist_ok=True)
+    refuse_creation_in(monkeypatch, config_home, OSError(errno.EROFS, "Read-only file system"))
+
+    target = authoritative_config_target(workspace)
+
+    assert target.parent.parent == fallback_config_root()
+    assert not (config_home / "agentic-hil").exists()
+
+
+def test_init_writes_under_the_fallback_when_the_default_cannot_be_created(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the operator gets, on the profile the report came from.
+
+    `init` reached the interpreter here: the raw `OSError` left the candidate
+    loop, left `init_config`, and passed the entrypoint, which catches
+    `ConfigError` and `CoordinationError` only. Exit 1, a traceback, no file, and
+    the writable root one line further down the list never looked at.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    projects = project_config_directory()
+    projects.mkdir(parents=True)
+    one_attached_stlink(monkeypatch, own_programmer(tmp_path), "STLINK47801")
+    refuse_creation_in(monkeypatch, projects, PermissionError(errno.EACCES, "Permission denied"))
+
+    created = init_config()
+
+    assert created["ok"] is True, created
+    assert Path(created["path"]) == fallback_config_root() / project_config_leaf(workspace) / "config.yaml"
+    assert Path(created["path"]).is_file()
+    assert Path(load_authoritative_config(workspace).workspace_root) == workspace
+
+
+def test_a_healthy_first_root_still_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour that decides whether this is a fix or a relocation.
+
+    A profile with nothing wrong with it keeps the platform default, and the
+    fallback root is not created at all.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+
+    target = authoritative_config_target(workspace)
+
+    assert target == project_config_directory() / project_config_leaf(workspace) / "config.yaml"
+    assert not fallback_config_root().exists()
+
+
+def test_an_existing_leaf_that_refuses_the_write_probe_still_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one case the walk already handled, pinned as unchanged.
+
+    The per-workspace directory is there and opens, and only the create-and-delete
+    probe is refused. That was the single shape reaching the fallback before, and
+    it still reaches it.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    leaf = project_config_directory() / project_config_leaf(workspace)
+    leaf.mkdir(parents=True)
+    refuse_creation_in(monkeypatch, leaf, PermissionError(errno.EACCES, "Permission denied"))
+
+    target = authoritative_config_target(workspace)
+
+    assert target.parent.parent == fallback_config_root()
+    assert list(leaf.iterdir()) == []
+
+
+def test_no_root_that_can_hold_the_file_still_refuses_rather_than_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other end of the walk, pinned as unchanged.
+
+    Skipping a root that cannot be created must not turn "no location works" into
+    a silent answer. Both roots refuse the same way here, and what comes out is
+    the catalogue refusal on `config_path`, carrying the remediation that names
+    the fallback root, rather than an `OSError` on its way to the interpreter.
+    """
+    workspace = bench(tmp_path, monkeypatch)
+    for root in project_config_directories():
+        root.mkdir(parents=True, exist_ok=True)
+        refuse_creation_in(monkeypatch, root, PermissionError(errno.EACCES, "Permission denied"))
+
+    with pytest.raises(ConfigError) as refusal:
+        authoritative_config_target(workspace)
+
+    assert refusal.value.error_type == "unsafe_configured_path"
+    assert refusal.value.details.get("field") == "config_path"
+    assert refusal.value.to_dict()["remediation"] == remediation_fields("unsafe_configured_path", "config_path")["remediation"]
+    # The same refusal is what the command answers with, which is what the
+    # entrypoint can turn into an exit code and a document.
+    with pytest.raises(ConfigError) as command_refusal:
+        init_config()
+    assert command_refusal.value.error_type == "unsafe_configured_path"

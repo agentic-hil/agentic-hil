@@ -327,6 +327,14 @@ def enumerate_attached_probes(timeout_s: float = 10.0, *, com_ports: JsonObject 
     listed = spawn_command([*invocation(executable), "-q", "-l", "st-link-only"], cwd, timeout_s)
     if listed.not_found:
         return _discovery_failure("debugger_not_found", "STM32CubeProgrammer CLI disappeared during discovery.", executable=executable, **found_by)
+    if listed.not_executable:
+        return _discovery_failure(
+            "debugger_not_executable",
+            f"The STM32CubeProgrammer CLI this host answered with (`{executable}`) is present and will not run: {listed.spawn_error}.",
+            executable=executable,
+            not_executable_reason=listed.not_executable_reason,
+            **found_by,
+        )
     if listed.timed_out:
         return _discovery_failure("timeout", "ST-Link enumeration timed out after its process was reaped.", executable=executable, **found_by)
     output = f"{listed.stdout}{listed.stderr}"
@@ -470,6 +478,16 @@ def _openocd_target_identity(
         return None, _discovery_failure(
             "debugger_not_found",
             f"OpenOCD (`{executable}`) disappeared before the target could be read. Nothing was said to the board.",
+            **attempt,
+        )
+    if probed.not_executable:
+        # The spawn was refused, so this is the same pre-contact failure as the
+        # branch above: nothing was said to the board, and the bench stays
+        # `unchanged`.
+        return None, _discovery_failure(
+            "debugger_not_executable",
+            f"OpenOCD (`{executable}`) is present and will not run, so the target could not be read: {probed.spawn_error}. Nothing was said to the board.",
+            not_executable_reason=probed.not_executable_reason,
             **attempt,
         )
     if probed.timed_out:
@@ -752,6 +770,12 @@ def _stlink_target_identity(executable: str, probe_id: str, timeout_s: float) ->
     )
     if probed.not_found:
         return None, _discovery_failure("debugger_not_found", "STM32CubeProgrammer CLI disappeared during target discovery.")
+    if probed.not_executable:
+        return None, _discovery_failure(
+            "debugger_not_executable",
+            f"The STM32CubeProgrammer CLI (`{executable}`) is present and will not run, so no target could be read: {probed.spawn_error}.",
+            not_executable_reason=probed.not_executable_reason,
+        )
     if probed.timed_out:
         return None, _discovery_failure("timeout", "Target discovery timed out after its process was reaped.")
     target = stlink_target_info(f"{probed.stdout}{probed.stderr}")
