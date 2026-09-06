@@ -24,14 +24,12 @@
 #
 # NET_ADMIN is for the CAN tests, which create a virtual CAN interface inside
 # the container and bind the product's SocketCAN transport to it; the host
-# kernel has to carry the `vcan` module (`modprobe vcan`). The serial tests
-# need only what a container has by default: the devpts socat allocates its
-# pseudo-terminal pair from, and root inside the container, which two of them
-# use to drop a server to `nobody` through `setpriv`.
+# kernel has to carry the `vcan` and `can_raw` modules (`modprobe vcan can_raw`).
+# The serial tests need only what a container has by default: the devpts socat
+# allocates its pseudo-terminal pair from, and root inside the container, which
+# two of them use to drop a server to `nobody` through `setpriv`.
 #
-# NET_ADMIN is for the CAN tests, which create a virtual CAN interface inside
-# the container and bind the product's SocketCAN transport to it; the host
-# kernel has to carry the `vcan` module (`modprobe vcan`). The run needs the network. uv resolves this distribution's dependencies from
+# The run needs the network. uv resolves this distribution's dependencies from
 # the package index, and one test reads the release index over HTTPS to check
 # that a currency claim is only made after the index has answered.
 # Pinned by digest, with the tag it was resolved from beside it, the way this
@@ -62,10 +60,12 @@ FROM python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e18
 # would be an image whose results depend on which toolchain.
 #
 # The virtual CAN interface itself is not made here: a container cannot load
-# a kernel module, so the host has to carry `vcan` and the run has to grant
+# a kernel module, so the host has to carry `vcan` and `can_raw` and the run has to grant
 # `--cap-add NET_ADMIN`. Without both, the CAN tests skip naming that reason,
 # and the job that runs this tier counts the skip as a failure.
-RUN apt-get update \n    && apt-get install --no-install-recommends --yes openocd ca-certificates procps curl socat iproute2 can-utils \n    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes openocd ca-certificates procps curl socat iproute2 can-utils \
+    && rm -rf /var/lib/apt/lists/*
 
 # One version, named here, because the receipts these tests read are written by
 # this program and a different one may write them differently: that is the whole

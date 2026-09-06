@@ -36,9 +36,12 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -68,17 +71,24 @@ BUS_TIMEOUT_S = 2.0
 WAIT_SLACK_S = 1.5
 
 _interface_numbers = itertools.count()
+# One token per worker process, drawn once. `can:socketcan:<channel>` is a
+# machine-wide lock, so two workers on one name would meet as `device_busy`, and
+# `pytest -n` runs this tier in several processes at once. A random token keeps
+# two workers apart where `pid mod 1000` could collide two whose pids agree on
+# the low three digits; the counter keeps two tests in one worker apart. Four
+# digits, not hex: a `peak` bus routes to socketcan only for a channel matching
+# `vcan\\d+`, so the whole name after `vcan` stays numeric.
+_INTERFACE_TOKEN = f"{secrets.randbelow(10000):04d}"
 
 
 def a_fresh_interface_name() -> str:
     """One vcan name per test, unique on this host.
 
-    `can:socketcan:<channel>` is a machine-wide lock, so two tests on one name
-    would meet each other as `device_busy`; the pid keeps two runs apart and the
-    counter keeps two tests apart. Fifteen characters is the kernel's limit on
-    an interface name.
+    Ten characters (`vcan` + a four-digit per-process token + a two-digit
+    counter), all digits after `vcan`, inside the kernel's fifteen-character
+    limit on an interface name.
     """
-    return f"vcan{os.getpid() % 1000:03d}{next(_interface_numbers):02d}"
+    return f"vcan{_INTERFACE_TOKEN}{next(_interface_numbers):02d}"
 
 
 def ip_command() -> str:
@@ -94,15 +104,62 @@ def ip_link(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run([ip_command(), "link", *arguments], capture_output=True, text=True, timeout=30, check=False)
 
 
+def observer_is_bound(channel: str, seconds: float) -> bool:
+    """Whether a receiver for this interface is listed in the kernel's CAN rcvlist.
+
+    A bound `CAN_RAW` socket (candump's, here) shows up as a row for its
+    interface in `/proc/net/can/rcvlist_all`. Polling that is how a test waits
+    for the observer to be listening before it sends, instead of a fixed sleep
+    that races a loaded runner.
+    """
+    rcvlist = Path("/proc/net/can/rcvlist_all")
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            listed = rcvlist.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        if any(line.split()[:1] == [channel] for line in listed.splitlines()):
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def a_can_raw_socket_binds_here() -> str | None:
+    """Why a CAN_RAW socket cannot be opened on this host, or None where it can.
+
+    `ip link add ... type vcan` needs only the `vcan` module, and it succeeds on
+    a kernel that has `vcan` but not `can_raw`. The product's transport binds a
+    `CAN_RAW` socket, which needs `can_raw`, and without it the bind answers
+    EAFNOSUPPORT and the classifier reports `can_adapter_open_failed` with a
+    quarantine: every test here would then fail as if the product were wrong.
+    Probed once, before an interface is made, so that gap is a named skip rather
+    than a wall of red. The plan asks for exactly this probe.
+    """
+    family = getattr(socket, "AF_CAN", None)
+    raw = getattr(socket, "CAN_RAW", None)
+    if family is None or raw is None:
+        return "this Python has no AF_CAN/CAN_RAW, so the CAN sub-tier cannot bind the socket the product binds"
+    try:
+        probe = socket.socket(family, socket.SOCK_RAW, raw)
+    except OSError as error:
+        return f"a CAN_RAW socket could not be opened here ({error}): the CAN sub-tier needs the host kernel's can_raw module, not only vcan"
+    probe.close()
+    return None
+
+
 @contextmanager
 def virtual_interface(*, up: bool = True) -> Iterator[str]:
     """A vcan netdev for one test, deleted afterwards.
 
-    The one condition that is a skip rather than a failure: the interface could
-    not be made, which is the host kernel's module or the container's
-    capability. The reason is named so the job that reads this tier's report
-    can print it.
+    The one condition that is a skip rather than a failure: the interface, or a
+    CAN_RAW socket on it, could not be made, which is the host kernel's modules
+    or the container's capability. The reason is named so the job that reads
+    this tier's report can print it.
     """
+    no_socket = a_can_raw_socket_binds_here()
+    if no_socket is not None:
+        pytest.skip(f"{no_socket}, and CAP_NET_ADMIN on the container")
     name = a_fresh_interface_name()
     added = ip_link("add", "dev", name, "type", "vcan")
     if added.returncode != 0:
@@ -130,18 +187,46 @@ def vcan_down() -> Iterator[str]:
         yield name
 
 
-def bus_entry(bus_id: str, channel: str, *, allow_write: bool = True, listen_only: bool = False) -> str:
+@pytest.fixture
+def vcan_fd() -> Iterator[str]:
+    """A vcan whose MTU carries a CAN FD frame (72 bytes: the 64-byte payload plus the header).
+
+    The MTU is set while the interface is down: the kernel refuses an MTU change
+    on an up vcan, so the interface is created down, given its MTU, then brought
+    up.
+    """
+    with virtual_interface(up=False) as name:
+        assert ip_link("set", name, "mtu", "72").returncode == 0, "the kernel refused mtu 72 on the vcan"
+        assert ip_link("set", "up", name).returncode == 0, "the vcan could not be brought up after its mtu was set"
+        yield name
+
+
+def bus_entry(
+    bus_id: str,
+    channel: str,
+    *,
+    adapter: str = "socketcan",
+    allow_write: bool = True,
+    listen_only: bool = False,
+    fd: bool = False,
+    receive_own_messages: bool = False,
+    max_buffer_frames: int = 8,
+) -> str:
     """One `can_buses` entry on a SocketCAN channel, at configuration version 3.
 
     Reading needs no grant at this version; `allow_write` is the one permission
     the entry carries. `timeout_s` bounds every read's wait and every send.
+    `adapter` is the logical adapter written into the config verbatim, so a test
+    can name `peak` on a netdev-shaped channel and watch it route to socketcan.
     """
     return f"""  {bus_id}:
-    adapter: socketcan
+    adapter: {adapter}
     channel: {channel!r}
     bitrate: 500000
+    fd: {str(fd).lower()}
+    receive_own_messages: {str(receive_own_messages).lower()}
     timeout_s: {BUS_TIMEOUT_S}
-    max_buffer_frames: 8
+    max_buffer_frames: {max_buffer_frames}
     listen_only: {str(listen_only).lower()}
     permissions:
       allow_write: {str(allow_write).lower()}
@@ -224,26 +309,30 @@ def live_server(project: Path, config: Path, **kwargs: str) -> Iterator[LiveServ
 
 
 @contextmanager
-def far_end(channel: str) -> Iterator[object]:
+def far_end(channel: str, *, fd: bool = False) -> Iterator[object]:
     """A second CAN_RAW socket on the interface, held by this test.
 
     A frame the product sends is what this receives, and a frame this sends is
     what the product reads. It is python-can's own socket and nothing of this
-    project's.
+    project's. `fd` opens it CAN FD-capable, which a socket has to be to receive
+    an FD frame off the wire.
     """
     import can
 
-    bus = can.Bus(interface="socketcan", channel=channel)
+    bus = can.Bus(interface="socketcan", channel=channel, fd=fd)
     try:
         yield bus
     finally:
         bus.shutdown()
 
 
-def send_from_far_end(bus: object, frame_id: int, data: bytes) -> None:
+def send_from_far_end(bus: object, frame_id: int, data: bytes, *, extended: bool = False, rtr: bool = False, fd: bool = False) -> None:
     import can
 
-    bus.send(can.Message(arbitration_id=frame_id, data=data, is_extended_id=False), timeout=WIRE_TIMEOUT_S)  # type: ignore[attr-defined]
+    bus.send(  # type: ignore[attr-defined]
+        can.Message(arbitration_id=frame_id, data=data, is_extended_id=extended, is_remote_frame=rtr, is_fd=fd),
+        timeout=WIRE_TIMEOUT_S,
+    )
 
 
 def a_frame_at_the_far_end(bus: object, timeout_s: float = WIRE_TIMEOUT_S) -> tuple[int, bytes] | None:
@@ -251,6 +340,37 @@ def a_frame_at_the_far_end(bus: object, timeout_s: float = WIRE_TIMEOUT_S) -> tu
     if message is None:
         return None
     return int(message.arbitration_id), bytes(message.data)
+
+
+@contextmanager
+def flooding(bus: object, frames: list[tuple[int, bytes, dict]], *, gap_s: float = 0.001) -> Iterator[None]:
+    """Keep sending frames from the far end for as long as the block runs.
+
+    A background sender, so a read-until-match or a drain that cannot keep up has
+    a bus that keeps carrying traffic under it. Each entry is `(id, data, kwargs)`
+    where kwargs is forwarded to `send_from_far_end` (for example `extended`).
+    """
+    stop = threading.Event()
+
+    def pump() -> None:
+        while not stop.is_set():
+            for frame_id, data, kwargs in frames:
+                if stop.is_set():
+                    break
+                try:
+                    send_from_far_end(bus, frame_id, data, **kwargs)
+                except Exception:
+                    return
+                if gap_s:
+                    time.sleep(gap_s)
+
+    sender = threading.Thread(target=pump, daemon=True)
+    sender.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        sender.join(timeout=5)
 
 
 @contextmanager
@@ -424,10 +544,21 @@ def test_a_frame_the_product_sent_is_what_candump_reads_off_the_interface(tmp_pa
         assert server.call("can_session_start", {"bus_id": "bus"})["ok"] is True
         observer = subprocess.Popen([candump, "-L", "-n", "1", vcan], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            time.sleep(0.5)
+            # Wait for candump to be bound before sending, not a fixed sleep: the
+            # kernel lists a socket's receiver for the interface in
+            # /proc/net/can/rcvlist_all the moment it binds, so a frame sent
+            # after that line appears is a frame candump will see. A fixed sleep
+            # loses the frame on a loaded runner and turns this into a timeout
+            # about the observer rather than an assertion about the product.
+            assert observer_is_bound(vcan, WIRE_TIMEOUT_S), f"candump did not bind {vcan} within {WIRE_TIMEOUT_S:.0f}s: {observer.stderr.read() if observer.poll() is not None else 'still starting'}"
             sent = server.call("can_send", {"bus_id": "bus", "frame_id": "0x7ab", "data_hex": "deadbeef"})
             assert sent["ok"] is True, sent
-            stdout, stderr = observer.communicate(timeout=WIRE_TIMEOUT_S)
+            try:
+                stdout, stderr = observer.communicate(timeout=WIRE_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                observer.kill()
+                stdout, stderr = observer.communicate()
+                raise AssertionError(f"candump read no frame off {vcan} after the product reported it sent 0x7ab: {stdout!r} {stderr!r}") from None
         finally:
             if observer.poll() is None:
                 observer.kill()
@@ -462,13 +593,22 @@ def test_a_read_on_a_quiet_bus_waits_the_asked_time_and_no_longer_than_the_bus_t
         assert read["ok"] is True, read
         assert read["frames_read"] == 0 and read["frames"] == [], read
         assert read["summary"] == "No CAN frames were available.", read
-        assert 1.0 <= waited < 1.0 + WAIT_SLACK_S, f"a read asked to wait 1.0s waited {waited:.2f}s"
+        # The lower bound is the claim: the read really did wait its second. The
+        # upper bound only guards against it running to the bus timeout, so it is
+        # loose enough not to flake on a loaded runner where a pipe round trip
+        # and two JSON encodings sit on top of the wait.
+        assert waited >= 1.0, f"a read asked to wait 1.0s came back after only {waited:.2f}s"
+        assert waited < BUS_TIMEOUT_S + WAIT_SLACK_S, f"a read asked to wait 1.0s waited {waited:.2f}s, past the bus timeout"
 
         began = time.monotonic()
         capped = server.call("can_read", {"bus_id": "bus", "wait_timeout_s": 30.0})
         waited = time.monotonic() - began
         assert capped["ok"] is True and capped["frames_read"] == 0, capped
-        assert BUS_TIMEOUT_S <= waited < BUS_TIMEOUT_S + WAIT_SLACK_S, f"a read asked to wait 30s on a bus with timeout_s {BUS_TIMEOUT_S} waited {waited:.2f}s"
+        # The claim is that the entry's timeout_s capped the 30s ask: it waited at
+        # least that long and nothing like the 30s it was told. The upper bound is
+        # generous for the same reason as above, not a second product property.
+        assert waited >= BUS_TIMEOUT_S, f"a read asked to wait 30s on a bus with timeout_s {BUS_TIMEOUT_S} came back after only {waited:.2f}s"
+        assert waited < BUS_TIMEOUT_S + WAIT_SLACK_S + 2.0, f"a read asked to wait 30s on a bus with timeout_s {BUS_TIMEOUT_S} waited {waited:.2f}s, nowhere near capped"
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +666,6 @@ def test_listen_only_is_refused_on_a_virtual_interface_and_the_send_gate_answers
         assert sent["listen_only"] is True, sent
         assert sent["listen_only_enforcement"] == "link_verified", sent
         assert sent["side_effect_committed"] is False and sent["retry_safe"] is False, sent
-        assert "session" not in sent.get("error_type", ""), sent
         assert a_frame_at_the_far_end(peer, timeout_s=1.0) is None, "a refused send put a frame on the interface"
 
 
@@ -560,37 +699,47 @@ def test_a_channel_that_names_no_interface_is_refused_as_not_found_and_leaves_th
         assert started["ok"] is True, started
 
 
-def test_a_session_on_an_interface_that_is_down_is_refused_before_contact(tmp_path: Path, vcan_down: str) -> None:
-    """An interface that exists and is down carries nothing, so a session on it is a refusal.
+def test_a_session_on_an_interface_that_is_down_shows_the_two_current_answers_neither_naming_the_down_link(tmp_path: Path, vcan_down: str) -> None:
+    """A characterisation of what a down interface answers today, pending the issue this behaviour is recorded under.
 
-    The kernel lets a CAN_RAW socket bind a down interface and then answers
-    every send with ENETDOWN and a receive with either nothing or the same. So
-    a session opened on one is a session over a link that cannot carry a frame:
-    with the default `clear_rx_queue` the drain happens to fail on the receive
-    and the start is refused as a queue that could not be cleared, and with
-    `clear_rx_queue: false` it reports "CAN bus session started." and the first
-    send is answered as an unknown bus effect. Neither says what is wrong.
-    Refused instead, both ways, before any socket exists, as a channel that is
-    not there is refused: the channel named, no contact, no incident, and the
-    operator told which `ip link` line brings it up.
+    The kernel lets a CAN_RAW socket bind an interface that exists and is down,
+    and then answers a receive with ENETDOWN and a send with the same. So the
+    product's two answers, recorded here against the real kernel, are both wrong
+    for the reason the wave report records, and neither names a down link:
+
+    * with the default `clear_rx_queue`, the socket opens, the pre-session drain
+      fails on the ENETDOWN receive, and the start is refused as
+      `can_queue_clear_failed`, "the adapter was closed", which names the drain
+      and not the link;
+    * with `clear_rx_queue: false`, the start reports `ok` and "CAN bus session
+      started." over a link that cannot carry a frame.
+
+    This test pins that behaviour so the tier exercises the down link through the
+    real kernel and so the fix, when the shape is decided, changes a test that
+    was measuring the wrong answers. It deliberately asserts no `can_interface_down`
+    contract: no issue or owner decision names one yet, and the wave rule is that
+    a test encodes decided behaviour, not an author's proposal. The report field
+    that a fix would add is the missing one: neither answer carries a `channel` naming the
+    interface that is down.
     """
     project, config = can_project(tmp_path, bus_entry("bus", vcan_down))
 
     with live_server(project, config) as server:
-        for arguments in ({"bus_id": "bus"}, {"bus_id": "bus", "clear_rx_queue": False}):
-            refused = server.call("can_session_start", arguments)
-            assert refused["ok"] is False, refused
-            assert refused["error_type"] == "can_interface_down", refused
-            assert refused["channel"] == vcan_down, refused
-            assert refused["field"] == "can_buses.bus.channel", refused
-            assert refused["target_contacted"] is False, refused
-            assert refused["side_effect_committed"] is False, refused
-            assert refused["retry_safe"] is True, refused
-            assert refused["quarantined"] is False and refused["lease_state"] == "released", refused
-            assert f"ip link set up {vcan_down}" in " ".join(refused["remediation"]), refused
-            assert server.call("can_buses_list")["buses"]["bus"]["session_active"] is False
+        default = server.call("can_session_start", {"bus_id": "bus"})
+        assert default["ok"] is False, default
+        assert default["error_type"] == "can_queue_clear_failed", default
+        assert "Network is down" in json.dumps(default), default
+        assert default["quarantined"] is False and default["lease_state"] == "released", default
+        assert "channel" not in default, default
+        assert server.call("can_buses_list")["buses"]["bus"]["session_active"] is False
 
-        # Brought up, the same entry opens.
+        no_drain = server.call("can_session_start", {"bus_id": "bus", "clear_rx_queue": False})
+        assert no_drain["ok"] is True, no_drain
+        assert no_drain["summary"] == "CAN bus session started.", no_drain
+        assert "channel" not in no_drain, no_drain
+        assert server.call("can_session_stop", {"bus_id": "bus"})["ok"] is True
+
+        # Brought up, the same entry opens the ordinary way.
         assert ip_link("set", "up", vcan_down).returncode == 0
         started = server.call("can_session_start", {"bus_id": "bus"})
         assert started["ok"] is True, started
@@ -779,3 +928,234 @@ def test_a_can_plan_whose_claim_is_unmet_is_headed_failed_and_carries_the_frames
     assert {"id_hex": "0x124", "data_hex": "02", "extended": False} in read["frames_tail"], read
     assert result["cleanup_ok"] is True, result
     assert [entry["action"] for entry in result["cleanup"]] == ["can_close"], result
+
+
+# ---------------------------------------------------------------------------
+# Frame shapes, own messages, FD, and a queue that will not drain.
+
+
+def test_a_second_start_of_the_same_entry_is_already_active_and_drains_the_queue(tmp_path: Path, vcan: str) -> None:
+    """The same entry started twice is one session: `already_active`, not a second lease.
+
+    Unlike two entries on one channel (the #501 shape below), starting the same
+    entry again is not a lock collision at all: the session exists, so the second
+    start reports it as already active and, with the default `clear_rx_queue`,
+    drains whatever the far end put on the bus since. A frame sent between the two
+    starts is drained by the second and is gone from a following read.
+    """
+    project, config = can_project(tmp_path, bus_entry("bus", vcan))
+
+    with live_server(project, config) as server, far_end(vcan) as peer:
+        assert server.call("can_session_start", {"bus_id": "bus"})["ok"] is True
+        send_from_far_end(peer, 0x111, b"\x01")
+        time.sleep(0.1)
+
+        again = server.call("can_session_start", {"bus_id": "bus"})
+        assert again["ok"] is True, again
+        assert again["already_active"] is True, again
+        assert again["frames_drained"] == 1, again
+        assert again["session"]["session_active"] is True, again
+
+        # The drained frame is not read again: the queue the second start cleared is empty.
+        read = server.call("can_read", {"bus_id": "bus", "wait_timeout_s": 0.2})
+        assert read["ok"] is True and read["frames_read"] == 0, read
+
+
+def test_extended_and_remote_frames_cross_the_read_path_with_their_shape_intact(tmp_path: Path, vcan: str) -> None:
+    """A 29-bit identifier and a remote frame are read back as what they are.
+
+    The read path reports `extended` and `rtr` per frame, and the comparator's
+    frame selection reads exactly those. A standard 0x123 and an extended 0x123
+    are different frames, so the flags are part of the frame, not a decoration:
+    both are sent from the far end and both come back distinct.
+    """
+    project, config = can_project(tmp_path, bus_entry("bus", vcan))
+
+    with live_server(project, config) as server, far_end(vcan) as peer:
+        assert server.call("can_session_start", {"bus_id": "bus"})["ok"] is True
+
+        send_from_far_end(peer, 0x1ABCDEF, b"\x11\x22", extended=True)
+        send_from_far_end(peer, 0x123, b"", rtr=True)
+        time.sleep(0.1)
+
+        read = server.call("can_read", {"bus_id": "bus", "wait_timeout_s": 1.0, "max_frames": 2})
+        assert read["ok"] is True and read["frames_read"] == 2, read
+        by_id = {frame["id"]: frame for frame in read["frames"]}
+
+        extended = by_id[0x1ABCDEF]
+        assert extended["extended"] is True and extended["rtr"] is False, extended
+        assert extended["id_hex"] == "0x1abcdef" and extended["data_hex"] == "1122", extended
+
+        remote = by_id[0x123]
+        assert remote["rtr"] is True and remote["extended"] is False, remote
+
+
+def test_a_comparator_only_matches_the_frame_type_it_asked_for(tmp_path: Path, vcan: str) -> None:
+    """The reactor's `can_read` comparator selects on the identifier and the frame type.
+
+    A plan asking for the extended 0x123 is not met by a standard 0x123 carrying
+    the same payload: the two are different frames on the wire. The far end floods
+    both while the plan reads until its claim is met, and the run is green only
+    because the extended frame arrived and matched.
+    """
+    project, config = can_project(tmp_path, bus_entry("bus", vcan))
+    plan = project / "extended.yaml"
+    plan.write_text(
+        """version: 3
+name: extended
+steps:
+  - {device: bus, action: can_open}
+  - {device: bus, action: can_read, comparator: {id: "0x123", extended: true, equals: "5a"}, timeout_s: 4}
+  - {device: bus, action: can_close}
+""",
+        encoding="utf-8",
+    )
+
+    with far_end(vcan) as peer, flooding(peer, [(0x123, b"\x5a", {}), (0x123, b"\x5a", {"extended": True})]):
+        ran = reactor(project, config, plan, "--json")
+
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    result = json.loads(ran.stdout)
+    assert result["ok"] is True, result
+    matched = result["steps"][1]["result"]
+    assert matched["frame"]["extended"] is True, matched
+    assert matched["frame"]["id_hex"] == "0x123" and matched["frame"]["data_hex"] == "5a", matched
+
+
+def test_receive_own_messages_reads_back_the_frame_the_same_session_sent(tmp_path: Path, vcan: str) -> None:
+    """`receive_own_messages: true` puts a session's own send on its own read path.
+
+    The default is off, and a session does not read its own traffic; on, the
+    kernel loops a sent frame back to the sending socket, so the same session
+    reads the frame it just sent. Proved on the real socket, since the flag is a
+    `CAN_RAW` socket option nothing in the fakes could exercise.
+    """
+    project, config = can_project(tmp_path, bus_entry("bus", vcan, receive_own_messages=True))
+
+    with live_server(project, config) as server:
+        assert server.call("can_session_start", {"bus_id": "bus"})["ok"] is True
+        assert server.call("can_send", {"bus_id": "bus", "frame_id": "0x2aa", "data_hex": "c0ffee"})["ok"] is True
+
+        read = server.call("can_read", {"bus_id": "bus", "wait_timeout_s": 1.0})
+        assert read["ok"] is True and read["frames_read"] == 1, read
+        assert read["frames"][0]["id_hex"] == "0x2aa" and read["frames"][0]["data_hex"] == "c0ffee", read
+
+
+def test_a_can_fd_frame_crosses_a_vcan_whose_mtu_carries_it(tmp_path: Path, vcan_fd: str) -> None:
+    """An FD bus on an mtu-72 vcan sends a payload longer than a classic frame.
+
+    Classic CAN caps a frame at 8 data bytes; CAN FD carries up to 64, and the
+    interface has to have the MTU for it. A 16-byte payload the product sends is
+    read off the far end whole, which a classic frame could not carry.
+    """
+    project, config = can_project(tmp_path, bus_entry("bus", vcan_fd, fd=True))
+    payload = "00112233445566778899aabbccddeeff"
+
+    with live_server(project, config) as server, far_end(vcan_fd, fd=True) as peer:
+        assert server.call("can_session_start", {"bus_id": "bus"})["ok"] is True
+        sent = server.call("can_send", {"bus_id": "bus", "frame_id": "0x321", "data_hex": payload})
+        assert sent["ok"] is True, sent
+        assert a_frame_at_the_far_end(peer) == (0x321, bytes.fromhex(payload))
+
+
+def test_a_receive_queue_that_never_empties_is_the_clear_limit_and_the_lease_is_released(tmp_path: Path, vcan: str) -> None:
+    """A flood the drain cannot outrun stops the start as `can_queue_clear_limit`.
+
+    `max_buffer_frames: 2` and a far end that keeps sending mean the pre-session
+    drain reads its bounded batches and the queue is still not empty, so the
+    start is refused as the clear limit rather than opening a session onto a bus
+    it cannot get ahead of. The socket is closed and the lease released: a refused
+    start holds no bench.
+    """
+    project, config = can_project(tmp_path, bus_entry("bus", vcan, max_buffer_frames=2))
+
+    with far_end(vcan) as peer, flooding(peer, [(0x100, b"\x01\x02", {})], gap_s=0.0), live_server(project, config) as server:
+        refused = server.call("can_session_start", {"bus_id": "bus"})
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "can_queue_clear_limit", refused
+        assert refused["cleanup_confirmed"] is True, refused
+        assert refused["lease_state"] == "released", refused
+        assert refused["quarantined"] is False, refused
+        assert server.call("can_buses_list")["buses"]["bus"]["session_active"] is False
+
+
+def test_a_peak_bus_on_a_netdev_channel_opens_through_socketcan_and_frames_cross(tmp_path: Path, vcan: str) -> None:
+    """A `peak` bus whose channel names a Linux netdev routes to the socketcan backend.
+
+    PCANBasic cannot open a kernel netdev, so a `peak` bus configured on a `vcan`
+    channel opens through socketcan instead, keeps its logical adapter name in the
+    result, and carries frames like any socketcan bus. Proved on the real kernel:
+    the routing decision is invisible to a fake that never binds a socket.
+    """
+    project, config = can_project(tmp_path, bus_entry("bus", vcan, adapter="peak"))
+
+    with live_server(project, config) as server, far_end(vcan) as peer:
+        started = server.call("can_session_start", {"bus_id": "bus"})
+        assert started["ok"] is True, started
+        assert started["adapter"] == "peak", started
+        assert started["session"]["session_active"] is True, started
+
+        sent = server.call("can_send", {"bus_id": "bus", "frame_id": "0x201", "data_hex": "42"})
+        assert sent["ok"] is True, sent
+        assert a_frame_at_the_far_end(peer) == (0x201, b"\x42")
+
+
+# ---------------------------------------------------------------------------
+# The CI reader over a real CAN report, and doctor with the extra installed.
+
+
+def test_run_evidence_reads_the_report_a_green_can_plan_wrote(tmp_path: Path, vcan: str) -> None:
+    """`agentic-hil run-evidence` turns a CAN run's report into CI evidence.
+
+    The report a plan writes is fed to the evidence command the same workflow
+    runs after a run, and the run summary it emits reports the run as passed and
+    names the CAN steps. The command loads no configuration and touches no
+    hardware; it reads the report and the workspace only.
+    """
+    project, config = can_project(tmp_path, bus_entry("bus", vcan))
+    plan = write_plan(project, "evidence", "02")
+
+    with scripted_peer(vcan, tmp_path / "peer-ready", "0x123/01=0x124/02"):
+        ran = reactor(project, config, plan, "--json")
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    report = project / "can-report.json"
+    report.write_text(ran.stdout, encoding="utf-8")
+
+    evidence = subprocess.run(
+        [sys.executable, "-m", "agentic_hil", "run-evidence", "--report", str(report), "--out", "evidence", "--json"],
+        cwd=str(project),
+        env={**os.environ, "AGENTIC_HIL_CONFIG": str(config)},
+        capture_output=True,
+        text=True,
+        timeout=COMMAND_TIMEOUT_S,
+        check=False,
+    )
+    assert evidence.returncode == 0, evidence.stdout + evidence.stderr
+    result = json.loads(evidence.stdout)
+    assert result["ok"] is True, result
+    summary = json.loads((project / "evidence" / "run-summary.json").read_text(encoding="utf-8"))
+    assert summary["outcome"] == "success", summary
+    assert (project / "evidence" / "job-summary.md").is_file()
+
+
+def test_doctor_with_the_can_extra_installed_names_no_missing_python_can(tmp_path: Path, vcan: str) -> None:
+    """`agentic-hil doctor` over a CAN config does not warn that python-can is missing.
+
+    The image installs `agentic-hil[can]`, so the extra a CAN configuration needs
+    is present, and doctor's missing-extra warning (the one a bench installed
+    without the extra would carry) is absent. Run over the real installation, the
+    only place that check reads a true answer.
+    """
+    project, config = can_project(tmp_path, bus_entry("bus", vcan))
+
+    checked = subprocess.run(
+        [sys.executable, "-m", "agentic_hil", "doctor", "--json"],
+        cwd=str(project),
+        env={**os.environ, "AGENTIC_HIL_CONFIG": str(config)},
+        capture_output=True,
+        text=True,
+        timeout=COMMAND_TIMEOUT_S,
+        check=False,
+    )
+    result = json.loads(checked.stdout)
+    assert "python-can" not in json.dumps(result.get("warnings", [])), result

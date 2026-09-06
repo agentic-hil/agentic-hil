@@ -60,8 +60,11 @@ product's SocketCAN transport to it and put a second socket on the far end,
 which needs that capability and the host kernel's `vcan` module (`modprobe
 vcan` on the host; a container cannot load one). Where the interface cannot be
 created the CAN tests skip and say why, and the job that runs this tier reads
-that skip as a failure. A Docker Desktop host whose kernel carries CAN runs
-them too.
+that skip as a failure. The kernel needs both `vcan` and `can_raw`: the tests
+probe a `CAN_RAW` socket before making an interface and skip with that reason
+where only `vcan` is present. A Docker Desktop host whose WSL2 kernel is built
+with CAN runs them too; the stock WSL2 kernel is not, so on an unmodified one
+the CAN tests skip.
 
 `DOCKER_BUILDKIT=1` is not decoration. This build's ignore file is
 `Dockerfile.dockerignore`, which sits beside the Dockerfile, and only BuildKit
