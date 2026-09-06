@@ -38,12 +38,14 @@ from pathlib import Path
 import pytest
 from conftest import (
     FAKE_OPENOCD,
+    FAKE_STLINK,
     write_authoritative_config,
     write_config,
 )
 
 from agentic_hil import cli
 from agentic_hil.backends import common as backend_common
+from agentic_hil.bootstrap import discover_attached_hardware
 from agentic_hil.config import load_config
 from agentic_hil.knowledge import remediation_fields
 from agentic_hil.mcp import handle_mcp_message
@@ -346,3 +348,48 @@ def test_a_spawn_failure_that_is_not_an_exec_refusal_still_raises(tmp_path: Path
         service.close()
 
     assert raised.value.errno == errno.EMFILE
+
+
+# ---------------------------------------------------------------------------
+# The two other callers of the same boundary.
+
+
+def test_a_gdb_that_will_not_run_is_the_same_refusal_named_for_gdb(tmp_path: Path) -> None:
+    """`debug.gdb_executable` is a second configured tool at the same boundary.
+
+    It has to be named for what it is. Answering with the debugger executable's
+    wording would send an operator to repair the entry that is fine.
+    """
+    gdb = unrunnable_tool(tmp_path / "toolchain", name="arm-none-eabi-gdb-broken")
+    elf = tmp_path / "build" / "app.elf"
+    elf.parent.mkdir(parents=True, exist_ok=True)
+    elf.write_bytes(b"\x7fELFfake")
+    config_path = write_config(tmp_path, debugger_type="stlink", debugger_executable=FAKE_STLINK, gdb_executable=gdb)
+    service = AgenticHILToolService(load_config(str(config_path)))
+    try:
+        assert service.call("flash_firmware", {"image_path": "build/app.elf"})["ok"] is True
+        result = service.call("debug_symbol_info", {"symbol": "CTC_array"})
+    finally:
+        service.close()
+
+    assert result["ok"] is False, json.dumps(result)
+    assert result["error_type"] == "debugger_not_executable"
+    assert Path(result["executable"]) == gdb
+    assert "GDB executable" in result["summary"]
+
+
+def test_bootstrap_discovery_reports_a_toolchain_that_will_not_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Discovery runs before any configuration exists and meets the same file.
+
+    It answered the traceback too, and it is the first command a new bench runs.
+    """
+    tool = unrunnable_tool(tmp_path / "toolchain", name="STM32_Programmer_CLI")
+    monkeypatch.setattr("agentic_hil.bootstrap.find_stm32_programmer_cli", lambda: str(tool))
+
+    result = discover_attached_hardware(profile={"target": {"name": "demo"}})
+
+    assert result["ok"] is False, json.dumps(result)
+    assert result["error_type"] == "debugger_not_executable"
+    assert result["not_executable_reason"] == "not_an_executable_image"
+    assert result["hardware_state"] == "unchanged"
+    assert str(tool) in result["summary"]
