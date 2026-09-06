@@ -1644,6 +1644,52 @@ _UV_PIN_AT_CURRENT_HINT = (
 )
 
 
+# What `uv tool upgrade` really writes on a pinned installation, recorded with
+# uv 0.12.10 on 2026-09-06: stdout is empty, and the whole of it, the sentence
+# and the hint, arrives on stderr with one blank line between them. Every other
+# fixture in this file puts `Nothing to upgrade` on stdout, which is a stream
+# placement uv has never used, so what those fixtures pin is a world that does
+# not exist. The reader joins both streams today and would keep passing if it
+# were narrowed to one; this is the case that would then fail here rather than
+# on a bench.
+_UV_PINNED_UPGRADE_STDERR = f"Nothing to upgrade\n\n{_UV_PIN_AT_CURRENT_HINT}\n"
+
+
+def test_the_pin_note_is_read_off_the_stream_real_uv_writes_it_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recorded transcript, stdout empty, read to the same outcome as the typed one.
+
+    Nothing here is new behaviour: it is the same already-current note as the
+    test below, asked of the bytes uv actually produced. What it holds is that
+    the sentence and the hint are found where uv puts them, so the note, the
+    pin and the line that clears it survive a reader that stops guessing which
+    stream carries them.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_PINNED_UPGRADE_STDERR),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert result["already_current"] is True
+    assert result["pinned_version"] == __version__
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert "note rather than as a refusal" in result["summary"]
+    # The premise of the test, kept in the result the operator reads: the
+    # manager said all of it on stderr and nothing on stdout.
+    assert "stdout" not in result["install"], result["install"]
+    assert "Nothing to upgrade" in result["install"]["stderr"], result["install"]
+
+
 def test_a_pin_at_the_release_that_is_installed_is_a_note_and_exits_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
