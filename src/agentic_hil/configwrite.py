@@ -1417,6 +1417,12 @@ def _permission_key_refusal(command: str, rejected: list[JsonObject], path: Path
         "ok": False,
         "command": f"agentic-hil {command}",
         "error_type": "invalid_argument",
+        # The argument the refusal is about, in the name the parser gives it,
+        # and the catalogue's advice for that argument merged in the way
+        # `ConfigError.to_dict` merges it: the unscoped `invalid_argument` entry
+        # explains a tool payload (`validator`, `inputSchema`, `tools/list`),
+        # none of which this refusal carries or a shell has (#504).
+        "field": "keys",
         "summary": (
             f"{len(rejected)} of the names given to `agentic-hil {command}` do not name a permission in this "
             "configuration, so nothing was written. Every key this command accepts is listed in "
@@ -1432,6 +1438,7 @@ def _permission_key_refusal(command: str, rejected: list[JsonObject], path: Path
         ),
         **NOT_STARTED,
         "retry_safe": False,
+        **remediation_fields("invalid_argument", "keys"),
     }
 
 

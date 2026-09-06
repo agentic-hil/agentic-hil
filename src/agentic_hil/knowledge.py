@@ -1648,6 +1648,51 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "recover and no permission to ask the operator for.",
         ),
     ),
+    # Two `invalid_argument` refusals that are not about a tool payload at all,
+    # scoped on the argument each names. The unscoped entry above explains
+    # `field` and `validator`, `inputSchema` in `tools/list` and `wait_s: true`;
+    # a permission name typed at `agentic-hil grant` and a run handle typed at
+    # `agentic-hil test-reactor-status --run` carry no `validator` and were
+    # decided against no schema, and the reader was sent through four steps and
+    # three bullets about a surface they were not on before the one line they
+    # could act on (#504).
+    "invalid_argument:keys": ErrorRemedy(
+        meaning=(
+            "A name given to `agentic-hil grant` or `agentic-hil revoke` is not a permission key of this "
+            "configuration. `rejected_keys` lists each one with why, and `permission_keys_here` lists every key the "
+            "command accepts, read out of the file as it stands. Nothing was written: the command writes all of its "
+            "names or none of them."
+        ),
+        remediation=(
+            "Name one of `permission_keys_here`. A permission is named one at a time and several may be given in one "
+            "command; there is no wildcard and no whole-entry form, so what is opened is exactly what was typed.",
+            "A key is spelled as the section, the entry and the permission (`debuggers.dut.permissions.allow_flash`); "
+            "the shorter `debuggers.dut.allow_flash` is accepted too. The entry names are this bench's own, which is "
+            "why the list comes out of this file rather than out of a reference.",
+            "`agentic-hil doctor` shows each configured entry with the permissions it grants today, if the question "
+            "is what the bench allows rather than how a key is spelled.",
+        ),
+        do_not=(
+            "Do not reach for `{reopen_command}` to make a name valid. It rewrites the whole file from the project "
+            "profile, every narrowed permission included, and adds no permission key the schema does not already have.",
+        ),
+    ),
+    "invalid_argument:run": ErrorRemedy(
+        meaning=(
+            "The value given as a run handle is not one. A handle is the `run` value `test_reactor_run` answered when "
+            "the run started: `run-` followed by sixteen hexadecimal digits. `value` carries what was given. Nothing "
+            "was reached: no record was read and no run was touched."
+        ),
+        remediation=(
+            "Use the `run` value the start of the run printed, exactly as it was printed.",
+            "Called without a handle, `test_reactor_status` lists every run this bench still has a record of, newest "
+            "first, with the handle of each; that is where a handle nobody wrote down is found.",
+        ),
+        do_not=(
+            "Do not guess a handle from a report file name or shorten one. The record is looked up by the exact "
+            "handle, and a value that does not match the shape is refused before the lookup.",
+        ),
+    ),
     # The only entry here that is about this server's own output rather than
     # about a bench, a policy or a payload. It is what a reader gets in place of
     # a result the rendering could not vouch for, so it has to say that the
