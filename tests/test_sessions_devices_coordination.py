@@ -784,20 +784,32 @@ def test_a_call_naming_an_undeclared_device_is_refused_with_the_documented_error
             assert refused["bus_id"] == "ghost", (tool, refused)
             assert refused["configured_buses"] == [BUS_ID], (tool, refused)
             assert refused.get("side_effect_committed") is not True, (tool, refused)
+        # The third route, and the one the documents were right about: a run
+        # declaring a device the configuration does not carry is refused by the
+        # declaration itself, before any device is held.
+        declared = service.call("bench_run_start", {"devices": [{"kind": "uart", "id": "ghost"}]})
+        assert declared["ok"] is False, declared
+        assert declared["error_type"] == "unknown_device", declared
+        assert declared["side_effect_committed"] is False, declared
     finally:
         service.close()
 
-    # README.md and docs/safety-model.md promised `unknown_device` for a call
-    # naming an undeclared device; the tools answer the two names above, and
-    # TROUBLESHOOTING.md already relies on the first. The documents name what
-    # the tools answer.
+    # README.md and docs/safety-model.md gave `unknown_device` as the refusal
+    # for any call naming an undeclared device. There are three, and which one
+    # answers depends on what did the naming: a run declaring a device it may
+    # not have is `unknown_device` (`resolve_devices`, pinned by
+    # test_permission_default_claim against a generated file), and a port tool
+    # or a bus tool naming one is the two above, which TROUBLESHOOTING.md
+    # already relies on. The pages carry all three and say which is which,
+    # rather than one name for three routes.
     for document in ("README.md", "docs/safety-model.md"):
         text = (REPOSITORY_ROOT / document).read_text(encoding="utf-8")
         sentence = next((line for line in text.splitlines() if "does not exist on this bench until" in line), None)
         assert sentence is not None, f"{document} no longer carries the presence sentence"
         assert "`com_port_not_configured`" in sentence, (document, sentence)
         assert "`can_bus_not_configured`" in sentence, (document, sentence)
-        assert "`unknown_device`" not in sentence, (document, sentence)
+        assert "`unknown_device` where a run declares it" in sentence, (document, sentence)
+        assert "refused with `unknown_device`" not in sentence, (document, sentence)
     troubleshooting = (REPOSITORY_ROOT / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
     assert "turns a precise refusal back into `com_port_not_configured`" in troubleshooting
     # docs/security-design.md makes the same promise in its own words, in the
@@ -806,7 +818,7 @@ def test_a_call_naming_an_undeclared_device_is_refused_with_the_documented_error
     sentence = next((line for line in security.splitlines() if "does not declare does not exist here" in line), None)
     assert sentence is not None, "docs/security-design.md no longer carries the presence sentence"
     assert "`com_port_not_configured`" in sentence and "`can_bus_not_configured`" in sentence, sentence
-    assert "`unknown_device`" not in sentence, sentence
+    assert "`unknown_device` to a run that declares it" in sentence, sentence
 
 
 # ---------------------------------------------------------------------------
