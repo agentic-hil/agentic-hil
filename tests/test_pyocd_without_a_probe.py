@@ -197,8 +197,13 @@ def test_a_tool_with_no_probe_attached_refuses_promptly_instead_of_timing_out(tm
 
     assert result["error_type"] != "timeout", result
     assert_refused_before_contact(result, config)
-    assert elapsed_s < CONFIGURED_TIMEOUT_S, (elapsed_s, result)
+    # The product's own clock around the pyOCD run is the claim: a call that
+    # waited out the timeout measures at least the timeout there. The wall
+    # clock around the whole call also holds two interpreter starts and
+    # whatever the host was doing beside them, so it is held to twice the
+    # timeout, which the three waits the issue measured still cannot pass.
     assert result["elapsed_ms"] < CONFIGURED_TIMEOUT_S * 1000, result
+    assert elapsed_s < 2 * CONFIGURED_TIMEOUT_S, (elapsed_s, result)
     # pyOCD's own sentence travels with the refusal, as the evidence it is.
     assert "No connected debug probes" in json.dumps(result), result
     log = log_of(config, result)
@@ -282,7 +287,12 @@ def test_a_sessionless_read_with_no_probe_attached_is_refused_the_same_way(tmp_p
     assert result["error_type"] != "timeout", result
     assert_refused_before_contact(result, config)
     assert result.get("retry_safe") is True, result
-    assert elapsed_s < CONFIGURED_TIMEOUT_S, (elapsed_s, result)
+    # As above: the product's clock carries the claim where the result has
+    # one, and the wall clock around the offline symbol read and the spawn
+    # is held to twice the timeout.
+    if "elapsed_ms" in result:
+        assert result["elapsed_ms"] < CONFIGURED_TIMEOUT_S * 1000, result
+    assert elapsed_s < 2 * CONFIGURED_TIMEOUT_S, (elapsed_s, result)
     log = log_of(config, result)
     assert "-W" in log["command"].split() or "--no-wait" in log["command"].split(), log["command"]
     assert log["stdout"] == RECORDED_NO_PROBE, log
