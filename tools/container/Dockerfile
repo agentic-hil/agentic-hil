@@ -39,13 +39,16 @@ FROM python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e18
 # OpenOCD is the debugger backend the no-probe tests drive, ca-certificates is
 # what lets uv and the release-index read verify anything at all, procps is
 # `ps`: one test reads a process's start time out of procfs and checks it
-# against what a program with no stake in the answer says, and curl is what
+# against what a program with no stake in the answer says, curl is what
 # install.sh fetches Astral's pinned uv installer with on the route that has
 # no uv and no Python, which one test runs for real to read the shell rc files
-# back. Nothing else: an image that grew a toolchain would be an image whose
-# results depend on which toolchain.
+# back, and socat is what makes the pseudo-terminal pair the serial tests
+# open through the real pyserial: one end is the configured COM port, the
+# other is held by a scripted peer under tests/container. Nothing else: an
+# image that grew a toolchain would be an image whose results depend on which
+# toolchain.
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes openocd ca-certificates procps curl \
+    && apt-get install --no-install-recommends --yes openocd ca-certificates procps curl socat \
     && rm -rf /var/lib/apt/lists/*
 
 # One version, named here, because the receipts these tests read are written by

@@ -51,7 +51,8 @@ import socket
 import subprocess
 import sys
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
@@ -490,3 +491,276 @@ logs:
         encoding="utf-8",
     )
     return config_path
+
+
+# ---------------------------------------------------------------------------
+# The serial transport: a pseudo-terminal pair, the scripted peer on its far
+# end, a live server over its own pipe, and the console script.
+#
+# The pair is made by socat and opened through the real pyserial, so what these
+# fixtures put in front of a test is the kernel's terminal device and pyserial's
+# own POSIX behaviour on it: the exclusive flock a second opener meets, the
+# termios the open applies, the read that returns nothing when the far end is
+# quiet. None of that is reachable through the fake serial handle the unit tier
+# uses, which is the reason this arrangement exists.
+#
+# The peer on the far end is `tests/container/pty_responder.py`: a byte peer
+# for the transport and nothing more. It runs no firmware, models nothing
+# electrical, and its answers are an argument the test wrote, documented beside
+# the assertions that read them back.
+
+# How long the pair may take to appear, and how long a peer may take to open
+# its end. Generous: both are a process start away.
+PTY_SETUP_TIMEOUT_S = 15.0
+# How long a live server may take to answer one request before that is a
+# failure rather than a slow machine. A `com_read` waits out its own
+# `wait_timeout_s` inside this, so it has to exceed every wait a test asks for.
+SERVER_ANSWER_TIMEOUT_S = 60.0
+
+RESPONDER = Path(__file__).resolve().parent / "pty_responder.py"
+
+
+@dataclass
+class PtyPair:
+    """Two linked pseudo-terminals, and the socat that joins them.
+
+    ``dut`` is the link the configuration names as its COM port; ``peer`` is
+    the link the responder holds. Both are symbolic links socat made to the
+    ``/dev/pts/N`` slaves it allocated, so a configuration written against
+    them is stable across runs and never names a pts number.
+    """
+
+    dut: Path
+    peer: Path
+    socat: subprocess.Popen[bytes]
+
+    @property
+    def dut_slave(self) -> Path:
+        """The ``/dev/pts/N`` behind the configured link, as the kernel names it."""
+        return Path(os.path.realpath(self.dut))
+
+    def stop(self) -> None:
+        """End socat and wait for it, which removes both slaves.
+
+        Idempotent, so a test that killed the pair itself to make the device
+        vanish can leave the fixture's teardown to find it already gone.
+        """
+        if self.socat.poll() is None:
+            self.socat.kill()
+        self.socat.wait(timeout=30)
+        for stream in (self.socat.stdout, self.socat.stderr):
+            if stream is not None:
+                stream.close()
+
+
+def _wait_until(condition: Callable[[], bool], timeout_s: float, what: str, process: subprocess.Popen[bytes] | None = None) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not condition():
+        if process is not None and process.poll() is not None:
+            stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr is not None else ""
+            raise RuntimeError(f"{what}: the process exited with {process.returncode} first:\n{stderr}")
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"{what}: not within {timeout_s:.0f}s")
+        time.sleep(0.02)
+
+
+@pytest.fixture
+def pty_pair(tmp_path: Path) -> Iterator[PtyPair]:
+    """A fresh pair per test, so one test's holder can never be another's.
+
+    ``raw,echo=0`` on both ends is not optional: the two slaves share nothing,
+    but a slave left in its default line discipline echoes what it receives
+    back to its writer, and the product would then read its own stimulus as
+    the peer's answer.
+
+    Skips, with the reason named, where the pair cannot be made: no socat on
+    PATH, or a devpts the container does not mount. A skip here reaches the
+    job's own gate, which refuses a tier that skipped anything, so a container
+    that could not create the transport is a red run and not a quiet pass.
+    """
+    socat = shutil.which("socat")
+    if socat is None:
+        pytest.skip("socat is not on PATH, and the pseudo-terminal pair this module drives is made by it")
+    dut = tmp_path / "dut"
+    peer = tmp_path / "peer"
+    process = subprocess.Popen(
+        [socat, "-d", "-d", f"pty,raw,echo=0,link={dut}", f"pty,raw,echo=0,link={peer}"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    pair = PtyPair(dut=dut, peer=peer, socat=process)
+    try:
+        _wait_until(lambda: dut.exists() and peer.exists(), PTY_SETUP_TIMEOUT_S, "waiting for socat's two links", process)
+    except RuntimeError as error:
+        pair.stop()
+        pytest.skip(f"the pseudo-terminal pair could not be created here: {error}")
+    try:
+        yield pair
+    finally:
+        pair.stop()
+
+
+@dataclass
+class Responder:
+    """The scripted peer, running, and what it has received so far."""
+
+    process: subprocess.Popen[bytes]
+    record: Path
+
+    def received(self) -> bytes:
+        """Every byte the product put on the wire, as the peer saw it."""
+        return self.record.read_bytes() if self.record.exists() else b""
+
+    def wait_for(self, expected: bytes, timeout_s: float = 10.0) -> bytes:
+        """The record once ``expected`` is in it, or whatever it holds at the bound."""
+        deadline = time.monotonic() + timeout_s
+        while expected not in self.received() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return self.received()
+
+    def stop(self) -> bytes:
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=10)
+        if self.process.stderr is not None:
+            self.process.stderr.close()
+        return self.received()
+
+
+def start_responder(pair: PtyPair, tmp_path: Path, *replies: str, delay_s: float = 0.0) -> Responder:
+    """Put the peer on the far end of ``pair`` with the given answer table.
+
+    Each reply is ``REQUEST=RESPONSE`` under Python's escape rules, so
+    ``PING=PONG\\r\\n`` answers the line ``PING`` with the bytes ``PONG\\r\\n``.
+    No replies at all is a peer that listens and records and never answers.
+    Returns once the peer has opened its end, so a test that writes next is
+    writing to a listener.
+    """
+    record = tmp_path / "responder-received.bin"
+    ready = tmp_path / "responder-ready"
+    arguments = [sys.executable, str(RESPONDER), "--device", str(pair.peer), "--record", str(record), "--ready", str(ready), "--delay-s", str(delay_s)]
+    for reply in replies:
+        arguments += ["--reply", reply]
+    process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    _wait_until(ready.exists, PTY_SETUP_TIMEOUT_S, "waiting for the responder to open its end of the pair", process)
+    return Responder(process=process, record=record)
+
+
+class LiveServer:
+    """One ``agentic-hil mcp-stdio`` over its own pipes, spoken to as a host does.
+
+    Started by absolute interpreter in the project directory with the
+    configuration named through ``AGENTIC_HIL_CONFIG``, exactly the way an
+    agent host starts one. ``call`` is a ``tools/call`` and returns the
+    ``structuredContent`` document, which is the same document the server puts
+    in the content text and what a caller reads.
+    """
+
+    def __init__(self, config: Path, project: Path, *, command: list[str] | None = None, environment: dict[str, str] | None = None):
+        self.project = project
+        env = {**os.environ, "AGENTIC_HIL_CONFIG": str(config), **(environment or {})}
+        self.process = subprocess.Popen(
+            command or [sys.executable, "-m", "agentic_hil", "mcp-stdio"],
+            cwd=str(project),
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        self._next_id = 1
+
+    def __enter__(self) -> LiveServer:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def request(self, method: str, params: dict | None = None, timeout_s: float = SERVER_ANSWER_TIMEOUT_S) -> dict:
+        assert self.process.stdin is not None and self.process.stdout is not None
+        request_id = self._next_id
+        self._next_id += 1
+        message = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}
+        self.process.stdin.write(json.dumps(message) + "\n")
+        self.process.stdin.flush()
+        deadline = time.monotonic() + timeout_s
+        while True:
+            remaining = max(0.1, deadline - time.monotonic())
+            line = a_line_within(self.process.stdout, remaining)
+            if line is None or line == "":
+                state = f"exited with {self.process.returncode}" if self.process.poll() is not None else "is still running"
+                raise AssertionError(f"the server did not answer {method} (id {request_id}) within {timeout_s:.0f}s and {state}")
+            answered = json.loads(line)
+            if answered.get("id") == request_id:
+                return answered
+            if time.monotonic() > deadline:
+                raise AssertionError(f"the server answered other messages but never id {request_id} for {method}")
+
+    def initialize(self) -> dict:
+        answered = self.request(
+            "initialize",
+            {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "container-tier", "version": "1"}},
+        )
+        assert "result" in answered, answered
+        return answered["result"]
+
+    def call(self, name: str, arguments: dict | None = None, timeout_s: float = SERVER_ANSWER_TIMEOUT_S) -> dict:
+        answered = self.request("tools/call", {"name": name, "arguments": arguments or {}}, timeout_s=timeout_s)
+        assert "result" in answered, answered
+        result = answered["result"]
+        document = result["structuredContent"]
+        # The content text is the same document, which a host that reads no
+        # structuredContent parses; held to it here so the two cannot drift.
+        assert json.loads(result["content"][0]["text"]) == document, result
+        return document
+
+    def close(self, timeout_s: float = 30.0) -> str:
+        """End the server by closing its stdin, and return what it wrote to stderr."""
+        if self.process.poll() is None:
+            try:
+                _stdout, stderr = self.process.communicate(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                _stdout, stderr = self.process.communicate(timeout=timeout_s)
+        else:
+            stderr = self.process.stderr.read() if self.process.stderr is not None else ""
+        return stderr or ""
+
+    def kill(self) -> None:
+        if self.process.poll() is None:
+            self.process.kill()
+            self.process.wait(timeout=30)
+
+
+def run_cli(project: Path, config: Path | None, *arguments: str, stdin: bytes | None = None, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
+    """The console script, in the project, with the configuration named.
+
+    Bytes in and bytes out, so what a test asserts on is what a shell saw.
+    ``config`` None leaves ``AGENTIC_HIL_CONFIG`` as the environment has it,
+    for the commands that read no configuration.
+    """
+    env = {**os.environ, **(environment or {})}
+    if config is not None:
+        env["AGENTIC_HIL_CONFIG"] = str(config)
+    return subprocess.run(
+        [sys.executable, "-m", "agentic_hil", *arguments],
+        cwd=str(project),
+        env=env,
+        input=stdin,
+        capture_output=True,
+        timeout=COMMAND_TIMEOUT_S,
+        check=False,
+    )
+
+
+def json_document(completed: subprocess.CompletedProcess[bytes]) -> dict:
+    """The one JSON document a ``--json`` run printed."""
+    text = completed.stdout.decode("utf-8")
+    assert text.strip(), f"no document on stdout (exit {completed.returncode}):\n{completed.stderr.decode('utf-8', errors='replace')}"
+    return json.loads(text)
