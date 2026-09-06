@@ -149,7 +149,32 @@ jobs:
       # variable the image already sets is passed again here as the statement it
       # is: these tests run because this run means them to.
       - name: Run the container tests
-        run: docker run --rm -e AGENTIC_HIL_CONTAINER_TESTS=1 agentic-hil-container-tests python -m pytest tests/container -m container -q
+        run: |
+          mkdir -p container-report
+          docker run --rm -e AGENTIC_HIL_CONTAINER_TESTS=1 -v "$PWD/container-report:/report" agentic-hil-container-tests \
+            python -m pytest tests/container -m container -q --junitxml=/report/container-tests.xml
+
+      # This job's whole claim is that it ran the real uv, the real OpenOCD and
+      # the real /proc, and pytest exits 0 for a tier in which every test
+      # skipped. Green over fifteen skips and green over fifteen passes are
+      # indistinguishable to a workflow that reads only the status, so the
+      # report is what the claim is read out of: tests ran, none of them
+      # skipped, none of them errored.
+      - name: Check the container tests actually ran
+        shell: python
+        run: |
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("container-report/container-tests.xml").getroot()
+          suites = root.findall("testsuite") or [root]
+          tests = sum(int(suite.get("tests", 0)) for suite in suites)
+          skipped = sum(int(suite.get("skipped", 0)) for suite in suites)
+          errors = sum(int(suite.get("errors", 0)) for suite in suites)
+          print(f"{tests} test(s) ran, {skipped} skipped, {errors} error(s)")
+          if tests == 0 or skipped or errors:
+              print("This tier has to run every test it collects: a tier that skipped proves nothing and still reports success.")
+              sys.exit(1)
 
   release_metadata:
     name: Release metadata consistency

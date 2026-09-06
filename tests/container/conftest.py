@@ -13,10 +13,17 @@ tell anyone any of that.
 So this tier runs the real tools. It needs uv, an OpenOCD binary, ``/proc`` and
 the package index, and it needs no probe and no board: what needs those is the
 bench tier under ``tests/bench``. ``tools/container/Dockerfile`` is the image it
-is published with and the image the hosted CI job builds, and
-``AGENTIC_HIL_CONTAINER_TESTS=1`` is what says a run is in it. Every test here
-skips without that, so a developer's ``pytest`` and the hosted matrix are
-unaffected.
+is published with and the image the hosted CI job builds.
+
+The gate has two halves, because a skip and an error are different answers.
+``AGENTIC_HIL_CONTAINER_TESTS=1`` says a run means to be in the image, and every
+test here skips without it, so a developer's ``pytest`` and the hosted matrix
+are unaffected. A run that does set it and cannot find the marker the image
+build writes, or uv, or the debugger, or ``/proc``, ends the collection with an
+error naming what is missing. A required check that reported success over
+fifteen skipped tests would be a check measuring nothing and saying nothing
+about it, and a machine that satisfied the variable outside the image could be a
+bench with a probe attached.
 
 Three arrangements are shared here because every test needs at least one:
 
@@ -43,16 +50,28 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO
 
 import pytest
 
-# What says this run is in the image this tier is published with. Set by the
-# Dockerfile, and by nothing else: a developer who exports it on a machine
-# without uv or OpenOCD gets the skips below instead, which name what is
-# missing.
+# What says a run means to be in the image this tier is published with. Set by
+# the Dockerfile and by the job that runs it. It says what a run intends and
+# nothing about what is here, which is why it is not the whole gate.
 CONTAINER_ENV = "AGENTIC_HIL_CONTAINER_TESTS"
+
+# What says a run really is in it. Written by the image build and by nothing
+# else, so a run that declared the image and cannot find this is a run whose
+# result would be a green tier that measured nothing, or worse, a machine with a
+# bench attached.
+IMAGE_MARKER = Path("/etc/agentic-hil/container-test-image")
+
+# The process table this tier reads. Named so a test can put a directory that is
+# not there in front of the gate without moving the real one.
+PROC_ROOT = "/proc"
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -81,26 +100,60 @@ INSTALL_TIMEOUT_S = 600.0
 COMMAND_TIMEOUT_S = 300.0
 
 
-def _what_this_host_cannot_answer() -> str | None:
-    """Why this tier cannot run here, or None where it can.
+def why_this_run_is_not_in_the_image() -> str | None:
+    """Why this run never meant to be here, or None where it says it is.
 
-    The environment variable says what a run intends; the three checks under it
-    say what the host can actually answer, so a variable exported on a machine
-    without the tools produces a skip that names what is missing rather than a
-    failure inside uv.
+    The one condition that is a skip. A developer's `pytest` in a checkout, the
+    hosted matrix and anything else that did not set the variable never claimed
+    to be in the image, and a tier that skips itself for them is the tier
+    working. Everything else is `missing_from_the_image`.
     """
     if os.environ.get(CONTAINER_ENV) != "1":
         return f"the container tier runs only where {CONTAINER_ENV}=1 says the real tools are present"
-    if shutil.which("uv") is None:
-        return "uv is not on PATH, and this tier reads receipts uv writes"
-    if shutil.which("openocd") is None:
-        return "openocd is not on PATH, and this tier drives the real debugger backend"
-    if not Path("/proc").is_dir():
-        return "this host publishes no /proc, and this tier reads the process table out of it"
     return None
 
 
-_UNAVAILABLE = _what_this_host_cannot_answer()
+def missing_from_the_image(which: Callable[[str], str | None] | None = None, proc_root: Path | None = None, marker: Path | None = None) -> str | None:
+    """What the published image would have and this host has not, or None.
+
+    The marker is first and is a file the image build writes, because the
+    variable above is something an operator can export on a Linux bench with a
+    probe plugged in, and one test in this tier runs `agentic-hil init`, which
+    reads the attached bench, enumerates probes and connects. The root
+    conftest's guard against that is a monkeypatch inside the test process and a
+    subprocess never sees it. A file in the image cannot be exported by
+    accident.
+    """
+    which = which or shutil.which
+    proc_root = proc_root or Path(PROC_ROOT)
+    marker = marker or IMAGE_MARKER
+    if not marker.is_file():
+        return f"{marker} is not here, so this is not the container test image and this tier cannot establish that no bench is attached"
+    if which("uv") is None:
+        return "uv is not on PATH, and this tier reads receipts uv writes"
+    if which("openocd") is None:
+        return "openocd is not on PATH, and this tier drives the real debugger backend"
+    if not proc_root.is_dir():
+        return f"this host publishes no {proc_root}, and this tier reads the process table out of it"
+    return None
+
+
+def image_gate(not_in_the_image: str | None, missing: str | None) -> None:
+    """Stop the collection where a run said it was in the image and it is not.
+
+    A `skipif` cannot tell those two apart, and the difference is the whole
+    value of the job that runs this tier: any condition that made the old gate
+    return a reason turned all of its tests into skips, pytest exited 0, and the
+    required check reported success over a tier that measured nothing. Green
+    over fifteen skips and green over fifteen passes were indistinguishable to
+    the workflow.
+    """
+    if not_in_the_image is None and missing is not None:
+        raise RuntimeError(f"{CONTAINER_ENV}=1 says this run is in the container test image, and it is not: {missing}")
+
+
+_NOT_IN_THE_IMAGE = why_this_run_is_not_in_the_image()
+image_gate(_NOT_IN_THE_IMAGE, missing_from_the_image() if _NOT_IN_THE_IMAGE is None else None)
 
 # Every module in this tier carries this beside its `container` marker, and it
 # has to be a mark rather than an autouse fixture. A skip raised from a fixture
@@ -108,7 +161,23 @@ _UNAVAILABLE = _what_this_host_cannot_answer()
 # set up, so an ordinary `pytest` in a checkout would build a wheelhouse and
 # drive uv before finding out it was never going to run anything. A `skipif` is
 # evaluated before any fixture of the item is touched.
-CONTAINER_ONLY = pytest.mark.skipif(_UNAVAILABLE is not None, reason=_UNAVAILABLE or "the real tools are present")
+CONTAINER_ONLY = pytest.mark.skipif(_NOT_IN_THE_IMAGE is not None, reason=_NOT_IN_THE_IMAGE or "the real tools are present")
+
+
+def a_line_within(stream: IO[str], seconds: float) -> str | None:
+    """One line off a pipe, or None when nothing arrived inside the bound.
+
+    An unbounded `readline` sits ahead of every assertion in the process-table
+    test, and no timeout plugin is configured anywhere in this repository, so a
+    server that starts and never answers ran the job to its ceiling with no
+    useful failure. A server that dies closes its stdout and the read returns at
+    once; only a live but silent one needed this.
+    """
+    answered: list[str] = []
+    reader = threading.Thread(target=lambda: answered.append(stream.readline()), daemon=True)
+    reader.start()
+    reader.join(seconds)
+    return answered[0] if answered else None
 
 
 @pytest.fixture(scope="session")

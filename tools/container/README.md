@@ -70,26 +70,51 @@ docker run --rm -v "$PWD/src:/work/src" -v "$PWD/tests:/work/tests" \
     agentic-hil-container-tests python -m pytest tests/container -m container -q
 ```
 
-## What is pinned in the image
+## What is pinned in the image, and what is not
 
-- a slim Python base, so the interpreter is one version and not whichever one
-  the host happens to have;
+Pinned:
+
+- the base image, by digest, with the tag it was resolved from on the line
+  beside it. Two builds of one commit therefore carry the same interpreter, the
+  same distribution release and the same debugger;
 - uv at one exact version, named in the Dockerfile as `UV_VERSION`. The receipts
   these tests read are written by that program, and a different version may
   write them differently, which is the whole reason the tests exist. Moving the
   pin is a deliberate change with a test run behind it;
+- the dependency set, installed with `--require-hashes` from
+  `requirements/dev.txt`, which is the same locked file the hosted matrix job
+  installs from. This checkout goes on top of it with `--no-deps`.
+
+Not pinned, deliberately:
+
 - the distribution's OpenOCD and `procps`, which are the debugger backend and
-  the second opinion on a process's start time;
-- this checkout, installed with its `dev` and `can` extras;
+  the second opinion on a process's start time. The mirror drops superseded
+  package versions, so a version pin here without a snapshot mirror would turn a
+  stable job red days later for a reason nothing in the change under it can
+  explain. What fixes the versions a build gets is the base digest above.
+
+Set by the image, which is not the same as pinned:
+
 - `AGENTIC_HIL_CONTAINER_TESTS=1`, which is what stops every test in that
   directory from skipping. Without it a plain `pytest` in a checkout collects
   them and runs none of them, which is what keeps a developer's run and the
-  hosted matrix out of uv's way.
+  hosted matrix out of uv's way;
+- `/etc/agentic-hil/container-test-image`, written by this build and by nothing
+  else. The variable says a run means to be here and anybody can export it; the
+  file says a run really is here. A run that sets the variable and cannot find
+  the file, or cannot find uv, the debugger or `/proc`, stops the collection
+  with an error naming what is missing rather than skipping. One test in this
+  tier runs `agentic-hil init`, which reads whatever bench is attached, and a
+  developer's Linux machine with a probe plugged in satisfies every other
+  condition the gate can check.
 
 ## Where it runs on its own
 
 The `Container tests` job in `.github/workflows/ci.yml` builds this image and
 runs it on every pull request, and it is one of the jobs `Required CI` insists
-on. Measured cold, with no layer cache and the base image pulled, the build
-takes 28 seconds and the tests 15, so the job is about three quarters of a
-minute of work.
+on. The job writes a JUnit report out of the container and fails when nothing
+ran, when anything was skipped or when anything errored, because a tier whose
+gate turned every test into a skip exits 0 and is otherwise indistinguishable
+from a tier that passed. Measured cold, with no layer cache and the base image
+pulled, the build takes 28 seconds and the tests 15, so the job is about three
+quarters of a minute of work.

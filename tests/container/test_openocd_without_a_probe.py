@@ -127,4 +127,10 @@ def test_doctor_accepts_a_bound_configuration_whose_openocd_is_installed(tmp_pat
 
     assert answered.returncode == 0, answered.stdout + answered.stderr
     assert "OpenOCD is available." in answered.stdout, answered.stdout
-    assert str(shutil.which("openocd")) in config.read_text(encoding="utf-8")
+
+    # What doctor reports back, not what the fixture wrote. Reading the
+    # executable out of the file three lines after writing it there was a line
+    # that read as a check and could not go red.
+    reported = json.loads(agentic_hil("doctor", "--json", cwd=project, config=config).stdout)
+    checked = reported["debuggers"]["dut"].get("check") or reported["debugger"]
+    assert checked["executable"] == shutil.which("openocd"), checked

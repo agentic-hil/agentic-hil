@@ -88,7 +88,7 @@ def test_each_tool_the_tier_needs_is_named_when_it_is_missing(tmp_path: Path) ->
 
     assert missing_from_the_image(which=everything_is_there, proc_root=proc, marker=marker) is None
     assert "uv" in (missing_from_the_image(which=nothing_is_there, proc_root=proc, marker=marker) or "")
-    assert "/proc" in (missing_from_the_image(which=everything_is_there, proc_root=tmp_path / "gone", marker=marker) or "")
+    assert str(tmp_path / "gone") in (missing_from_the_image(which=everything_is_there, proc_root=tmp_path / "gone", marker=marker) or "")
 
 
 # -- m6: what says this is the image, rather than what says somebody meant it
@@ -106,7 +106,8 @@ def test_the_marker_the_image_writes_is_what_admits_the_tier(tmp_path: Path) -> 
 
 
 def test_the_image_build_writes_the_marker_the_gate_looks_for() -> None:
-    assert str(IMAGE_MARKER) in DOCKERFILE.read_text(encoding="utf-8")
+    """The gate looks for a file, so the build has to be the thing that writes it."""
+    assert IMAGE_MARKER.as_posix() in DOCKERFILE.read_text(encoding="utf-8")
 
 
 # -- m8: a server that starts and never answers ---------------------------

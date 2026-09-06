@@ -12,9 +12,10 @@
 # of them is invisible to a fake and obvious to the real tool.
 #
 # So this image carries the real tools and nothing that needs hardware: uv at
-# one pinned version, the distribution's OpenOCD, and this checkout installed
-# with its dev and can extras. What still needs a probe or a board is the bench
-# tier under tests/bench, which never runs here.
+# one pinned version, the distribution's OpenOCD, this project's dev and can
+# dependency set installed from the locked file the hosted matrix uses, and this
+# checkout on top of it. What still needs a probe or a board is the bench tier
+# under tests/bench, which never runs here.
 #
 # Build and run it from the repository root:
 #
@@ -24,7 +25,16 @@
 # The run needs the network. uv resolves this distribution's dependencies from
 # the package index, and one test reads the release index over HTTPS to check
 # that a currency claim is only made after the index has answered.
-FROM python:3.12-slim
+# Pinned by digest, with the tag it was resolved from beside it, the way this
+# repository's workflows pin their actions. A moving tag means two builds of one
+# commit can carry a different interpreter patch and a different debugger, which
+# is a poor property for the required check whose whole claim is that it ran the
+# real ones. The distribution's own packages below stay unpinned deliberately:
+# the mirror drops superseded versions, so a version pin without a snapshot
+# mirror turns a stable job red days later for a reason nothing in the change
+# under it can explain.
+FROM python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+# ^ python:3.12-slim
 
 # OpenOCD is the debugger backend the no-probe tests drive, ca-certificates is
 # what lets uv and the release-index read verify anything at all, and procps is
@@ -48,12 +58,31 @@ RUN python -m pip install --no-cache-dir --disable-pip-version-check \
     "uv==${UV_VERSION}" "setuptools>=77" "wheel"
 
 WORKDIR /work
-COPY . /work
-RUN python -m pip install --no-cache-dir --disable-pip-version-check -e ".[dev,can]"
 
-# What tells the tier it is where it belongs. Without it every test under
-# tests/container skips, which is what keeps a developer's `pytest` and the
-# hosted matrix from trying to drive uv and OpenOCD.
+# The dependency set from the file this repository already generates, with its
+# hashes, before the checkout is copied in. The matrix job in the same workflow
+# installs exactly this set with `--require-hashes` from the same file, and the
+# required check resolving it live meant a release of any transitive dependency
+# could turn it red on a pull request that changed nothing, with no lock to
+# bisect against. It is also the one layer worth caching: it does not invalidate
+# when a source file changes.
+COPY requirements/dev.txt /tmp/dev.txt
+RUN python -m pip install --no-cache-dir --disable-pip-version-check --require-hashes -r /tmp/dev.txt
+
+COPY . /work
+# `--no-deps`, because the line above installed them from the locked file and a
+# resolver run here would be free to move any of them.
+RUN python -m pip install --no-cache-dir --disable-pip-version-check --no-deps -e .
+
+# What tells the tier it is where it belongs, in two parts. The variable says a
+# run means to be here and can be exported by anybody; this file says a run
+# really is here and is written by this build alone. Without the variable every
+# test under tests/container skips, which is what keeps a developer's `pytest`
+# and the hosted matrix from trying to drive uv and OpenOCD; with the variable
+# and without the file the tier stops the collection instead of running commands
+# that read hardware on a machine that may have some.
+RUN mkdir -p /etc/agentic-hil \
+    && printf 'The container test tier runs here. Written by tools/container/Dockerfile.\n' > /etc/agentic-hil/container-test-image
 ENV AGENTIC_HIL_CONTAINER_TESTS=1
 
 CMD ["python", "-m", "pytest", "tests/container", "-m", "container"]

@@ -36,7 +36,14 @@ import pytest
 
 from agentic_hil.process import filetime_epoch_seconds, snapshot_process_images
 
-from .conftest import ABOVE_EVERY_RELEASE, CONTAINER_ONLY, UvTool, Wheelhouse, fixture_configuration
+from .conftest import ABOVE_EVERY_RELEASE, CONTAINER_ONLY, UvTool, Wheelhouse, a_line_within, fixture_configuration
+
+# How long the server may take to answer `initialize` before that is a failure
+# rather than a slow machine. Read under a bound because a server that starts and
+# never answers would otherwise block this readline forever: no timeout plugin is
+# configured anywhere in this repository, so the job would run to its ceiling and
+# report a timeout instead of a test that says what did not answer.
+INITIALIZE_TIMEOUT_S = 60.0
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
 
@@ -143,7 +150,8 @@ def test_a_server_started_from_the_installation_is_named_under_restart_required_
         }
         server.stdin.write(json.dumps(request) + "\n")
         server.stdin.flush()
-        answered = server.stdout.readline()
+        answered = a_line_within(server.stdout, INITIALIZE_TIMEOUT_S)
+        assert answered is not None, f"the server did not answer initialize within {INITIALIZE_TIMEOUT_S:.0f}s and is still running"
         assert answered.strip(), f"the server answered nothing to initialize: {server.stderr.read() if server.poll() is not None else 'it is still running'}"
         assert json.loads(answered)["result"]["protocolVersion"], answered
 
