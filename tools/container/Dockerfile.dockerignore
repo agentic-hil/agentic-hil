@@ -1,0 +1,31 @@
+# The build context for tools/container/Dockerfile, and only for it. BuildKit
+# reads the ignore file that sits beside the Dockerfile it was given before it
+# falls back to the one at the context root, and the one at the context root
+# sends only evals/ and src/: it belongs to the evaluation images, which want a
+# context of a few hundred kilobytes.
+#
+# Written the way the repository root's own ignore file is written: nothing
+# goes, and what the build needs is named back in. The other direction, naming
+# what to leave out, is a list that cannot keep up, and this one had already
+# fallen behind every path this repository's .gitignore marks as local
+# machine-bound state, so a build from a working checkout carried the builder's
+# bench configuration, the agent loop directory, the local agent configuration
+# and both caches into a layer. The next local directory somebody creates would
+# have gone the same way.
+**
+
+# What the image installs and what it runs. The four files and src/ are what
+# the tests build their wheels out of, requirements/ is the locked dependency
+# set the image installs, and tests/ is the tier itself.
+!pyproject.toml
+!README.md
+!LICENSE
+!MANIFEST.in
+!requirements
+!src
+!tests
+
+# And not what a build leaves behind inside those.
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
