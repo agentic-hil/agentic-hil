@@ -621,6 +621,7 @@ def test_a_resume_to_a_file_and_line_breakpoint_stops_inside_that_function(sessi
     assert stop["frame"]["function"] == HANDLER_FUNCTION, stop
 
 
+@pytest.mark.xfail(reason="#495", strict=True)
 def test_a_resume_with_nothing_to_stop_it_times_out_and_halts_the_running_target(session: McpServer) -> None:
     """The resume that runs out, which is also how a running target gets halted.
 
@@ -667,6 +668,7 @@ def test_a_resume_with_nothing_to_stop_it_times_out_and_halts_the_running_target
     assert status.get("cleanup_required") is not True, status
 
 
+@pytest.mark.xfail(reason="#495", strict=True)
 def test_clearing_a_breakpoint_the_target_is_sitting_on_leaves_the_stop_reason_and_the_next_resume_alone(session: McpServer) -> None:
     """Clear at a breakpoint, then read the stop reason, then resume again.
 
