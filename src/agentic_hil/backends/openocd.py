@@ -76,6 +76,13 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "probe_unconfirmed": "target_state_unconfirmed",
     "flash_unconfirmed": "flash_failed",
     "reset_unconfirmed": "reset_failed",
+    # The debugger failed and its output says no more than that. `debugger_error`
+    # is the name the debug-session path has always published for exactly that
+    # (`_start_failure` in gdbdebug), and a caller that reads one word for it in
+    # a failed session and another in a failed command has to learn two. The
+    # backend's own `unknown_debugger_error` travels beside it in
+    # `backend_error_type` for a reader at that layer (#506).
+    "unknown_debugger_error": "debugger_error",
 }
 
 # OpenOCD's own words for an erase it could not carry out: `flash_erase_address`
@@ -834,7 +841,7 @@ class OpenOCDBackend:
             "reset_failed": "Debugger failed to reset the target.",
             "timeout": "Debugger command timed out.",
             "debugger_command_rejected": "OpenOCD refused the command before it opened the debug probe, so the target was not touched.",
-            "unknown_debugger_error": "Debugger failed with an unknown error.",
+            "debugger_error": "Debugger failed with an unknown error.",
         }.get(error_type, "Debugger failed with an unknown error.")
 
     def _likely_causes(self, error_type: str) -> list[str]:

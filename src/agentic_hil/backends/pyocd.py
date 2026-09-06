@@ -80,6 +80,13 @@ PYOCD_NOT_FOUND: JsonObject = {
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "pyocd_not_found": "debugger_not_found",
     "probe_not_found": "adapter_not_found",
+    # The debugger failed and its output says no more than that. `debugger_error`
+    # is the name the debug-session path has always published for exactly that
+    # (`_start_failure` in gdbdebug), and a caller that reads one word for it in
+    # a failed session and another in a failed command has to learn two. The
+    # backend's own `unknown_debugger_error` travels beside it in
+    # `backend_error_type` for a reader at that layer (#506).
+    "unknown_debugger_error": "debugger_error",
 }
 
 # Legal characters in a pyOCD target type name, from pyocd.target.
@@ -1056,7 +1063,7 @@ class PyOCDBackend:
             "reset_failed": "Debugger failed to reset the target.",
             "memory_read_failed": "Debugger failed to read the requested target memory.",
             "timeout": "Debugger command timed out.",
-            "unknown_debugger_error": "Debugger failed with an unknown error.",
+            "debugger_error": "Debugger failed with an unknown error.",
         }.get(error_type, "Debugger failed with an unknown error.")
 
     def _likely_causes(self, error_type: str) -> list[str]:

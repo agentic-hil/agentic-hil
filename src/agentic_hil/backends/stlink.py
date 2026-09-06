@@ -85,6 +85,13 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "flash_unconfirmed": "flash_failed",
     "reset_unconfirmed": "reset_failed",
     "memory_read_unconfirmed": "memory_read_failed",
+    # The debugger failed and its output says no more than that. `debugger_error`
+    # is the name the debug-session path has always published for exactly that
+    # (`_start_failure` in gdbdebug), and a caller that reads one word for it in
+    # a failed session and another in a failed command has to learn two. The
+    # backend's own `unknown_debugger_error` travels beside it in
+    # `backend_error_type` for a reader at that layer (#506).
+    "unknown_debugger_error": "debugger_error",
 }
 
 # One entry per tool, and every entry is a line the operation itself prints.
@@ -844,7 +851,7 @@ class STLinkBackend:
         return BACKEND_ERROR_TO_PUBLIC_ERROR.get(backend_error_type, backend_error_type)
 
     def _summary_for_error(self, error_type: str) -> str:
-        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "flash_erase_failed": "STM32CubeProgrammer could not erase the target's flash, so its contents are unconfirmed.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "memory_read_failed": "Debugger failed to read the requested target memory.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "unknown_debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
+        return {"debugger_not_found": "Debugger executable could not be found.", "adapter_not_found": "Debugger adapter could not be found or opened.", "target_not_detected": "Debugger could not detect the target.", "target_state_unconfirmed": "STM32CubeProgrammer exited without confirming the operation, so the target's state is unknown.", "flash_failed": "Debugger failed to flash the firmware.", "flash_erase_failed": "STM32CubeProgrammer could not erase the target's flash, so its contents are unconfirmed.", "verify_failed": "Debugger failed to verify the flashed firmware.", "reset_failed": "Debugger failed to reset the target.", "memory_read_failed": "Debugger failed to read the requested target memory.", "timeout": "Debugger command timed out.", "config_file_not_found": "Debugger input file could not be found.", "debugger_error": "Debugger failed with an unknown error."}.get(error_type, "Debugger failed with an unknown error.")
 
     def _erase_failure_summary(self, reading: str) -> str:
         """The erase-failure summary the transcript reading actually supports.
