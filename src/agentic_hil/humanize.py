@@ -672,11 +672,28 @@ def _work_was_done(result: Mapping[str, object]) -> bool:
     refused at preflight carries it too, naming the step whose *text* is wrong,
     so reading it as evidence of execution would call every schema error a failed
     test run.
+
+    An upgrade answers the same question with its own two markers, and it is
+    the one command whose "ran" is a package manager rather than a bench:
+    `changed_on_disk` is the half-finished run that replaced files before it
+    stopped, and `installation_broken` is the run that left no package to load
+    at all. Both are a disk that is other than it was, so both were headed
+    `Refused:`, the word that promises nothing happened, over a summary saying
+    the installation is half-changed (#504). The intact failure keeps the word:
+    the manager ran and moved nothing, and nothing on this host is different.
     """
     if result.get("side_effect_committed") is True:
         return True
+    if any(result.get(marker) is True for marker in _DISK_CHANGED_MARKERS):
+        return True
     steps = result.get("steps")
     return isinstance(steps, Sequence) and not isinstance(steps, (str, bytes)) and bool(steps)
+
+
+# The markers `upgrade._failed_upgrade` writes when the manager left the disk
+# other than it found it, by name, because they are the producer's own words
+# for the two outcomes and nothing else on any result spells them.
+_DISK_CHANGED_MARKERS = ("changed_on_disk", "installation_broken")
 
 
 def render_refusal(result: JsonObject, command: str | None = None) -> list[str]:
