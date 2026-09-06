@@ -2,11 +2,12 @@
 
 Each test here was written from the issue text before any change, and each
 names the code it pins. A hex stimulus and its refusal, a base64 upload and a
-flash by the id it returned, every `hardware_recover` refusal, the pytest
-fixture's teardown, a corrupt audit ledger sidecar, a corrupt report-state
-file, a serial device this user may not open, an undeclared port or bus, the
-holder a `device_busy` refusal names, the two optional extras' own refusals,
-and a broker whose adapter cannot open. Everything runs against the shipped
+flash by the id it returned, every `hardware_recover` refusal and its
+`agentic-hil recover` spelling, the pytest fixture's teardown, a corrupt audit
+ledger sidecar, a corrupt report-state file, a serial device this user may
+not open, an undeclared port or bus, the holder a `device_busy` refusal names
+and the CLI's passthrough of it, the two optional extras' own refusals, and a
+broker whose adapter cannot open. Everything runs against the shipped
 fakes and files under a temporary state root; what needs a real terminal
 device, a real CAN interface or a real absence of python-can is in
 tests/container beside this.
@@ -35,7 +36,14 @@ from test_pytest_plugin import PLUGIN_ARGS
 
 from agentic_hil.artifacts import decode_base64_payload
 from agentic_hil.bench import HEARTBEAT_INTERVAL_S, BenchMutex, DeviceBusyError, resource_digest
-from agentic_hil.canbroker import ParticipantError, attach_participant, broker_log_path, bus_lock_key
+from agentic_hil.canbroker import (
+    BROKER_EXIT_ADAPTER,
+    ParticipantError,
+    attach_participant,
+    broker_log_path,
+    bus_lock_key,
+)
+from agentic_hil.cli import _holds_from_collision, build_parser, dispatch
 from agentic_hil.comports import likely_causes, payload_bytes
 from agentic_hil.config import ConfigError, load_authoritative_config, load_config
 from agentic_hil.coordination import HardwareCoordinator
@@ -139,10 +147,11 @@ def test_com_write_hex_payload_bytes_and_refusal(tmp_path: Path, monkeypatch: py
 # the rule refuses is a channel of neither shape, before the library is asked.
 
 
-class PosixOs:
-    """The `os` module as `agentic_hil.can` sees it on Linux: `name` is posix, the rest is the real module."""
+class HostOs:
+    """The `os` module as a driver module sees it on one host: `name` is fixed, the rest is the real module."""
 
-    name = "posix"
+    def __init__(self, name: str) -> None:
+        self.name = name
 
     def __getattr__(self, attribute: str):
         return getattr(os, attribute)
@@ -163,7 +172,7 @@ def test_can_session_start_without_python_can_and_with_a_peak_channel_of_neither
     try:
         # The rule is the POSIX one whichever host runs the suite: `os.name`
         # is what the code reads, and only the CAN module sees the POSIX name.
-        monkeypatch.setattr("agentic_hil.can.os", PosixOs())
+        monkeypatch.setattr("agentic_hil.can.os", HostOs("posix"))
         monkeypatch.setitem(sys.modules, "can", None)
         without_backend = service.call("can_session_start", {"bus_id": BUS_ID})
         assert without_backend["ok"] is False, without_backend
@@ -361,6 +370,78 @@ def test_recover_refusals_leave_the_incident_standing(tmp_path: Path) -> None:
         recovery.close()
 
 
+def cli_recover(argv: list[str]) -> dict:
+    """`agentic-hil recover ...` for the project in the working directory, as the document the command prints."""
+    result = dispatch(build_parser().parse_args(["recover", *argv]))
+    assert isinstance(result, dict), result
+    return result
+
+
+def test_the_recover_command_spells_the_same_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`agentic-hil recover` at a shell: the confirmation and the id are the parser's, the other two are the coordinator's.
+
+    The two flags are required by the command line itself, so an operator who
+    leaves one out is answered by the parser naming the flag and never reaches
+    the bench; an id that is present and empty reaches the coordinator and is
+    `quarantine_id_required` there. The live owner is `resource_busy` in the
+    shape a shell sees it: the command's own coordinator is never the holder,
+    so the project lock is held by another process and the summary says so,
+    naming the project resource, where the holder recovering around its own
+    lease reads "Live owner still holds project resources." above. The
+    inconsistent markers are the coordinator's refusal printed as the command's
+    document, and `lease-status` afterwards still reports the incident under
+    the same id.
+    """
+    workspace = tmp_path / "project"
+    write_authoritative_config(workspace, monkeypatch)
+    monkeypatch.chdir(workspace)
+    config = load_authoritative_config(workspace)
+    owner = HardwareCoordinator(config, "owner")
+    resource = "physical:incident"
+    lease = owner.acquire(resource)
+    lease.quarantine("test_audit_broken", audit_broken=True)
+    quarantine_id = str(owner.status()["quarantine_id"])
+
+    for argv, flag in (
+        (["--quarantine-id", quarantine_id], "--confirm-safe-state"),
+        (["--confirm-safe-state"], "--quarantine-id"),
+    ):
+        with pytest.raises(SystemExit) as usage:
+            build_parser().parse_args(["recover", *argv])
+        assert usage.value.code == 2, argv
+        assert flag in capsys.readouterr().err, argv
+
+    busy = cli_recover(["--confirm-safe-state", "--quarantine-id", quarantine_id])
+    assert busy["ok"] is False, busy
+    assert busy["error_type"] == "resource_busy", busy
+    assert busy["summary"] == "Hardware resource is owned by another Agentic HIL process.", busy
+    assert busy["resources"] == [owner.project_key], busy
+    assert busy["retry_safe"] is True, busy
+    owner.close()
+
+    without_id = cli_recover(["--confirm-safe-state", "--quarantine-id", ""])
+    assert without_id["ok"] is False, without_id
+    assert without_id["error_type"] == "quarantine_id_required", without_id
+    assert without_id["summary"] == "Recovery requires the current quarantine_id from lease-status.", without_id
+
+    recovery = HardwareCoordinator(config, "recovery")
+    try:
+        record = recovery._read_record(recovery.project_key)
+        assert record is not None
+        recovery._write_record(recovery.project_key, {**record, "resources": [resource, resource]})
+    finally:
+        recovery.close()
+    inconsistent = cli_recover(["--confirm-safe-state", "--quarantine-id", quarantine_id])
+    assert inconsistent["ok"] is False, inconsistent
+    assert inconsistent["error_type"] == "coordination_state_invalid", inconsistent
+    assert inconsistent["summary"] == "Quarantine resource markers are inconsistent.", inconsistent
+
+    status = dispatch(build_parser().parse_args(["lease-status"]))
+    assert isinstance(status, dict), status
+    assert status["blocked"] is True and status["incident_stands"] is True, status
+    assert status["quarantine_id"] == quarantine_id, status
+
+
 # ---------------------------------------------------------------------------
 # The pytest plugin fixture's teardown.
 
@@ -409,6 +490,63 @@ def test_whose_port_cleanup_fails(agentic_hil):
     output = failing.stdout.str()
     assert "Agentic HIL fixture cleanup failed: COM: RuntimeError: port would not close" in output
     assert "ERROR at teardown of test_whose_port_cleanup_fails" in output or "test_whose_port_cleanup_fails FAILED" in output
+
+
+def test_fixture_teardown_reports_a_debug_stop_that_is_refused_or_raises(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stop half of the same sentence: a `debug_stop_session` that answers not ok, or raises, fails the test as `debug: ...`.
+
+    Each test leaves its session open and replaces what the fixture will call
+    with something that answers once and then puts the real thing back, so the
+    session-scoped service still closes the session it was left with. The
+    refused stop is the tool's own not-ok document and the message carries its
+    summary. The raising stop is the service's `call` raising: a tool body that
+    raises never reaches the fixture as an exception, because the service turns
+    it into a quarantining not-ok result (the first shape again), so what the
+    fixture's own except branch reports is a failure of the call itself, by
+    class and text.
+    """
+    write_authoritative_config(pytester.path, monkeypatch, gdb_executable=FAKE_GDB)
+    elf_for_the_plugin(pytester.path)
+    pytester.makepyfile(
+        test_stop_fails="""
+def open_session(agentic_hil):
+    started = agentic_hil.call("debug_start_session", {"image_path": "build/app.elf", "mode": "load", "timeout_s": 10.0})
+    assert started["ok"] is True, started
+    assert agentic_hil.call("debug_get_session_status")["active"] is True
+
+
+def test_whose_stop_is_refused(agentic_hil):
+    open_session(agentic_hil)
+
+    def refusing_stop(arguments=None):
+        del agentic_hil.debug_stop_session
+        return {"ok": False, "tool": "debug_stop_session", "error_type": "debugger_unresponsive", "summary": "the probe did not answer the stop"}
+
+    agentic_hil.debug_stop_session = refusing_stop
+
+
+def test_whose_stop_raises(agentic_hil):
+    open_session(agentic_hil)
+    real_call = agentic_hil.call
+
+    def raising_call(name, arguments=None):
+        del agentic_hil.call
+        if name == "debug_stop_session":
+            raise RuntimeError("gdb pipe broke")
+        return real_call(name, arguments)
+
+    agentic_hil.call = raising_call
+"""
+    )
+    failing = pytester.runpytest(*PLUGIN_ARGS, "-p", "no:cacheprovider", "test_stop_fails.py")
+    outcomes = failing.parseoutcomes()
+    assert outcomes.get("errors", 0) == 2, outcomes
+    assert outcomes.get("passed", 0) == 2, outcomes
+    output = failing.stdout.str()
+    assert "Agentic HIL fixture cleanup failed: debug: the probe did not answer the stop" in output
+    assert "Agentic HIL fixture cleanup failed: debug: RuntimeError: gdb pipe broke" in output
+    assert "ERROR at teardown of test_whose_stop_is_refused" in output
+    assert "ERROR at teardown of test_whose_stop_raises" in output
 
 
 # ---------------------------------------------------------------------------
@@ -535,15 +673,29 @@ def names_the_device_group(causes: list[str]) -> bool:
     return any(re.search(r"dialout|uucp|group", cause, re.IGNORECASE) for cause in causes)
 
 
-def test_a_serial_device_this_user_may_not_open_names_the_permission_not_a_second_holder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """EACCES on the device: an open failure whose causes name the group to join, not a holder."""
+def eacces_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str) -> dict:
+    """`com_session_start` on a device whose open raises EACCES, as the driver module sees host `host`."""
     config = load_config(str(write_config(tmp_path, com_ports_yaml=COM_PORT_YAML)))
     service = AgenticHILToolService(config)
     install_fake_serial(monkeypatch, UnopenablePort(PermissionError(errno.EACCES, "could not open port", DEVICE)))
+    monkeypatch.setattr("agentic_hil.comports.os", HostOs(host))
     try:
-        refused = service.call("com_session_start", {"port_id": PORT_ID})
+        return service.call("com_session_start", {"port_id": PORT_ID})
     finally:
         service.close()
+
+
+def test_a_serial_device_this_user_may_not_open_names_the_permission_not_a_second_holder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """EACCES on the device: an open failure whose causes name the group to join, not a holder.
+
+    The expectation is keyed on two things and the test fixes both: the OS
+    number, read off the exception the way `serial_port_busy` reads its own
+    (`raised_errno`, never the message), and the POSIX host, given to the
+    driver module the way the CAN channel rule is given its host above, so the
+    suite decides the Linux advice wherever it runs. On Windows the same number
+    means the opposite thing, and the neighbour below pins that.
+    """
+    refused = eacces_refusal(tmp_path, monkeypatch, "posix")
 
     assert refused["ok"] is False, refused
     assert refused["error_type"] == "com_port_open_failed", refused
@@ -552,6 +704,20 @@ def test_a_serial_device_this_user_may_not_open_names_the_permission_not_a_secon
     assert refused["retry_safe"] is True, refused
     assert names_the_device_group(refused["likely_causes"]), refused["likely_causes"]
     assert not any("another program" in cause for cause in refused["likely_causes"]), refused["likely_causes"]
+
+
+def test_access_denied_on_a_windows_com_port_keeps_the_second_holder_among_its_causes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour: `PermissionError(13, 'Access is denied.')` is what a held COM port answers on Windows.
+
+    pyserial reports `CreateFile` on a port another program holds as errno 13
+    there, so on that host the number is the second holder and not a group,
+    and the causes stay the ones the open failure always had.
+    """
+    refused = eacces_refusal(tmp_path, monkeypatch, "nt")
+
+    assert refused["error_type"] == "com_port_open_failed", refused
+    assert refused["likely_causes"] == likely_causes("com_port_open_failed"), refused
+    assert not names_the_device_group(refused["likely_causes"]), refused["likely_causes"]
 
 
 def test_a_device_that_does_not_exist_keeps_the_causes_it_always_had(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -628,6 +794,13 @@ def test_a_call_naming_an_undeclared_device_is_refused_with_the_documented_error
         assert "`unknown_device`" not in sentence, (document, sentence)
     troubleshooting = (REPOSITORY_ROOT / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
     assert "turns a precise refusal back into `com_port_not_configured`" in troubleshooting
+    # docs/security-design.md makes the same promise in its own words, in the
+    # paragraph on where enforcement sits.
+    security = (REPOSITORY_ROOT / "docs" / "security-design.md").read_text(encoding="utf-8")
+    sentence = next((line for line in security.splitlines() if "does not declare does not exist here" in line), None)
+    assert sentence is not None, "docs/security-design.md no longer carries the presence sentence"
+    assert "`com_port_not_configured`" in sentence and "`can_bus_not_configured`" in sentence, sentence
+    assert "`unknown_device`" not in sentence, sentence
 
 
 # ---------------------------------------------------------------------------
@@ -677,6 +850,21 @@ def test_device_busy_names_the_holder_and_flags_a_stale_heartbeat(tmp_path: Path
             contender.acquire([BOARD])
         assert recent.value.result["heartbeat_age_s"] > HEARTBEAT_INTERVAL_S, recent.value.result
         assert "holder_heartbeat_stale" not in recent.value.result, recent.value.result
+
+        # The CLI's passthrough: a grant or revoke that raced this holder
+        # carries the same refusal as `open_holds`, and the reader of that
+        # document is told who holds the device, since when, how long ago the
+        # holder last said so, and, for the hung holder, that it is hung.
+        holds = _holds_from_collision(stale)
+        assert holds["raced_a_run"] is True and holds["owner_active"] is False, holds
+        assert holds["held_devices"] == [BOARD] and holds["busy_devices"] == [BOARD], holds
+        assert holds["holder"] == stale["holder"], holds
+        assert holds["held_since"] == stale["held_since"], holds
+        assert holds["heartbeat_age_s"] == stale["heartbeat_age_s"], holds
+        assert holds["holder_heartbeat_stale"] is True, holds
+        fresh = _holds_from_collision(recent.value.result)
+        assert fresh["heartbeat_age_s"] == recent.value.result["heartbeat_age_s"], fresh
+        assert "holder_heartbeat_stale" not in fresh, fresh
     finally:
         holder.release_all()
         contender.release_all()
@@ -764,7 +952,17 @@ def failing_bridge_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_a_broker_whose_adapter_cannot_open_refuses_the_participant_with_the_adapter_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:  # noqa: F811
-    """One broker is spawned, and the participant learns why the bus is not there."""
+    """One broker is spawned, and the participant learns why the bus is not there.
+
+    The broker's own open refusal is the bridge's: its open request went
+    unanswered because the bridge exited, so the document the broker wrote to
+    its log before exiting `BROKER_EXIT_ADAPTER` is `can_adapter_timeout` with
+    the bridge's stderr in `stderr_tail`. The participant is refused with that
+    document, not with the generic "could not be reached or started": the
+    adapter's error type, its summary, the bridge's last words as
+    `backend_error`, the broker's exit code and the path of the log that holds
+    the whole of it, and `retry_safe` stated as a value.
+    """
     config = failing_bridge_config(tmp_path, monkeypatch)
     bus_key = bus_lock_key(config, "sdcbroker")
 
@@ -774,10 +972,18 @@ def test_a_broker_whose_adapter_cannot_open_refuses_the_participant_with_the_ada
     diagnostics = broker_diagnostics(config, bus_key)
 
     assert len(reaped_brokers) == 1, f"{len(reaped_brokers)} brokers were spawned for one adapter that cannot open\n{diagnostics}"
+    assert reaped_brokers[0].wait(timeout=15) == BROKER_EXIT_ADAPTER, diagnostics
     assert result["ok"] is False, result
     assert result["bus_id"] == "sdcbroker", result
-    assert "retry_safe" in result, result
-    serialised = json.dumps(result)
-    log_path = str(broker_log_path(bus_key, BenchMutex().root))
-    assert result.get("backend_error") is not None or log_path in serialised or "adapter" in serialised.lower(), (result, diagnostics)
-    assert "adapter gone" in diagnostics or "can_adapter" in diagnostics, diagnostics
+    assert result["participant"] == "alpha", result
+    assert result["error_type"] == "can_adapter_timeout", (result, diagnostics)
+    assert result["summary"].startswith("The CAN broker started for this bus could not open its adapter: "), result
+    assert "adapter gone" in result["backend_error"], (result, diagnostics)
+    assert "adapter gone" in result["stderr_tail"], (result, diagnostics)
+    assert result["broker_exit_code"] == BROKER_EXIT_ADAPTER, result
+    assert result["broker_log"] == str(broker_log_path(bus_key, BenchMutex().root)), result
+    assert result["retry_safe"] is True, result
+    # The log the result points at carries the same document, and the deadline
+    # was not what ended the attach: one broker, one refusal, well inside it.
+    assert "adapter gone" in diagnostics and "can_adapter_timeout" in diagnostics, diagnostics
+    assert "can_broker_unavailable" not in json.dumps(result), result

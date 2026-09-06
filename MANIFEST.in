@@ -5,6 +5,11 @@ include TROUBLESHOOTING.md
 include SECURITY.md
 include LICENSE
 include docs/mcp-hosts.md
+# Read by tests that pin what the documents promise against what the tools
+# answer, the way test_tool_annotations.py reads docs/mcp-hosts.md.
+include docs/safety-model.md
+include docs/security-design.md
+include docs/installation.md
 recursive-include src/agentic_hil/schemas *.json
 recursive-include src/agentic_hil/templates *.json
 recursive-include src/agentic_hil/skills *.md
