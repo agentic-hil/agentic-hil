@@ -138,6 +138,10 @@ def missing_from_the_image(which: Callable[[str], str | None] | None = None, pro
         return "pyocd is not on PATH, and this tier drives the pyOCD backend against nothing on USB"
     if which("curl") is None:
         return "curl is not on PATH, and this tier runs install.sh's fetch route, which downloads the pinned uv installer with it"
+    if which("ip") is None:
+        return "ip (iproute2) is not on PATH, and this tier creates the virtual CAN interface the CAN tools bind with it"
+    if which("candump") is None:
+        return "candump (can-utils) is not on PATH, and this tier reads a frame the CAN tools sent off the interface with it"
     if not proc_root.is_dir():
         return f"this host publishes no {proc_root}, and this tier reads the process table out of it"
     return None
@@ -423,6 +427,7 @@ def fixture_configuration(
     com_port_device: str | None = None,
     com_port_fields: dict[str, object] | None = None,
     com_port_identity_source: str | None = "device",
+    can_buses_yaml: str = "can_buses: {}\n",
 ) -> Path:
     """A configuration for a project with no hardware behind it.
 
@@ -443,7 +448,9 @@ def fixture_configuration(
     further keys to that entry as an operator would write them (an encoding, a
     buffer size, a serial number), and ``com_port_identity_source`` is the
     declaration to write, or None to write none, for an entry whose identity
-    one of those added keys carries instead.
+    one of those added keys carries instead. ``can_buses_yaml`` is the
+    whole ``can_buses:`` section verbatim, for a test that declares a bus on a
+    virtual CAN interface; the default declares none.
     """
     executable_value = repr(shutil.which("openocd")) if executable is None else executable
     entry_lines = "".join(f"    {key}: {_yaml_scalar(value)}\n" for key, value in (com_port_fields or {}).items())
@@ -498,8 +505,7 @@ artifacts:
   allowed_extensions: [".elf"]
   max_upload_size_mb: 1
   allow_upload: false
-{com_ports}can_buses: {{}}
-reports:
+{com_ports}{can_buses_yaml}reports:
   directory: ".agentic-hil/reports"
 logs:
   directory: ".agentic-hil/logs"

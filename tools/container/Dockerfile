@@ -29,7 +29,9 @@
 # pseudo-terminal pair from, and root inside the container, which two of them
 # use to drop a server to `nobody` through `setpriv`.
 #
-# The run needs the network. uv resolves this distribution's dependencies from
+# NET_ADMIN is for the CAN tests, which create a virtual CAN interface inside
+# the container and bind the product's SocketCAN transport to it; the host
+# kernel has to carry the `vcan` module (`modprobe vcan`). The run needs the network. uv resolves this distribution's dependencies from
 # the package index, and one test reads the release index over HTTPS to check
 # that a currency claim is only made after the index has answered.
 # Pinned by digest, with the tag it was resolved from beside it, the way this
@@ -49,14 +51,21 @@ FROM python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e18
 # against what a program with no stake in the answer says, curl is what
 # install.sh fetches Astral's pinned uv installer with on the route that has
 # no uv and no Python, which one test runs for real to read the shell rc files
-# back, and socat is what makes the pseudo-terminal pair the serial tests
-# open through the real pyserial: one end is the configured COM port, the
-# other is held by a scripted peer under tests/container. Nothing else: an
-# image that grew a toolchain would be an image whose results depend on which
-# toolchain.
-RUN apt-get update \
-    && apt-get install --no-install-recommends --yes openocd ca-certificates procps curl socat \
-    && rm -rf /var/lib/apt/lists/*
+# back, socat is what makes the pseudo-terminal pair the serial tests open
+# through the real pyserial (one end is the configured COM port, the other is
+# held by a scripted peer under tests/container), iproute2 is `ip`, which the
+# CAN tests create their virtual CAN interface with and which the product
+# itself reads a link's control mode from (it looks in /sbin and /usr/sbin,
+# where this package installs), and can-utils is `candump`, the observer with
+# no stake in the answer that reads a frame off the interface after the
+# product says it sent one. Nothing else: an image that grew a toolchain
+# would be an image whose results depend on which toolchain.
+#
+# The virtual CAN interface itself is not made here: a container cannot load
+# a kernel module, so the host has to carry `vcan` and the run has to grant
+# `--cap-add NET_ADMIN`. Without both, the CAN tests skip naming that reason,
+# and the job that runs this tier counts the skip as a failure.
+RUN apt-get update \n    && apt-get install --no-install-recommends --yes openocd ca-certificates procps curl socat iproute2 can-utils \n    && rm -rf /var/lib/apt/lists/*
 
 # One version, named here, because the receipts these tests read are written by
 # this program and a different one may write them differently: that is the whole

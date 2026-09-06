@@ -54,6 +54,15 @@ open the device or append to the session's log. A container started with a
 user other than root skips those two, naming that reason, and the job that
 runs this tier reads the skip as a failure.
 
+`--cap-add NET_ADMIN` is for the CAN tests. They create a virtual CAN
+interface inside the container with `ip link add ... type vcan`, bind the
+product's SocketCAN transport to it and put a second socket on the far end,
+which needs that capability and the host kernel's `vcan` module (`modprobe
+vcan` on the host; a container cannot load one). Where the interface cannot be
+created the CAN tests skip and say why, and the job that runs this tier reads
+that skip as a failure. A Docker Desktop host whose kernel carries CAN runs
+them too.
+
 `DOCKER_BUILDKIT=1` is not decoration. This build's ignore file is
 `Dockerfile.dockerignore`, which sits beside the Dockerfile, and only BuildKit
 prefers it to the repository root's `.dockerignore`. The root one belongs to the
