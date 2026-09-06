@@ -80,6 +80,7 @@ MEMORY_READ_CHUNK_BYTES = 1024
 # for why both are stated rather than assumed.
 INTEGER_VALUE_WIDTHS = frozenset({1, 2, 4, 8})
 DEFAULT_SYMBOL_VALUE_BYTE_ORDER = "little"
+MI_ASYNC_COMMAND = "-gdb-set mi-async on"
 GDB_COMMAND_TIMEOUT_CAP_S = 10.0
 CONTINUE_COMMAND_TIMEOUT_CAP_S = 5.0
 STOP_SESSION_TIMEOUT_CAP_S = 5.0
@@ -810,10 +811,32 @@ class GdbDebugSessions:
         return resolve_gdb_executable(self.config, self.backend_name)
 
     def _initialize_gdb(self, session: GdbDebugSession, timeout: float) -> JsonObject:
-        commands = ["-gdb-set pagination off", "-gdb-set confirm off", f"-file-exec-and-symbols {mi_string(str(session.artifact['resolved_path']))}"]
+        # Asynchronous MI is asked for before the target is connected, and it
+        # is not optional. In synchronous mode GDB does not read the next MI
+        # command while -exec-continue is in flight, so the interrupt the
+        # timeout path sends to contain a running target is not processed
+        # until the target stops on its own, which a firmware whose main loop
+        # never returns never does: every timeout became a free-running board
+        # and a quarantine (#495). A GDB that refuses the setting is refused
+        # here, before anything on the target was touched, rather than found
+        # out at the first timeout.
+        commands = ["-gdb-set pagination off", "-gdb-set confirm off", MI_ASYNC_COMMAND, f"-file-exec-and-symbols {mi_string(str(session.artifact['resolved_path']))}"]
         for command in commands:
             response = self._gdb_command(session, command, min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))
             if not response.ok:
+                if command == MI_ASYNC_COMMAND and not response.timed_out and not getattr(response, "audit_failure", False):
+                    return {
+                        **self._gdb_failure("debug_start_session", session, response.error_message, False, response=response),
+                        "error_type": "gdb_async_unsupported",
+                        "summary": f"GDB refused `{MI_ASYNC_COMMAND}`, and a debug session needs asynchronous MI to interrupt a running target; this GDB cannot run one.",
+                        "backend_error": response.error_message,
+                        "load_phase": session.load_phase,
+                        "firmware_load_status": session.firmware_load_status,
+                        "target_contacted": False,
+                        "side_effect_committed": False,
+                        "side_effect_status": "not_started",
+                        "retry_safe": True,
+                    }
                 return {**self._gdb_failure("debug_start_session", session, response.error_message or f"GDB startup command failed: {command}", response.timed_out, response=response), **self._startup_effect_fields(session, response.timed_out)}
         session.load_phase = "target_connect_started"
         target = self._gdb_command(session, f"-target-select extended-remote localhost:{session.gdb_port}", min(timeout, GDB_COMMAND_TIMEOUT_CAP_S))

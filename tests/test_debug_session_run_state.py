@@ -3,9 +3,12 @@
 Three defects one board showed in the same module, `backends/gdbdebug.py`, each
 a session that ended in a quarantine over a target that was doing exactly what
 it had been told (#492, #493, #495). The bench tier carries the hardware half
-of these as strict expected failures; this is the unit half, driven through the
-fake GDB with the behaviours the bench recorded opted in, so the same sequences
-can be run on every push.
+of these, in tests/bench/test_bench_breakpoints.py and test_bench_symbols.py;
+this is the unit half, driven through the fake GDB with the behaviours the
+bench recorded opted in, so the same sequences can be run on every push. The
+fake's model of asynchronous MI comes from the GDB manual and the issue's
+reasoning, not from a recording, because the bench had never run with the
+setting on: what the board does with it is the bench tier's to prove.
 """
 from __future__ import annotations
 
