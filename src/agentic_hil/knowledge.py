@@ -1642,10 +1642,15 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
         ),
     ),
     "run_already_active": ErrorRemedy(
-        meaning="This owner already holds an open run, and a run declares its devices once, up front.",
+        meaning=(
+            "This owner already holds an open run, and a run declares its devices once, up front. A test plan run through "
+            "`test_reactor_run` is a run of its own and takes the devices it names for itself, so it is refused the same way "
+            "while this session's `bench_run_start` is open, rather than as `device_busy` against this session's own hold."
+        ),
         remediation=(
             "End the open run before declaring another; the devices it declared are released then.",
             "One run per owner is what makes the declared set the complete answer to what this owner may touch.",
+            "For a plan, that is `bench_run_stop` and then `test_reactor_run` again; the plan needs no run around it.",
         ),
     ),
     # The most common refusal on this surface, and for a long time the one that
@@ -4198,7 +4203,7 @@ A single call needs no declaration. A *sequence* does: without one, `flash_firmw
 
 `kind` is one of `debugger`, `uart`, `can`. `id` is the name of the config entry; for `debugger` it may be omitted when the project configures exactly one. The DUT is not a kind: it is what the devices drive, not something that drives.
 
-A written test plan needs no declaration around it. `test_reactor_run` drives the same reactor `agentic-hil test-reactor` drives, and there the plan *is* the declaration: every device it names is taken before its first step and held past its last, and a step reaching for one the plan did not name is refused with `undeclared_device` exactly as a call inside a `bench_run_start` would be.
+A written test plan needs no declaration around it. `test_reactor_run` drives the same reactor `agentic-hil test-reactor` drives, and there the plan *is* the declaration: every device it names is taken before its first step and held past its last, and a step reaching for one the plan did not name is refused with `undeclared_device` exactly as a call inside a `bench_run_start` would be. Asked for while this session's own `bench_run_start` is open, a plan is refused as `run_already_active` naming `bench_run_stop` as the way out: a plan is a run of its own, and one run per owner is the rule.
 
 What the declaration buys, and what it costs:
 
