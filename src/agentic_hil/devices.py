@@ -28,7 +28,7 @@ free-form so a device kind can grow a tool without a new plumbing path.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import ClassVar, Protocol
 
@@ -567,16 +567,18 @@ class DeviceSet:
         composite unit) still produce it once."""
         return sorted({key for device in self.devices for key in device.lock_keys})
 
-    def acquire(self, bench: BenchMutex, *, wait_s: float = 0.0) -> list[str]:
+    def acquire(self, bench: BenchMutex, *, wait_s: float = 0.0, stop_requested: Callable[[], bool] | None = None) -> list[str]:
         """Hold every device in this set, or hold none of them.
 
         The whole set goes into one ``BenchMutex.acquire`` on purpose. That is
         where the mechanism lives: it walks the keys in sorted order under one
         deadline and unwinds everything it already took when one of them is busy.
         Taking them here one device at a time would rebuild both, worse, and a
-        partially acquired set is exactly what must never escape."""
+        partially acquired set is exactly what must never escape.
+        ``stop_requested`` is handed through unchanged: a wait it ends is ended
+        by the mutex, with the same unwind."""
         self.require_lockable()
-        return bench.acquire(self.lock_keys, wait_s=wait_s)
+        return bench.acquire(self.lock_keys, wait_s=wait_s, stop_requested=stop_requested)
 
     def unlockable_keys(self) -> list[str]:
         """Keys the machine-wide mutex would ignore rather than lock.

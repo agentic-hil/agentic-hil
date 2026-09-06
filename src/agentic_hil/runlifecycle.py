@@ -801,6 +801,13 @@ def run_status_summary(state: str, record: JsonObject, requested_at: str | None)
         verdict = "passed" if record.get("run_ok") else f"did not pass ({record.get('error_type') or 'unknown'})"
         ended = "was stopped on request" if state == RUN_STOPPED else "ended"
         return f"This run {ended} and {verdict}; its report is at {record.get('report_path')}."
+    if state == RUN_STARTING:
+        # A run that has not published `running` holds nothing yet: it is
+        # taking its devices, or waiting for a holder to give one up. Saying it
+        # is on its first step would send a reader away expecting a report the
+        # device wait may never let the run write.
+        pending = " A stop has been requested; the run ends before any step runs." if requested_at else ""
+        return f"This run is starting: it is taking the devices its plan declares and has run no step.{pending}"
     progress = record.get("progress") or {}
     where = f"step {progress.get('step')} ({progress.get('action')})" if progress.get("step") else "its first step"
     iteration = f", iteration {progress['iteration']}" if progress.get("iteration") else ""
@@ -860,8 +867,9 @@ def request_run_stop(config: AgenticHILConfig, handle: str) -> JsonObject:
     """Ask a run to end after the step it is in.
 
     Cooperative and nothing else: this writes a file, and the run reads it
-    between its steps and inside a wait. Nothing here reaches the process, so a
-    run cannot be left half way through a step by whoever asked it to stop."""
+    between its steps, inside a waiting step and inside the wait for a device
+    another run holds. Nothing here reaches the process, so a run cannot be
+    left half way through a step by whoever asked it to stop."""
     validated_run_handle(handle)
     record = read_run_record(config, handle)
     if record is None:
@@ -901,6 +909,12 @@ def request_run_stop(config: AgenticHILConfig, handle: str) -> JsonObject:
         }
     requested_at = utc_now_iso()
     atomic_write_text(stop_path(config, handle), json.dumps({"run": handle, "requested_at": requested_at, "requested_by_pid": os.getpid()}, indent=2) + "\n")
+    if state == RUN_STARTING:
+        # Read inside the device wait as well as between steps, so a run that
+        # holds nothing yet ends there: nothing to finish, nothing to close.
+        summary = "A stop was requested; the run is still taking its devices, so it ends before any step runs, releases whatever it took and writes its report."
+    else:
+        summary = "A stop was requested; the run finishes the step it is in, closes its devices in the usual order and writes its report."
     return {
         **public_run_fields(record),
         "ok": True,
@@ -908,5 +922,5 @@ def request_run_stop(config: AgenticHILConfig, handle: str) -> JsonObject:
         "state": state,
         "stop_requested": True,
         "stop_requested_at": requested_at,
-        "summary": "A stop was requested; the run finishes the step it is in, closes its devices in the usual order and writes its report.",
+        "summary": summary,
     }

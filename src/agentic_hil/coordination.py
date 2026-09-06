@@ -5,13 +5,14 @@ import json
 import os
 import secrets
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
 from agentic_hil.bench import (
     BenchMutex,
     DeviceBusyError,
+    DeviceWaitStoppedError,
     _LifetimeLock,
     is_physical_resource,
     physical_resources,
@@ -494,7 +495,7 @@ class HardwareCoordinator:
         be asking a person to confirm what the next call establishes anyway."""
         return self.blocked and self.audit_incident
 
-    def begin_run(self, resources: Sequence[Device | str] | DeviceSet, *, label: str | None = None, wait_s: float = 0.0) -> JsonObject:
+    def begin_run(self, resources: Sequence[Device | str] | DeviceSet, *, label: str | None = None, wait_s: float = 0.0, stop_requested: Callable[[], bool] | None = None) -> JsonObject:
         """Lock every declared device for the whole run.
 
         The lease taken per hardware call is not exclusivity: it is released the
@@ -505,7 +506,11 @@ class HardwareCoordinator:
         Accepts Device objects or already-derived resource names, one form or the
         other. Devices are the intended form: they carry the hardware identity and
         collapse two config entries naming one unit onto one lock before anything
-        is taken. A declaration mixing the two is refused; see below for why."""
+        is taken. A declaration mixing the two is refused; see below for why.
+
+        ``stop_requested`` lets the wait for a held device be ended by a
+        cooperative stop; a wait ended that way is raised as the stopped result
+        it is, so the run that asked can write it as its report."""
         with self._guard:
             self._require_open()
             if self.run_active:
@@ -564,10 +569,10 @@ class HardwareCoordinator:
                 # either all devices, in which case the set is every one of them,
                 # or all names, in which case there is no set to take.
                 if device_set:
-                    device_set.acquire(self.bench, wait_s=wait_s)
+                    device_set.acquire(self.bench, wait_s=wait_s, stop_requested=stop_requested)
                 else:
-                    self.bench.acquire(declared, wait_s=wait_s)
-            except DeviceBusyError as error:
+                    self.bench.acquire(declared, wait_s=wait_s, stop_requested=stop_requested)
+            except (DeviceBusyError, DeviceWaitStoppedError) as error:
                 raise CoordinationError({**error.result, "declared_devices": declared}) from error
             except DeviceError as error:
                 raise CoordinationError({**error.result, "declared_devices": declared}) from error

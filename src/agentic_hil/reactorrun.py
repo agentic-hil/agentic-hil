@@ -117,7 +117,11 @@ def run_registered_plan(config: AgenticHILConfig, test_config: TestConfig, *, wa
     devices = plan.lock_keys
     if devices:
         try:
-            service.coordinator.begin_run(plan, label=test_config.name, wait_s=wait_s)
+            # The registration's stop check goes into the wait, so a stop asked
+            # of a run that is still waiting for a held device ends the wait
+            # and the run, as stopped, instead of being read only once a step
+            # boundary comes, which a wait of up to fifteen minutes has none of.
+            service.coordinator.begin_run(plan, label=test_config.name, wait_s=wait_s, stop_requested=registration.stop_requested)
         except CoordinationError as error:
             service.close()
             return write_report(
