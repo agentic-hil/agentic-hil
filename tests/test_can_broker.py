@@ -1381,3 +1381,70 @@ def test_an_attach_after_the_last_detach_stop_decision_is_refused(tmp_path: Path
     assert reply["error_type"] == "can_broker_stopping"
     assert reply["retry_safe"] is True
     assert broker.participants == {}, "no participant may be seated onto a stopping broker"
+
+
+# ---------------------------------------------------------------------------
+# What a bus with `shares:` says about itself while sessions still take it whole (#489).
+#
+# The broker's participant path is complete under `attach_participant`, and no
+# tool or plan step reaches it: `can_session_start` takes the bus's own lock and
+# opens the adapter itself, so a second session on a shared bus is refused
+# exactly as on a single-owner one. Until a session can attach as a participant,
+# the advertisement has to say so, in the listing an agent reads before starting
+# a session and in the refusal it meets when it did not.
+
+SHARING_NOTE_FRAGMENT = "takes the whole bus"
+
+
+def test_a_shared_bus_says_sessions_still_take_it_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = shared_config(tmp_path, monkeypatch)
+    service = CanBusService(config)
+    try:
+        listed = service.list_buses()
+    finally:
+        service.close()
+    status = listed["buses"]["bench"]
+    # The declared views are still advertised: they are configuration, and the
+    # listing is where an operator checks what the file says.
+    assert sorted(status["shares"]) == ["alpha", "beta"]
+    assert status["shares_declared"] is True
+    assert status["session_takes_whole_bus"] is True
+    assert "can_session_start" in status["sharing_note"]
+    assert SHARING_NOTE_FRAGMENT in status["sharing_note"]
+    assert "declared shareable" in listed["summary"]
+    assert SHARING_NOTE_FRAGMENT in listed["summary"]
+
+
+def test_a_single_owner_bus_carries_no_sharing_note(tmp_path: Path) -> None:
+    config = single_owner_config(tmp_path)
+    service = CanBusService(config)
+    try:
+        listed = service.list_buses()
+    finally:
+        service.close()
+    status = listed["buses"]["bench"]
+    for key in ("shares_declared", "session_takes_whole_bus", "sharing_note"):
+        assert key not in status, key
+    assert listed["summary"] == "1 configured CAN bus(es)."
+
+
+def test_a_second_session_on_a_shared_bus_is_refused_and_told_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = shared_config(tmp_path, monkeypatch)
+    first = CanBusService(config)
+    second = CanBusService(config)
+    try:
+        opened = first.session_start("bench")
+        assert opened["ok"] is True, opened
+        assert "participant" not in opened
+
+        refused = second.session_start("bench")
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] in {"device_busy", "resource_busy"}, refused
+        assert refused["side_effect_committed"] is False
+        assert refused["shares_declared"] is True
+        assert refused["session_takes_whole_bus"] is True
+        assert SHARING_NOTE_FRAGMENT in refused["sharing_note"]
+    finally:
+        second.close()
+        first.close()
