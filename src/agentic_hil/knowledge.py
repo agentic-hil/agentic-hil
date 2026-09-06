@@ -54,6 +54,12 @@ BACKENDS = ("openocd", "stlink", "pyocd")
 # and that module imports this one: a second copy of either would be exactly the
 # drift this file exists to prevent.
 DEFAULT_TEST_CONFIG_PATH = ".agentic-hil/testconfig.yaml"
+# The `field` a test-plan refusal names when what is wrong is the document as a
+# whole rather than a path into it: the schema validator's own spelling of the
+# root, and the scope the loader's three pre-parse refusals (not UTF-8, not
+# YAML or JSON, root not a mapping) carry so the catalogue answers them with the
+# fault and not with advice about a plan nobody has read.
+WHOLE_PLAN_FIELD = "$"
 TEST_CONFIG_SCHEMA_RESOURCE = "schemas/testconfig.schema.json"
 # The annotation the plan schema marks a newer format's additions with. A plan
 # is held to what its own `version:` contains, and the schema is what says which
@@ -1573,6 +1579,39 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "to nothing else: it rewrites the file from hardware discovery, so every narrowed permission, the "
             "baudrate, the `resource_id`, the `state_root` and the artifact roots go with it. A bench somebody "
             "narrowed on purpose is exactly the bench where that costs the most.",
+        ),
+    ),
+    # The `test_config_invalid` the loader raises before it has a document: the
+    # file is not UTF-8 text, it is not valid YAML or JSON, or its root is not a
+    # mapping. The unscoped entry above is about a plan the loader has read, and
+    # every step of it (device names, adoption, `init --force`, plan versions)
+    # is about contents this refusal never saw; it sent a reader whose plan has
+    # a duplicate key at a named line and column to reconfigure the bench
+    # (#448's class, #504). Scoped on the field the three refusals carry, which
+    # is the validator's own spelling of the whole document.
+    f"test_config_invalid:{WHOLE_PLAN_FIELD}": ErrorRemedy(
+        meaning=(
+            "The test plan could not be read as a document, so nothing in it was checked and nothing on the bench "
+            "was reached: it is not UTF-8 text, it is not valid YAML or JSON, or its root is not a mapping. `summary` "
+            "says which. Where the parser could name the place, `line` and `column` locate the fault, counted from 1, "
+            "and `backend_error` is the parser's own words for it. A duplicate key is refused here on purpose: a plan "
+            "that names the same key twice would be run under whichever value the parser kept, which is not what "
+            "anybody wrote."
+        ),
+        remediation=(
+            "Open the plan at the `line` and `column` the refusal names and correct the document there; "
+            "`backend_error` says what the parser found. Then run the plan again: nothing needs recovering, because "
+            "no session was opened and no board was driven.",
+            "A plan that is not UTF-8 was saved in another encoding; save it as UTF-8. A root that is not a mapping "
+            "is a file whose top level is a list or a bare value, and a plan is a mapping with `version:` and "
+            "`steps:` at the top.",
+            "`{test_plan_reference}` shows the shape a plan takes once it parses; the schema is checked only after "
+            "this refusal is cleared, so a step or key fault is reported on the next run by its own path.",
+        ),
+        do_not=(
+            "Do not touch the bench configuration for this. Nothing here is about a device, a permission or an "
+            "entry: the fault is in the plan's own text, and nothing written to the configuration changes what the "
+            "parser reads there.",
         ),
     ),
     # The one `test_config_invalid` that is not about the plan's contents at all.

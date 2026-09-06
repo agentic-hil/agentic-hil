@@ -42,6 +42,7 @@ from agentic_hil.knowledge import (
     EXCLUSIVE_PERMISSION_SCOPE,
     LISTEN_ONLY_MODE_ERROR,
     PERMISSION_DENIED_ERROR,
+    WHOLE_PLAN_FIELD,
     exclusive_permission_fields,
     permission_denied_fields,
     permission_denied_summary,
@@ -664,14 +665,21 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
     digest = hashlib.sha256(raw_bytes).hexdigest()
     try:
         loaded = yaml.load(raw_bytes.decode("utf-8"), Loader=UniqueKeyLoader)
+    # The three refusals below are about the document as a whole, which the
+    # schema validator spells `$`, and they are scoped on it for the same reason
+    # the boundary refusal above is scoped on `workspace_root`: the unscoped
+    # `test_config_invalid` entry is about a plan the loader has read, and here
+    # it has read none. It sent a reader whose plan has a duplicate key at a
+    # named line to check device names, run adoption and regenerate the
+    # configuration (#448's class, #504).
     except UnicodeDecodeError as error:
         raise ConfigError(
             "test_config_invalid",
             "Test reactor configuration file is not valid UTF-8 text.",
-            {"path": str(path)},
+            {"path": str(path), "field": WHOLE_PLAN_FIELD},
         ) from error
     except yaml.YAMLError as error:
-        details: JsonObject = {"path": str(path), "backend_error": str(error)}
+        details: JsonObject = {"path": str(path), "field": WHOLE_PLAN_FIELD, "backend_error": str(error)}
         mark = getattr(error, "problem_mark", None)
         if mark is not None:
             details.update({"line": mark.line + 1, "column": mark.column + 1})
@@ -683,7 +691,7 @@ def load_test_config(test_config_path: str | None = None, work_dir: str | None =
 
     raw: Any = loaded or {}
     if not isinstance(raw, dict):
-        raise ConfigError("test_config_invalid", "Test reactor configuration root must be a mapping.", {"path": str(path)})
+        raise ConfigError("test_config_invalid", "Test reactor configuration root must be a mapping.", {"path": str(path), "field": WHOLE_PLAN_FIELD})
     reject_nonfinite_numbers(raw, "test_config_invalid", str(path))
     reject_superseded_plan_version(raw, str(path))
     validate_test_config_schema(raw, str(path))
@@ -913,7 +921,7 @@ def format_test_config_field(parts: list[str]) -> str:
             field = f"{field}[{part}]" if field else f"[{part}]"
         else:
             field = f"{field}.{part}" if field else part
-    return field or "$"
+    return field or WHOLE_PLAN_FIELD
 
 
 @dataclass(frozen=True)
