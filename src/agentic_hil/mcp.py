@@ -9,7 +9,7 @@ from agentic_hil.contracts import MCP_TOOLS as MCP_TOOLS
 from agentic_hil.knowledge import MCP_RESOURCE_TEMPLATES as MCP_RESOURCE_TEMPLATES
 from agentic_hil.knowledge import MCP_RESOURCES as MCP_RESOURCES
 from agentic_hil.knowledge import read_resource
-from agentic_hil.redact import redact_sensitive
+from agentic_hil.redact import redact_sensitive, redact_stream_text
 from agentic_hil.report import overall_success
 from agentic_hil.tools import AgenticHILToolService
 from agentic_hil.types import JsonObject
@@ -178,10 +178,32 @@ def handle_single_mcp_message(message: Any, tools: AgenticHILToolService) -> Jso
         return None
     try:
         return handle_method(request_id, str(message["method"]), message.get("params", {}), tools)
-    except (TypeError, ValueError) as error:
-        return error_response(request_id, JSONRPC_INVALID_PARAMS, "Invalid params", {"summary": str(error)})
+    except InvalidParamsError as error:
+        return error_response(request_id, JSONRPC_INVALID_PARAMS, "Invalid params", {"summary": fault_summary(error)})
     except Exception as error:
-        return error_response(request_id, JSONRPC_INTERNAL_ERROR, "Internal error", {"summary": str(error)})
+        # Every other exception, a TypeError or ValueError included, is a fault
+        # behind a well-formed request. Answered as -32602 it told the agent to
+        # correct arguments that were right; the code for the server's own
+        # fault is -32603.
+        return error_response(request_id, JSONRPC_INTERNAL_ERROR, "Internal error", {"summary": fault_summary(error)})
+
+
+class InvalidParamsError(ValueError):
+    """The request's params are not what JSON-RPC lets a method take: -32602.
+
+    Raised by the envelope's own checks and by nothing else, so that the code
+    for the caller's mistake is never handed out for an exception a tool let
+    escape."""
+
+
+def fault_summary(error: BaseException) -> str:
+    """An exception's text, fit for the wire.
+
+    It is whatever the failing code quoted, and a tool that failed against a
+    package index quotes the index URL with its credential. It takes the same
+    content pass a captured process stream takes, because it is the same kind
+    of text: the tool's words, not a summary this server wrote."""
+    return redact_stream_text(str(error))
 
 
 def handle_method(request_id: Any, method: str, params: Any, tools: AgenticHILToolService) -> JsonObject:
@@ -255,7 +277,7 @@ def params_object_or_throw(params: Any) -> JsonObject:
         return {}
     if isinstance(params, dict):
         return params
-    raise TypeError("JSON-RPC params must be an object.")
+    raise InvalidParamsError("JSON-RPC params must be an object.")
 
 
 def mcp_tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
