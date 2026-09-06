@@ -995,13 +995,16 @@ class GdbDebugSessions:
         validated = self._validate_symbol(tool, symbol)
         if not validated["ok"]:
             return validated
-        # The stop reason as it stood before the queries. An untyped symbol makes
-        # GDB answer `^error`, and _gdb_command records every failed command as a
-        # debugger_error stop, which would make the next debug_continue
-        # short-circuit on "Target is already stopped" because a symbol lookup
-        # took the second route. Restored below for the same reason
-        # clear_breakpoints restores it: resolving a symbol does not change
-        # target execution state.
+        # The stop reason as it stood before the queries. GDB answers `^error`
+        # for an untyped symbol and for a name it does not have, and
+        # _gdb_command records every failed command as a debugger_error stop,
+        # which would make the next debug_continue short-circuit on "Target is
+        # already stopped". The stop reason describes the target, and a name the
+        # debugger could not resolve says nothing about the target, so the
+        # record is put back the moment the refusal is known, whichever route
+        # answers afterwards and whether any does (#493); the same reason
+        # clear_breakpoints restores it. Only a query that never got an answer
+        # keeps the record, because that one is about the debugger.
         prior_stop_reason = session.stop_reason
         address_value, failed = self._evaluate_symbol_expression(session, f"(unsigned long)&{symbol}")
         size_value = None
@@ -1015,11 +1018,11 @@ class GdbDebugSessions:
             # and would hide a debugger that has stopped responding or an audit
             # trail that has broken, so neither is covered by this fallback.
             return self._symbol_expression_failure(tool, symbol, failed)
+        if session.stop_reason is not None and str(session.stop_reason.get("stop_reason")) == "debugger_error":
+            session.stop_reason = prior_stop_reason
         table = read_elf_symbol(str(session.artifact["resolved_path"]), symbol)
         if not table["ok"]:
             return {**self._symbol_expression_failure(tool, symbol, failed), "symbol_table_lookup": table["reason"]}
-        if session.stop_reason is not None and str(session.stop_reason.get("stop_reason")) == "debugger_error":
-            session.stop_reason = prior_stop_reason
         address = int(table["address"])
         return {"ok": True, "symbol": symbol, "address": hex(address), "address_value": address, "size_bytes": int(table["size_bytes"]), "resolved_from": "elf_symbol_table"}
 

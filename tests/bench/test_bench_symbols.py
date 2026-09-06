@@ -785,16 +785,16 @@ def test_every_symbol_read_refuses_without_a_session_rather_than_opening_the_pro
     assert ownership["incident_stands"] is False, ownership
 
 
-@pytest.mark.xfail(reason="#493", strict=True)
 def test_a_failed_lookup_leaves_the_session_able_to_resume(symbols: BenchSymbols) -> None:
-    """A lookup that found nothing, and the resume after it, which is #493.
+    """A lookup that found nothing, and the resume after it, which was #493.
 
     Resolving a symbol does not move the target, so it must not change what the
-    session records about why the target is stopped. Today a name the debugger
-    cannot resolve is recorded as a debugger error against the session, and the
-    next `debug_continue` short-circuits on that recorded state and refuses to
-    resume a target that is sitting exactly where the caller left it. An agent
-    that mistypes a symbol name loses the session it was debugging in.
+    session records about why the target is stopped. A name the debugger could
+    not resolve used to be recorded as a debugger error against the session,
+    and the next `debug_continue` short-circuited on that recorded state and
+    refused to resume a target that was sitting exactly where the caller left
+    it. An agent that mistyped a symbol name lost the session it was debugging
+    in.
 
     The first resume is the control: it runs before the failed lookup and proves
     this session, this breakpoint and this target can do the thing the second
