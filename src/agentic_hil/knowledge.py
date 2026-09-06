@@ -164,6 +164,16 @@ LISTEN_ONLY_MODE_ERROR = "can_listen_only_mode"
 # failure whose outcome is not merely unproven: the bind had nothing to bind to,
 # so no controller was addressed and the bench is untouched.
 CAN_INTERFACE_NOT_FOUND_ERROR = "can_interface_not_found"
+# A SocketCAN interface that is on this host and is administratively down. Its
+# own error_type rather than a shade of the one above, and the separation is the
+# point: an interface that is absent and one that is down are two host states
+# with two different fixes, and one answer for both would send an operator
+# looking for an adapter that is plugged in and named exactly as configured. The
+# kernel lets a CAN_RAW socket bind a down link and only then answers ENETDOWN on
+# every receive and every send, so nothing the bind does says what is wrong; the
+# state is read before the socket is opened, and the refusal is in the same class
+# as a missing interface, with the bench untouched.
+CAN_INTERFACE_DOWN_ERROR = "can_interface_down"
 # The vendor library a configured CAN adapter is driven through is not installed
 # on this host. The same class of claim as the two above and the strongest of
 # them: python-can raises before a driver object exists, so there was nothing for
@@ -2415,6 +2425,36 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "quarantined, and signing for a physical state nobody disturbed teaches the signature to mean nothing.",
             "Do not point the entry at whichever `canN` happens to be up. That is the wrong-bus mistake the channel "
             "name exists to prevent; confirm which interface belongs to this bench first.",
+        ),
+    ),
+    CAN_INTERFACE_DOWN_ERROR: ErrorRemedy(
+        meaning=(
+            "The SocketCAN interface named by `can_buses.<name>.channel` is on this host and is administratively "
+            "down. The kernel lets a raw CAN socket bind a down interface and then answers every receive and every "
+            "send on it with ENETDOWN, so a session opened over one would carry nothing in either direction: the "
+            "state was read before the socket was opened, so no controller was addressed and nothing was put on any "
+            "bus. This is a refusal about the host's network configuration, not a quarantine, and it is deliberately "
+            "not the same answer as an interface that is absent: this one is here, under the configured name, and "
+            "one command away from carrying frames. The usual cause is that it was created and never brought up, or "
+            "that it was taken down out of band and nothing brought it back."
+        ),
+        remediation=(
+            "Bring it up: `sudo ip link set <dev> up`, where `<dev>` is the `channel` on the result. A real CAN "
+            "controller needs its bitrate set first, with `sudo ip link set <dev> type can bitrate <bitrate>`; a "
+            "`vcan` needs nothing but the one command.",
+            "Confirm it is this bench's interface before bringing it up: `ip -details link show dev <dev>` reports "
+            "the state and, for a real controller, the bitrate it is configured for, and `can_buses_list` reports "
+            "what this bench has configured under which name.",
+            "Retry the session afterwards. The bench was never blocked: `retry_safe` is true, no incident was "
+            "opened, and the same entry opens on the running server as soon as the link is up, with no restart.",
+        ),
+        do_not=(
+            "Do not run `recover --confirm-safe-state` over this. There is nothing to recover: no lease was "
+            "quarantined, and signing for a physical state nobody disturbed teaches the signature to mean nothing.",
+            "Do not start the session with `clear_rx_queue: false` to get past it. That is what used to report a "
+            "started session over a link that carries nothing, and the receive queue is not what is wrong here.",
+            "Do not move the entry to another interface that happens to be up. That is the wrong-bus mistake the "
+            "channel name exists to prevent, and the interface this one names is the one this bench is wired to.",
         ),
     ),
     CAN_ADAPTER_LIBRARY_MISSING_ERROR: ErrorRemedy(
