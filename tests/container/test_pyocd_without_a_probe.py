@@ -189,3 +189,75 @@ def test_a_tool_with_no_probe_attached_refuses_promptly_against_the_real_pyocd(t
     assert log["timed_out"] is False, log
     assert "-W" in log["command"].split() or "--no-wait" in log["command"].split(), log["command"]
     assert log["stdout"] == RECORDED_NO_PROBE, log
+
+
+# ---------------------------------------------------------------------------
+# #509: the wording behind `target_type_invalid`, on the one leg that has pyOCD.
+#
+# tests/test_pyocd_unknown_target_phrases.py holds the classifier's two markers
+# against the installed pyOCD's own refusal, and it `importorskip`s pyOCD: the
+# hosted matrix installs requirements/dev.txt, which pins no pyocd, and the
+# job that runs this tier runs only tests/container. So the one place the
+# suite had a real pyOCD never asked it, and the markers were pinned only by a
+# fixture sentence typed from memory of 0.45.1. The `target_type_invalid`
+# classification is the only thing that unlocks the `pyocd pack find` /
+# `pyocd pack install` remediation; an earlier phrase list matched nothing
+# pyOCD printed and every such failure fell to `unknown_debugger_error`.
+
+# Not a plausible near-miss of a real part: unresolvable on any host, including
+# one whose CMSIS-pack cache is full of vendor targets.
+UNRESOLVABLE_TARGET_TYPE = "agentic_hil_no_such_target_type"
+# pyOCD 0.45.1, 2026-09-06, in this image: `Board(Session(None, ...))` with
+# this target override. The unit fixture (tests/fixtures/fake_pyocd_unknown_target.py)
+# wraps the same sentence in the log prefix and suffix the command line adds.
+RECORDED_UNKNOWN_TARGET = (
+    f"Target type {UNRESOLVABLE_TARGET_TYPE} not recognized. Use 'pyocd list --targets' to see currently "
+    "available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional "
+    "target support."
+)
+
+
+def the_installed_pyocds_refusal(target_type: str = UNRESOLVABLE_TARGET_TYPE) -> str:
+    """What this image's pyOCD says about a target type it cannot resolve, with no probe.
+
+    pyOCD's command line reaches for a probe before it resolves the type, so the
+    sentence is made the way the unit tier makes it: through the documented
+    options-container session and the `Board` that raises, with the probe
+    `None` throughout.
+    """
+    from pyocd.board.board import Board
+    from pyocd.core.exceptions import TargetSupportError
+    from pyocd.core.session import Session
+
+    session = Session(None, no_config=True, project_dir=".", target_override=target_type)
+    assert session.probe is None
+    with pytest.raises(TargetSupportError) as raised:
+        Board(session)
+    return str(raised.value)
+
+
+def test_the_installed_pyocd_refuses_an_unknown_target_with_the_words_the_classifier_reads(tmp_path: Path) -> None:
+    """The markers, the classification and the fixture, all held against pyOCD's own sentence.
+
+    Named separately so a failure says which died: either marker alone
+    classifies, so losing one is not yet the regression, but it is the drift
+    that preceded it last time. The unit fixture's sentence is the third
+    check: the fake the matrix runs has to say what the tool says.
+    """
+    from fixtures.fake_pyocd_unknown_target import TARGET_NOT_RECOGNIZED
+
+    from agentic_hil.backends.pyocd import TARGET_TYPE_INVALID_DOC, PyOCDBackend
+
+    message = the_installed_pyocds_refusal()
+    lower = message.lower()
+
+    assert message == RECORDED_UNKNOWN_TARGET, message
+    assert "target type" in lower, message
+    assert "not recognized" in lower, message
+    assert TARGET_TYPE_INVALID_DOC in lower, message
+    assert TARGET_NOT_RECOGNIZED.format(target=UNRESOLVABLE_TARGET_TYPE) == f"0001042 C {message} [__main__]", TARGET_NOT_RECOGNIZED
+
+    project = tmp_path / "project"
+    project.mkdir()
+    config = load_config(str(pyocd_configuration(project, tmp_path / "config" / "config.yaml", tmp_path / "state")))
+    assert PyOCDBackend(config)._classify_output(f"0001042 C {message} [__main__]", "flash_firmware") == "target_type_invalid"

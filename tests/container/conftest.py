@@ -429,6 +429,7 @@ def fixture_configuration(
     com_port_fields: dict[str, object] | None = None,
     com_port_identity_source: str | None = "device",
     can_buses_yaml: str = "can_buses: {}\n",
+    grant_flash_and_reset: bool = False,
 ) -> Path:
     """A configuration for a project with no hardware behind it.
 
@@ -453,9 +454,13 @@ def fixture_configuration(
     declaration to write, or None to write none, for an entry whose identity
     one of those added keys carries instead. ``can_buses_yaml`` is the
     whole ``can_buses:`` section verbatim, for a test that declares a bus on a
-    virtual CAN interface; the default declares none.
+    virtual CAN interface; the default declares none. ``grant_flash_and_reset``
+    opens the two effectful debugger permissions, for a test whose whole point
+    is that a flash or a reset never reached the board: with them closed the
+    refusal is `permission_denied` and the spawn under test never happens.
     """
     executable_value = repr(shutil.which("openocd")) if executable is None else executable
+    effectful = "true" if grant_flash_and_reset else "false"
     entry_lines = "".join(f"    {key}: {_yaml_scalar(value)}\n" for key, value in (com_port_fields or {}).items())
     identity_line = "" if com_port_identity_source is None else f"    identity_source: {com_port_identity_source}\n"
     com_ports = (
@@ -492,8 +497,8 @@ debuggers:
     target_cfg: {target_cfg}
     timeout_s: {timeout_s}
     permissions:
-      allow_flash: false
-      allow_reset: false
+      allow_flash: {effectful}
+      allow_reset: {effectful}
       allow_debug_execution: false
       allow_raw_debugger_commands: false
       allow_mass_erase: false
