@@ -71,10 +71,13 @@ PROGRESS_WRITE_INTERVAL_S = 0.25
 # expense. Far below the slice a waiting step is interrupted on, so it costs a
 # stop nothing in responsiveness.
 STOP_POLL_INTERVAL_S = 0.1
-# How many finished runs the coordination state keeps. Every run leaves a
-# record, including the synchronous ones, so without this the directory grows
-# for the life of the bench. Only terminal records are ever removed, oldest
-# first, and a record whose run is still going is not a candidate at all.
+# How many ended runs the coordination state keeps. Every run leaves a record,
+# including the synchronous ones, so without this the directory grows for the
+# life of the bench. Removed oldest first, and a record whose run is still
+# going is not a candidate at all: what decides that is the lock behind the
+# record, not its state field, so a record left saying `running` by a worker
+# that was killed hard counts as ended too. Only those records, and only their
+# own files.
 RUN_RECORDS_KEPT = 100
 # How often a record write is retried while somebody is reading it. One process
 # writes a record and any number poll it, and on Windows a rename over a file
@@ -306,11 +309,16 @@ def _records_newest_first(directory: Path) -> list[Path]:
 
 
 def prune_run_records(config: AgenticHILConfig) -> None:
-    """Drop the oldest finished runs once there are more than a bench needs.
+    """Drop the oldest ended runs once there are more than a bench needs.
 
-    Only terminal records, and only their own three files. A run still going is
-    never a candidate, so this cannot take the record out from under a reader
-    asking what a live run is doing."""
+    A run still going is never a candidate, so this cannot take the record out
+    from under a reader asking what a live run is doing. Whether it is going is
+    asked of the lock rather than of the record's state field: a worker killed
+    hard leaves a record that says `running` for ever, and a prune that read
+    only the field kept every one of those, so a bench whose runners get
+    rebooted grew past the cap without bound and paid one lock probe per such
+    record on every listing. A record whose lock can be taken is a run that has
+    ended however it ended, and past the cap it goes with its own files."""
     directory = runs_directory(config)
     try:
         records = _records_newest_first(directory)
@@ -327,7 +335,7 @@ def prune_run_records(config: AgenticHILConfig) -> None:
             record = read_run_record(config, handle)
         except ConfigError:
             record = None
-        if record is not None and record.get("state") not in TERMINAL_RUN_STATES:
+        if record is not None and record.get("state") not in TERMINAL_RUN_STATES and not worker_is_gone(config, handle):
             continue
         for candidate in (path, directory / f"{handle}.stop", directory / f"{handle}.lock", directory / f"{handle}.log"):
             try:
