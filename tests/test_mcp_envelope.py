@@ -27,9 +27,11 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import write_authoritative_config, write_config
-from test_implicit_single_action_run import PORT_ID, FakeBackend, FakeSerialHandle, config_for
+from test_can_frame_and_routing import RecordingBus, fake_can_module
+from test_implicit_single_action_run import DEVICE, PORT_ID, FakeBackend, FakeSerialHandle, config_for
 
 from agentic_hil.config import load_config
+from agentic_hil.knowledge import remediation_fields
 from agentic_hil.mcp import handle_mcp_message
 from agentic_hil.stdio import run_stdio_server
 from agentic_hil.tools import AgenticHILToolService
@@ -238,6 +240,7 @@ def test_tools_call_argument_shapes() -> None:
     list_arguments = handle_mcp_message(tools_call(3, "bench_run_status", [1]), service)  # type: ignore[arg-type]
     numeric_name = handle_mcp_message(tools_call(4, 5, {}), service)  # type: ignore[arg-type]
     list_params = handle_mcp_message(tools_call(5, None, params=[]), service)  # type: ignore[arg-type]
+    no_params = handle_mcp_message({"jsonrpc": "2.0", "id": 6, "method": "tools/call"}, service)  # type: ignore[arg-type]
 
     assert service.calls == [("bench_run_status", {}), ("bench_run_status", {})], service.calls
     assert null_arguments["result"]["isError"] is False, null_arguments
@@ -256,23 +259,57 @@ def test_tools_call_argument_shapes() -> None:
 
     assert list_params["error"]["code"] == JSONRPC_INVALID_PARAMS, list_params
 
+    # No params member at all: there is no name to keep, so the refusal is the
+    # result-level one for tool `unknown`, not a protocol error.
+    absent = no_params["result"]
+    assert absent["isError"] is True, absent
+    assert absent["structuredContent"]["error_type"] == "invalid_argument", absent
+    assert absent["structuredContent"]["tool"] == "unknown", absent
+    assert service.calls == [("bench_run_status", {}), ("bench_run_status", {})], service.calls
+
+
+def assert_reads_like_the_catalogues_invalid_argument(refusal: dict, *, tool: str, field: str) -> None:
+    """What every invalid_argument on the surface carries: `field` and `validator`
+    say what was wrong, and the remediation and do_not are the catalogue's own
+    lists for the tool, the same ones `agentic-hil://reference/errors` serves."""
+    catalogue = remediation_fields("invalid_argument", tool)
+    assert refusal["error_type"] == "invalid_argument", refusal
+    assert refusal["tool"] == tool, refusal
+    assert refusal["field"] == field, refusal
+    assert refusal["validator"] == "type", refusal
+    assert refusal["remediation"] == catalogue["remediation"], refusal
+    assert refusal["do_not"] == catalogue["do_not"], refusal
+
 
 def test_a_tools_call_with_list_arguments_is_refused_the_way_every_schema_refusal_is() -> None:
     """The envelope's own invalid_argument reads like the catalogue's: `field`
-    and `validator` say what was wrong, and the remediation every other
-    invalid_argument carries is there to read with them."""
+    and `validator` say what was wrong, and the remediation and do_not every
+    other invalid_argument carries are there to read with them."""
     service = RecordingService()
 
     response = handle_mcp_message(tools_call(1, "bench_run_status", [1]), service)  # type: ignore[arg-type]
 
     assert isinstance(response, dict)
     refusal = response["result"]["structuredContent"]
-    assert refusal["error_type"] == "invalid_argument", refusal
-    assert refusal["tool"] == "bench_run_status", refusal
-    assert refusal["field"] == "$", refusal
-    assert refusal["validator"] == "type", refusal
-    assert isinstance(refusal.get("remediation"), str) and refusal["remediation"], refusal
+    assert_reads_like_the_catalogues_invalid_argument(refusal, tool="bench_run_status", field="$")
+    assert refusal["summary"] == "tools/call arguments must be an object.", refusal
     assert service.calls == []
+
+
+def test_the_services_own_list_refusal_reads_the_same_way(tmp_path: Path) -> None:
+    """One layer down, `AgenticHILToolService.call` refuses a list of arguments
+    itself, for a caller that is not the MCP envelope. It names the same field
+    and validator, and it carries the same remediation: two refusals for the
+    one mistake must read alike."""
+    service = real_service(tmp_path)
+    try:
+        refusal = service.call("bench_run_status", [1])  # type: ignore[arg-type]
+    finally:
+        service.close()
+
+    assert refusal["ok"] is False, refusal
+    assert_reads_like_the_catalogues_invalid_argument(refusal, tool="bench_run_status", field="$")
+    assert refusal["summary"] == "Tool arguments must be an object.", refusal
 
 
 # --- the envelope faults over one session -------------------------------------
@@ -283,7 +320,8 @@ def test_a_notification_is_answered_with_silence_and_envelope_faults_carry_their
     -32600 for a request without `jsonrpc: "2.0"`, -32601 naming the method the
     server does not serve, -32602 for params that are not an object, and a
     result-level refusal for a tools/call whose name is not a string that reads
-    like every other invalid_argument: `field` and remediation included."""
+    like every other invalid_argument: `field`, `validator`, remediation and
+    do_not included."""
     service = RecordingService()
     session = lines(
         INITIALIZE,
@@ -306,10 +344,8 @@ def test_a_notification_is_answered_with_silence_and_envelope_faults_carry_their
     assert replies[3]["error"]["data"]["summary"] == "JSON-RPC params must be an object.", replies[3]
     refusal = replies[4]["result"]
     assert refusal["isError"] is True, refusal
-    assert refusal["structuredContent"]["error_type"] == "invalid_argument", refusal
-    assert refusal["structuredContent"]["tool"] == "unknown", refusal
-    assert refusal["structuredContent"]["field"] == "name", refusal
-    assert isinstance(refusal["structuredContent"].get("remediation"), str) and refusal["structuredContent"]["remediation"], refusal
+    assert_reads_like_the_catalogues_invalid_argument(refusal["structuredContent"], tool="unknown", field="name")
+    assert refusal["structuredContent"]["summary"] == "tools/call requires a string name.", refusal
     assert service.calls == []
 
 
@@ -366,6 +402,53 @@ def test_eof_on_stdin_closes_the_sessions_the_run_opened(tmp_path: Path, monkeyp
     assert started["isError"] is False, started
     assert len(factory.handles) == 1, factory.handles
     assert factory.handles[0].is_open is False
+    assert service.call("probe_target")["error_type"] == "service_closed"
+
+
+class ClosingBackend(FakeBackend):
+    """The probe backend, recording whether the service closed it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+# This file's own bus id and channel, so its device locks contend with no
+# sibling checkout's tests.
+BUS_ID = "envelope_can"
+CAN_BUSES_YAML = f'can_buses:\n  {BUS_ID}:\n    adapter: "socketcan"\n    channel: "vcan7"\n    fd: false\n    bitrate: 500000\n'
+COM_PORTS_YAML = f'com_ports:\n  {PORT_ID}:\n    device: "{DEVICE}"\n'
+
+
+def test_eof_on_stdin_closes_the_backend_and_the_can_session_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole of what the server holds goes back at EOF: the probe backend,
+    the COM port and the CAN bus a run opened over the same loop, so nothing
+    the host's next session needs is still held by a process that has ended."""
+    written = write_config(tmp_path, com_ports_yaml=COM_PORTS_YAML, can_buses_yaml=CAN_BUSES_YAML)
+    serial_factory = SerialFactory()
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=serial_factory))
+    buses: list[RecordingBus] = []
+    monkeypatch.setitem(sys.modules, "can", fake_can_module(lambda **kwargs: buses.append(RecordingBus()) or buses[-1]))
+    backend = ClosingBackend()
+    service = AgenticHILToolService(load_config(str(written)), backend=backend)
+    output = io.StringIO()
+
+    exit_code = run_stdio_server(
+        service.config,
+        input_stream=io.StringIO(lines(tools_call(1, "com_session_start", {"port_id": PORT_ID}), tools_call(2, "can_session_start", {"bus_id": BUS_ID, "clear_rx_queue": False}))),
+        output_stream=output,
+        tools=service,
+    )
+
+    assert exit_code == 0
+    replies = [json.loads(line)["result"] for line in output.getvalue().splitlines()]
+    assert [reply["isError"] for reply in replies] == [False, False], replies
+    assert len(serial_factory.handles) == 1 and serial_factory.handles[0].is_open is False
+    assert len(buses) == 1 and buses[0].closed is True
+    assert backend.closed is True
     assert service.call("probe_target")["error_type"] == "service_closed"
 
 
