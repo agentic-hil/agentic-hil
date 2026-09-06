@@ -59,6 +59,7 @@ from agentic_hil.report import (
     no_contact_refusal,
     overall_success,
     recommit_report_with_status,
+    report_write_failed,
     safe_filename,
     timestamp_for_filename,
     utc_now_iso,
@@ -617,15 +618,21 @@ class CanBusService:
             # dead owner's devices) sees whichever report was committed last.
             prepared = {**prepared, **session.contact.report_fields(), **session.lease.status()}
         written = write_report(self.config, prepared)
-        if session is not None and written.get("audit_ok") is False:
+        # The report's own failure and nothing carried in: the lease status
+        # above brings `audit_ok: false` with it once the lease is audit-broken,
+        # and reading that back as this write failing filed a second reason,
+        # that a report could not be persisted, against a report that had just
+        # landed (see `report_write_failed`).
+        if session is not None and report_write_failed(prepared, written):
             session.audit_broken = True
             session.lease.quarantine("can_report_audit_broken", audit_broken=True)
             written = write_report(self.config, {**written, **session.lease.status()})
         return written
 
     def _write_unattached_lease_report(self, result: JsonObject, lease: HardwareLease, *, release_if_safe: bool) -> JsonObject:
-        written = write_report(self.config, {**mark_side_effect(result), **lease.status()})
-        if written.get("audit_ok") is False:
+        prepared = {**mark_side_effect(result), **lease.status()}
+        written = write_report(self.config, prepared)
+        if report_write_failed(prepared, written):
             lease.quarantine("can_report_audit_broken", audit_broken=True)
             return write_report(self.config, {**written, **lease.status()})
         if release_if_safe and not lease.release():

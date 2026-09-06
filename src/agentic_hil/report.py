@@ -1116,3 +1116,22 @@ def audit_errors(result: JsonObject) -> list[JsonObject]:
         return [item for item in nested if isinstance(item, dict)]
     single = result.get("audit_error")
     return [single] if isinstance(single, dict) else []
+
+
+def report_write_failed(prepared: JsonObject, written: JsonObject) -> bool:
+    """Whether `write_report` failed to persist ``prepared``, read off ``written``.
+
+    Not ``written["audit_ok"] is False``. A report written for a session whose
+    lease is already audit-broken carries the lease's ``audit_ok: false`` in
+    with the rest of the lease's status, on purpose: the persisted record has
+    to say what the lease says, because the dead-owner release reads it there.
+    A writer that read the flag back as its own write having failed filed a
+    second reason against every such report, one whose guidance says the
+    report could not be persisted, while the file on disk was that very
+    report. What the write itself adds when it fails is an entry in the
+    report's audit errors, so a write that failed is one that left more of
+    them than it was given. (`mark_audit_failure` drops an entry equal to one
+    already there; a report file and a session log never fail under the same
+    path, so the two cannot be equal.)
+    """
+    return len(audit_errors(written)) > len(audit_errors(prepared))
