@@ -59,7 +59,7 @@ from agentic_hil.configwrite import (
     project_config_describe,
     project_config_set,
 )
-from agentic_hil.contracts import MCP_TOOL_NAMES, validate_tool_arguments
+from agentic_hil.contracts import MCP_TOOL_NAMES, invalid_argument, validate_tool_arguments
 from agentic_hil.coordination import (
     ATTESTATION_NO_CONTACT_CLASS,
     ATTESTATION_OPERATOR_VIA_AGENT,
@@ -616,7 +616,7 @@ class AgenticHILToolService:
         if arguments is None:
             args: JsonObject = {}
         elif not isinstance(arguments, dict):
-            return {"ok": False, "tool": name, "error_type": "invalid_argument", "field": "$", "validator": "type", "summary": "Tool arguments must be an object."}
+            return invalid_argument(name, "$", "type", "Tool arguments must be an object.")
         else:
             args = arguments
         validation_error = validate_tool_arguments(name, args)

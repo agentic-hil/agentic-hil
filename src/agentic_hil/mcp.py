@@ -6,6 +6,7 @@ from typing import Any
 from agentic_hil import __version__
 from agentic_hil.contracts import MCP_TOOL_NAMES as MCP_TOOL_NAMES
 from agentic_hil.contracts import MCP_TOOLS as MCP_TOOLS
+from agentic_hil.contracts import invalid_argument
 from agentic_hil.knowledge import MCP_RESOURCE_TEMPLATES as MCP_RESOURCE_TEMPLATES
 from agentic_hil.knowledge import MCP_RESOURCES as MCP_RESOURCES
 from agentic_hil.knowledge import read_resource
@@ -250,12 +251,15 @@ def call_tool(params: Any, tools: AgenticHILToolService) -> JsonObject:
     params_object = params_object_or_throw(params)
     name = params_object.get("name")
     arguments = params_object.get("arguments", {})
+    # The envelope's own two refusals are built where every schema refusal is
+    # built, so they carry the field, the validator and the catalogue's fix the
+    # agent reads together on every other invalid_argument.
     if not isinstance(name, str):
-        return mcp_tool_error("unknown", "invalid_argument", "tools/call requires a string name.")
+        return tool_error_result(invalid_argument("unknown", "name", "type", "tools/call requires a string name."))
     if arguments is None:
         arguments = {}
     if not isinstance(arguments, dict):
-        return mcp_tool_error(name, "invalid_argument", "tools/call arguments must be an object.")
+        return tool_error_result(invalid_argument(name, "$", "type", "tools/call arguments must be an object."))
     result = tools.call(name, arguments)
     # Defense-in-depth: strip any secret-named field before the result is
     # serialized into the MCP content text and structuredContent. isError is
@@ -280,8 +284,8 @@ def params_object_or_throw(params: Any) -> JsonObject:
     raise InvalidParamsError("JSON-RPC params must be an object.")
 
 
-def mcp_tool_error(tool: str, error_type: str, summary: str) -> JsonObject:
-    result = {"ok": False, "tool": tool, "error_type": error_type, "summary": summary}
+def tool_error_result(result: JsonObject) -> JsonObject:
+    """A refusal the envelope raised itself, in the shape of a failed tool result."""
     return {"content": [{"type": "text", "text": tool_result_text(result)}], "structuredContent": result, "isError": True}
 
 
