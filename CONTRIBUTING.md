@@ -7,10 +7,12 @@ Thanks for helping improve Agentic Hardware-in-the-Loop (Agentic HIL). This proj
 Use the Python toolchain from the repository root (Python 3.10+):
 
 ```bash
-python -m pip install -e '.[dev,can]'
+python -m pip install -e '.[dev,can,pyocd]'
 ruff check src tests examples
 pytest
 ```
+
+`pyocd` is in that list because part of the suite asks the installed pyOCD what it says: the phrases the `target_type_invalid` classification is matched on are produced by pyOCD's own code rather than quoted, so those tests skip themselves without the library. CI installs the same three extras, and a checkout that installs fewer collects fewer tests.
 
 Names: the Python distribution/install target, CLI command, repository URL, and MCP server name use `agentic-hil`. Python imports, pytest plugin names, fixtures, and Python examples use `agentic_hil`.
 
