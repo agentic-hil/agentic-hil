@@ -12,6 +12,7 @@ nav:
   - MCP hosts: mcp-hosts.md
   - MCP tools: mcp-tools.md
   - Testing: testing.md
+  - Bench battery: bench-battery.md
   - Test plan contract: test-plan-contract.md
   - CI examples: ci-examples.md
   - Safety model: safety-model.md
