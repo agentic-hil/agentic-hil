@@ -215,3 +215,63 @@ def test_the_container_tier_is_collected_by_a_bare_pytest_and_runs_nothing() -> 
     assert collected.returncode == 0, collected.stdout + collected.stderr
     assert "tests/container/test_process_table.py" in collected.stdout.replace("\\", "/"), collected.stdout
     assert "tests/bench/test_bench_plans.py" in collected.stdout.replace("\\", "/"), collected.stdout
+
+
+# -- #480 and #488: two more tools the image has to carry, and be checked for --
+
+
+def only_missing(name: str):
+    return lambda asked: None if asked == name else f"/usr/bin/{asked}"
+
+
+def test_a_missing_pyocd_is_named_by_the_gate(tmp_path: Path) -> None:
+    """pyOCD with no probe is exactly the #480 bench, and only this image can be it.
+
+    A pyOCD spawned without `-W` waits for a probe forever, and the only place
+    that can be measured with nothing attached and nothing at risk is here. A
+    run that declared the image and has no pyOCD would skip the one test that
+    proves the refusal, and report green over it.
+    """
+    marker = tmp_path / "marker"
+    marker.write_text("image\n", encoding="utf-8")
+    proc = tmp_path / "proc"
+    proc.mkdir()
+
+    why = missing_from_the_image(which=only_missing("pyocd"), proc_root=proc, marker=marker)
+
+    assert why is not None
+    assert "pyocd" in why
+
+
+def test_a_missing_curl_is_named_by_the_gate(tmp_path: Path) -> None:
+    """The fetch route of install.sh runs Astral's pinned installer, and both need curl.
+
+    #488 found that route editing shell rc files, which no fake of the installer
+    reproduces: the test that pins it has to fetch the real bytes and run them,
+    here, and `install.sh` reaches for curl or wget to do that.
+    """
+    marker = tmp_path / "marker"
+    marker.write_text("image\n", encoding="utf-8")
+    proc = tmp_path / "proc"
+    proc.mkdir()
+
+    why = missing_from_the_image(which=only_missing("curl"), proc_root=proc, marker=marker)
+
+    assert why is not None
+    assert "curl" in why
+
+
+def test_the_image_carries_pyocd_and_curl() -> None:
+    """The gate looks for both, so the build has to be what installs them.
+
+    pyOCD from the package index, unpinned like the distribution's own packages
+    for the reason the Dockerfile gives; curl from the distribution.
+    """
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    commands = [line for line in dockerfile.splitlines() if line.startswith("RUN ")]
+
+    apt = next(line for line in commands if "apt-get" in line)
+    apt_block = dockerfile[dockerfile.index(apt) :].split("\n\n", 1)[0]
+    assert "curl" in apt_block, apt_block
+    pip_lines = [line for line in dockerfile.splitlines() if "pip install" in line or line.strip().startswith('"')]
+    assert any("pyocd" in line for line in pip_lines), pip_lines
