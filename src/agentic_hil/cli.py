@@ -40,6 +40,7 @@ from agentic_hil.config import (
     atomic_write_text,
     authoritative_config_target,
     bind_debugger,
+    cache_roots,
     config_schema_text,
     debugger_drives_hardware,
     debugger_is_placeholder,
@@ -3639,13 +3640,10 @@ check_plan.__test__ = False  # type: ignore[attr-defined] - keep pytest from col
 
 
 def _mcp_cache_roots() -> list[Path]:
-    cache_roots: list[Path] = [Path(tempfile.gettempdir()), Path.home() / ".cache", Path.home() / "Library" / "Caches"]
-    for variable in ("UV_CACHE_DIR", "XDG_CACHE_HOME"):
-        if value := os.environ.get(variable):
-            cache_roots.append(Path(value).expanduser())
-    if local_app_data := os.environ.get("LOCALAPPDATA"):
-        cache_roots.append(Path(local_app_data) / "uv" / "cache")
-    return cache_roots
+    # The one cache list, shared with the configured-executable rule in
+    # `config.cache_roots`: a root refused for the launcher is refused for the
+    # toolchain, and the other way round.
+    return [Path(tempfile.gettempdir()), *cache_roots()]
 
 
 def _trusted_mcp_command(command: str) -> str:
