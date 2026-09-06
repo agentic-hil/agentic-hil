@@ -413,8 +413,17 @@ class BenchMutex:
         if self._pump is not None and self._pump.is_alive():
             return
         self._pump_stop = threading.Event()
-        self._pump = threading.Thread(target=self._pump_heartbeats, args=(self._pump_stop,), name="agentic-hil-heartbeat", daemon=True)
-        self._pump.start()
+        pump = threading.Thread(target=self._pump_heartbeats, args=(self._pump_stop,), name="agentic-hil-heartbeat", daemon=True)
+        try:
+            pump.start()
+        except RuntimeError:
+            # A host that cannot start one more thread still holds the device
+            # exclusively; what is lost is the freshness of the record, exactly
+            # as when the record itself cannot be written. The event is set in
+            # case the thread did launch before the failure was reported.
+            self._pump_stop.set()
+            return
+        self._pump = pump
 
     def _pump_heartbeats(self, stop: threading.Event) -> None:
         # The interval is read on every wait rather than once, so the value a
