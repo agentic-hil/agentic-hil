@@ -18,9 +18,22 @@ under (`/sys/class/net` on a Linux host), `socketcan_interface_state(channel)`
 reads `<root>/<channel>/flags` and answers `"up"`, `"down"` or `None`, and
 `socketcan_interface_down(bus_id, bus_config)` is the refusal or `None`,
 mirroring `socketcan_interface_missing`. Only a proven down link refuses: a state
-that cannot be read (no sysfs entry, a non-Linux host) answers `None` and the
-session proceeds as it did before. The signal is the `IFF_UP` bit of the flags
-file, because `operstate` reads `unknown` on an up vcan and is not the signal.
+that cannot be read (no sysfs entry, a non-Linux host, a channel that is not a
+single path component) answers `None` and the session proceeds as it did before.
+The signal is the `IFF_UP` bit of the flags file, because `operstate` reads
+`unknown` on an up vcan and is not the signal.
+
+Why a second reader of this netdev rather than `socketcan_link_listen_only`,
+which already runs `ip -details -json link show dev <channel>` against the same
+interface: three reasons, written down here so the next reader does not unify the
+two by reflex. Sysfs needs no subprocess, so the state is read on the path that
+refuses a session rather than by spawning a child on it. Sysfs answers on a host
+with no iproute2 installed, where the `ip` reader can only report that it could
+not look, and a non-answer may never become a refusal. And the two are not the
+same question: a listen-only ctrlmode is a property of a CAN controller, which a
+`vcan` does not have and answers nothing about, while `IFF_UP` is carried by
+every netdev the kernel has. The `ip` reader stays exactly where it is, for the
+one mode it was written for.
 
 Every string a fake answers here was recorded inside the container image on
 2026-09-06 (kernel 6.18 under WSL2, iproute2-6.15.0, python-can 4.6.1,
@@ -47,11 +60,12 @@ from pathlib import Path
 
 import pytest
 from conftest import write_config
+from test_can_listen_only import completed, install_ip, ip_json
 
 import agentic_hil.can as can_module_under_test
 from agentic_hil.can import open_python_can_adapter
 from agentic_hil.config import load_config
-from agentic_hil.knowledge import CAN_INTERFACE_NOT_FOUND_ERROR, catalogue_entry
+from agentic_hil.knowledge import CAN_INTERFACE_NOT_FOUND_ERROR, LISTEN_ONLY_UNSUPPORTED_ERROR, catalogue_entry
 from agentic_hil.tools import AgenticHILToolService
 
 # Distinctive by design: device locks are machine-wide, so a bus id and
@@ -77,14 +91,14 @@ RECORDED_SEND_ON_DOWN_LINK = "Failed to transmit: Network is down"
 RECORDED_SEND_BACKEND_ERROR = f"{RECORDED_SEND_ON_DOWN_LINK} [Error Code {RECORDED_ENETDOWN}]"
 
 
-def can_config(tmp_path: Path, *, channel: str = CHANNEL, adapter: str = "socketcan"):
+def can_config(tmp_path: Path, *, channel: str = CHANNEL, adapter: str = "socketcan", listen_only: bool = False):
     yaml = "".join(
         [
             "can_buses:\n",
             f"  {BUS_ID}:\n",
             f'    adapter: "{adapter}"\n',
             f'    channel: "{channel}"\n',
-            "    listen_only: false\n",
+            f"    listen_only: {'true' if listen_only else 'false'}\n",
         ]
     )
     return load_config(str(write_config(tmp_path, can_buses_yaml=yaml)))
@@ -217,11 +231,64 @@ def test_a_missing_sysfs_root_reads_no_state(tmp_path: Path, monkeypatch: pytest
     assert can_module_under_test.socketcan_interface_state(CHANNEL) is None
 
 
+@pytest.mark.parametrize(
+    "channel",
+    [
+        "",
+        ".",
+        "..",
+        f"{CHANNEL}/../{CHANNEL}",
+        f"sub/{CHANNEL}",
+        f"../net/{CHANNEL}",
+        f"/sys/class/net/{CHANNEL}",
+        f"{CHANNEL}\\..\\{CHANNEL}",
+    ],
+)
+def test_a_channel_that_is_not_a_single_path_component_reads_no_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, channel: str) -> None:
+    """A channel is an interface name, and the state read joins it under a
+    directory, so a name that is a path is not read as one.
+
+    `can_buses.<name>.channel` is `str(raw["channel"])` and nothing else, so the
+    string that reaches this read is whatever the configuration says. Every case
+    here resolves, under the fake root, to the one interface that really is
+    published and really is down, and the answer must still be no state at all:
+    a name that is not a single component names no netdev the kernel has, so it
+    proves nothing about a link, and only a proven down link refuses.
+    """
+    root = fake_sysfs(tmp_path, monkeypatch)
+    publish_link(root, CHANNEL, RECORDED_DOWN_FLAGS, RECORDED_DOWN_OPERSTATE)
+    (root / "sub").mkdir()
+    publish_link(root / "sub", CHANNEL, RECORDED_DOWN_FLAGS, RECORDED_DOWN_OPERSTATE)
+
+    assert can_module_under_test.socketcan_interface_state(channel) is None
+
+
+def test_a_channel_that_is_not_a_single_path_component_refuses_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """And so the bus carrying such a channel is not refused as down: it goes on
+    to the bind, which is what decides what the name is."""
+    config = can_config(tmp_path, channel=f"{CHANNEL}/../{CHANNEL}")
+    root = fake_sysfs(tmp_path, monkeypatch)
+    publish_link(root, CHANNEL, RECORDED_DOWN_FLAGS, RECORDED_DOWN_OPERSTATE)
+
+    assert can_module_under_test.socketcan_interface_down(BUS_ID, config.can_buses[BUS_ID]) is None
+
+
 # ---------------------------------------------------------------------------
 # The refusal, before the socket is opened.
 
 
 def assert_refused_as_down(result: dict, *, channel: str = CHANNEL, adapter: str = "socketcan") -> None:
+    """Every field the decided refusal carries.
+
+    On the two `ip link` spellings, since the assertions below insist on one of
+    them: #511 writes the command as `ip link set up <name>` and the catalogue's
+    `can_interface_not_found` entry, which this refusal's neighbour, already
+    writes `sudo ip link set <dev> up`. Both are valid iproute2. The catalogue's
+    spelling wins, because it is the one an operator already meets on this
+    surface and two entries that disagree about the same command read as two
+    different commands. An implementation that copied the issue's word order is
+    not wrong about anything but this, and this comment is why it fails here.
+    """
     assert result["ok"] is False, result
     assert result["tool"] == "can_session_start", result
     assert result["bus_id"] == BUS_ID, result
@@ -282,6 +349,72 @@ def test_a_link_that_is_up_opens_the_ordinary_way(tmp_path: Path, monkeypatch: p
     assert [bus.kwargs["channel"] for bus in opened] == [CHANNEL]
 
 
+def test_a_listen_only_bus_on_a_down_link_is_refused_as_down_and_not_by_the_sentence_that_calls_it_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The state read settles a down link before the listen-only precondition does.
+
+    `open_python_can_adapter` asks `listen_only_precondition` before the
+    constructor, and on the socketcan route that reads the kernel's ctrlmode. A
+    CAN link that is administratively down still reports `info_kind: can` with no
+    ctrlmode flags, which is the branch that answers, verbatim,
+    "<channel> is up without listen-only, so its controller sends dominant ACK
+    bits." That sentence is false about a link that is down, and it is the
+    refusal a `listen_only: true` bus on a down `can0` gets today. So the order
+    is part of the contract and not an implementation detail: a fix that reads
+    the link state after the precondition leaves #511 unfixed for exactly the
+    buses whose refusal already says something untrue about the same link.
+
+    The sentence is produced here rather than written down: the fake `ip` answers
+    the JSON iproute2 emits for a `can` link with no ctrlmode, and the product's
+    own reader turns it into the text this test then asserts is gone.
+    """
+    can = real_can_module()
+    config = can_config(tmp_path, listen_only=True)
+    root = fake_sysfs(tmp_path, monkeypatch)
+    publish_link(root, CHANNEL, RECORDED_DOWN_FLAGS, RECORDED_DOWN_OPERSTATE)
+    install_ip(monkeypatch, tmp_path, lambda command, **kwargs: completed(ip_json(None)))
+    monkeypatch.setattr(can, "Bus", a_bus_that_must_not_be_constructed)
+    false_sentence = can_module_under_test.socketcan_link_listen_only(CHANNEL)["detail"]
+    assert false_sentence == f"{CHANNEL} is up without listen-only, so its controller sends dominant ACK bits.", false_sentence
+
+    result = open_python_can_adapter(config, BUS_ID, config.can_buses[BUS_ID], False)
+
+    assert_refused_as_down(result)
+    assert result["error_type"] != LISTEN_ONLY_UNSUPPORTED_ERROR, result
+    assert false_sentence not in json.dumps(result), result
+
+
+def test_a_listen_only_bus_on_a_link_that_is_up_keeps_the_listen_only_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neighbour the reorder must not swallow: an up link without the
+    ctrlmode is still `can_listen_only_unsupported`, with its own field and its
+    own reading of the link."""
+    can = real_can_module()
+    config = can_config(tmp_path, listen_only=True)
+    root = fake_sysfs(tmp_path, monkeypatch)
+    publish_link(root, CHANNEL, RECORDED_UP_FLAGS, RECORDED_UP_OPERSTATE)
+    install_ip(monkeypatch, tmp_path, lambda command, **kwargs: completed(ip_json(None)))
+    monkeypatch.setattr(can, "Bus", a_bus_that_must_not_be_constructed)
+
+    result = open_python_can_adapter(config, BUS_ID, config.can_buses[BUS_ID], False)
+
+    assert result["error_type"] == LISTEN_ONLY_UNSUPPORTED_ERROR, result
+    assert result["field"] == f"can_buses.{BUS_ID}.listen_only", result
+    assert "interface_state" not in result, result
+
+
+def test_a_listen_only_bus_on_a_link_whose_state_cannot_be_read_keeps_the_listen_only_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No sysfs entry proves nothing about the link, so the precondition still
+    has the last word and the new check took nothing away from it."""
+    can = real_can_module()
+    config = can_config(tmp_path, listen_only=True)
+    fake_sysfs(tmp_path, monkeypatch)
+    install_ip(monkeypatch, tmp_path, lambda command, **kwargs: completed(ip_json(None)))
+    monkeypatch.setattr(can, "Bus", a_bus_that_must_not_be_constructed)
+
+    result = open_python_can_adapter(config, BUS_ID, config.can_buses[BUS_ID], False)
+
+    assert result["error_type"] == LISTEN_ONLY_UNSUPPORTED_ERROR, result
+
+
 def test_a_state_that_cannot_be_read_does_not_refuse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No sysfs entry for the name: the session proceeds exactly as before this
     refusal existed, and the bind is what decides."""
@@ -326,9 +459,14 @@ def test_a_down_link_is_refused_through_the_service_for_both_clear_rx_queue_valu
     """The two wrong answers this replaces: `can_queue_clear_failed` naming the
     drain with the default, and `ok` over a dead link without it.
 
-    The bus here is one that would open, so the red line on the code as it
-    stands is the answer an operator actually got rather than an exception this
-    test threw, and `opened` is what says the socket was never reached.
+    The bus here is one that opens and whose `recv` answers `None`, so the red
+    line on the code as it stands is `ok: True` for both parametrisations: the
+    drain succeeds against this fake rather than failing as it does against the
+    kernel. The operator's actual `can_queue_clear_failed` needs a receive that
+    raises ENETDOWN, and that is the container tier's red line over the real
+    kernel, in `test_can_over_vcan.py`. What this test adds to it is the whole
+    service path around the refusal, and `opened` is what says the socket was
+    never reached.
     """
     can = real_can_module()
     config = can_config(tmp_path)
@@ -357,6 +495,46 @@ def test_a_down_link_is_refused_through_the_service_for_both_clear_rx_queue_valu
     finally:
         service.close()
     assert not coordination_record_states(config) & {"cleanup_required", "quarantined", "recovery_pending"}
+
+
+def test_the_classifier_answers_causes_about_the_link_and_not_a_generic_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The half of "carried by the knowledge remediation table and the report
+    classifier" that echoing the error type does not satisfy.
+
+    `classify_last_error` reports an `error_type` for any type at all, by
+    copying it out of the last report, so a test that asserts only that says
+    nothing about the new type. The field the classifier actually decides is
+    `likely_causes`, and its tables are the debugger's and the COM port's: a CAN
+    error type reaches neither, so the fallback answers, and an operator whose
+    link is down is sent to inspect a log about something else. The refusal
+    carries its own causes and `classify_failure_report` passes a report's own
+    `likely_causes` through, which is what makes the answer the link's on every
+    backend rather than on whichever table happened to be consulted.
+    """
+    can = real_can_module()
+    config = can_config(tmp_path)
+    root = fake_sysfs(tmp_path, monkeypatch)
+    publish_link(root, CHANNEL, RECORDED_DOWN_FLAGS, RECORDED_DOWN_OPERSTATE)
+    monkeypatch.setattr(can, "Bus", a_bus_that_opens(can))
+    service = AgenticHILToolService(config)
+    try:
+        refused = service.call("can_session_start", {"bus_id": BUS_ID})
+        assert refused["error_type"] == DOWN_ERROR, refused
+        causes = refused["likely_causes"]
+        assert isinstance(causes, list) and causes, refused
+
+        classified = service.call("classify_last_error")
+    finally:
+        service.close()
+
+    assert classified["likely_causes"] == causes, classified
+    assert classified["likely_causes"] not in (["inspect the debugger log for details"], ["inspect the COM port log for details"]), classified
+    # Causes, not remediation: what would leave a link that exists administratively
+    # down. Each one is about this interface, and none of them is about a queue,
+    # a serial port or a debugger.
+    assert all(("interface" in cause or "link" in cause or "adapter" in cause) for cause in classified["likely_causes"]), classified
+    assert any("up" in cause for cause in classified["likely_causes"]), classified
+    assert not any("COM port" in cause or "debugger" in cause for cause in classified["likely_causes"]), classified
 
 
 def test_a_link_brought_up_after_the_refusal_opens_on_the_same_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
