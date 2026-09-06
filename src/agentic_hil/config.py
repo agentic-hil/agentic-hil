@@ -1808,34 +1808,8 @@ def authoritative_config_target(workspace: Path) -> Path:
         except ConfigError as error:
             failure = error
             continue
-        except OSError as error:
-            # The per-workspace directory does not exist yet and this root
-            # refuses to create it: a projects directory this account cannot
-            # enter, a parent without write permission, a read-only mount. The
-            # write probe never ran, because there was nothing to probe in, and
-            # the operating system's refusal used to travel out of here as the
-            # exception itself: `init` ended in a traceback on the first root
-            # while the second root sat there writable and unasked. A root that
-            # cannot be created is a root that cannot hold the file, which is
-            # the same verdict the probe returns, so it takes the same route.
-            failure = _uncreatable_config_root(target.parent, error)
-            continue
         return target
     raise failure or ConfigError("unsafe_configured_path", "No trusted configuration location is available on this profile.", {"field": "config_path"})
-
-
-def _uncreatable_config_root(directory: Path, error: OSError) -> ConfigError:
-    """The refusal for a configuration root whose per-workspace directory cannot be created.
-
-    Shaped like the write-probe refusal so a caller reads one `unsafe_configured_path`
-    whichever half of the check turned the root down, with the operating system's
-    own sentence under `backend_error` because that is the fact the operator acts on.
-    """
-    return ConfigError(
-        "unsafe_configured_path",
-        "Configured directory cannot be created by this process.",
-        {"field": "config_path", "path": str(directory), "backend_error": str(error)},
-    )
 
 
 def _config_target_outside_workspace(target: Path, workspace: Path) -> Path:
