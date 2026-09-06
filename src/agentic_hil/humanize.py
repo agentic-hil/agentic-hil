@@ -1600,6 +1600,38 @@ def render_adopt_hardware(result: JsonObject) -> list[str]:
     return lines
 
 
+def _tool_landing(tool: Mapping[str, object]) -> str:
+    """Where one searched toolchain was found, or that it was not."""
+    return f"found at {_scalar(tool.get('path'))}" if tool.get("found") is True else "not on this host"
+
+
+def _stlink_port_lines(result: JsonObject) -> list[str]:
+    """The ST-Link serial ports the ids were read off, or that there were none.
+
+    `stlink_ports` is the evidence #432 put on the OpenOCD listing so that an
+    empty `probes` beside a visible ST-Link is read as a probe that is there and
+    cannot be named, not as no probe attached; the rendering printed `0
+    connected debugger probe(s)` and never named the port (#504). The one fact a
+    reader needs about each port is the serial it published, because a port
+    that published none is exactly the probe the listing could not name. A key
+    that is present and empty is a reading too: the inventory was taken and
+    held no ST-Link, which is not the same as never having looked.
+    """
+    if "stlink_ports" not in result:
+        return []
+    ports = _entries(result.get("stlink_ports"))
+    if not ports:
+        return ["", *_wrap("This host's serial inventory showed no ST-Link serial port.", indent=_INDENT)]
+    rows: list[str] = []
+    for port in ports:
+        device = _scalar(port.get("stable_device") or port.get("device") or "?")
+        serial = port.get("serial_number")
+        named = f"serial {_scalar(serial)}" if serial not in (None, "") else "serial not published"
+        described = _scalar(port.get("description") or port.get("product") or "")
+        rows.append(f"{device}, {named}" + (f", {described}" if described else ""))
+    return _section("ST-Link serial ports this host is showing", _bullets(rows))
+
+
 def render_debugger_probes(result: JsonObject) -> list[str]:
     lines = _headline(result)
     # `discovered_by` beside the backend, because on an OpenOCD bench the two are
@@ -1623,9 +1655,13 @@ def render_debugger_probes(result: JsonObject) -> list[str]:
     if header:
         lines.append("")
         lines.extend(header)
+    searched = _entries(result.get("tools_searched"))
+    if searched:
+        lines.extend(_section("Tools searched", _fields([(f"{tool.get('name', 'tool')} ({tool.get('provided_by', 'unknown')})", _tool_landing(tool)) for tool in searched])))
     probes = _entries(result.get("probes"))
     if probes:
         lines.extend(_section("Probes", _bullets([", ".join(f"{key} {_scalar(value)}" for key, value in probe.items() if _renderable_scalar(value)) for probe in probes])))
+    lines.extend(_stlink_port_lines(result))
     per_debugger = _mapping(result.get("debuggers"))
     for name, raw in per_debugger.items():
         entry = _mapping(raw)
