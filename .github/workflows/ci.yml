@@ -105,6 +105,52 @@ jobs:
           cd sdist-check/agentic_hil-*
           python -m pytest --collect-only -q
 
+  # The tier the matrix above cannot run. Every test in the matrix is written
+  # against a fake, so the suite is only ever as right as the person who wrote
+  # the fake was about the tool, and four defects reached a bench through that
+  # gap: uv writes `python` at the `[tool]` level of its receipt, a virtual
+  # environment's process resolves its image to the system interpreter, a procfs
+  # directory's creation time is the time of the lookup, and OpenOCD prints an
+  # error line after a reset that succeeded. This job runs the real uv, the real
+  # OpenOCD and the real /proc, in the image the repository publishes them with,
+  # so the environment is part of the result rather than a property of whoever
+  # happened to run it.
+  #
+  # ubuntu-latest, and one leg: the tools these tests are about are the same on
+  # every runner, and what varies between runners is exactly what the matrix
+  # above already covers. It needs the network, because uv resolves this
+  # distribution's dependency set from the package index and one test reads the
+  # release index over HTTPS to establish that a currency claim is only made
+  # after the index has answered.
+  #
+  # Measured cold, with no layer cache and the base image pulled, which is what
+  # a hosted runner has: 28 seconds to build the image and 15 to run the tests,
+  # so about three quarters of a minute in total. The limit below is margin for
+  # a slow runner and a slow index rather than a deadline a slow runner beats.
+  container_tests:
+    name: Container tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # BUILDKIT explicitly, because the ignore file this build uses is the one
+      # beside its Dockerfile: the repository root's `.dockerignore` belongs to
+      # the evaluation images and sends only `evals/` and `src/`, and only
+      # BuildKit reads `<dockerfile>.dockerignore` in preference to it.
+      - name: Build the container test image
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: docker build -f tools/container/Dockerfile -t agentic-hil-container-tests .
+
+      # The marker as well as the path, so a test that lands in this directory
+      # without it is a test this job does not silently start running, and the
+      # variable the image already sets is passed again here as the statement it
+      # is: these tests run because this run means them to.
+      - name: Run the container tests
+        run: docker run --rm -e AGENTIC_HIL_CONTAINER_TESTS=1 agentic-hil-container-tests python -m pytest tests/container -m container -q
+
   release_metadata:
     name: Release metadata consistency
     runs-on: ubuntu-latest
@@ -165,6 +211,7 @@ jobs:
     timeout-minutes: 5
     needs:
       - test
+      - container_tests
       - release_metadata
       - audit
     if: ${{ always() }}
@@ -174,6 +221,10 @@ jobs:
         run: |
           if [[ "${{ needs.test.result }}" != "success" ]]; then
             echo "Python test matrix finished with ${{ needs.test.result }}"
+            exit 1
+          fi
+          if [[ "${{ needs.container_tests.result }}" != "success" ]]; then
+            echo "Container tests finished with ${{ needs.container_tests.result }}"
             exit 1
           fi
           if [[ "${{ needs.release_metadata.result }}" != "success" ]]; then
