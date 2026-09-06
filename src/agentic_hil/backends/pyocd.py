@@ -746,6 +746,15 @@ class PyOCDBackend:
             args.extend(["--uid", selector])
         if self.config.debugger.target_type is not None:
             args.extend(["--target", self.config.debugger.target_type])
+        # And `-W`: without it pyOCD prints `Waiting for a debug probe to be
+        # connected...` and polls until one appears, so an unplugged probe, the
+        # commonest bench fault, sat out `timeout_s` on every tool that
+        # connects, was reaped, declared its hardware state unknown and opened
+        # a quarantine for a board nothing had contacted (#480). With the flag
+        # pyOCD says `No connected debug probes` and exits, and the classifier
+        # below reads that sentence as the missing probe it is. The enumeration
+        # (`json --probes`) connects to nothing and does not take these args.
+        args.append("-W")
         return args
 
     def _resolve_probe_selector(self, tool: str) -> JsonObject:
@@ -987,7 +996,13 @@ class PyOCDBackend:
 
     def _classify_output(self, output: str, tool: str | None = None) -> str:
         lower = output.lower()
-        if contains_any(lower, ["no available debug probes", "no debug probes are connected", "unable to open probe", "probe not found", "no probe with uid"]):
+        # The last two are what pyOCD 0.45.1 prints when spawned with `-W` and
+        # nothing is attached: `No connected debug probes`, or `No connected
+        # debug probe matches unique ID '<id>'` when a `--uid` was given
+        # (pyocd/core/helpers.py). Ahead of every other rule, because the
+        # commander exits 0 over the first and `flash` follows it with a `No
+        # target device available` line the flash bucket would otherwise claim.
+        if contains_any(lower, ["no available debug probes", "no debug probes are connected", "unable to open probe", "probe not found", "no probe with uid", "no connected debug probes", "no connected debug probe matches unique id"]):
             return "probe_not_found"
         if contains_any(lower, ["unable to connect", "failed to connect", "target is not responding", "no ack received", "error connecting"]):
             return "target_not_detected"
