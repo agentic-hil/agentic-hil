@@ -1262,7 +1262,7 @@ class ComPortService:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
 
         def open_failure(error: BaseException) -> JsonObject:
-            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
+            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": open_failure_causes(error)}
 
         try:
             # Built unopened so the modem lines are decided BEFORE the port is
@@ -1795,6 +1795,32 @@ def stable_device_name(device: str, stable_names: dict[str, str]) -> str | None:
         return stable_names.get(os.path.realpath(device))
     except OSError:  # pragma: no cover - realpath does not raise for a plain string on POSIX
         return None
+
+
+def open_failure_causes(error: BaseException) -> list[str]:
+    """The likely causes of an open the OS refused, read off its number where the number decides.
+
+    One number has a cause of its own. `EACCES` on a POSIX host is the device
+    node's mode refusing this user, which on a Linux bench is the most common
+    first-run failure of all: the user is not in the group that owns
+    `/dev/ttyACM0`. The comment beside `PORT_BUSY_ERRNOS` keeps that number out
+    of the busy set for exactly this reason, and a refusal that then listed a
+    second holder among its causes sent the reader hunting for a process that
+    does not exist. Read the way `serial_port_busy` reads its own numbers,
+    through `raised_errno` and never the message, so a wrapper or a libc in
+    another language changes nothing.
+
+    On Windows the same number is the opposite thing: pyserial reports
+    `CreateFile` on a port another program holds as errno 13, "Access is
+    denied", so there the causes stay the ones the open failure always had,
+    with the second holder among them.
+    """
+    if os.name != "nt" and raised_errno(error, errno.EACCES):
+        return [
+            "this user may not open the device: on Linux add the user to the group that owns it (dialout on Debian and Ubuntu, uucp on Arch and Fedora) and log in again",
+            "a udev rule or the device node's mode denies this user (ls -l on the device shows its owner and group)",
+        ]
+    return likely_causes("com_port_open_failed")
 
 
 def likely_causes(error_type: str) -> list[str]:
