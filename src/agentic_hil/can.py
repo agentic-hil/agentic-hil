@@ -29,6 +29,7 @@ from agentic_hil.knowledge import (
     CAN_CLASSIC_FRAME_TOO_LARGE_ERROR,
     CAN_FD_FRAME_LENGTH_INVALID_ERROR,
     CAN_FD_REMOTE_FRAME_ERROR,
+    CAN_INTERFACE_DOWN_ERROR,
     CAN_INTERFACE_NOT_FOUND_ERROR,
     LISTEN_ONLY_MODE_ERROR,
     LISTEN_ONLY_UNCONFIRMED_ERROR,
@@ -102,6 +103,28 @@ LISTEN_ONLY_ENFORCEMENT: dict[str, str] = {
 # for an interface that is ACKing. These are the locations iproute2 installs to.
 IP_COMMAND_PATHS = ("/sbin/ip", "/usr/sbin/ip", "/bin/ip", "/usr/bin/ip")
 LINK_QUERY_TIMEOUT_S = 5.0
+
+# Where the kernel publishes every netdev it has, one directory per interface.
+# The administrative state is read here rather than through the `ip` reader below
+# that already asks about this same interface, and the divergence is deliberate:
+# reading a file needs no subprocess on the path that refuses a session, it
+# answers on a host with no iproute2 installed at all (where the `ip` reader can
+# only report that it could not look, and a non-answer may never become a
+# refusal), and the two are not the same question anyway. Listen-only is a
+# ctrlmode belonging to a CAN controller, which a `vcan` does not have; `IFF_UP`
+# is carried by every netdev the kernel has. The `ip` reader stays where it is,
+# for the one mode it was written for.
+SYSFS_NET_CLASS = "/sys/class/net"
+# `IFF_UP` in <linux/if.h>: the administrative up bit, and the whole of the
+# signal. `operstate` is not it, and cannot be: an up `vcan` reads `unknown`
+# there, because a virtual link has no carrier to report on.
+IFF_UP = 0x1
+# What may be joined onto SYSFS_NET_CLASS. `can_buses.<name>.channel` is whatever
+# string the configuration carries, and this read turns it into a filesystem
+# path, so a channel that is not a single path component names no netdev and is
+# not read as one: the kernel's own interface names are at most IFNAMSIZ - 1
+# characters and contain no separator or whitespace.
+SOCKETCAN_INTERFACE_NAME = re.compile(r"[^\s/\\:]{1,15}")
 
 
 @dataclass(frozen=True)
@@ -926,6 +949,96 @@ def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: C
     }
 
 
+def names_one_netdev(channel: str) -> bool:
+    """Whether this channel is a name the kernel could have given an interface.
+
+    Asked before the name is joined onto ``SYSFS_NET_CLASS``, because the answer
+    decides whether a filesystem path is built out of it at all. `.` and `..`
+    match the character class and are excluded by name: both are directories that
+    exist under every root and neither is an interface.
+    """
+    return channel not in {".", ".."} and SOCKETCAN_INTERFACE_NAME.fullmatch(channel) is not None
+
+
+def socketcan_interface_state(channel: str) -> str | None:
+    """``"up"``, ``"down"``, or ``None`` when the state was not read.
+
+    ``None`` is the answer to every question that is not a reading: this host has
+    no sysfs (it is not Linux), the interface has no directory under it (the name
+    is not a netdev here), the flags file cannot be opened or is not a number, or
+    the channel is not a name a netdev could have. Only a positive reading of a
+    clear ``IFF_UP`` bit is a down link, because the refusal this feeds is a
+    claim about the host and an unread state proves nothing about one.
+    """
+    if not names_one_netdev(channel):
+        return None
+    try:
+        raw = Path(SYSFS_NET_CLASS, channel, "flags").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        flags = int(raw.strip(), 16)
+    except ValueError:
+        return None
+    return "up" if flags & IFF_UP else "down"
+
+
+def socketcan_interface_down(bus_id: str, bus_config: CanBusConfig) -> JsonObject | None:
+    """The refusal for a SocketCAN interface that is here and is down, or ``None``.
+
+    The mirror of `socketcan_interface_missing`, and asked earlier than it for
+    the reason the two answers differ. A missing interface announces itself: the
+    bind fails with ENODEV and there is an exception to read. A down one does
+    not, because the kernel binds a raw CAN socket to it quite happily and only
+    the first receive or send says ENETDOWN, by which point the product has
+    opened a socket and, without a drain, reported a started session over a link
+    that carries nothing. So this is read before anything is opened, and it reads
+    the state directly rather than inferring it from a failure that has not
+    happened yet.
+
+    The route decides, not the configured name, exactly as in
+    `socketcan_interface_missing`: a `peak` bus whose channel is a Linux netdev
+    opens through socketcan and reaches this, and a PCANBasic handle does not,
+    whatever a directory of that name might happen to contain.
+
+    Reads no python-can. A link that is down is a fact about the host, and the
+    answer must not depend on whether an optional library imported.
+    """
+    if effective_can_adapter(bus_config) != "socketcan" or socketcan_interface_state(bus_config.channel) != "down":
+        return None
+    channel = bus_config.channel
+    return {
+        "ok": False,
+        "tool": "can_session_start",
+        "bus_id": bus_id,
+        "adapter": bus_config.adapter,
+        "error_type": CAN_INTERFACE_DOWN_ERROR,
+        "field": f"can_buses.{bus_id}.channel",
+        "channel": channel,
+        "interface_state": "down",
+        "summary": (
+            f"SocketCAN interface {channel} is on this host and is down, so the session was refused before the socket "
+            f"was opened: a socket bound to a down link carries no frame in either direction. Bring it up with `sudo "
+            f"ip link set {channel} up`."
+        ),
+        # Carried on the refusal rather than looked up by error type, so that
+        # `classify_last_error` answers about this link. The classifier prefers a
+        # report's own causes and falls back to a table per backend, and those
+        # tables are the debugger's and the COM port's: a CAN error type reaches
+        # neither, and an operator whose link is down would be sent to read a log
+        # about something else entirely.
+        "likely_causes": [
+            "the interface was created and never brought up (`ip link set <dev> up` has not been run for it)",
+            "the link was taken down out of band, by an operator or by a script, and nothing brought it back",
+            "a USB CAN adapter was re-enumerated and its interface came back down",
+        ],
+        "target_contacted": False,
+        "side_effect_committed": False,
+        "side_effect_status": "not_started",
+        "retry_safe": True,
+        **remediation_fields(CAN_INTERFACE_DOWN_ERROR),
+    }
+
 
 def pcan_basic_library_error() -> str | None:
     """What the installed PCAN-Basic API says when it will not load, or ``None``.
@@ -1164,6 +1277,17 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     # honesty, the summary -- reads the same answer this does.
     effective_adapter = effective_can_adapter(bus_config)
     peak_via_socketcan = bus_config.adapter == "peak" and effective_adapter == "socketcan"
+    # Before the listen-only precondition, and that order is part of the
+    # contract rather than an accident of where the line was added. The
+    # precondition's SocketCAN branch reads the kernel's ctrlmode and, for a CAN
+    # link carrying no ctrlmode flags, answers "<channel> is up without
+    # listen-only, so its controller sends dominant ACK bits" -- which is false
+    # about a link that is administratively down, and was the refusal a
+    # `listen_only: true` bus on a down interface got. A down link is settled
+    # first, so the one refusal an operator reads is the one that is true.
+    down = socketcan_interface_down(bus_id, bus_config)
+    if down is not None:
+        return down
     interface = "pcan" if effective_adapter == "peak" else effective_adapter
     bus_kwargs: JsonObject = {
         "interface": interface,
