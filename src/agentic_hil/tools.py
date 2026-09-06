@@ -196,6 +196,13 @@ class AgenticHILToolService:
         self._quarantined_lease: HardwareLease | None = None
         self._machine_recovery_incident: str | None = None
         self._machine_recovery_attempts = 0
+        # Whether the last `_attempt_machine_recovery` drove a predicate (a reset
+        # or a probe reached the backend), as opposed to returning at a guard
+        # because the incident was never machine-recoverable. The refusal an
+        # agent reads says `auto_recovery_attempted` only when this is true: the
+        # agent is told to stop retrying on that field, and it has to mean that
+        # the machine did try, not that a gate was in the way.
+        self._machine_recovery_ran = False
         self._lifecycle_lock = threading.RLock()
         self._dispatch_local = threading.local()
         self._state = "open"
@@ -730,7 +737,7 @@ class AgenticHILToolService:
                 # settle. Anything else stands down at the end of this call and
                 # the next one meets the bench with nothing on it.
                 if recovered is None and self.coordinator.incident_stands and name not in recovery_class_tools():
-                    return {
+                    refusal: JsonObject = {
                         "ok": False,
                         "tool": name,
                         "error_type": "resource_quarantined",
@@ -738,10 +745,16 @@ class AgenticHILToolService:
                         "cleanup_required": True,
                         "quarantined": True,
                         "retry_safe": False,
-                        "auto_recovery_attempted": True,
-                        "cleanup_reasons": sorted({reason for lease in self.coordinator.leases.values() for reason in lease.cleanup_reasons()}),
-                        "quarantine_id": self.coordinator.quarantine_id,
                     }
+                    # Only where the attempt in fact ran. An incident that was
+                    # audit-broken from the start is never retryable, so nothing
+                    # was driven, and a refusal claiming otherwise would tell the
+                    # operator the machine reset a board it never touched.
+                    if self._machine_recovery_ran:
+                        refusal["auto_recovery_attempted"] = True
+                    refusal["cleanup_reasons"] = sorted({reason for lease in self.coordinator.leases.values() for reason in lease.cleanup_reasons()})
+                    refusal["quarantine_id"] = self.coordinator.quarantine_id
+                    return refusal
             if name in audit_gated_tools():
                 try:
                     ensure_audit_ready(self.config)
@@ -1420,6 +1433,7 @@ class AgenticHILToolService:
         # from the unbound service config was exactly that disagreement: it admits
         # the reset set on `debugger is None`, so a selected entry's `allow_reset:
         # false` did not stop the reset the bound backend then performed.
+        self._machine_recovery_ran = False
         recovery_config = self._recovery_config(selected_probe, selected_debugger)
         authority = recovery_config or self.config
         allowed = self.coordinator.recoverable_reasons(authority)
@@ -1434,6 +1448,9 @@ class AgenticHILToolService:
         if cleanup_registered_processes(owner_marker=self.coordinator.owner_marker):
             return None
         backend, owns_backend = self._recovery_backend(recovery_config)
+        # From here on a predicate is driven, and whatever it answers (or
+        # raises) the attempt has run.
+        self._machine_recovery_ran = True
         try:
             if needs_reset:
                 reset = self._invoke_dispatch(lambda: backend.reset_target("halt"))
