@@ -673,16 +673,20 @@ def names_the_device_group(causes: list[str]) -> bool:
     return any(re.search(r"dialout|uucp|group", cause, re.IGNORECASE) for cause in causes)
 
 
-def eacces_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str) -> dict:
-    """`com_session_start` on a device whose open raises EACCES, as the driver module sees host `host`."""
+def open_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str, error: OSError) -> dict:
+    """`com_session_start` on a device whose open raises `error`, as the driver module sees host `host`."""
     config = load_config(str(write_config(tmp_path, com_ports_yaml=COM_PORT_YAML)))
     service = AgenticHILToolService(config)
-    install_fake_serial(monkeypatch, UnopenablePort(PermissionError(errno.EACCES, "could not open port", DEVICE)))
+    install_fake_serial(monkeypatch, UnopenablePort(error))
     monkeypatch.setattr("agentic_hil.comports.os", HostOs(host))
     try:
         return service.call("com_session_start", {"port_id": PORT_ID})
     finally:
         service.close()
+
+
+def eacces_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str) -> dict:
+    return open_refusal(tmp_path, monkeypatch, host, PermissionError(errno.EACCES, "could not open port", DEVICE))
 
 
 def test_a_serial_device_this_user_may_not_open_names_the_permission_not_a_second_holder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -720,15 +724,17 @@ def test_access_denied_on_a_windows_com_port_keeps_the_second_holder_among_its_c
     assert not names_the_device_group(refused["likely_causes"]), refused["likely_causes"]
 
 
-def test_a_device_that_does_not_exist_keeps_the_causes_it_always_had(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The neighbour: ENOENT is still the absent device, the second holder and the missing driver."""
-    config = load_config(str(write_config(tmp_path, com_ports_yaml=COM_PORT_YAML)))
-    service = AgenticHILToolService(config)
-    install_fake_serial(monkeypatch, UnopenablePort(FileNotFoundError(errno.ENOENT, "could not open port", DEVICE)))
-    try:
-        refused = service.call("com_session_start", {"port_id": PORT_ID})
-    finally:
-        service.close()
+@pytest.mark.parametrize("host", ["posix", "nt"])
+def test_a_device_that_does_not_exist_keeps_the_causes_it_always_had(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str) -> None:
+    """The neighbour on either host: ENOENT is still the absent device, the second holder and the missing driver.
+
+    The POSIX half is the one that carries weight. It is the host on which the
+    permission advice exists at all, so advice keyed on the wrong number, or on
+    the host alone rather than on the number, is caught here rather than left
+    to a bench: a device that is simply not there must keep the three causes it
+    always had.
+    """
+    refused = open_refusal(tmp_path, monkeypatch, host, FileNotFoundError(errno.ENOENT, "could not open port", DEVICE))
 
     assert refused["error_type"] == "com_port_open_failed", refused
     assert "[Errno 2]" in refused["backend_error"], refused
