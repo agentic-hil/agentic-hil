@@ -3225,6 +3225,10 @@ def test_the_retry_is_refused_when_it_was_told_to_be(tmp_path: Path) -> None:
     assert result.returncode != 0, transcript
     assert attempts.read_text(encoding="utf-8").split() == ["unset"], transcript
     assert "--no-system-certs" in transcript, transcript
+    # And uv's own words for the failure, which is what the sentence about the
+    # flag is added to rather than substituted for: a run this script cannot
+    # resolve shows the line it failed on.
+    assert "invalid peer certificate: UnknownIssuer" in transcript, transcript
 
 
 def _recording_uv_stub(seen: Path) -> str:
@@ -3519,6 +3523,12 @@ def test_the_anchor_replaces_a_copy_uv_did_not_write_in_its_own_bin(tmp_path: Pa
     # Named, not silently overwritten: the copy came from another manager, and
     # that manager's record of it outlives this run.
     assert f"uv refused to overwrite an agentic-hil in {user_bin} {DISPLACED_COPY_TAIL}" in transcript, transcript
+    # And uv's refusal itself is not printed. The run resolved it, so a
+    # transcript that ends in a working installation must not carry a line that
+    # reads as the fault and tells the reader to pass a flag this script passed
+    # for them. What a failure the script does not resolve still shows is pinned
+    # by test_the_retry_is_refused_when_it_was_told_to_be.
+    assert UV_REFUSES_AN_EXISTING_EXECUTABLE not in transcript, transcript
     answered = subprocess.run([str(user_bin / "agentic-hil"), "--version"], capture_output=True, text=True, timeout=SCRIPT_TIMEOUT_S, check=False)
     assert answered.stdout.strip() == "99.0.0", transcript
 
@@ -4080,6 +4090,10 @@ def test_the_powershell_anchor_replaces_a_copy_uv_did_not_write_in_its_own_bin(t
     assert installs == ["tool install --upgrade --reinstall agentic-hil[can]", "tool install --upgrade --reinstall agentic-hil[can] --force"], installs
     assert f"uv refused to overwrite an agentic-hil in {bench.uv_bin} {DISPLACED_COPY_TAIL}" in transcript, transcript
     assert "could not install" not in transcript, transcript
+    # The shell half's rule on the script Windows runs: the refusal this run
+    # resolved is not printed, so a transcript that ends in a working
+    # installation carries no line reading as the fault.
+    assert UV_REFUSES_AN_EXISTING_EXECUTABLE not in transcript, transcript
     assert bench.version_in_uv_bin() == "99.0.0", transcript
 
 
@@ -4111,6 +4125,9 @@ def test_the_powershell_retry_is_refused_when_it_was_told_to_be(tmp_path: Path) 
     assert result.returncode != 0, transcript
     assert bench.attempts.read_text(encoding="utf-8").split() == ["unset"], transcript
     assert "--no-system-certs was given" in transcript, transcript
+    # And uv's own words for the failure, the way the shell half shows them: a
+    # run this script cannot resolve shows the line it failed on.
+    assert "invalid peer certificate: UnknownIssuer" in transcript, transcript
     assert not (bench.uv_bin / "agentic-hil.exe").exists(), transcript
 
 
