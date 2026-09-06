@@ -38,7 +38,14 @@ RECORDED_NO_PROBE_FOR_UID = "No connected debug probe matches unique ID 'NOSUCHP
 # its probe drivers) is nowhere near it, short enough that a run which waits it
 # out is a failure and not a slow job. The bound the refusal is held to is half
 # of it.
-TIMEOUT_S = 10
+#
+# Measured rather than guessed, and raised from 10 because the guess was too
+# close: that start-up took 8.5 s in this image on a loaded machine, which is
+# past the old half-of-it bound and near enough to the old timeout that the
+# refusal would have been reaped as one. A timeout is the failure this file
+# exists to tell apart from a refusal, so a machine's load must not be able to
+# manufacture it here.
+TIMEOUT_S = 40
 
 
 def real_pyocd() -> str:
