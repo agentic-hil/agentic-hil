@@ -332,7 +332,16 @@ def test_com_ports_list_reports_the_entry_as_the_configuration_names_it_and_the_
 
 
 def test_com_stdio_relays_stdin_to_the_port_and_the_peers_answer_to_stdout(pty_pair: PtyPair, tmp_path: Path) -> None:
-    """A line in on stdin reaches the peer; the peer's answer comes out on stdout, and nothing on stderr."""
+    """A line in on stdin reaches the peer; the peer's answer comes out on stdout, and nothing on stderr.
+
+    tests/container/test_com_stdio_on_a_pty.py proves the same two directions
+    over a pair this process allocates with `os.openpty()`, holding the master
+    itself and naming the slave's `/dev/pts/N` as the port. What this adds is
+    the arrangement an operator has: the configured device is a link path to
+    a slave a separate program owns, the other end is a second process and
+    not a descriptor in the test, and what reached the wire is read off that
+    process's record rather than off a master the test holds.
+    """
     project, config, _state = a_project(tmp_path, pty_pair)
     responder = start_responder(pty_pair, tmp_path, PING_PONG)
     try:
@@ -375,7 +384,8 @@ def test_a_second_session_on_the_same_configuration_is_refused_while_the_first_h
             assert received == b"PONG\r\n"
             assert first.call("com_session_stop", {"port_id": PORT})["was_active"] is True
     finally:
-        assert responder.stop() == b"PING\r\n"
+        received = responder.stop()
+    assert received == b"PING\r\n", received
 
 
 def test_a_port_another_program_holds_exclusively_is_refused_as_busy_and_opens_once_it_is_released(pty_pair: PtyPair, tmp_path: Path) -> None:
@@ -443,6 +453,13 @@ def test_a_device_this_user_cannot_read_is_refused_as_open_failed_and_not_as_bus
     error is far more often a missing group membership than a second holder,
     and the product answers it as an open failure rather than sending the
     reader after a process that does not exist.
+
+    The configured device is the slave's own `/dev/pts/N` and not the link
+    under this test's temporary directory: pytest creates that tree with mode
+    0o700, so a link there is refused in the path lookup by a user who cannot
+    traverse it, and the slave's mode would then decide nothing. `/dev/pts`
+    is traversable by everyone, so the EACCES the server meets is the
+    device's own, which is the case this test exists for.
     """
     if os.geteuid() != 0:
         pytest.skip("needs root: the device has to be one the server's user cannot open, and only root can arrange that here")
@@ -471,7 +488,7 @@ def test_a_device_this_user_cannot_read_is_refused_as_open_failed_and_not_as_bus
         home.mkdir()
         temporary = tree / "tmp"
         temporary.mkdir()
-        config = fixture_configuration(project, tree / "config" / "config.yaml", tree / "state", com_port_device=str(pty_pair.dut))
+        config = fixture_configuration(project, tree / "config" / "config.yaml", tree / "state", com_port_device=str(pty_pair.dut_slave))
         for path in [tree, *tree.rglob("*")]:
             os.chown(path, unprivileged.pw_uid, unprivileged.pw_gid)
 
@@ -510,6 +527,8 @@ def test_a_device_this_user_cannot_read_is_refused_as_open_failed_and_not_as_bus
     assert refused["ok"] is False, refused
     assert refused["error_type"] == "com_port_open_failed", refused
     assert "[Errno 13]" in refused["backend_error"], refused
+    # pyserial names the device it could not open, so the errno is the slave's.
+    assert str(pty_pair.dut_slave) in refused["backend_error"], refused
     assert refused["side_effect_committed"] is False, refused
     assert refused["retry_safe"] is True, refused
 
