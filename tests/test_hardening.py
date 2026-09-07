@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
+from support import scaled_time_bound
 
 from agentic_hil.artifacts import ArtifactManager
 from agentic_hil.backends.common import spawn_command
@@ -87,8 +88,21 @@ def load_test_config(tmp_path: Path, **kwargs):
     return load_config(str(write_config(tmp_path, **kwargs)))
 
 
-def wait_until(predicate, timeout_s: float = WAIT_TIMEOUT_S) -> bool:
-    deadline = time.monotonic() + timeout_s
+def wait_bound() -> float:
+    """The module's wait ceiling, widened by the runner's one time scale.
+
+    Every wait in this module reads its ceiling through here rather than
+    from the constant directly, so the factor reaches all of them and the
+    number itself stays written once.
+    """
+    return scaled_time_bound(WAIT_TIMEOUT_S)
+
+
+def wait_until(predicate, timeout_s: float | None = None) -> bool:
+    # The bound is read here rather than defaulted in the signature, because the
+    # scale factor is an environment variable a runner may export after this
+    # module is imported, and a default evaluated at import would freeze it.
+    deadline = time.monotonic() + scaled_time_bound(WAIT_TIMEOUT_S if timeout_s is None else timeout_s)
     while time.monotonic() < deadline:
         if predicate():
             return True
@@ -788,7 +802,7 @@ class AnswersDuringTheWriteSerialHandle:
     def write(self, data: bytes) -> int:
         self.writes.append(bytes(data))
         self.answer_on_the_line.set()
-        self.reader_arrived = self.reader_took_answer.wait(WAIT_TIMEOUT_S)
+        self.reader_arrived = self.reader_took_answer.wait(wait_bound())
         time.sleep(0.05)
         return len(data)
 
@@ -840,7 +854,7 @@ def test_com_write_logs_the_command_before_the_answer_it_provoked(tmp_path: Path
         assert wait_until(lambda: len(log_entries(log_path)) == 2), log_entries(log_path)
     finally:
         session.active = False
-        reader.join(WAIT_TIMEOUT_S)
+        reader.join(wait_bound())
     assert not reader.is_alive(), "reader thread never finished"
 
     entries = log_entries(log_path)
@@ -925,7 +939,7 @@ def test_com_input_read_before_a_concurrent_write_is_logged_before_it(tmp_path: 
     session.append_audit = announce_rx  # type: ignore[method-assign]
 
     def send_later_command() -> None:
-        reader_at_rx.wait(WAIT_TIMEOUT_S)
+        reader_at_rx.wait(wait_bound())
         service.write_bytes("dut", b"version\n")
         write_done.set()
 
@@ -939,8 +953,8 @@ def test_com_input_read_before_a_concurrent_write_is_logged_before_it(tmp_path: 
     finally:
         write_done.set()
         session.active = False
-        reader.join(WAIT_TIMEOUT_S)
-        writer.join(WAIT_TIMEOUT_S)
+        reader.join(wait_bound())
+        writer.join(wait_bound())
     assert not reader.is_alive(), "reader thread never finished"
 
     entries = log_entries(log_path)
@@ -1068,7 +1082,7 @@ class DataThenDiesOnCueSerialHandle:
         if self.calls == 1:
             return b"ok\n"
         self.buffered.set()
-        self.may_die.wait(WAIT_TIMEOUT_S)
+        self.may_die.wait(wait_bound())
         raise OSError("device disconnected after delivering data")
 
     def close(self) -> None:
@@ -1131,7 +1145,7 @@ def test_com_read_keeps_real_data_a_success_even_if_the_reader_later_dies(tmp_pa
     reader = session.reader
     assert reader is not None
 
-    assert handle.buffered.wait(WAIT_TIMEOUT_S), "reader never came back for a second read"
+    assert handle.buffered.wait(wait_bound()), "reader never came back for a second read"
     assert session.reader_error is None
 
     result = service.read_bytes("dut", 16, 2.0)
@@ -1144,7 +1158,7 @@ def test_com_read_keeps_real_data_a_success_even_if_the_reader_later_dies(tmp_pa
     assert result["buffer_remaining_bytes"] == 0
 
     handle.may_die.set()
-    reader.join(WAIT_TIMEOUT_S)
+    reader.join(wait_bound())
     assert not reader.is_alive(), "reader thread never finished"
 
     later = service.read_bytes("dut", 16, 0.0)
@@ -1738,9 +1752,15 @@ def test_com_stdio_relays_device_output_while_stdin_is_blocked(tmp_path: Path, m
     )
 
     worker.start()
-    relayed = wait_until(lambda: "banner" in output.getvalue(), timeout_s=2.0)
+    # The claim is that the banner arrives while stdin is still blocked, not
+    # that it arrives inside any particular number of seconds, so this waits
+    # with the module's own bound rather than a tighter one of its own. The
+    # tighter one cost a green run on a loaded runner: the thread had not been
+    # scheduled inside two seconds and the test read that as output that never
+    # came.
+    relayed = wait_until(lambda: "banner" in output.getvalue())
     stdin.release.set()
-    worker.join(timeout=WAIT_TIMEOUT_S)
+    worker.join(timeout=wait_bound())
 
     assert relayed, "device output was not relayed while stdin was still blocked"
     assert not worker.is_alive(), "com-stdio loop did not exit after stdin EOF"
@@ -1800,14 +1820,14 @@ def test_stdin_reader_stop_accepts_a_reader_that_closed_its_own_fd_on_posix(monk
     reader = comstdio.start_stdin_reader(PipeStream())
     try:
         reader.stop.set()
-        assert at_teardown.wait(WAIT_TIMEOUT_S), "the reader thread never reached its own descriptor teardown"
+        assert at_teardown.wait(wait_bound()), "the reader thread never reached its own descriptor teardown"
         # A reader still winding down from its own teardown is not a borrowed
         # stream, so shutdown must report nothing about a cancellable interface.
-        errors = comstdio.stop_stdin_reader(reader, WAIT_TIMEOUT_S)
+        errors = comstdio.stop_stdin_reader(reader, wait_bound())
         assert errors == []
         assert not reader.thread.is_alive()
     finally:
-        reader.thread.join(timeout=WAIT_TIMEOUT_S)
+        reader.thread.join(timeout=wait_bound())
         os.close(write_fd)
         with suppress(OSError):
             os.close(read_fd)
@@ -1823,7 +1843,7 @@ def test_stdin_reader_stop_reports_a_stream_it_cannot_cancel() -> None:
             self.release = threading.Event()
 
         def read(self, size: int) -> bytes:
-            self.release.wait(WAIT_TIMEOUT_S)
+            self.release.wait(wait_bound())
             return b""
 
     stdin = UncancellableStdin()
@@ -1837,7 +1857,7 @@ def test_stdin_reader_stop_reports_a_stream_it_cannot_cancel() -> None:
         assert all(isinstance(error, RuntimeError) for error in errors)
     finally:
         stdin.release.set()
-        reader.thread.join(timeout=WAIT_TIMEOUT_S)
+        reader.thread.join(timeout=wait_bound())
 
 
 def test_stdin_reader_start_failure_closes_dup_fd(monkeypatch: pytest.MonkeyPatch) -> None:
