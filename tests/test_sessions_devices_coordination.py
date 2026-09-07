@@ -23,12 +23,14 @@ import re
 import subprocess
 import sys
 import textwrap
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from conftest import FAKE_GDB, write_authoritative_config, write_config
+from support import scaled_time_bound
 from test_can_broker import broker_diagnostics, reaped_brokers  # noqa: F401  (fixture)
 from test_contact_marker import FakeHandle, FakePort, install_fake_serial
 from test_debugger_processes import authoritative_config_with_executable_spelling, path_without_a_toolchain
@@ -38,6 +40,7 @@ from agentic_hil.artifacts import decode_base64_payload
 from agentic_hil.bench import HEARTBEAT_INTERVAL_S, BenchMutex, DeviceBusyError, resource_digest
 from agentic_hil.canbroker import (
     BROKER_EXIT_ADAPTER,
+    BROKER_START_TIMEOUT_S,
     ParticipantError,
     attach_participant,
     broker_log_path,
@@ -951,16 +954,16 @@ FAILING_BRIDGE = textwrap.dedent(
 )
 
 
-def failing_bridge_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def failing_bridge_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, bus_id: str = "sdcbroker", channel: str = "vcan0"):
     workspace = tmp_path / "project"
     workspace.mkdir()
     bridge = tmp_path / "failing_bridge.py"
     bridge.write_text(FAILING_BRIDGE, encoding="utf-8")
     can_buses_yaml = (
         "can_buses:\n"
-        "  sdcbroker:\n"
+        f"  {bus_id}:\n"
         '    adapter: "process"\n'
-        '    channel: "vcan0"\n'
+        f'    channel: "{channel}"\n'
         f'    executable: "{bridge.as_posix()}"\n'
         # Short, so a broker whose bridge never answers its open exits well
         # inside the attach deadline and what the loop does next is observable.
@@ -1012,3 +1015,55 @@ def test_a_broker_whose_adapter_cannot_open_refuses_the_participant_with_the_ada
     # was not what ended the attach: one broker, one refusal, well inside it.
     assert "adapter gone" in diagnostics and "can_adapter_timeout" in diagnostics, diagnostics
     assert "can_broker_unavailable" not in json.dumps(result), result
+
+
+# The bound this refusal is allowed to take, and the reason it is not the
+# product's own start timeout. The attach above ends the moment the broker exits
+# with an explained code and never on the clock, so a healthy run costs a fresh
+# interpreter, the authoritative config, the bus lock, a bridge process and the
+# one second the fixture gives the adapter, and nothing else. Ten seconds is
+# room for all of that on a contended host and is still far enough below
+# `BROKER_START_TIMEOUT_S` that a broker which hangs instead of exiting is read
+# as a failure rather than as a slow machine.
+BROKER_REFUSAL_CEILING_S = 10.0
+
+
+def test_the_adapter_refusal_ends_on_the_brokers_explained_exit_and_not_on_a_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:  # noqa: F811
+    """What ends this attach is the broker's exit code, so no deadline is passed (#530).
+
+    The same adapter that cannot open, attached with the product's own start
+    timeout instead of a number this test chose. Two things are pinned and they
+    hold each other up.
+
+    The refusal carries the adapter's own error type and exactly one broker was
+    spawned, which together say the loop left through the explained exit at
+    `BROKER_EXIT_ADAPTER`: a client whose deadline expired first would terminate
+    the broker it was waiting for, raise the generic `can_broker_unavailable`
+    with no cause in it, and hand the test the terminate's exit code instead of
+    the broker's, while a death this path does not explain would spawn a second
+    broker and be caught by the count.
+
+    And the whole refusal lands well inside `BROKER_REFUSAL_CEILING_S`, which is
+    what keeps the wide start timeout honest: widening a bound is only free
+    while nothing waits it out, so a broker that hangs rather than exiting has
+    to be visible here.
+    """
+    config = failing_bridge_config(tmp_path, monkeypatch, bus_id="sdcclock", channel="vcan0clock")
+    bus_key = bus_lock_key(config, "sdcclock")
+
+    started_at = time.monotonic()
+    with pytest.raises(ParticipantError) as refused:
+        attach_participant(config, "sdcclock", "alpha")
+    elapsed = time.monotonic() - started_at
+    result = refused.value.result
+    diagnostics = broker_diagnostics(config, bus_key)
+
+    assert len(reaped_brokers) == 1, f"{len(reaped_brokers)} brokers were spawned for one adapter that cannot open\n{diagnostics}"
+    assert reaped_brokers[0].wait(timeout=15) == BROKER_EXIT_ADAPTER, diagnostics
+    assert result["error_type"] == "can_adapter_timeout", (result, diagnostics)
+    assert result["broker_exit_code"] == BROKER_EXIT_ADAPTER, result
+    assert "can_broker_unavailable" not in json.dumps(result), result
+    assert elapsed < scaled_time_bound(BROKER_REFUSAL_CEILING_S), (elapsed, diagnostics)
+    # And the ceiling is a ceiling, not the default under another name: a run
+    # that waited out the product's start timeout fails the line above.
+    assert BROKER_REFUSAL_CEILING_S * 2 <= BROKER_START_TIMEOUT_S

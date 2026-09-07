@@ -14,6 +14,7 @@ and a broker that is not a process cannot be shown to be that.
 """
 from __future__ import annotations
 
+import ast
 import dataclasses
 import json
 import os
@@ -1520,3 +1521,120 @@ def test_a_participant_argument_is_refused_by_the_schema_until_sharing_lands(tmp
         assert service.can_buses.sessions == {}
     finally:
         service.close()
+
+
+# ---------------------------------------------------------------------------
+# What a spawning attach may do to the broker's start timeout (#530).
+
+
+# Every test file the suite has, in every tier, because an attach that spawns a
+# broker is not confined to this one and the tier that runs least often is the
+# tier whose failure costs most to read.
+SUITE_FILES = sorted(Path(__file__).resolve().parent.rglob("*.py"))
+
+# The spawning attaches that may keep a bare number, named one by one with the
+# reason each is not this issue's. In all four a broker is already attached and
+# serving when the call is made, so the attach reads the descriptor that is
+# already there and is refused by `_attach_once` on the first pass; no broker is
+# spawned, nothing is waited for, and the number never becomes a deadline.
+#
+# An entry has to go on naming exactly one such call, so an exemption cannot
+# outlive the call it was written for or quietly grow to cover a second one.
+ATTACHES_THAT_NEVER_WAIT_FOR_A_START = {
+    "test_can_broker.py": (
+        "test_participant_name_collision_is_refused_and_distinct_names_run_in_parallel",
+        "test_listen_only_and_transmitting_participants_cannot_coexist",
+        "test_a_transmitting_participant_cannot_join_a_listen_only_sniffer",
+        "test_a_listen_only_bus_refuses_a_participant_that_may_transmit",
+    )
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class AttachCall:
+    """One `attach_participant(...)` in the suite's own source."""
+
+    path: Path
+    line: int
+    test: str
+    bound: str
+
+    @property
+    def where(self) -> str:
+        return f"{self.path.name}:{self.line} ({self.test})"
+
+
+def bare_start_bounds(path: Path) -> list[AttachCall]:
+    """Every spawning attach in one file that hands the start timeout a number.
+
+    Spawning is read from the source, which is the only place it can be read
+    from without running the call: `allow_start=False` states that no broker
+    will be started, and everything else may start one. A bound reached through
+    `scaled_time_bound` is not a bare number and is not collected, because that
+    is the one spelling a contended host can widen from a single place.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except SyntaxError:  # pragma: no cover  (no such file in this tree)
+        return []
+    found: list[AttachCall] = []
+    for definition in tree.body:
+        if not isinstance(definition, ast.FunctionDef):
+            continue
+        for node in ast.walk(definition):
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if name != "attach_participant":
+                continue
+            keywords = {keyword.arg: keyword.value for keyword in node.keywords if keyword.arg}
+            bound = keywords.get("start_timeout_s")
+            if bound is None or not isinstance(bound, ast.Constant) or not isinstance(bound.value, (int, float)):
+                continue
+            allow_start = keywords.get("allow_start")
+            if isinstance(allow_start, ast.Constant) and allow_start.value is False:
+                continue
+            found.append(AttachCall(path=path, line=node.lineno, test=definition.name, bound=repr(bound.value)))
+    return found
+
+
+def suite_bare_start_bounds() -> list[AttachCall]:
+    return [call for path in SUITE_FILES for call in bare_start_bounds(path)]
+
+
+def test_no_attach_that_may_start_a_broker_bounds_the_start_with_a_bare_number() -> None:
+    """A number here is a deadline on a machine, and the machine is not the test's.
+
+    A spawning attach that hands `start_timeout_s` a literal is measuring the
+    host: inside it a broker has to start an interpreter, load the authoritative
+    configuration, take the bus lock, reach its adapter and answer. When the
+    number expires first the client terminates the broker it was waiting for and
+    raises the generic `can_broker_unavailable`, so the test reads the
+    terminate's exit code where it expected the broker's and reports a defect in
+    the code under test rather than a loaded runner.
+
+    The default costs nothing to take, because this path ends on the broker's
+    own explained exit and never on the clock. Where a bound really is the
+    claim, `scaled_time_bound` is how it is written, so one variable widens it
+    with every other bound in the suite.
+    """
+    offenders = [
+        call
+        for call in suite_bare_start_bounds()
+        if call.test not in ATTACHES_THAT_NEVER_WAIT_FOR_A_START.get(call.path.name, ())
+    ]
+
+    assert not offenders, "attaches that may start a broker and bound its start with a bare number:\n" + "\n".join(
+        f"  {call.where}: start_timeout_s={call.bound}" for call in offenders
+    )
+
+
+def test_every_exemption_still_names_one_attach_the_walk_finds() -> None:
+    """An exemption nobody is reading is an exemption that has stopped being true."""
+    for name, tests in ATTACHES_THAT_NEVER_WAIT_FOR_A_START.items():
+        path = Path(__file__).resolve().parent / name
+        if not path.exists():  # pragma: no cover  (a source distribution ships part of this tree)
+            continue
+        found = [call.test for call in bare_start_bounds(path)]
+        for test in tests:
+            assert found.count(test) == 1, f"{name}: {test} names {found.count(test)} bare start bounds, not one"
