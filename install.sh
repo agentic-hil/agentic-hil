@@ -3,7 +3,8 @@
 #   1. the agentic-hil package, installed user-local (uv tool, or pip --user).
 #   2. your agent's skill file, under your own home directory.
 #   3. your agent's user-level MCP registration, under your own home directory.
-#   4. nothing in any repository, no project configuration, no shell rc file.
+#   4. nothing in any repository and no project configuration; of your shell
+#      profile, one line, in one file, named as it is written, skipped by --no-path.
 #   5. nothing that needs administrator rights: no sudo, no system package manager.
 
 set -eu
@@ -17,7 +18,7 @@ set -eu
 # untouched. Deliberately not a capability floor either: step 4 registers the
 # skill out of whatever copy step 1 left in place, so a floor left a returning
 # user on an old package and an old skill at once.
-RELEASE="0.21.4"
+RELEASE="0.21.5"
 
 # The PATH this run was handed, recorded before anything of ours has prepended to
 # it. Step 3's report is about the operator's own shell, and this script edits
@@ -34,6 +35,9 @@ AGENT=""
 WITH_AGENT_INSTALL=1
 PINNED=""
 WITH_CAN=1
+# Whether step 3 puts the directory the command landed in on the PATH of the
+# shells that come after this one, when it is not there already.
+WITH_PATH=1
 # auto, always or never: whether this machine's own certificate store is
 # reached for, and whether it takes a failed attempt first.
 SYSTEM_CERTS="auto"
@@ -78,6 +82,9 @@ Options:
   --can               Install the [can] extra for PEAK and SocketCAN adapters.
                       This is the default.
   --no-can            Install without the [can] extra.
+  --no-path           Do not touch your shell profile. Step 3 then prints
+                      the one line to add yourself, as it always does when
+                      it cannot write the file.
   --system-certs      Validate TLS against this machine's own certificate
                       store, the one curl and apt already read, from the start.
                       Rarely needed: a failure that carries the signature of a
@@ -124,6 +131,10 @@ while [ $# -gt 0 ]; do
             ;;
         --no-can)
             WITH_CAN=0
+            shift
+            ;;
+        --no-path)
+            WITH_PATH=0
             shift
             ;;
         --system-certs)
@@ -983,6 +994,76 @@ installed_executable_dir() {
     return 1
 }
 
+# The one file of yours step 3 may add a line to, chosen from the shell you
+# actually run. One file and never three: Astral's installer appends to
+# ~/.profile and to ~/.bashrc and creates ~/.zshrc, which is the spread this
+# script refuses and turns off with UV_NO_MODIFY_PATH (#488). The transcript
+# names whichever file this returns, so the edit can be found and undone.
+path_profile() {
+    case "$(basename "${SHELL:-sh}")" in
+        zsh)
+            printf '%s\n' "${ZDOTDIR:-$HOME}/.zshrc"
+            ;;
+        bash)
+            # A macOS terminal window is a login shell and reads .bash_profile,
+            # a Linux one is an interactive non-login shell and reads .bashrc,
+            # and neither reads the other by default.
+            if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
+                printf '%s\n' "$HOME/.bash_profile"
+            else
+                printf '%s\n' "$HOME/.bashrc"
+            fi
+            ;;
+        fish)
+            printf '%s\n' "$HOME/.config/fish/conf.d/agentic-hil.fish"
+            ;;
+        *)
+            printf '%s\n' "$HOME/.profile"
+            ;;
+    esac
+}
+
+# That line, in the syntax of the file it goes in.
+path_line() {
+    case "$1" in
+        *.fish)
+            printf 'fish_add_path "%s"\n' "$2"
+            ;;
+        *)
+            printf 'export PATH="%s:$PATH"\n' "$2"
+            ;;
+    esac
+}
+
+# Put the directory the command landed in on the PATH of the shells that come
+# after this one. Sets PATH_PROFILE_FILE to the file it decided on either way,
+# and PATH_PROFILE_RESULT to what happened there: "written" for the line this
+# run added, "present" for a file that already names the directory, so a second
+# run of this script adds nothing. Returns non-zero when the file could not be
+# written, and the caller then prints the line for the reader to add.
+PATH_PROFILE_FILE=""
+PATH_PROFILE_RESULT=""
+persist_path() {
+    PATH_PROFILE_FILE=$(path_profile)
+    if [ -f "$PATH_PROFILE_FILE" ] && grep -Fqs -- "$1" "$PATH_PROFILE_FILE"; then
+        PATH_PROFILE_RESULT="present"
+        return 0
+    fi
+    if ! mkdir -p "$(dirname "$PATH_PROFILE_FILE")" 2>/dev/null; then
+        PATH_PROFILE_RESULT="failed"
+        return 1
+    fi
+    {
+        printf '\n# added by the agentic-hil installer: the directory it installed the command in\n'
+        path_line "$PATH_PROFILE_FILE" "$1"
+    } >> "$PATH_PROFILE_FILE" 2>/dev/null || {
+        PATH_PROFILE_RESULT="failed"
+        return 1
+    }
+    PATH_PROFILE_RESULT="written"
+    return 0
+}
+
 report_path() {
     if [ "$NEEDS_PACKAGE" -eq 0 ]; then
         # Nothing was installed: the development copy step 1 kept on this PATH is
@@ -1009,8 +1090,19 @@ report_path() {
                 ;;
             *)
                 step 3 "PATH: agentic-hil landed in $found_dir, which is not on your PATH"
-                say "PATH: add this line to your shell profile yourself, then open a new shell:"
-                printf '\n    export PATH="%s:$PATH"\n\n' "$found_dir"
+                if [ "$WITH_PATH" -eq 0 ]; then
+                    say "PATH: --no-path was given, so no file of yours was touched; add this line to your shell profile yourself, then open a new shell:"
+                    printf '\n    %s\n\n' "$(path_line "$(path_profile)" "$found_dir")"
+                elif persist_path "$found_dir"; then
+                    if [ "$PATH_PROFILE_RESULT" = "written" ]; then
+                        say "PATH: added one line to $PATH_PROFILE_FILE, so the next shell you open finds the command; this run already has it"
+                    else
+                        say "PATH: $PATH_PROFILE_FILE already names that directory, so the next shell you open finds the command; this run already has it"
+                    fi
+                else
+                    say "PATH: $PATH_PROFILE_FILE could not be written, so add this line to your shell profile yourself, then open a new shell:"
+                    printf '\n    %s\n\n' "$(path_line "$PATH_PROFILE_FILE" "$found_dir")"
+                fi
                 ;;
         esac
         PATH="$found_dir:$PATH"

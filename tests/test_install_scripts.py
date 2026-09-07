@@ -19,6 +19,7 @@ where the interpreter or the daemon is missing, and say what would have run it.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -54,6 +55,7 @@ DOCUMENTED_FLAGS = (
     "--version",
     "--can",
     "--no-can",
+    "--no-path",
     "--system-certs",
     "--no-system-certs",
     "--help",
@@ -1200,9 +1202,9 @@ _PYTHON_WITH_A_FAILING_PIP = (
 )
 
 
-def _install_on(env: dict[str, str], project: Path) -> subprocess.CompletedProcess[str]:
+def _install_on(env: dict[str, str], project: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [_posix_shell(), str(SHELL_SCRIPT), "--no-can"],
+        [_posix_shell(), str(SHELL_SCRIPT), "--no-can", *arguments],
         cwd=str(project),
         capture_output=True,
         text=True,
@@ -1348,9 +1350,12 @@ def test_step_three_does_not_call_our_own_path_edit_the_operators_path(tmp_path:
     assert marker.read_text(encoding="utf-8").strip() == "uv", transcript
     assert f"PATH: agentic-hil landed in {user_bin}, which is not on your PATH" in transcript, transcript
     assert "already on your PATH" not in transcript, transcript
-    # The line the reader has to copy, printed on exactly the branch that admits
-    # the directory is missing.
-    assert f'export PATH="{user_bin}:$PATH"' in transcript, transcript
+    # And the branch that admits the directory is missing is the branch that
+    # puts it there: one line, in the one file the shell of this environment
+    # reads, named in the transcript so the edit can be found and undone.
+    profile = Path(env["HOME"]) / ".profile"
+    assert f"PATH: added one line to {profile}" in transcript, transcript
+    assert f'export PATH="{user_bin}:$PATH"' in profile.read_text(encoding="utf-8"), profile.read_text(encoding="utf-8")
 
 
 def test_step_three_still_says_a_user_bin_that_is_really_on_path_is_on_path(tmp_path: Path) -> None:
@@ -1376,6 +1381,9 @@ def test_step_three_still_says_a_user_bin_that_is_really_on_path_is_on_path(tmp_
     assert f"PATH: agentic-hil is installed in {user_bin}, already on your PATH" in transcript, transcript
     assert "which is not on your PATH" not in transcript, transcript
     assert "export PATH=" not in transcript, transcript
+    # Nothing to add means nothing written: the branch that edits a profile is
+    # the other one, and this run may not have created a file at all.
+    assert not (Path(env["HOME"]) / ".profile").exists(), transcript
 
 
 def test_both_scripts_report_step_three_from_the_path_they_were_started_with() -> None:
@@ -3591,11 +3599,12 @@ def test_both_scripts_tell_the_fetched_uv_installer_not_to_edit_profiles() -> No
     """The same instruction on the Windows side, where the installer edits the user Path.
 
     The pinned install.ps1 writes `%USERPROFILE%\\.local\\bin` into the user's
-    Path in the registry unless `UV_NO_MODIFY_PATH` is set, and step 3 then
-    prints a line that prepends the same directory again. Running the real
-    installer on a developer's Windows machine would edit that developer's
-    registry, so the Windows half is pinned on the text: the variable is set,
-    and it is set before the line that executes the fetched bytes.
+    Path in the registry unless `UV_NO_MODIFY_PATH` is set, which is uv's own
+    bin directory and not the one this script installs the command into, and
+    step 3 puts that one there itself. Running the real installer on a
+    developer's Windows machine would edit that developer's registry, so the
+    Windows half is pinned on the text: the variable is set, and it is set
+    before the line that executes the fetched bytes.
     """
     shell = _code_only(_shell_source())
     assert "UV_NO_MODIFY_PATH" in shell
@@ -3854,8 +3863,14 @@ class _WindowsBench:
         }
 
     def run(self, *arguments: str, manager_bin_on_path: bool = True, timeout: float = SCRIPT_TIMEOUT_S, **extra: str) -> tuple[subprocess.CompletedProcess[str], str]:
+        # -NoPath on every run from here. Everything else this bench fakes lives
+        # in tmp_path, but the Path step 3 writes is the one belonging to the
+        # account running the suite, and there is no second one to hand it. What
+        # the write itself does is held by
+        # test_the_windows_path_write_keeps_the_kind_and_repeats_into_nothing,
+        # which drives that function against a scratch key of its own.
         result = subprocess.run(
-            [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(POWERSHELL_SCRIPT), *arguments],
+            [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(POWERSHELL_SCRIPT), "-NoPath", *arguments],
             cwd=str(self.project),
             capture_output=True,
             text=True,
@@ -4018,7 +4033,8 @@ def test_the_powershell_first_install_closes_on_the_calm_sentence_and_reports_th
     assert "tool install --upgrade agentic-hil\n" in invocations, invocations
     assert "--reinstall" not in invocations, invocations
     assert f"agentic-hil landed in {bench.uv_bin}, which is not on your PATH" in transcript, transcript
-    assert f"[Environment]::SetEnvironmentVariable('Path', '{bench.uv_bin};'" in transcript, transcript
+    assert "-NoPath was given, so nothing of yours was changed" in transcript, transcript
+    assert f"SetValue('Path', '{bench.uv_bin};'" in transcript, transcript
     assert CALM_LINE in transcript, transcript
     assert REFRESH_LINE not in transcript, transcript
 
@@ -4070,7 +4086,8 @@ def test_the_powershell_pip_route_installs_user_local_and_asks_the_interpreter_w
     assert re.search(r'sysconfig\.get_path\("?scripts"?, "?nt_user"?\)', python_calls), python_calls
     assert bench.invocations() == "", bench.invocations()
     assert f"agentic-hil landed in {bench.pip_scripts}, which is not on your PATH" in transcript, transcript
-    assert f"[Environment]::SetEnvironmentVariable('Path', '{bench.pip_scripts};'" in transcript, transcript
+    assert "-NoPath was given, so nothing of yours was changed" in transcript, transcript
+    assert f"SetValue('Path', '{bench.pip_scripts};'" in transcript, transcript
     assert bench.version_in(bench.pip_scripts) == "99.0.0", transcript
     assert CALM_LINE in transcript, transcript
 
@@ -4193,7 +4210,7 @@ def test_the_powershell_fetch_route_leaves_the_users_registry_path_untouched(tmp
     assert (bench.home / ".local" / "bin" / "uv.exe").is_file(), transcript
     assert (bench.uv_bin / "agentic-hil.exe").is_file(), transcript
     assert f"agentic-hil landed in {bench.uv_bin}, which is not on your PATH" in transcript, transcript
-    assert transcript.count("[Environment]::SetEnvironmentVariable('Path'") == 1, transcript
+    assert transcript.count("CurrentUser.OpenSubKey('Environment'") == 1, transcript
 
 
 # The one agent CLI this suite may start a process for, and how long it lingers.
@@ -4872,8 +4889,11 @@ class _RealUvWindowsBench:
         return subprocess.run([str(self.uv_bin / "uv.exe"), *arguments], capture_output=True, text=True, env=self.environment(tool_bin_on_path=False), timeout=CONTAINER_TIMEOUT_S, check=False)
 
     def run(self, *arguments: str, tool_bin_on_path: bool) -> tuple[subprocess.CompletedProcess[str], str]:
+        # -NoPath for the same reason as the bench above: this one reaches the
+        # real uv and the real index, and the Path it would write is the one
+        # belonging to the account running the suite.
         result = subprocess.run(
-            [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(POWERSHELL_SCRIPT), *arguments],
+            [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(POWERSHELL_SCRIPT), "-NoPath", *arguments],
             cwd=str(self.bench.project),
             capture_output=True,
             text=True,
@@ -4909,7 +4929,8 @@ def test_the_powershell_installer_installs_refreshes_and_binds_every_flag_spelli
     assert "no agentic-hil on this PATH, installing it user-local" in transcript, transcript
     assert "uv is here, installing agentic-hil user-local with uv tool install" in transcript, transcript
     assert f"agentic-hil landed in {bench.tool_bin}, which is not on your PATH" in transcript, transcript
-    assert "[Environment]::SetEnvironmentVariable('Path'" in transcript, transcript
+    assert "-NoPath was given, so nothing of yours was changed" in transcript, transcript
+    assert f"SetValue('Path', '{bench.tool_bin};'" in transcript, transcript
     assert bench.receipt.is_file(), transcript
     document = _receipt_document(bench.receipt)
     assert document["tool"]["requirements"][0].get("extras", []) == [], document
@@ -5039,3 +5060,177 @@ def test_the_two_pages_that_already_describe_the_restart_keep_describing_it() ->
         assert "restart_required" in text, page
         assert "two separate refusals" not in text, page
         assert "neither asks for a restart" not in text, page
+
+
+# ---------------------------------------------------------------------------
+# Step 3 puts the directory the command landed in on the PATH of the shells
+# that come after the run, which the one line in the README leaves no room to
+# do by hand. The edit is one line in one file on POSIX and the account's own
+# Path value on Windows, it happens only on the branch that already says the
+# directory is missing, and --no-path leaves both alone.
+
+
+def test_the_shell_installer_adds_one_line_to_one_profile_and_a_second_run_adds_nothing(tmp_path: Path) -> None:
+    """One file, one line, and a rerun that finds its own work and leaves it.
+
+    Astral's installer appends to `~/.profile` and to `~/.bashrc` and creates
+    `~/.zshrc`, which is the spread this script turns off with
+    `UV_NO_MODIFY_PATH` and does not reproduce: the file is the one the shell in
+    this environment reads, the transcript names it, and a second run of the
+    same script recognises the directory and adds nothing.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, _marker, _uv_log, _fetched = _machine_whose_only_python_is(tmp_path, _PYTHON_EXTERNALLY_MANAGED)
+    home = Path(env["HOME"])
+    user_bin = home / ".local" / "bin"
+    profile = home / ".profile"
+    bashrc = home / ".bashrc"
+    bashrc.write_text("# the operator's own bashrc\nalias ll='ls -l'\n", encoding="utf-8")
+    kept = bashrc.read_bytes()
+
+    first = _install_on(env, project)
+
+    transcript = f"{first.stdout}{first.stderr}"
+    assert first.returncode == 0, transcript
+    assert f"PATH: added one line to {profile}" in transcript, transcript
+    written = profile.read_text(encoding="utf-8")
+    assert f'export PATH="{user_bin}:$PATH"' in written, written
+    assert written.count("added by the agentic-hil installer") == 1, written
+    assert bashrc.read_bytes() == kept, bashrc.read_text(encoding="utf-8")
+    assert not (home / ".zshrc").exists(), sorted(path.name for path in home.iterdir())
+
+    second = _install_on(env, project)
+
+    transcript = f"{second.stdout}{second.stderr}"
+    assert second.returncode == 0, transcript
+    assert f"PATH: {profile} already names that directory" in transcript, transcript
+    assert profile.read_text(encoding="utf-8") == written, profile.read_text(encoding="utf-8")
+
+
+def test_the_shell_installer_writes_the_file_the_running_shell_actually_reads(tmp_path: Path) -> None:
+    """zsh reads `.zshrc` and fish reads neither that nor `.profile`.
+
+    A line in `.profile` is read by a login shell, which is what a machine with
+    no `SHELL` set is assumed to start, and a zsh session on a desktop is not
+    one: it reads `.zshrc` and nothing this script could put in `.profile`
+    reaches it. fish does not read POSIX syntax at all, so it gets its own file
+    in `conf.d` and `fish_add_path`, which is the one line fish itself
+    documents.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    for label, shell, expected, line in (
+        ("zsh", "/bin/zsh", ".zshrc", 'export PATH="{bin}:$PATH"'),
+        ("fish", "/usr/bin/fish", ".config/fish/conf.d/agentic-hil.fish", 'fish_add_path "{bin}"'),
+    ):
+        env, project, _marker, _uv_log, _fetched = _machine_whose_only_python_is(tmp_path / label, _PYTHON_EXTERNALLY_MANAGED)
+        env["SHELL"] = shell
+        home = Path(env["HOME"])
+        user_bin = home / ".local" / "bin"
+
+        result = _install_on(env, project)
+
+        transcript = f"{result.stdout}{result.stderr}"
+        assert result.returncode == 0, transcript
+        written = home / expected
+        assert f"PATH: added one line to {written}" in transcript, transcript
+        assert line.format(bin=user_bin) in written.read_text(encoding="utf-8"), written.read_text(encoding="utf-8")
+        assert not (home / ".profile").exists(), transcript
+
+
+def test_no_path_leaves_every_profile_alone_and_prints_the_line_instead(tmp_path: Path) -> None:
+    """The opt-out, and what a reader is handed in its place.
+
+    An operator who manages their own profile gets the same report and no edit,
+    and the line the script would have written is printed for them to place
+    themselves. That is also the shape of the failure path: a file that cannot
+    be written ends in the same sentence.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    env, project, _marker, _uv_log, _fetched = _machine_whose_only_python_is(tmp_path, _PYTHON_EXTERNALLY_MANAGED)
+    home = Path(env["HOME"])
+    user_bin = home / ".local" / "bin"
+
+    result = _install_on(env, project, "--no-path")
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert f"PATH: agentic-hil landed in {user_bin}, which is not on your PATH" in transcript, transcript
+    assert "--no-path was given, so no file of yours was touched" in transcript, transcript
+    assert f'export PATH="{user_bin}:$PATH"' in transcript, transcript
+    assert not (home / ".profile").exists(), sorted(path.name for path in home.iterdir())
+    assert not (home / ".bashrc").exists(), sorted(path.name for path in home.iterdir())
+    assert not (home / ".zshrc").exists(), sorted(path.name for path in home.iterdir())
+
+
+@WINDOWS_ONLY
+def test_the_windows_path_write_keeps_the_kind_and_repeats_into_nothing(tmp_path: Path) -> None:
+    """The registry write itself, against a key of this test's own.
+
+    The value the script edits on a real machine is the one belonging to the
+    account running it, and this suite has no second account to hand it, so the
+    function is lifted out of the script and driven against a scratch key here.
+    Two claims: a Path stored as an expandable string stays one, with
+    `%USERPROFILE%` still written that way rather than flattened to whatever it
+    points at today, which is what
+    `[Environment]::SetEnvironmentVariable(..., 'User')` does to it; and a
+    directory that is already there is recognised, trailing separator and all,
+    so a second run of the installer adds nothing.
+    """
+    import winreg
+
+    source = POWERSHELL_SCRIPT.read_text(encoding="utf-8")
+    function = re.search(r"(?s)function Add-DirectoryToUserPath \{.*?\n\}\n", source)
+    assert function, "install.ps1 no longer carries the function this test drives"
+    subkey = "Software\\agentic-hil-test-path"
+    harness = tmp_path / "path-write.ps1"
+    harness.write_text(
+        function.group(0)
+        + f"$sub = '{subkey}'\n"
+        "$key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($sub)\n"
+        "$key.SetValue('Path', '%USERPROFILE%\\bin;C:\\Windows', [Microsoft.Win32.RegistryValueKind]::ExpandString)\n"
+        "$key.Close()\n"
+        "Write-Output (Add-DirectoryToUserPath -Directory 'C:\\scratch\\bin' -SubKey $sub)\n"
+        "Write-Output (Add-DirectoryToUserPath -Directory 'C:\\scratch\\bin\\' -SubKey $sub)\n",
+        encoding="utf-8",
+    )
+    try:
+        result = subprocess.run(
+            [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=SCRIPT_TIMEOUT_S,
+            check=False,
+        )
+        assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+        assert result.stdout.split() == ["written", "present"], f"{result.stdout}{result.stderr}"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, subkey) as scratch:
+            value, kind = winreg.QueryValueEx(scratch, "Path")
+        assert kind == winreg.REG_EXPAND_SZ, kind
+        assert value == "C:\\scratch\\bin;%USERPROFILE%\\bin;C:\\Windows", value
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, subkey)
+
+
+def test_the_windows_script_never_writes_a_path_through_the_environment_class() -> None:
+    """`SetEnvironmentVariable(..., 'User')` reads the value expanded and writes it back flat.
+
+    A user Path holding `%USERPROFILE%\\bin` survives that call as the
+    directory it happened to point at, permanently, and an installer that adds
+    one directory has no business rewriting the rest. So neither the write nor
+    the line printed for a reader to run may go through it, on the script or in
+    the transcript it prints.
+    """
+    code = _code_only(_powershell_source())
+
+    assert "SetEnvironmentVariable" not in code, "install.ps1 writes or prints a Path edit through [Environment]"
+    assert "DoNotExpandEnvironmentNames" in code, "install.ps1 reads the Path expanded"
+    assert "GetValueKind('Path')" in code, "install.ps1 does not keep the kind the value already had"
