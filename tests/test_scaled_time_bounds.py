@@ -285,7 +285,15 @@ def test_the_variable_is_documented_where_the_suite_is_run() -> None:
     with the reactor and the pytest plugin, and this variable steers neither, so
     the sentence belongs beside `pytest -n auto` instead.
     """
-    text = (REPOSITORY_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    document = REPOSITORY_ROOT / "CONTRIBUTING.md"
+    # CONTRIBUTING.md is repository content, not package content, so a source
+    # distribution's checkout does not carry it. Skip there rather than fail, the
+    # way test_generated_configurations_can_flash.py skips the statements it
+    # reads out of docs/; every contributor and every CI leg runs this from a
+    # repository checkout, where the document is always present.
+    if not document.is_file():
+        pytest.skip("CONTRIBUTING.md is repository content and does not ship in a source distribution")
+    text = document.read_text(encoding="utf-8")
     assert TIME_SCALE_VARIABLE in text, "the suite's own document does not name the variable"
 
     paragraphs = [block for block in text.split("\n\n") if TIME_SCALE_VARIABLE in block]
