@@ -25,13 +25,21 @@ the last test here is the reason: `_last_broker_document` returns the last
 document in a file appended by every broker ever started for the bus, and it is
 right on the explained path only because the exit code attributes it. A client
 that read that tail after killing a live broker would hand the caller an earlier
-broker's failure as this attempt's cause.
+broker's failure as this attempt's cause. The earlier document seeded here
+carries its own marker in every field a refusal could copy, its summary
+included, so that an unsafe tail read cannot slip past by taking the one field
+the marker missed.
 
 The client's own clock is the fake below, so every one of these situations is
-exact rather than raced: the broker's death and the loop's deadline are the same
-number, which is what makes "inside the final poll window" a fact and not a
-timing hope. One test keeps the real clock, because "bounded" is a claim about
-wall-clock time and has to be measured on one.
+exact rather than raced. A broker scripted to die "at the deadline" dies on the
+same number the loop compares against, and because the clock only ever advances
+on the client's own sleeps, every poll the loop makes is a poll of a living
+process no matter how the accumulated float lands. The broker of the shutdown
+case schedules its death only once it is actually waited for, which is what
+keeps that case from collapsing into the case above it. One test keeps the real
+clock, because "bounded" is a claim about wall-clock time and has to be measured
+on one, and its double refuses an unbounded wait outright rather than letting
+one look prompt.
 """
 
 from __future__ import annotations
@@ -86,6 +94,10 @@ UNRECOGNISED_EXIT_CODE = 1
 # the bound the wall-clock test below allows the whole failed attach on top of
 # its own deadline. A budget larger than this stops being "short".
 GRACE_CEILING_S = 3.0
+# How long the scripted broker of the shutdown case stays inside its shutdown
+# once the client starts waiting for it. Comfortably under the ceiling, so any
+# budget that deserves the name covers it.
+SHUTDOWN_LAG_S = 0.25
 # The deadline of the one test that runs on the real clock. Short, because what
 # it measures is the budget spent after the deadline, not the deadline.
 REAL_ATTACH_DEADLINE_S = 0.5
@@ -106,16 +118,19 @@ CONFIG_DOCUMENT = {
     "summary": "The authoritative config declares no shared CAN bus of that name.",
 }
 # A document from a broker started for this bus at some earlier time, sitting in
-# the log where every broker for this bus appends. Its marker must never reach a
-# refusal raised for a later broker whose exit code does not attribute it.
+# the log where every broker for this bus appends. Every field of it that a
+# refusal could copy carries the same marker, summary included: a client that
+# quoted the tail would have to drop all of them to look innocent, and dropping
+# all of them is not quoting the tail.
+EARLIER_MARKER = "earlier-broker-marker"
 EARLIER_DOCUMENT = {
     "ok": False,
     "error_type": "can_adapter_timeout",
-    "summary": "An earlier broker on this bus could not open its adapter.",
-    "backend_error": "an earlier broker's bridge, hours ago",
-    "stderr_tail": "an earlier broker's bridge, hours ago",
+    "summary": f"An earlier broker on this bus could not open its adapter ({EARLIER_MARKER}-summary).",
+    "backend_error": f"an earlier broker's bridge, hours ago ({EARLIER_MARKER}-backend)",
+    "stderr_tail": f"an earlier broker's bridge, hours ago ({EARLIER_MARKER}-stderr)",
+    "detail": f"an earlier broker's detail ({EARLIER_MARKER}-detail)",
 }
-EARLIER_MARKER = "an earlier broker's bridge, hours ago"
 
 GENERIC_SUMMARY = "No CAN broker for this bus could be reached or started."
 
@@ -147,15 +162,29 @@ class ScriptedBroker:
     Stands in for the `Popen` the client holds. `poll` and `wait` both read the
     clock the test drives, so a broker dies where the test says it does whether
     the client waits for it, polls for it, or does neither.
+
+    `shutdown_lag` is the shutdown case: such a broker has no scheduled death at
+    all until somebody waits for it, so every poll before that wait is a poll of
+    a living process, and the death that follows is one the wait produced rather
+    than one the clock would have reached anyway.
+
+    A wait with no timeout is refused outright. A real `Popen.wait()` with no
+    timeout blocks until the child chooses to go, so a double that returned or
+    raised there would let an accidentally unbounded production wait pass for a
+    bounded one.
     """
 
-    def __init__(self, clock, *, dies_at: float | None = None, exit_code: int | None = None) -> None:
+    def __init__(self, clock, *, dies_at: float | None = None, exit_code: int | None = None, shutdown_lag: float | None = None) -> None:
         self.clock = clock
         self.dies_at = dies_at
         self.exit_code = exit_code
+        self.shutdown_lag = shutdown_lag
         self.pid = -1
         self.terminated = False
+        self.terminated_at: float | None = None
         self.killed = False
+        self.waited_for: list[float] = []
+        self.unbounded_wait = False
         self.returncode: int | None = None
 
     def _code(self) -> int | None:
@@ -168,17 +197,24 @@ class ScriptedBroker:
         return self._code()
 
     def wait(self, timeout: float | None = None) -> int:
+        if timeout is None:
+            self.unbounded_wait = True
+            raise AssertionError("the client waited on the broker with no timeout, which is not a bounded budget")
+        self.waited_for.append(float(timeout))
+        if self.dies_at is None and self.shutdown_lag is not None:
+            self.dies_at = self.clock.monotonic() + self.shutdown_lag
         code = self._code()
         if code is not None:
             return code
-        if self.dies_at is not None and (timeout is None or self.dies_at - self.clock.monotonic() <= timeout):
+        if self.dies_at is not None and self.dies_at - self.clock.monotonic() <= timeout:
             self.clock.sleep(max(0.0, self.dies_at - self.clock.monotonic()))
             return self._code()
-        self.clock.sleep(float(timeout or 0.0))
+        self.clock.sleep(float(timeout))
         raise subprocess.TimeoutExpired(cmd="agentic-hil-can-broker", timeout=timeout)
 
     def terminate(self) -> None:
         self.terminated = True
+        self.terminated_at = self.clock.monotonic()
         if self._code() is None:
             self.dies_at = self.clock.monotonic()
             self.exit_code = -15
@@ -255,13 +291,14 @@ def attach_against(config, bus_key: str, log_path: Path, monkeypatch: pytest.Mon
 def test_a_broker_that_exited_inside_the_final_poll_window_is_refused_with_its_own_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The loop ended one comparison before the answer was there to be read.
 
-    The broker dies on the same moment the loop's deadline names, so every poll
-    the loop makes is a poll of a living process and the loop leaves without
-    ever classifying it. The code is `BROKER_EXIT_ADAPTER`, the branch that
-    reads that code sits one screen above, and the document it wants is already
-    the last line of the log. Asking `poll` once more after the loop is the
-    whole fix, and the participant gets the adapter's refusal rather than the
-    sentence that names no cause.
+    The broker dies on the same moment the loop's deadline names. The clock only
+    moves on the client's own sleeps, and every poll the loop makes happens
+    after a comparison that put the clock strictly below that moment, so the
+    loop sees a living process each time and leaves without ever classifying it.
+    The code is `BROKER_EXIT_ADAPTER`, the branch that reads that code sits one
+    screen above, and the document it wants is already the last line of the log.
+    Asking `poll` once more after the loop is the whole fix, and the participant
+    gets the adapter's refusal rather than the sentence that names no cause.
     """
     config, bus_key, log_path = prepared_bus(tmp_path, monkeypatch, "vcan532a", documents=[ADAPTER_DOCUMENT])
 
@@ -273,7 +310,10 @@ def test_a_broker_that_exited_inside_the_final_poll_window_is_refused_with_its_o
     assert result["summary"] == "The CAN broker started for this bus could not open its adapter: The CAN adapter did not answer the open request.", result
     assert result["broker_exit_code"] == BROKER_EXIT_ADAPTER, result
     assert result["broker_log"] == str(log_path), result
-    assert result["backend_error"] == "the bridge closed the pipe", result
+    # The whole document is carried, not the two fields a refusal happens to
+    # name: the exit code attributes all of it.
+    assert result["backend_error"] == ADAPTER_DOCUMENT["backend_error"], result
+    assert result["stderr_tail"] == ADAPTER_DOCUMENT["stderr_tail"], result
     assert result["retry_safe"] is True, result
     assert result["bus_id"] == BUS_ID and result["participant"] == PARTICIPANT, result
     # A dead process is not something to terminate, and one broker met one
@@ -291,27 +331,39 @@ def test_a_broker_still_inside_its_shutdown_is_waited_for_and_reclassifies(tmp_p
 
     The broker entry point prints its refusal and then runs `broker.shutdown()`
     in a `finally`, which closes the adapter session, which a wedged adapter can
-    block. In that window the client kills a process whose answer it already
-    had. A short budget spent after the deadline, and only on an attach that has
-    already failed, lets the exit be read and the refusal be the explained one.
+    block. Only the adapter exit reaches that `finally`: both configuration
+    returns are above the `try`, so a configuration exit cannot be the broker
+    that blocks here. In that window the client kills a process whose answer it
+    already had. A short budget spent after the deadline, and only on an attach
+    that has already failed, lets the exit be read and the refusal be the
+    explained one.
+
+    The broker here has no scheduled death until the client waits for it, so
+    this cannot pass as case three in disguise: every poll the loop made was a
+    poll of a living process, and the exit that gets classified is one the
+    client's own wait produced.
     """
-    config, bus_key, log_path = prepared_bus(tmp_path, monkeypatch, "vcan532b", documents=[CONFIG_DOCUMENT])
-    grace = canbroker.BROKER_SHUTDOWN_GRACE_S
-    assert 0.0 < grace <= GRACE_CEILING_S, f"the shutdown grace is not a short budget: {grace}"
+    config, bus_key, log_path = prepared_bus(tmp_path, monkeypatch, "vcan532b", documents=[ADAPTER_DOCUMENT])
 
-    attempt = attach_against(config, bus_key, log_path, monkeypatch, lambda clock, index: ScriptedBroker(clock, dies_at=ATTACH_DEADLINE_S + grace / 2, exit_code=BROKER_EXIT_CONFIG))
+    attempt = attach_against(config, bus_key, log_path, monkeypatch, lambda clock, index: ScriptedBroker(clock, exit_code=BROKER_EXIT_ADAPTER, shutdown_lag=SHUTDOWN_LAG_S))
     result = attempt.result
+    broker = attempt.spawned[-1]
 
+    assert broker.waited_for, "the broker still inside its shutdown was never waited for"
+    assert broker.terminated is False, "a broker that answered inside the budget was killed anyway"
     assert result["summary"] != GENERIC_SUMMARY, result
-    assert result["error_type"] == "can_bus_not_shared", result
-    assert result["summary"] == "The CAN broker started for this bus could not load its configuration: The authoritative config declares no shared CAN bus of that name.", result
-    assert result["broker_exit_code"] == BROKER_EXIT_CONFIG, result
+    assert result["error_type"] == "can_adapter_timeout", result
+    assert result["summary"] == "The CAN broker started for this bus could not open its adapter: The CAN adapter did not answer the open request.", result
+    assert result["broker_exit_code"] == BROKER_EXIT_ADAPTER, result
     assert result["broker_log"] == str(log_path), result
+    assert result["backend_error"] == ADAPTER_DOCUMENT["backend_error"], result
     assert result["retry_safe"] is True, result
-    assert attempt.spawned[-1].terminated is False, "a broker that answered inside the budget was killed anyway"
-    # The budget is spent, and it is spent once: the clock stands past the
-    # deadline by the lag and no further.
-    assert attempt.clock.now < ATTACH_DEADLINE_S + grace + canbroker.BROKER_POLL_INTERVAL_S, attempt.clock.now
+    # The budget was really spent, and it is a short one: the clock stands past
+    # the deadline by the shutdown it waited out, and the whole allowance handed
+    # to the process stays under the ceiling however it was split.
+    assert attempt.clock.now >= ATTACH_DEADLINE_S + SHUTDOWN_LAG_S, attempt.clock.now
+    assert attempt.clock.now <= ATTACH_DEADLINE_S + GRACE_CEILING_S + canbroker.BROKER_POLL_INTERVAL_S, attempt.clock.now
+    assert sum(broker.waited_for) <= GRACE_CEILING_S, broker.waited_for
 
 
 def test_the_budget_after_the_deadline_is_bounded_on_a_real_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -319,17 +371,27 @@ def test_the_budget_after_the_deadline_is_bounded_on_a_real_clock(tmp_path: Path
 
     The one test here that keeps the real clock, because "short" is a claim
     about wall-clock time and the fake clock cannot make it. A budget that grew
-    into a second deadline would show up nowhere else.
+    into a second deadline would show up nowhere else, and neither would a wait
+    with no timeout at all: the double refuses that outright, so an unbounded
+    production wait cannot borrow the double's promptness.
     """
     config, bus_key, log_path = prepared_bus(tmp_path, monkeypatch, "vcan532c")
-    assert 0.0 < canbroker.BROKER_SHUTDOWN_GRACE_S <= GRACE_CEILING_S, canbroker.BROKER_SHUTDOWN_GRACE_S
-    monkeypatch.setattr(canbroker, "_spawn_broker", lambda *args, **kwargs: ScriptedBroker(time))
+    spawned: list = []
+
+    def spawn(*args, **kwargs):
+        child = ScriptedBroker(time)
+        spawned.append(child)
+        return child
+
+    monkeypatch.setattr(canbroker, "_spawn_broker", spawn)
 
     started_at = time.monotonic()
     with pytest.raises(ParticipantError):
         attach_participant(config, BUS_ID, PARTICIPANT, start_timeout_s=REAL_ATTACH_DEADLINE_S)
     elapsed_s = time.monotonic() - started_at
 
+    assert spawned, "no broker was started at all"
+    assert not any(child.unbounded_wait for child in spawned), "the client waited on the broker with no timeout"
     assert elapsed_s < scaled_time_bound(REAL_ATTACH_DEADLINE_S + GRACE_CEILING_S), elapsed_s
 
 
@@ -371,15 +433,19 @@ def test_a_broker_terminated_at_the_deadline_names_the_log_and_both_timeouts(tmp
     assert result["side_effect_committed"] is False, result
     assert result["bus_id"] == BUS_ID and result["bus_key"] == bus_key, result
     assert result["participant"] == PARTICIPANT, result
-    # Nothing exited, so nothing is attributed: no exit code, and no fields out
-    # of a broker's document.
+    # Nothing exited on its own, so nothing is attributed: no fields out of a
+    # broker's document, and no exit code either. The only code there is now is
+    # the one this client's own `terminate` produced moments later, and a signal
+    # this client sent is not evidence about the adapter.
     assert "broker_exit_code" not in result, result
     assert "backend_error" not in result, result
     assert "stderr_tail" not in result, result
-    # One broker, started once and terminated once. A live process is what the
-    # loop leaves behind, and killing it is the client's own doing.
+    # One broker, started once and terminated once, and terminated because the
+    # deadline arrived rather than before it.
     assert len(attempt.spawned) == 1, attempt.spawned
     assert attempt.spawned[0].terminated is True, "the broker the client started was left running"
+    assert attempt.clock.now >= ATTACH_DEADLINE_S, attempt.clock.now
+    assert attempt.spawned[0].terminated_at is not None and attempt.spawned[0].terminated_at >= ATTACH_DEADLINE_S, attempt.spawned[0].terminated_at
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +471,10 @@ def test_an_earlier_brokers_document_is_never_this_attempts_cause(tmp_path: Path
     hand the caller an earlier broker's failure as this attempt's cause, and a
     confidently wrong cause is worse than a generic one.
 
+    Every field of the seeded document that a refusal could copy carries the
+    marker, its summary included, so a client that took only the old summary and
+    dropped the rest is caught the same way as one that copied all of it.
+
     Naming the log is not quoting it: `broker_log` is a place to look and stays.
     """
     config, bus_key, log_path = prepared_bus(tmp_path, monkeypatch, channel, documents=[EARLIER_DOCUMENT])
@@ -414,13 +484,17 @@ def test_an_earlier_brokers_document_is_never_this_attempts_cause(tmp_path: Path
     result = attempt.result
 
     assert EARLIER_MARKER not in json.dumps(result, default=str), result
+    for field, value in EARLIER_DOCUMENT.items():
+        if isinstance(value, str):
+            assert value not in json.dumps(result, default=str), (field, result)
     assert EARLIER_MARKER in log_path.read_text(encoding="utf-8"), "the earlier document is supposed to still be in the log"
     assert result["error_type"] == "can_broker_unavailable", result
     assert "backend_error" not in result, result
     assert "stderr_tail" not in result, result
+    assert "detail" not in result, result
     assert result["broker_log"] == str(log_path), result
     # The one field the exit code does attribute is the exit code itself, and
-    # only when there was one.
+    # only when the broker chose it rather than this client.
     assert result.get("broker_exit_code") in (None, exit_code), result
 
 
@@ -436,6 +510,12 @@ def test_the_configuration_exit_still_refuses_at_once_with_its_document(tmp_path
     `tests/test_sessions_devices_coordination.py::test_a_broker_whose_adapter_cannot_open_refuses_the_participant_with_the_adapter_error`;
     the configuration exit had no test, and it is the branch a post-loop poll is
     most able to disturb.
+
+    "At once" is pinned against the broker's own exit rather than against the
+    deadline: the refusal is due on the very first poll that sees the exit, so
+    the clock may stand one poll interval past the death and no further. A
+    client that charged the new shutdown budget here, or waited out the
+    deadline, or spawned a replacement, moves that number.
     """
     config, bus_key, log_path = prepared_bus(tmp_path, monkeypatch, "vcan532g", documents=[CONFIG_DOCUMENT])
     dies_at = 2 * canbroker.BROKER_POLL_INTERVAL_S
@@ -449,8 +529,8 @@ def test_the_configuration_exit_still_refuses_at_once_with_its_document(tmp_path
     assert result["broker_log"] == str(log_path), result
     assert result["retry_safe"] is True, result
     assert len(attempt.spawned) == 1, "a broker that explained itself was replaced by another"
-    # The refusal came when the broker exited, not when the deadline arrived.
-    assert attempt.clock.now < ATTACH_DEADLINE_S / 2, attempt.clock.now
+    assert attempt.spawned[0].waited_for == [], "a broker that had already explained itself was waited for"
+    assert attempt.clock.now <= dies_at + canbroker.BROKER_POLL_INTERVAL_S, attempt.clock.now
 
 
 def test_a_bus_busy_exit_is_still_retried_rather_than_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -479,3 +559,6 @@ def test_a_bus_busy_exit_is_still_retried_rather_than_refused(tmp_path: Path, mo
     assert result["broker_log"] == str(log_path), result
     assert "broker_exit_code" not in result, result
     assert EARLIER_MARKER not in json.dumps(result, default=str), result
+    for value in EARLIER_DOCUMENT.values():
+        if isinstance(value, str):
+            assert value not in json.dumps(result, default=str), result
