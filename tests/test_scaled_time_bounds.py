@@ -55,8 +55,10 @@ from __future__ import annotations
 
 import importlib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from support import TIME_SCALE_MAXIMUM, TIME_SCALE_MINIMUM, TIME_SCALE_VARIABLE, scaled_time_bound
@@ -369,21 +371,155 @@ def test_the_two_bounds_the_issue_names_keep_their_base_values() -> None:
 
 
 # What this walk counts as a measured duration. The vocabulary is deliberately
-# small and is the one the issue's own list is written in: `elapsed`,
-# `elapsed_s`, `elapsed_ms` however they are spelled or subscripted, and the
-# `_age_s` a heartbeat's age is read under. Every name in it is a wall-clock
-# measurement and nothing else, which is what lets the walk be positive about
-# each line it reports rather than arguable about it.
-MEASUREMENT = re.compile(r"(?<![A-Za-z0-9_])(?:elapsed[A-Za-z0-9_]*|[A-Za-z0-9_]*_age_s)(?![A-Za-z0-9_])")
+# small, and every name in it is a wall-clock measurement and nothing else,
+# which is what lets the walk be positive about each line it reports rather than
+# arguable about it: `elapsed` however it is spelled or suffixed, `waited` the
+# same way, and the `_age_s` a heartbeat's age is read under.
+MEASUREMENT = re.compile(r"(?<![A-Za-z0-9_])(?:elapsed[A-Za-z0-9_]*|waited[A-Za-z0-9_]*|[A-Za-z0-9_]*_age_s)(?![A-Za-z0-9_])")
+
+# The one spelling a bound is allowed to reach the factor through.
+HELPER = "scaled_time_bound("
+
+# A statement is joined out of at most this many physical lines. A guard against
+# a file whose brackets this reader cannot balance, never a limit any assertion
+# in the suite comes near.
+STATEMENT_LINE_LIMIT = 40
+
+
+def without_string_contents(text: str) -> str:
+    """`text` with the inside of every string literal and every comment blanked.
+
+    The result has the same length as the input, so an index into one is an
+    index into the other. What is inside a message is not code and must not be
+    read as code: `f"a wait of {ASKED_WAIT_S:.0f}s (asked for)"` carries a
+    bracket that closes nothing and a `<` in more than one failure message.
+    """
+    out: list[str] = []
+    quote = ""
+    escaped = False
+    for char in text:
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+                out.append(char)
+                continue
+            out.append(" ")
+            continue
+        if char in "\"'":
+            quote = char
+            out.append(char)
+            continue
+        if char == "#":
+            out.append(" " * (len(text) - len(out)))
+            break
+        out.append(char)
+    return "".join(out)
+
+
+def bracket_depth(masked: str) -> int:
+    """How many brackets a masked line leaves open."""
+    return sum(masked.count(char) for char in "([{") - sum(masked.count(char) for char in ")]}")
+
+
+def assert_statements(text: str) -> list[tuple[int, int, str]]:
+    """Every `assert` statement in `text`, as (first line, indentation, one line).
+
+    A statement wrapped over several physical lines is joined into one, so a
+    ceiling that was wrapped reads like any other and the walk below has no
+    blind spot a reformatting could open. The indentation is the first line's,
+    which is how an assertion nested inside an `if` is told from one that always
+    runs.
+    """
+    lines = text.splitlines()
+    statements: list[tuple[int, int, str]] = []
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        if not raw.strip().startswith("assert "):
+            index += 1
+            continue
+        start = index
+        joined = raw.strip()
+        while (
+            bracket_depth(without_string_contents(joined)) > 0
+            and index + 1 < len(lines)
+            and index - start < STATEMENT_LINE_LIMIT
+        ):
+            index += 1
+            joined = f"{joined} {lines[index].strip()}"
+        statements.append((start + 1, len(raw) - len(raw.lstrip()), joined))
+        index += 1
+    return statements
+
+
+def first_comparison(masked: str) -> tuple[int, str] | None:
+    """Where a masked statement first compares with `<`, `<=`, `>` or `>=`."""
+    depth = 0
+    for index, char in enumerate(masked):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif depth == 0 and char in "<>":
+            return index, char + ("=" if masked[index + 1 : index + 2] == "=" else "")
+    return None
+
+
+def bound_expression(statement: str, masked: str, start: int) -> str:
+    """The expression a comparison holds its measurement against.
+
+    Everything after the operator up to the comma that begins the assertion's
+    message, which is what separates the bound from the prose about it. A
+    message naming the helper therefore proves nothing here.
+    """
+    depth = 0
+    for index in range(start, len(masked)):
+        char = masked[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            return statement[start:index].strip()
+    return statement[start:].strip()
+
+
+def split_helper_call(bound: str) -> tuple[str, str] | None:
+    """`(what the helper was handed, what stands after it)`, or None.
+
+    A bound goes through the factor when the helper is the first thing in it, so
+    the base is what the factor multiplies and anything outside the call is a
+    unit conversion applied afterwards. `scaled_time_bound(A) * 1000` scales A;
+    `A + scaled_time_bound(B)` scales half of a bound and is refused.
+    """
+    if not bound.startswith(HELPER):
+        return None
+    masked = without_string_contents(bound)
+    depth = 0
+    for index, char in enumerate(masked):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+            if depth == 0:
+                return bound[len(HELPER) : index].strip(), bound[index + 1 :].strip()
+    return None
 
 
 @dataclass(frozen=True)
-class Ceiling:
-    """One assertion line that bounds a measured duration from above."""
+class Comparison:
+    """One assertion that holds a measured duration against a bound."""
 
     path: Path
     number: int
-    line: str
+    indentation: int
+    statement: str
+    operator: str
+    bound: str
 
     @property
     def name(self) -> str:
@@ -394,29 +530,46 @@ class Ceiling:
         return f"{self.name}:{self.number}"
 
     @property
+    def is_ceiling(self) -> bool:
+        """A ceiling bounds the measurement from above; a floor from below.
+
+        The distinction decides everything here. A ceiling has to take the
+        factor, and a floor must never be allowed to: widening a floor would
+        have the suite demand that a loaded host be slower still.
+        """
+        return self.operator.startswith("<")
+
+    @property
     def through_the_helper(self) -> bool:
-        return "scaled_time_bound(" in self.line
+        return split_helper_call(self.bound) is not None
+
+    @property
+    def base(self) -> str:
+        """The bound with the factor taken back off it, which is the number or
+        expression the test author chose and which this issue does not move."""
+        split = split_helper_call(self.bound)
+        return split[0] if split else self.bound
+
+    @property
+    def outside_the_helper(self) -> str:
+        split = split_helper_call(self.bound)
+        return split[1] if split else ""
 
 
-def ceilings_in(text: str, path: Path) -> list[Ceiling]:
-    """Every line in ``text`` that bounds a measured duration from above.
+def comparisons_in(text: str, path: Path) -> list[Comparison]:
+    """Every assertion in `text` that compares a measured duration with a bound.
 
-    A line counts when three things are true of it at once: it is an assertion,
-    it holds a ``<``, and one of the measurement words above stands to the left
-    of that ``<``. The last part is what separates a ceiling from a floor, since
-    a floor is written ``elapsed >= ...`` and holds no ``<`` at all, and a floor
-    must never take this factor: widening it would have the suite demand that a
-    loaded host be slower still.
+    A statement counts when its first top-level comparison is `<`, `<=`, `>` or
+    `>=` and one of the measurement words above stands to the left of it.
 
-    A regex over assertion lines, on purpose. What it catches is the shape the
+    A reader of assertion lines, on purpose. What it catches is the shape the
     issue is about and the shape a revert would be written in, and what it does
     not catch is worth stating rather than pretending away:
 
-    * a measurement named outside the vocabulary above, `waited` and `duration`
-      among them, which the suite does use in a few places;
-    * a ceiling written the other way round, ``BOUND > elapsed``, which the
-      suite writes nowhere today;
-    * an assertion spread over more than one physical line;
+    * a measurement named outside the vocabulary above, `duration` among them,
+      which the suite happens not to use for a wall-clock reading today;
+    * a bound written the other way round, `BOUND > elapsed`, which the suite
+      writes nowhere;
     * a bound applied outside an `assert`, a `pytest.approx` window, or a sleep
       chosen to match one;
     * a commented-out line, which is skipped deliberately: it asserts nothing.
@@ -424,15 +577,29 @@ def ceilings_in(text: str, path: Path) -> list[Ceiling]:
     So this is a floor under the rule and not a proof of it. It fails on every
     line the issue lists, and it goes on failing if one of them comes back.
     """
-    found: list[Ceiling] = []
-    for number, raw in enumerate(text.splitlines(), start=1):
-        line = raw.strip()
-        if not line.startswith("assert "):
+    found: list[Comparison] = []
+    for number, indentation, statement in assert_statements(text):
+        masked = without_string_contents(statement)
+        position = first_comparison(masked)
+        if position is None:
             continue
-        head, separator, _ = line.partition("<")
-        if not separator or not MEASUREMENT.search(head):
+        index, operator = position
+        # The measurement is looked for in the statement itself and not in the
+        # masked copy, because `result["elapsed_ms"]` keeps its name inside a
+        # subscript that masking blanks out. Everything to the left of the
+        # operator is the measured side, so a message cannot reach it.
+        if not MEASUREMENT.search(statement[:index]):
             continue
-        found.append(Ceiling(path, number, line))
+        found.append(
+            Comparison(
+                path=path,
+                number=number,
+                indentation=indentation,
+                statement=statement,
+                operator=operator,
+                bound=bound_expression(statement, masked, index + len(operator)),
+            )
+        )
     return found
 
 
@@ -446,8 +613,35 @@ def walked_files() -> list[Path]:
     return sorted(TESTS.rglob("*.py"))
 
 
-def suite_ceilings() -> list[Ceiling]:
-    return [entry for path in walked_files() for entry in ceilings_in(path.read_text(encoding="utf-8"), path)]
+# The comparisons the walk finds that are not bounds on this host's speed, and
+# are therefore not this issue's to widen. Each is named by a substring of the
+# statement rather than by a line number, and each has to go on matching exactly
+# one statement, so an exemption cannot quietly outlive the assertion it was
+# written for or grow to cover a second one.
+#
+# `test_run_lifecycle.py` holds the only one. `step["waited_ms"] < 600_000`
+# reads a number the product wrote into its own step envelope and holds it
+# against the ten minutes the plan asked for, so the claim is that a stop cut
+# the wait short. The product answers that the same way on a fast host and a
+# slow one; a factor there would loosen a product claim while granting a loaded
+# host nothing, which is the opposite of what this issue is for.
+EXEMPT_BOUNDS = {"test_run_lifecycle.py": ('step["waited_ms"] < 600_000',)}
+
+
+def is_exempt(entry: Comparison) -> bool:
+    return any(needle in entry.statement for needle in EXEMPT_BOUNDS.get(entry.name, ()))
+
+
+def suite_comparisons() -> list[Comparison]:
+    return [entry for path in walked_files() for entry in comparisons_in(path.read_text(encoding="utf-8"), path)]
+
+
+def suite_ceilings() -> list[Comparison]:
+    return [entry for entry in suite_comparisons() if entry.is_ceiling and not is_exempt(entry)]
+
+
+def suite_floors() -> list[Comparison]:
+    return [entry for entry in suite_comparisons() if not entry.is_ceiling]
 
 
 # A file of the shape the walk reads, written as a list of strings so that no
@@ -457,25 +651,74 @@ SCANNER_SAMPLE = "\n".join(
         "def sample() -> None:",
         '    assert elapsed < CALL_CEILING_S, "a bare ceiling, the shape this walk exists to find"',
         '    assert elapsed_s < scaled_time_bound(2.0), "the same ceiling, taken through the helper"',
-        '    assert result["elapsed_ms"] < scaled_time_bound(5.0) * 1000, "a measurement read out of an envelope"',
+        '    assert result["elapsed_ms"] < scaled_time_bound(5.0) * 1000, "a bound converted to milliseconds after scaling"',
         '    assert refusal["heartbeat_age_s"] < scaled_time_bound(1.0), "an age, a duration under another name"',
+        '    assert waited < 2.0, "a measurement the first vocabulary missed"',
+        "    assert waited_s < scaled_time_bound(timeout_s), (",
+        '        f"a ceiling wrapped over two lines, and a bound that is a parameter: {waited_s}"',
+        "    )",
         '    assert elapsed >= FLOOR_S, "a floor, which this factor must never be allowed to move"',
+        '    assert step["waited_ms"] < 600_000, "a number out of the product\'s own envelope"',
         '    # assert elapsed < CALL_CEILING_S, "a line that asserts nothing"',
-        '    assert waited < 2.0, "a measurement outside the vocabulary, and the walk says so"',
+        '    assert ASKED_WAIT_S + 1 < 5, "no measurement on the left, so not this walk\'s business"',
     ]
 )
 
 
-def test_the_walk_tells_a_bare_ceiling_from_a_scaled_one_and_leaves_a_floor_alone() -> None:
+def sample_comparisons() -> list[Comparison]:
+    return comparisons_in(SCANNER_SAMPLE, TESTS / "sample.py")
+
+
+def test_the_walk_finds_every_comparison_in_the_sample_and_nothing_else() -> None:
     """The scanner's own claim, on a sample holding one of each shape.
 
     Without this the walk could be narrowed to nothing and the pin below would
     stay green while the suite went back to bare bounds.
     """
-    found = ceilings_in(SCANNER_SAMPLE, TESTS / "sample.py")
+    found = sample_comparisons()
 
-    assert [entry.number for entry in found] == [2, 3, 4, 5], [entry.line for entry in found]
-    assert [entry.through_the_helper for entry in found] == [False, True, True, True], [entry.line for entry in found]
+    assert [entry.number for entry in found] == [2, 3, 4, 5, 6, 7, 10, 11], [entry.statement for entry in found]
+    assert [entry.is_ceiling for entry in found] == [True, True, True, True, True, True, False, True]
+
+
+def test_the_walk_tells_a_bare_ceiling_from_a_scaled_one() -> None:
+    """And reads the base back off a scaled one, which is what pins the numbers."""
+    by_line = {entry.number: entry for entry in sample_comparisons()}
+
+    assert not by_line[2].through_the_helper
+    assert by_line[2].base == "CALL_CEILING_S"
+    assert by_line[3].through_the_helper and by_line[3].base == "2.0"
+    assert by_line[4].through_the_helper and by_line[4].base == "5.0"
+    assert by_line[4].outside_the_helper == "* 1000"
+    assert by_line[7].through_the_helper and by_line[7].base == "timeout_s"
+
+
+def test_a_message_that_names_the_helper_does_not_count_as_scaling() -> None:
+    """The bound ends at the comma. What the failure says about itself is prose."""
+    pretending = "\n".join(
+        [
+            "def sample() -> None:",
+            '    assert elapsed < 5.0, f"set the factor, scaled_time_bound(5.0) would have allowed it"',
+        ]
+    )
+
+    found = comparisons_in(pretending, TESTS / "sample.py")
+
+    assert [entry.through_the_helper for entry in found] == [False], [entry.bound for entry in found]
+
+
+def test_only_the_helper_at_the_front_of_a_bound_counts() -> None:
+    """Half a composite bound scaled is not a scaled bound, and says so here."""
+    half = "\n".join(
+        [
+            "def sample() -> None:",
+            "    assert elapsed < ASKED_WAIT_S + scaled_time_bound(REFUSAL_CEILING_S), elapsed",
+        ]
+    )
+
+    found = comparisons_in(half, TESTS / "sample.py")
+
+    assert [entry.through_the_helper for entry in found] == [False], [entry.bound for entry in found]
 
 
 def test_the_walk_reads_every_tier_the_suite_has() -> None:
@@ -494,30 +737,80 @@ def test_every_wall_clock_ceiling_in_the_suite_is_taken_through_the_helper() -> 
     offenders = [entry for entry in suite_ceilings() if not entry.through_the_helper]
 
     assert not offenders, "wall-clock ceilings a loaded host cannot be granted any slack on:\n" + "\n".join(
-        f"  {entry.where}: {entry.line}" for entry in offenders
+        f"  {entry.where}: {entry.statement}" for entry in offenders
     )
 
 
-# How many such ceilings each file holds today. Asserted so the pin above cannot
-# be made green by deleting the assertions instead of scaling them, and so a
-# walk that quietly stopped reading a tier says so here.
+def test_no_floor_in_the_suite_takes_the_factor() -> None:
+    """The other half of the rule, and the mistake the sweep makes available.
+
+    Several of the ceilings this issue widens sit one line under a floor on the
+    same measurement, `elapsed >= ASKED_WAIT_S - WAIT_SHORTFALL_S` among them. A
+    factor on one of those would have the suite demand that a loaded host be
+    slower still, and would be green on exactly the machines it is wrong on.
+    """
+    scaled = [entry for entry in suite_floors() if HELPER in entry.bound]
+
+    assert not scaled, "floors widened by a factor that only ever grants a host more time:\n" + "\n".join(
+        f"  {entry.where}: {entry.statement}" for entry in scaled
+    )
+
+
+def test_nothing_outside_a_helper_call_is_part_of_a_bound() -> None:
+    """What may stand after the call is a unit conversion, and nothing else.
+
+    `scaled_time_bound(CONFIGURED_TIMEOUT_S) * 1000` is the same bound in
+    milliseconds. `scaled_time_bound(A) + B` is half a bound, and it is the
+    shape a sweep produces when it wraps the first name it meets.
+    """
+    conversion = re.compile(r"^(?:[*/]\s*[0-9][0-9_.]*)?$")
+    outside = [entry for entry in suite_ceilings() if not conversion.match(entry.outside_the_helper)]
+
+    assert not outside, "bounds with something other than a unit conversion outside the factor:\n" + "\n".join(
+        f"  {entry.where}: {entry.bound}" for entry in outside
+    )
+
+
+def test_every_exemption_still_names_one_comparison_the_walk_finds() -> None:
+    """An exemption that stopped matching is an exemption nobody is reading.
+
+    A file the walk cannot find is not asserted about, because a source
+    distribution ships only part of this tree.
+    """
+    for name, needles in EXEMPT_BOUNDS.items():
+        if not (TESTS / name).is_file():
+            continue
+        statements = [entry.statement for entry in suite_comparisons() if entry.name == name]
+        for needle in needles:
+            matching = [statement for statement in statements if needle in statement]
+            assert len(matching) == 1, f"{name}: {len(matching)} comparisons carry {needle!r}, not one"
+
+
+# How many such ceilings each file holds. A minimum rather than an exact count:
+# the property worth having is that the pin above cannot be made green by
+# deleting the assertions instead of scaling them, and that a walk which quietly
+# stopped reading a tier says so here. An exact count would add to that only the
+# guarantee that no legitimate, already scaled ceiling is ever added anywhere in
+# the suite without editing this map, which is friction bought with nothing.
 CEILINGS_PER_FILE = {
     "bench/test_bench_coordination.py": 2,
+    "container/test_can_over_vcan.py": 2,
     "container/test_debugger_processes_against_openocd.py": 2,
     "container/test_pyocd_without_a_probe.py": 1,
     "test_bench_mutex.py": 2,
     "test_com_stdio_bridge.py": 3,
     "test_debug_backend_refusals.py": 1,
     "test_debugger_processes.py": 4,
+    "test_devices.py": 1,
     "test_install_eval.py": 1,
     "test_pyocd_without_a_probe.py": 6,
     "test_reactor_runtime.py": 2,
     "test_redact.py": 2,
-    "test_run_lifecycle.py": 2,
+    "test_run_lifecycle.py": 4,
 }
 
 
-def test_the_ceilings_the_walk_finds_are_the_ones_the_suite_holds() -> None:
+def test_every_file_still_holds_the_ceilings_it_held() -> None:
     """The count per file, unchanged by this issue: the fix scales them, it moves none.
 
     A file the walk expects and cannot find is not asserted about, because a
@@ -531,15 +824,40 @@ def test_the_ceilings_the_walk_finds_are_the_ones_the_suite_holds() -> None:
         counted[entry.name] = counted.get(entry.name, 0) + 1
     expected = {name: count for name, count in CEILINGS_PER_FILE.items() if (TESTS / name).is_file()}
 
-    assert counted == expected, sorted(counted.items())
+    missing = {name: (counted.get(name, 0), count) for name, count in expected.items() if counted.get(name, 0) < count}
+    assert not missing, f"files holding fewer wall-clock ceilings than they did: {missing}"
     assert len(expected) >= 10, sorted(expected)
 
 
-# The base value behind each ceiling, stated where it was chosen. The factor is
-# the runner's to set; the claim is the test author's, and this issue moves none
-# of them. Named constants first.
+# The base behind each ceiling, spelled as it stands in the file that chose it.
+# The factor is the runner's to set; the claim is the test author's, and this
+# issue moves none of them. Read back through the helper, so a composite bound
+# has to hand the factor the whole of what it had: `ASKED_WAIT_S +
+# REFUSAL_CEILING_S` scaled in one half is not this bound, and the map says so
+# once here rather than being argued three times during the sweep.
+BASE_EXPRESSIONS = {
+    "bench/test_bench_coordination.py": {"REFUSAL_CEILING_S": 1, "ASKED_WAIT_S + REFUSAL_CEILING_S": 1},
+    "container/test_can_over_vcan.py": {"BUS_TIMEOUT_S + WAIT_SLACK_S": 1, "BUS_TIMEOUT_S + WAIT_SLACK_S + 2.0": 1},
+    "container/test_debugger_processes_against_openocd.py": {"CALL_CEILING_S": 2},
+    "container/test_pyocd_without_a_probe.py": {"TIMEOUT_S / 2": 1},
+    "test_bench_mutex.py": {"FRESH_HEARTBEAT_AGE_S": 2},
+    "test_com_stdio_bridge.py": {"SHUTDOWN_CEILING_S": 3},
+    "test_debug_backend_refusals.py": {"START_TIMEOUT_S * 1000 / 2": 1},
+    "test_debugger_processes.py": {"CALL_CEILING_S": 3, "EMPTIED_GROUP_CEILING_S": 1},
+    "test_devices.py": {"2.0": 1},
+    "test_install_eval.py": {"20": 1},
+    "test_pyocd_without_a_probe.py": {"CONFIGURED_TIMEOUT_S": 3, "2 * CONFIGURED_TIMEOUT_S": 3},
+    "test_reactor_runtime.py": {"runlifecycle.WORKER_EXIT_GRACE_S + 3.0": 1, "1.0": 1},
+    "test_redact.py": {"5.0": 2},
+    "test_run_lifecycle.py": {"30": 1, "60": 1, "timeout_s": 2},
+}
+
+# And the numbers those names stand for, at the value they already had, in the
+# file that stated them. `timeout_s` is a poll helper's parameter rather than a
+# constant, so its default is what is pinned.
 BASE_CONSTANTS = {
-    "bench/test_bench_coordination.py": ("REFUSAL_CEILING_S = 30.0",),
+    "bench/test_bench_coordination.py": ("REFUSAL_CEILING_S = 30.0", "ASKED_WAIT_S = 3.0"),
+    "container/test_can_over_vcan.py": ("BUS_TIMEOUT_S = 2.0", "WAIT_SLACK_S = 1.5"),
     "container/test_debugger_processes_against_openocd.py": ("CALL_CEILING_S = 15.0",),
     "container/test_pyocd_without_a_probe.py": ("TIMEOUT_S = 40",),
     "test_bench_mutex.py": ("FRESH_HEARTBEAT_AGE_S = 1.0",),
@@ -547,16 +865,26 @@ BASE_CONSTANTS = {
     "test_debug_backend_refusals.py": ("START_TIMEOUT_S = 10.0",),
     "test_debugger_processes.py": ("CALL_CEILING_S = 15.0", "EMPTIED_GROUP_CEILING_S = 4.0"),
     "test_pyocd_without_a_probe.py": ("CONFIGURED_TIMEOUT_S = 5",),
+    "test_run_lifecycle.py": ("timeout_s: float = 60.0",),
 }
 
-# And the ones written as a literal on the assertion line itself, with how many
-# of that file's ceiling lines have to carry each.
-LITERAL_BASES = {
-    "test_install_eval.py": (("20", 1),),
-    "test_reactor_runtime.py": (("1.0", 1), ("WORKER_EXIT_GRACE_S + 3.0", 1)),
-    "test_redact.py": (("5.0", 2),),
-    "test_run_lifecycle.py": (("30", 1), ("60", 1)),
-}
+
+def test_every_ceiling_hands_the_factor_the_base_it_already_had() -> None:
+    """`assert elapsed < 5.0` becomes `assert elapsed < scaled_time_bound(5.0)`.
+
+    The 5.0 stays where the author put it, which is the whole property: the
+    factor widens, it does not decide. Written per file as the expression the
+    helper is handed, so it holds equally before and after the sweep and pins
+    which half of a composite bound the factor takes.
+    """
+    for name, expressions in BASE_EXPRESSIONS.items():
+        path = TESTS / name
+        if not path.is_file():
+            continue
+        bases = [entry.base for entry in comparisons_in(path.read_text(encoding="utf-8"), path) if entry.is_ceiling]
+        for expression, expected in expressions.items():
+            carrying = [base for base in bases if base == expression]
+            assert len(carrying) == expected, f"{name}: {len(carrying)} ceilings are bounded by {expression!r}, not {expected}"
 
 
 def test_the_named_base_constants_keep_the_values_they_had() -> None:
@@ -570,23 +898,6 @@ def test_the_named_base_constants_keep_the_values_they_had() -> None:
             assert base in text, f"{name} no longer states its base bound as {base}"
 
 
-def test_the_literal_bounds_keep_the_numbers_they_had() -> None:
-    """The bounds written on the assertion line, still on it after the helper wraps them.
-
-    `assert elapsed < 5.0` becoming `assert elapsed < scaled_time_bound(5.0)`
-    keeps the 5.0 where the author put it, which is the whole property: the
-    factor widens, it does not decide.
-    """
-    for name, bases in LITERAL_BASES.items():
-        path = TESTS / name
-        if not path.is_file():
-            continue
-        lines = [entry.line for entry in ceilings_in(path.read_text(encoding="utf-8"), path)]
-        for base, expected in bases:
-            carrying = [line for line in lines if base in line]
-            assert len(carrying) == expected, f"{name}: {len(carrying)} of its ceilings carry {base}, not {expected}"
-
-
 # ---------------------------------------------------------------------------
 # The pyOCD stub that was being terminated rather than timing out.
 #
@@ -597,10 +908,14 @@ def test_the_literal_bounds_keep_the_numbers_they_had() -> None:
 # one failure the file exists to catch and is here the wrong answer. The log
 # envelope says so all along: it carries `timed_out`, and neither test reads it.
 #
-# Two things follow, and both are pinned here. The configured budget takes the
-# same factor as every bound above, so the test measures what it measured. And
-# both tests read `timed_out` and name the factor when it is true, so a slow
-# host is reported as slow.
+# Three things follow, and all three are pinned here. The configured budget
+# takes the same factor as every bound above, so the test measures what it
+# measured. Both tests fail on `timed_out` with a message naming the factor, so
+# a slow host is reported as slow: a failure and not a skip, because a file that
+# stops asserting on exactly the hosts this issue is about would be green with
+# the product broken, which is the state #515 refuses a large factor for. And
+# the wording claims stay unconditional, so reading the flag cannot become a way
+# of not making them.
 
 PYOCD_PHRASES = TESTS / "test_pyocd_unknown_target_phrases.py"
 
@@ -611,8 +926,19 @@ PYOCD_PHRASE_TESTS_THAT_RUN_THE_STUB = (
     "test_the_stub_carries_the_installed_pyocd_wording",
 )
 
+# The claim each of those two exists to make, which reading the flag must not
+# turn into something a run can decline to assert.
+PYOCD_UNCONDITIONAL_CLAIMS = {
+    "test_the_real_refusal_reaches_the_cmsis_pack_remediation": '"target_type_invalid"',
+    "test_the_stub_carries_the_installed_pyocd_wording": "real_pyocd_refusal()",
+}
+
 # What `tests/conftest.py` writes today, and what the base has to stay.
 STUB_BASE_TIMEOUT_S = 5.0
+
+
+def top_level_functions(text: str) -> list[str]:
+    return [line[4 : line.index("(")] for line in text.splitlines() if line.startswith("def ") and "(" in line]
 
 
 def function_body(text: str, name: str) -> str:
@@ -627,45 +953,106 @@ def function_body(text: str, name: str) -> str:
     return "\n".join(lines[start:end])
 
 
+def reachable_source(text: str, name: str) -> str:
+    """One test's own body plus the bodies of the module helpers it calls.
+
+    The natural home for reading `timed_out` is the helper both tests already
+    parse the log in, so a pin that only read a test's own body would refuse the
+    right implementation. One level deep is enough for this module and keeps the
+    reader something a person can follow.
+    """
+    own = function_body(text, name)
+    bodies = [own]
+    for helper in top_level_functions(text):
+        if helper == name or helper.startswith("test_"):
+            continue
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(helper)}\s*\(", own):
+            bodies.append(function_body(text, helper))
+    return "\n".join(bodies)
+
+
 def configured_timeout_s(config_path: Path) -> float:
     """The one `timeout_s` a written test configuration carries."""
-    written = re.findall(r"timeout_s:\s*([0-9]+(?:\.[0-9]+)?)", config_path.read_text(encoding="utf-8"))
+    written = re.findall(r"(?<![a-z_])timeout_s:\s*([0-9]+(?:\.[0-9]+)?)", config_path.read_text(encoding="utf-8"))
     assert len(written) == 1, f"{config_path} carries {len(written)} timeout_s entries: {written}"
     return float(written[0])
 
 
-def test_both_pyocd_phrase_tests_read_the_envelope_s_timed_out() -> None:
-    """A terminated stub is reported as a terminated stub, not as lost wording.
+def stub_configuration_seam(module: ModuleType) -> Callable[[Path], Path]:
+    """The module-level callable that writes the stub's configuration.
 
-    The envelope already knows. What was missing is a test that asks it, and a
-    message naming the variable an operator can act on, because "the stub did
-    not reach pyOCD" sends the reader to the stub and to pyOCD, and the answer
-    was neither.
+    Found rather than named: any callable defined in that module whose own name
+    says it makes a configuration counts, so the test pins the seam's existence
+    and its behaviour and leaves the spelling to the file. `write_config` and
+    `load_config` are imported from elsewhere and are excluded by that.
+    """
+    candidates = [
+        value
+        for name, value in vars(module).items()
+        if callable(value)
+        and "config" in name
+        and not name.startswith("test_")
+        and getattr(value, "__module__", "") == getattr(module, "__name__", "")
+    ]
+    assert len(candidates) == 1, (
+        f"test_pyocd_unknown_target_phrases exposes {len(candidates)} callables writing the stub's configuration, not one"
+    )
+    return candidates[0]
+
+
+def test_both_pyocd_phrase_tests_fail_a_terminated_stub_by_name() -> None:
+    """A terminated stub is reported as a slow host, not as lost pyOCD wording.
+
+    The envelope already knows. What was missing is an assertion that asks it,
+    and a message naming the variable an operator can act on, because "the stub
+    did not reach pyOCD" sends the reader to the stub and to pyOCD, and the
+    answer was neither.
+
+    Read off the assertion lines rather than the whole body, so a docstring
+    explaining `timed_out` cannot stand in for reading it, and refusing a skip,
+    so the file cannot stop asserting on exactly the hosts this is about.
     """
     text = PYOCD_PHRASES.read_text(encoding="utf-8")
 
     for name in PYOCD_PHRASE_TESTS_THAT_RUN_THE_STUB:
-        body = function_body(text, name)
-        assert "timed_out" in body, f"{name} never reads the log envelope's timed_out"
-        assert TIME_SCALE_VARIABLE in body or "TIME_SCALE_VARIABLE" in body, (
-            f"{name} can report a terminated stub without naming {TIME_SCALE_VARIABLE}"
+        source = reachable_source(text, name)
+        assert "pytest.skip" not in source, f"{name} skips rather than fails when its stub was terminated"
+        carrying = [statement for _, _, statement in assert_statements(source) if "timed_out" in statement]
+        assert carrying, f"{name} never asserts on the log envelope's timed_out"
+        assert any(TIME_SCALE_VARIABLE in statement for statement in carrying), (
+            f"{name} can report a terminated stub without naming {TIME_SCALE_VARIABLE}: {carrying}"
         )
+
+
+def test_the_pyocd_wording_claims_stay_unconditional() -> None:
+    """Reading the flag must not turn the file's own claims into an option.
+
+    Each of the two keeps its claim at the body's own indentation, which is
+    where an assertion that always runs stands and where one nested in an `if`
+    does not.
+    """
+    text = PYOCD_PHRASES.read_text(encoding="utf-8")
+
+    for name, claim in PYOCD_UNCONDITIONAL_CLAIMS.items():
+        body = function_body(text, name)
+        carrying = [(indentation, statement) for _, indentation, statement in assert_statements(body) if claim in statement]
+        assert carrying, f"{name} no longer asserts {claim}"
+        assert all(indentation == 4 for indentation, _ in carrying), f"{name} asserts {claim} conditionally: {carrying}"
 
 
 def test_the_stub_s_configured_timeout_follows_the_factor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The budget the stub runs under is scaled like every bound above it.
 
-    Read through one seam, `stub_config`, the single helper both tests write
-    their configuration with: a pin that only read the source could not tell a
-    scaled value from the words `scaled_time_bound` sitting nearby, and the
-    number on disk is the number the child actually runs under.
+    Read off the file the seam writes rather than out of its source, because the
+    number the child actually runs under is the one on disk and a source pin
+    could not tell a scaled value from the words `scaled_time_bound` standing
+    nearby.
 
     Unset, the file still says 5, which is what keeps the test the test it was.
     """
     pytest.importorskip("pyocd", reason="pyOCD is an optional extra (install agentic-hil[pyocd])")
     phrases = importlib.import_module("test_pyocd_unknown_target_phrases")
-    write = getattr(phrases, "stub_config", None)
-    assert callable(write), "test_pyocd_unknown_target_phrases has no stub_config writing the stub's configuration"
+    write = stub_configuration_seam(phrases)
 
     monkeypatch.delenv(TIME_SCALE_VARIABLE, raising=False)
     assert configured_timeout_s(write(tmp_path / "unset")) == STUB_BASE_TIMEOUT_S
