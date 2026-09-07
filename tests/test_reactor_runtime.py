@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from conftest import DEFAULT_TEST_PERMISSIONS, write_config
+from support import scaled_time_bound
 from test_run_lifecycle import (
     LONG_DELAY_PLAN,
     bench_workspace,
@@ -91,7 +92,7 @@ def test_a_worker_that_dies_before_publishing_is_reported_with_its_exit_code_and
     # the child exits within a second of starting, the start command notices on
     # its next poll and waits the grace for a record that never comes. The
     # margin is interpreter start-up; the window is 30 s away.
-    assert elapsed_s < runlifecycle.WORKER_EXIT_GRACE_S + 3.0, elapsed_s
+    assert elapsed_s < scaled_time_bound(runlifecycle.WORKER_EXIT_GRACE_S + 3.0), elapsed_s
 
 
 def test_a_worker_that_dies_before_its_record_is_reported_with_its_log_tail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -243,7 +244,7 @@ def test_a_stop_asked_while_the_worker_waits_for_a_held_device_ends_the_wait(tmp
     # Under a second, against the 3 s the wait was granted: the mutex polls the
     # lock every 0.2 s and the stop file is read at most every 0.1 s, so a stop
     # already on disk ends the first poll that asks.
-    assert elapsed_s < 1.0, (elapsed_s, result.get("error_type"), result.get("summary"))
+    assert elapsed_s < scaled_time_bound(1.0), (elapsed_s, result.get("error_type"), result.get("summary"))
     assert result["stopped"] is True, result
     assert result["error_type"] == "run_stopped", result
     assert result["stopped_after_step"] == 0, result

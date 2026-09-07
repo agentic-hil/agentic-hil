@@ -56,6 +56,7 @@ from conftest import (
     elf_with_symbols,
     write_config,
 )
+from support import scaled_time_bound
 
 # What the fake GDB answers for a refused read, which is what the product puts in
 # the summary. Imported rather than repeated: a placeholder that drifted between
@@ -755,7 +756,7 @@ def test_a_server_that_dies_at_startup_is_classified_from_its_output(tmp_path: P
     assert started["error_type"] == "adapter_not_found", started
     assert started["backend_error_type"] == "adapter_not_found", started
     assert started["summary"] == "Debug server exited before the GDB port became ready.", started
-    assert started["elapsed_ms"] < START_TIMEOUT_S * 1000 / 2, started
+    assert started["elapsed_ms"] < scaled_time_bound(START_TIMEOUT_S * 1000 / 2), started
     assert started["cleanup_confirmed"] is True, started
     assert started["side_effect_status"] == "not_started", started
     assert started["retry_safe"] is True, started

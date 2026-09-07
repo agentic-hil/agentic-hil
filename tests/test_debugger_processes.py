@@ -61,6 +61,7 @@ from pathlib import Path
 
 import pytest
 from conftest import FAKE_OPENOCD, FAKE_PYOCD, FAKE_STLINK, write_authoritative_config, write_config
+from support import scaled_time_bound
 
 from agentic_hil.config import ConfigError, debugger_is_placeholder, load_authoritative_config, load_config
 from agentic_hil.tools import AgenticHILToolService
@@ -305,7 +306,7 @@ def test_a_hanging_debugger_is_reaped_and_answers_timeout(tmp_path: Path, pid_fi
     assert result["log_path"], result
     # The deadline was the deadline: the call ended because timeout_s ran out,
     # not because the fake's own 30 s sleep did.
-    assert elapsed < CALL_CEILING_S, f"the call took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
+    assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
 
     log = written_log(config, result)
     assert log["timed_out"] is True, log
@@ -346,7 +347,7 @@ def test_a_hanging_probe_discovery_answers_its_own_timeout_sentence(tmp_path: Pa
     assert result["summary"] == "Debugger probe discovery timed out."
     assert result["target_contacted"] is False
     assert result["side_effect_status"] == "not_started"
-    assert elapsed < CALL_CEILING_S, f"the call took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
+    assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
     assert wait_until_gone(recorded_pids(pid_file), REAP_CEILING_S) == [], "the debugger or its child survived the reap"
 
 
@@ -365,7 +366,7 @@ def test_a_hanging_version_check_answers_its_own_timeout_sentence(tmp_path: Path
     assert result["error_type"] == "timeout"
     assert result["summary"] == "Debugger version check timed out."
     assert result["backend"] == debugger_type
-    assert elapsed < CALL_CEILING_S, f"the call took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
+    assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
     assert wait_until_gone(recorded_pids(pid_file), REAP_CEILING_S) == [], "the debugger or its child survived the reap"
 
 
@@ -432,7 +433,7 @@ def test_a_group_whose_remaining_members_are_zombies_reads_as_emptied(tmp_path: 
     finally:
         libc.prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
 
-    assert elapsed < EMPTIED_GROUP_CEILING_S, f"the reap waited {elapsed:.1f} s on a group that held nothing but a zombie"
+    assert elapsed < scaled_time_bound(EMPTIED_GROUP_CEILING_S), f"the reap waited {elapsed:.1f} s on a group that held nothing but a zombie"
     assert child.poll() is not None
     assert not Path(f"/proc/{grandchild}").exists(), "the orphan the reap left behind was never collected"
 

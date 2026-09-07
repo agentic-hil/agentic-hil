@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from support import scaled_time_bound
 
 from evals.install import bench_openocd, guard, refresh_login, scrub_credentials
 from evals.install import runner as install_runner
@@ -1602,7 +1603,7 @@ def test_a_silent_run_is_stopped_long_before_its_total_budget(tmp_path: Path) ->
     assert timed_out == "idle"
     assert exit_code != 0
     # Stopped on silence, nowhere near the total budget.
-    assert elapsed < 20, elapsed
+    assert elapsed < scaled_time_bound(20), elapsed
     assert "working" in log.read_text(encoding="utf-8")
 
 

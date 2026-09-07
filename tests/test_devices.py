@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 from conftest import write_config
+from support import scaled_time_bound
 
 from agentic_hil.bench import BenchMutex, DeviceBusyError
 from agentic_hil.config import ConfigError, load_config
@@ -560,7 +561,7 @@ def test_a_held_device_fails_the_run_immediately_and_names_the_holder(tmp_path: 
         assert result["side_effect_committed"] is False
         assert result["declared_devices"] == ["physical:board-a", "physical:board-b", "physical:board-c", "physical:board-d"]
         # Immediately: a wait happens only when the caller asked for one.
-        assert waited < 2.0
+        assert waited < scaled_time_bound(2.0)
         assert coordinator.run_active is False
         assert coordinator.bench.held_resources() == frozenset()
     finally:

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
+from support import scaled_time_bound
 from test_test_reactor import RecordingService, write_test_config
 
 from agentic_hil.config import ConfigError, load_authoritative_config, load_config
@@ -96,7 +97,7 @@ def wait_for_state(config, handle: str, states: set[str], timeout_s: float = 60.
         if status.get("state") in states:
             return status
         waited_s = time.monotonic() - started
-        assert waited_s < timeout_s, (
+        assert waited_s < scaled_time_bound(timeout_s), (
             f"{handle} was still in state {status.get('state')!r} after {waited_s:.1f}s of waiting for one of "
             f"{sorted(states)}; it says {status.get('summary')!r} and its worker printed:\n{worker_log(config, handle)}"
         )
@@ -141,7 +142,7 @@ def wait_for_progress_step(workspace: Path, config, handle: str, step: int, time
             f"its report says {last_report(workspace).get('summary')!r}"
         )
         waited_s = time.monotonic() - started
-        assert waited_s < timeout_s, (
+        assert waited_s < scaled_time_bound(timeout_s), (
             f"{handle} was still in state {state!r} on step {reached!r} after {waited_s:.1f}s of waiting for step {step}; "
             f"its report says {last_report(workspace).get('summary')!r}"
         )
@@ -254,7 +255,7 @@ def test_a_stop_ends_a_delay_that_would_have_waited_ten_minutes(tmp_path: Path) 
     result = TestReactor(config, service, stop_requested=StopOnQuestion(2)).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
     elapsed_s = time.monotonic() - started
 
-    assert elapsed_s < 30, elapsed_s
+    assert elapsed_s < scaled_time_bound(30), elapsed_s
     step = result["steps"][0]["result"]
     assert step["ok"] is True
     assert step["stop_requested"] is True
@@ -327,7 +328,7 @@ def test_a_detached_start_answers_with_a_handle_and_the_report_path(tmp_path: Pa
     detached_runs.append((load_authoritative_config(workspace), result["run"]))
     assert result["ok"] is True, result.get("worker_output") or result
     # The plan waits ten minutes; the start command does not.
-    assert elapsed_s < 60, elapsed_s
+    assert elapsed_s < scaled_time_bound(60), elapsed_s
     assert result["run"].startswith("run-")
     assert result["report_path"] == ".agentic-hil/reports/last-report.json"
     assert result["state"] == "running"
