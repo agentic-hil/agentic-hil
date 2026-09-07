@@ -54,8 +54,8 @@ from __future__ import annotations
 
 import errno
 import json
-import os
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -683,9 +683,10 @@ def test_the_recording_says_what_this_file_says_it_says() -> None:
     assert int(RECORDED_DOWN_FLAGS, 16) & 0x1 == 0
     assert int(RECORDED_UP_FLAGS, 16) & 0x1 == 1
     assert int(RECORDED_UP_FLAGS, 16) ^ int(RECORDED_DOWN_FLAGS, 16) == 0x1
-    # The number is the Linux kernel's. Windows numbers ENETDOWN 10050, and the
-    # recording is of the kernel the container ran, not of this host.
-    if os.name != "nt":
+    # The number is the Linux kernel's. Windows numbers ENETDOWN 10050 and the
+    # BSDs, macOS among them, 50; the recording is of the kernel the container
+    # ran, not of this host, so only a Linux host is asked to agree with it.
+    if sys.platform == "linux":
         assert errno.ENETDOWN == RECORDED_ENETDOWN
     # The one library fact, asserted against the installed python-can rather
     # than written down: the send text the container tier reads is what this
