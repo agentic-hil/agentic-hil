@@ -18,6 +18,16 @@ These tests hold both devices to the same answer, and hold unchanged the two
 neighbours the change must not touch: a start with nothing to inherit invents no
 reason, and a dead owner whose audit trail is damaged still holds the port.
 
+They also hold the answer to the shape of the fix. The reason has to reach the
+caller without the record lying about the bench, so the project record this
+successful session writes is pinned as ``active``: a fix that persists the
+session's own record as ``cleanup_required`` to carry the reason through would
+leave every concurrent reader of that record told a held bench needs recovery.
+And the successful result is pinned as still short, carrying no
+``quarantine_guidance`` and no cleanup or quarantine flags, because whether a
+success should also carry the guidance for what it inherited is the owner's open
+question and not one an implementation gets to answer on the way past.
+
 Issue #528.
 """
 
@@ -238,6 +248,53 @@ def stand_down_lines(config) -> list[dict]:
     return [line for line in ledger(config) if line.get("recovery") == "incident_stood_down"]
 
 
+def assert_record_is_honest(service) -> None:
+    """The record this held session wrote says what the bench actually is.
+
+    The reason has to reach the caller without the project record claiming a
+    held bench needs recovery. `cleanup_required` and `quarantined` are the two
+    states `_persist_project` writes the adopted reason onto, so they are the
+    tempting route and the wrong one: the record's state is read as the truth
+    about the bench by every other reader, and this session is running normally.
+    The reason may be written onto an honest `active` record, so only the state
+    is pinned here.
+    """
+    coordinator = service.coordinator
+    record = coordinator._read_record(coordinator.project_key)
+    assert record is not None, "the held session wrote no project record"
+    assert record["state"] == "active", record
+
+
+def assert_success_stayed_short(result: dict) -> None:
+    """A successful start does not read like a quarantine.
+
+    Whether a success that inherited an incident should also carry
+    `quarantine_guidance` for the reason is the open question on #528 and the
+    owner's to answer. `AgenticHILToolService` attaches the guidance from the
+    result's own cleanup fields, so a fix routing the reason through
+    `cleanup_reasons` rather than through the stand-down block would answer that
+    question by accident. Today's answer is pinned so the decision stays open.
+    """
+    assert "quarantine_guidance" not in result, result
+    assert "cleanup_reasons" not in result, result
+    assert result.get("cleanup_required") is not True, result
+    assert result.get("quarantined") is not True, result
+
+
+def assert_one_incident(result: dict, lines: list[dict]) -> str:
+    """The ledger line and the returned block are the same incident.
+
+    The issue's complaint is that the incident id leads to no record naming the
+    reason, so naming the reason on two surfaces is only worth anything if the
+    two surfaces are provably about one incident.
+    """
+    quarantine_id = result["incident_stood_down"]["quarantine_id"]
+    assert isinstance(quarantine_id, str) and quarantine_id, result
+    assert len(lines) == 1, lines
+    assert lines[0]["quarantine_id"] == quarantine_id, (lines[0], result)
+    return quarantine_id
+
+
 # ---------------------------------------------------------------------------
 # The gap: the device the dead owner itself held.
 
@@ -262,11 +319,13 @@ def test_a_com_start_on_the_dead_owners_own_port_names_the_reason_it_ended(tmp_p
         assert result["ok"] is True, result
         assert result["incident_stood_down"]["stood_down"] is True, result
         assert result["incident_stood_down"]["reasons"] == [DEAD_OWNER_REASON], result
+        assert_success_stayed_short(result)
+        assert_record_is_honest(service)
     finally:
         service.close()
 
     lines = stand_down_lines(config)
-    assert len(lines) == 1, lines
+    assert_one_incident(result, lines)
     assert lines[0]["reasons"] == [DEAD_OWNER_REASON], lines[0]
     assert lines[0]["attestation"] == ATTESTATION_NO_STANDING_STATE, lines[0]
 
@@ -285,11 +344,13 @@ def test_a_can_start_on_the_dead_owners_own_bus_names_the_reason_it_ended(tmp_pa
         assert result["ok"] is True, result
         assert result["incident_stood_down"]["stood_down"] is True, result
         assert result["incident_stood_down"]["reasons"] == [DEAD_OWNER_REASON], result
+        assert_success_stayed_short(result)
+        assert_record_is_honest(service)
     finally:
         service.close()
 
     lines = stand_down_lines(config)
-    assert len(lines) == 1, lines
+    assert_one_incident(result, lines)
     assert lines[0]["reasons"] == [DEAD_OWNER_REASON], lines[0]
 
 
@@ -346,6 +407,11 @@ def test_a_dead_owner_with_a_damaged_audit_trail_still_holds_the_port(tmp_path: 
     """The refusal that must survive untouched. A reason naming a ledger that
     could not be written is the one family no next contact re-establishes, so
     the incident stands, the start is refused, and nothing stands anything down.
+
+    This one asks the coordinator for its status first, which adopts the
+    incident and rewrites the record before the tool call, so the refusal it
+    pins is the one a server already holding the incident gives. The fresh
+    server's own route is the test below.
     """
     config = config_for(tmp_path)
     port_resource = uart_device(config, PORT_ID).lock_key
@@ -366,6 +432,44 @@ def test_a_dead_owner_with_a_damaged_audit_trail_still_holds_the_port(tmp_path: 
 
         assert refused["ok"] is False, refused
         assert refused["error_type"] == "resource_quarantined", refused
+        assert service.coordinator.incident_stands is True
+        assert service.coordinator.stand_down() is None
+    finally:
+        service.close()
+
+    assert stand_down_lines(config) == []
+
+
+def test_a_fresh_server_refuses_the_damaged_audit_trail_and_names_what_it_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal the issue is actually about, on a server asked nothing first.
+
+    Nothing has adopted the incident when the tool call arrives, so the refusal
+    is raised where the acquire meets the record the dead owner left. The
+    refusal has to name what it refused for: the reason is what keys the signer
+    guidance and the operator's choice between retrying and walking to the
+    bench, and a refusal that names nothing leaves the same hole the successful
+    start does.
+    """
+    config = config_for(tmp_path)
+    port_resource = uart_device(config, PORT_ID).lock_key
+    leave_dead_owner(
+        config,
+        [port_resource],
+        tool="com_session_start",
+        contact_source="serial_open",
+        audit_ok=False,
+        reason=AUDIT_BROKEN_REASON,
+    )
+    install_serial(monkeypatch, WorkingHandle())
+    service = AgenticHILToolService(config, backend=FakeBackend())
+    try:
+        refused = service.call("com_session_start", {"port_id": PORT_ID})
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == "resource_quarantined", refused
+        assert refused["quarantined"] is True, refused
+        assert refused["cleanup_required"] is True, refused
+        assert refused["cleanup_reasons"] == [DEAD_OWNER_REASON], refused
         assert service.coordinator.incident_stands is True
         assert service.coordinator.stand_down() is None
     finally:
