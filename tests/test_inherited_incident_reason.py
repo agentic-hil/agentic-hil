@@ -276,7 +276,10 @@ def assert_success_stayed_short(result: dict) -> None:
     question by accident. Today's answer is pinned so the decision stays open.
     """
     assert "quarantine_guidance" not in result, result
-    assert "cleanup_reasons" not in result, result
+    # `cleanup_reasons` is a field every session result carries; what it must
+    # not carry is the inherited reason, which would route the answer through
+    # the cleanup fields the guidance is keyed on.
+    assert not result.get("cleanup_reasons"), result
     assert result.get("cleanup_required") is not True, result
     assert result.get("quarantined") is not True, result
 
