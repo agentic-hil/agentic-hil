@@ -1241,3 +1241,41 @@ def test_a_failed_pyocd_read_hands_the_operator_the_read_steps(tmp_path: Path, e
     assert value.get("remediation"), value
     assert value["remediation"] == remediation_fields("memory_read_failed", "pyocd")["remediation"], value["remediation"]
     assert any("pyOCD" in step for step in value["remediation"]), value["remediation"]
+
+
+def test_a_read_that_never_left_this_host_carries_the_same_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shape of this bucket the entry opens by naming, and the one that answered with nothing.
+
+    A read whose private staging file cannot be created is `memory_read_failed`
+    like the two above, and it is the shape the entry's first step is written
+    for: it tells the reader that this summary is about the host's temporary
+    directory rather than about the board, so that a caller does not go looking
+    at a probe that was never opened. That step is unreachable on the one result
+    it is about unless this branch merges the bucket's steps as the branches
+    that go through the classifier do.
+    """
+    import tempfile as tempfile_module
+
+    real_mkdtemp = tempfile_module.mkdtemp
+
+    def refuse_the_read_staging_directory(*args: object, **kwargs: object):
+        if kwargs.get("prefix") == "agentic-hil-pyocd-read-":
+            raise OSError("no space left on device")
+        return real_mkdtemp(*args, **kwargs)
+
+    service = read_service(tmp_path, FAKE_PYOCD_READ_FAILED)
+    try:
+        assert service.call("flash_firmware", {"image_path": "build/app.elf"})["ok"] is True
+        monkeypatch.setattr(tempfile_module, "mkdtemp", refuse_the_read_staging_directory)
+        value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert value["ok"] is False, value
+    assert value["error_type"] == "memory_read_failed", value
+    assert value["summary"] == "The private file this read needs could not be created.", value
+    # The half that must not move with it: nothing was sent, so the promise that
+    # the board is exactly as the flash left it stands.
+    assert value["target_contacted"] is False, value
+    assert value["remediation"] == remediation_fields("memory_read_failed", "pyocd")["remediation"], value.get("remediation")
+    assert any(value["summary"] in step for step in value["remediation"]), value["remediation"]
