@@ -70,13 +70,18 @@ jobs:
         run: python tools/check_shipped_references.py
 
       # Across the runner's cores, which is what a developer run already uses.
-      # Nothing in the suite is marked serial and nothing has to be: every test
-      # gets its own HOME, config, state and temporary storage, and its
-      # device-lock root, its CAN broker endpoint and its run records all follow
-      # that HOME, so two workers cannot meet in a configuration, a lock, a
-      # socket or a scratch file. CONTRIBUTING.md, under "Running the suite on
-      # all cores", carries what a new test has to keep true for that to stay
-      # so. It is named here rather than in `addopts`, so a bare `pytest` in a
+      # Almost nothing in the suite needs a worker to itself: every test gets its
+      # own HOME, config, state and temporary storage, and its device-lock root,
+      # its CAN broker endpoint and its run records all follow that HOME, so two
+      # workers cannot meet in a configuration, a lock, a socket or a scratch
+      # file. The one thing two of them do share is the machine's process table,
+      # which step 5 of install.ps1 reads whole; those tests carry an
+      # `xdist_group` mark and `pyproject.toml`'s `addopts` carries the
+      # `--dist loadgroup` that keeps a group on one worker, so this line needs
+      # no scheduler of its own and must not pass one, which would override it.
+      # CONTRIBUTING.md, under "Running the suite on all cores", carries what a
+      # new test has to keep true for the rest of that to stay so. The worker
+      # count is named here rather than in `addopts`, so a bare `pytest` in a
       # checkout is still one process and a failure can be read without a worker
       # id in front of it.
       - name: Run tests

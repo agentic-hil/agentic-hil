@@ -4202,6 +4202,17 @@ def test_the_powershell_fetch_route_leaves_the_users_registry_path_untouched(tmp
 # would make the test report on somebody's session instead of on its own child.
 STEP_FIVE_AGENT = "opencode"
 LINGER_S = 30
+# The machine's process table is the one thing the two tests below share, and
+# they are the only tests in this suite that share anything. Step 5 reads the
+# whole of it, which is its job: an operator's agent CLI is wherever they
+# started it, and a scan narrowed to the test's own directory would be a scan
+# the real thing could hide from. So the test that plants a node process named
+# like an agent CLI and the test that asserts none is running cannot run at the
+# same time, or the second one reads the first one's child and is told a restart
+# is required. One group name, written here once and carried by every party, and
+# `--dist loadgroup` in pyproject.toml's addopts, which is what makes a group
+# stay on one worker.
+STEP_FIVE_PROCESS_TABLE_GROUP = "install-step-five-process-table"
 
 
 def _a_node_shaped_interpreter(into: Path) -> Path:
@@ -4260,6 +4271,7 @@ def _a_process_that_lingers(node: Path, script: Path, *arguments: str) -> subpro
 
 
 @WINDOWS_ONLY
+@pytest.mark.xdist_group(STEP_FIVE_PROCESS_TABLE_GROUP)
 def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(tmp_path: Path) -> None:
     """install.ps1's restart block against the real process table, with a real pair of children.
 
@@ -4309,6 +4321,7 @@ def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(
 
 
 @WINDOWS_ONLY
+@pytest.mark.xdist_group(STEP_FIVE_PROCESS_TABLE_GROUP)
 def test_step_five_says_there_is_nothing_to_restart_when_only_an_unrelated_node_runs(tmp_path: Path) -> None:
     """The other direction, which is what a command-line matcher can get wrong.
 

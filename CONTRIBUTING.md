@@ -28,7 +28,10 @@ pytest -n auto
 
 `addopts` deliberately does not carry `-n auto`: a bare `pytest` stays one
 process, so a failure can be read without a worker id in front of it, and what
-each runner does stays a command line rather than a property of the checkout.
+each runner spends on cores stays a command line rather than a property of the
+checkout. What `addopts` does carry is `--dist loadgroup`, the scheduler the
+grouped tests further down need; without `-n` it starts nothing, so the sentence
+above holds.
 The hosted jobs in `.github/workflows/ci.yml` pass it, because in one process
 the Windows legs sat close enough to the job's time limit that a slow runner
 cancelled two runs whose tests were green. `tools/ci_linux.py` and the review
@@ -64,17 +67,24 @@ test has to keep true for that to stay so:
   state root resolves back onto the operator's real profile. A test that wants a
   home of its own points HOME at `tmp_path`; nothing points it at the machine's.
 
-No test currently needs a machine to itself. A test that genuinely does gets
-`@pytest.mark.xdist_group("<why>")`, but that marker only pins a group to one
-worker under `--dist loadgroup`. `-n auto` above is `pytest-xdist`'s own
-shortcut for `--dist load --tx auto*popen`, and under plain `load` balancing a
-named group can still be split across workers, so the marker needs `pytest -n
-auto --dist loadgroup`, not the bare command this section otherwise
-recommends. The marker is registered by pytest-xdist, so it needs no entry in
-`pyproject.toml`. Keep that list short, give every entry a reason in the group
-name, and add `--dist loadgroup` to whichever command line is meant to honor
-it (CI, `tools/ci_linux.py`, or a developer's own invocation) once a test
-actually uses it.
+One thing two tests do share, because it belongs to the machine and not to the
+suite: the process table. Step 5 of `install.ps1` reads the whole of it, which
+is what it is for, so the test that plants a process named like an agent CLI and
+the test that asserts none is running may never run at the same time. A test in
+that position gets `@pytest.mark.xdist_group("<why>")`, and the group name lives
+in one constant beside the tests that carry it, never as a string repeated on
+decorators: two spellings are two groups, and two groups are two workers again.
+
+That marker only pins a group to one worker under `--dist loadgroup`. `-n auto`
+is `pytest-xdist`'s own shortcut for `--dist load --tx auto*popen`, and under
+plain `load` balancing a named group can still be split across workers, so
+`pyproject.toml`'s `addopts` carries `--dist loadgroup` for every caller: a bare
+`pytest -n auto`, the hosted legs, `tools/ci_linux.py` and the container
+invocation all schedule the same way, and no command line has to remember it.
+Do not pass a `--dist` of your own on top; the command line wins over `addopts`
+and the marks go back to being inert. The marker is registered by pytest-xdist,
+so it needs no entry in `pyproject.toml`. Keep the list of grouped tests short
+and give every entry a reason in the group name.
 
 ### Working on Windows
 
