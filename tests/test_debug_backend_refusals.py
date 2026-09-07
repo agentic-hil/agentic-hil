@@ -72,6 +72,7 @@ FIXTURES = ROOT / "fixtures"
 FAKE_TRANSCRIPT = FIXTURES / "fake_debugger_transcript.py"
 FAKE_PYOCD_RESET_REFUSED = FIXTURES / "fake_pyocd_reset_refused.py"
 FAKE_PYOCD_READ_FAILED = FIXTURES / "fake_pyocd_read_failed.py"
+FAKE_PYOCD_SILENT_READ = FIXTURES / "fake_pyocd_silent_read.py"
 RECORDINGS_PATH = FIXTURES / "debugger_refusal_recordings.json"
 RECORDINGS = json.loads(RECORDINGS_PATH.read_text(encoding="utf-8"))
 TROUBLESHOOTING = ROOT.parent / "TROUBLESHOOTING.md"
@@ -1053,7 +1054,10 @@ OWED_SCOPED_ENTRIES = [
     ("verify_failed", "stlink", "STM32CubeProgrammer", "verify", ("connect_mode", "option bytes")),
     ("verify_failed", "pyocd", "pyOCD", "verify", ("erase", "probe", "target_type")),
     ("flash_failed", "pyocd", "pyOCD", "flash", ("target_type", "frequenc")),
-    ("flash_failed", "openocd", "OpenOCD", "flash", ("target_cfg", "bank", "program")),
+    # `` `program` `` with its backticks and not the bare word: every
+    # neighbouring entry opens by sending the reader to `programmer_output`, so
+    # a bare `program` is satisfied by an entry that never names the command.
+    ("flash_failed", "openocd", "OpenOCD", "flash", ("target_cfg", "bank", "`program`")),
     ("memory_read_failed", "pyocd", "pyOCD", "read", ("probe", "halt", "address", "memory")),
 ]
 
@@ -1072,6 +1076,12 @@ def test_each_bucket_the_catalogue_left_unanswered_has_its_own_backend_scoped_en
     verify. The subjects each entry has to cover are the ones the issue's
     decision names for it, so an entry that reads well and answers a different
     question fails here rather than shipping.
+
+    The prose is what those checks read, and the key fields are excluded from
+    it on purpose: `verify_failed` contains `verify` and `memory_read_failed`
+    contains `read`, so an operation checked against the serialized entry would
+    be satisfied by the `error_type` the line above already pinned and could
+    never fail.
     """
     key = f"{bucket}:{backend_name}"
 
@@ -1082,11 +1092,18 @@ def test_each_bucket_the_catalogue_left_unanswered_has_its_own_backend_scoped_en
     assert entry["error_type"] == bucket, entry
     assert entry["scope"] == backend_name, entry
     assert entry["meaning"].strip(), entry
-    said = json.dumps(entry)
+    said = json.dumps([entry["meaning"], entry["remediation"], entry.get("do_not", [])])
     assert tool_name in said, said
     assert operation in said.lower(), (operation, said)
     for subject in subjects:
         assert subject in said.lower(), (subject, said)
+    # The nearest neighbour in the other direction: the same backend's
+    # `flash_erase_failed`, which is the entry an implementer would most
+    # plausibly copy. Its steps are about an erase the device refused, so an
+    # entry that repeated them would answer a different failure under this name.
+    erase = remediation_fields("flash_erase_failed", backend_name)
+    assert erase.get("remediation"), backend_name
+    assert fields["remediation"] != erase["remediation"], key
 
 
 SHARED_BUCKETS = {"verify_failed": ("stlink", "pyocd"), "flash_failed": ("pyocd", "openocd")}
@@ -1094,7 +1111,14 @@ SHARED_BUCKETS = {"verify_failed": ("stlink", "pyocd"), "flash_failed": ("pyocd"
 
 @pytest.mark.parametrize("bucket", sorted(SHARED_BUCKETS))
 def test_the_two_backends_that_share_a_bucket_do_not_share_its_steps(bucket: str) -> None:
-    """Scoping is the point: two entries under one bucket that said the same thing would be the generic entry again."""
+    """Scoping is the point: two entries under one bucket that said the same thing would be the generic entry again.
+
+    The steps are what has to differ, and only the steps. Nothing decides that
+    two backends may not warn against the same thing, and the three
+    `flash_erase_failed` entries show `do_not` lists across backends legitimately
+    opening with one sentence, so a check over `do_not` would be a gate this
+    design never asked for.
+    """
     first_backend, second_backend = SHARED_BUCKETS[bucket]
     first = remediation_fields(bucket, first_backend)
     second = remediation_fields(bucket, second_backend)
@@ -1102,7 +1126,6 @@ def test_the_two_backends_that_share_a_bucket_do_not_share_its_steps(bucket: str
     assert first.get("remediation"), (bucket, first_backend)
     assert second.get("remediation"), (bucket, second_backend)
     assert first["remediation"] != second["remediation"], bucket
-    assert first.get("do_not") != second.get("do_not") or not first.get("do_not"), bucket
 
 
 SILENT_PAIRS = [
@@ -1148,6 +1171,11 @@ def test_the_three_buckets_grow_no_unscoped_entry(bucket: str) -> None:
 # for the one thing the row table cannot assert while the catalogue is silent:
 # that the refusal reaching the operator carries this backend's steps and not an
 # empty field.
+#
+# The OpenOCD row replays the transcript
+# `test_a_flash_that_failed_without_reaching_its_marker_is_flash_failed` owns, so
+# a change to `** Programming Failed **` or to the rule that reads it has two
+# call sites in this file and not one.
 SCOPED_REMEDIATION_ROWS = [
     ("stlink", "", "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Verify failed at address 0x08000000\n", "verify_failed", "STM32CubeProgrammer"),
     ("pyocd", "", "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "pyOCD"),
@@ -1179,9 +1207,30 @@ def test_a_failed_verify_or_flash_hands_the_operator_that_tools_own_steps(tmp_pa
     assert remediation_fields(error_type) == {}, error_type
 
 
-def test_a_failed_pyocd_read_hands_the_operator_the_read_steps(tmp_path: Path) -> None:
-    """The third bucket, through the one path that can produce it: a read against a flashed ELF."""
-    service = read_service(tmp_path, FAKE_PYOCD_READ_FAILED)
+# The two shapes a pyOCD read fails in, both classified `memory_read_failed` and
+# both reaching for one entry. The first is the commander reporting the read
+# failed; the second is a run that exited 0 and left no file holding the window
+# that was asked for, which is a failed read that did reach the target. One
+# entry answers both, so the steps have to be about a read that could not be
+# taken rather than about the words of one transcript.
+PYOCD_READ_FAILURE_SHAPES = [
+    (FAKE_PYOCD_READ_FAILED, "Transfer error while reading"),
+    (FAKE_PYOCD_SILENT_READ, "pyOCD reported a completed run but left no file holding the requested bytes."),
+]
+
+
+@pytest.mark.parametrize(("executable", "evidence"), PYOCD_READ_FAILURE_SHAPES, ids=["commander-reported-failed", "completed-run-left-no-bytes"])
+def test_a_failed_pyocd_read_hands_the_operator_the_read_steps(tmp_path: Path, executable: Path, evidence: str) -> None:
+    """The third bucket, through the two paths that can produce it: a read against a flashed ELF.
+
+    The first row drives the flow
+    `test_a_pyocd_read_the_commander_reported_failed_is_memory_read_failed`
+    already owns, for the assertions that test cannot make while the catalogue is
+    silent; the second is the shape `tests/test_debug_sessions.py` pins, and it
+    is here because it receives the same steps the moment the entry exists and
+    nothing else says the wording fits it.
+    """
+    service = read_service(tmp_path, executable)
     try:
         assert service.call("flash_firmware", {"image_path": "build/app.elf"})["ok"] is True
         value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
@@ -1190,6 +1239,7 @@ def test_a_failed_pyocd_read_hands_the_operator_the_read_steps(tmp_path: Path) -
 
     assert value["ok"] is False, value
     assert value["error_type"] == "memory_read_failed", value
+    assert evidence in json.dumps(value), value
     assert value.get("remediation"), value
     assert value["remediation"] == remediation_fields("memory_read_failed", "pyocd")["remediation"], value["remediation"]
     assert any("pyOCD" in step for step in value["remediation"]), value["remediation"]
