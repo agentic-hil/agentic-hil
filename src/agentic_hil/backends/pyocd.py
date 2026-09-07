@@ -695,11 +695,18 @@ class PyOCDBackend:
         exactly the window that was asked for. Anything else is `None`, and the
         caller reports a failed read rather than a short answer, because half of
         a status word is a different number rather than a smaller one.
+
+        The two refusals below and the verdict in `_finish_symbol_read` are the
+        results of this bucket that no classifier saw, because pyOCD said nothing
+        in them, so each merges the catalogue's steps itself where the branches
+        through `_failure_result` are given them. Without that, the only shapes
+        of `memory_read_failed` reaching an operator with no next step at all
+        were the ones the entry's own first step is written to explain.
         """
         try:
             staging_dir = Path(tempfile.mkdtemp(prefix="agentic-hil-pyocd-read-"))
         except OSError as error:
-            return {"result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs could not be created.", "backend_error": str(error), **NOT_CONTACTED}, "data": None}
+            return {"result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs could not be created.", "backend_error": str(error), **NOT_CONTACTED, **remediation_fields("memory_read_failed", self.backend_name)}, "data": None}
         try:
             memory_path = staging_dir / "symbol-memory.bin"
             argument = pyocd_command_path(memory_path)
@@ -709,7 +716,7 @@ class PyOCDBackend:
                 # unquoted backslash as an escape and ends a single-quoted word
                 # at the next quote, so a path it cannot carry has to stop the
                 # read instead of silently redirecting it.
-                return {"result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs cannot be named on pyOCD's command line.", "backend_error": f"temporary directory path contains a quote character: {memory_path}", **NOT_CONTACTED}, "data": None}
+                return {"result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs cannot be named on pyOCD's command line.", "backend_error": f"temporary directory path contains a quote character: {memory_path}", **NOT_CONTACTED, **remediation_fields("memory_read_failed", self.backend_name)}, "data": None}
             result = self._run_pyocd(tool, ["commander", *PYOCD_READ_CONNECT_ARGS, "--command", f"savemem {hex(address_value)} {size_bytes} {argument}", *self._connection_args()])
             data: bytes | None = None
             if result.get("ok"):
