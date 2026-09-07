@@ -34,7 +34,7 @@ import yaml
 from conftest import write_authoritative_config, write_config
 
 from agentic_hil import __version__
-from agentic_hil.config import load_config
+from agentic_hil.config import ConfigError, load_config
 from agentic_hil.configwrite import resolve_permission_key
 from agentic_hil.contracts import MCP_TOOL_NAMES, MCP_TOOLS, TOOL_ANNOTATIONS, validate_tool_arguments
 from agentic_hil.knowledge import ERROR_CATALOGUE
@@ -113,12 +113,15 @@ def never_runs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def never_reads_the_process_table(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The three gates answer before anything looks at the process table.
+    """For a refusal that answers before anything looks at the process table.
 
-    What each of the tests below claims about `restart_required` rests on this:
-    the field is left off because the question was never put, and a gate that
-    had quietly read the table would owe the answer rather than the silence. So
-    the reader fails the test instead of returning a list."""
+    The premise of the silence, applied to one refusal at a time rather than
+    counted: a refusal may leave `restart_required` off exactly when it reached
+    its answer without asking, and a refusal that had quietly read the table
+    would owe what the read said instead. Which refusals those are is decided by
+    reading each one, not by a number, and the missing manager below is the one
+    that comes out the other way. So the reader fails the test instead of
+    returning a list."""
     monkeypatch.setattr(
         "agentic_hil.upgrade._processes_holding_installation",
         lambda: pytest.fail("a refusal that answers before the manager runs read the process table"),
@@ -182,7 +185,12 @@ def test_the_configuration_can_close_this_tool_and_the_refusal_names_the_key(
     assert any("agentic-hil upgrade" in step for step in refused["remediation"])
     assert any("uv tool upgrade" in step for step in refused["do_not"])
     has_no_restart_answer(refused)
-    assert "restart" not in refused["summary"], refused["summary"]
+    # The summary is about the permission and gains nothing about a table this
+    # refusal never read: neither the sentence a host that cannot read one gets,
+    # nor a claim that no restart is needed. What it says about this server is
+    # about its version and not about anybody's process.
+    assert "could not be read on this host" not in refused["summary"]
+    assert "No restart is needed" not in refused["summary"]
     assert "still runs the version it started with" in refused["summary"]
 
 
@@ -397,6 +405,149 @@ def test_a_failed_upgrade_over_mcp_on_a_host_that_cannot_read_its_table_says_so(
     assert result["running_version"] == __version__
 
 
+def a_manager_that_cannot_be_reached(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    holders: list[JsonObject] | None,
+    error_type: str = "upgrade_manager_not_found",
+) -> None:
+    """The refusal raised from inside `replace_installation`, over a table it read.
+
+    Not a gate. `replace_installation` reads the process table as its first
+    statement, removes the launchers an earlier run left behind, and only then
+    looks for the manager that owns this installation; the two spellings of not
+    finding one are raised there and turned into a document by the tool. So this
+    refusal did put the restart question, and `holders` is what it got back: the
+    list to be reported, the empty list, or `None` for a host whose table cannot
+    be read at all."""
+    summary = (
+        "This installation is managed by uv, but uv is not on PATH."
+        if error_type == "upgrade_manager_not_found"
+        else "Which package manager holds this installation could not be established, so nothing was upgraded."
+    )
+
+    def no_manager() -> tuple[str, list[str]]:
+        raise ConfigError(error_type, summary, {"manager": "uv", "python": "/opt/agentic-hil/bin/python"})
+
+    monkeypatch.setattr("agentic_hil.upgrade._host_locks_running_files", lambda: False)
+    monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: holders)
+    monkeypatch.setattr("agentic_hil.upgrade._upgrade_command", no_manager)
+    never_runs(monkeypatch)
+
+
+def test_the_missing_manager_reports_the_processes_it_read_before_it_looked_for_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fourth result of #498, and the one not in the position of the other three.
+
+    The three gates answer before anything asks the process table, so they owe
+    silence. This one is raised several statements after the table has been
+    read, which makes its constant `restart_required: false` the other error
+    #475 named: not an answer to a question nobody put, but an answer that was
+    read and thrown away. What it owes is what the read found, on the same terms
+    every other outcome of this tool reports it: the holders named, the count,
+    and the sentence in the summary, so that a caller whose server predates an
+    earlier upgrade is told so by the refusal that could not find a manager."""
+    holder = {"pid": 4242, "image": "/opt/agentic-hil/bin/python", "working_directory": "/srv/projects/blinky"}
+    a_manager_that_cannot_be_reached(monkeypatch, holders=[holder])
+    tools = AgenticHILToolService(upgradable_config(tmp_path))
+    try:
+        refused = tools.call(SERVER_UPGRADE)
+    finally:
+        tools.close()
+
+    assert refused["ok"] is False
+    assert refused["error_type"] == "upgrade_manager_not_found"
+    assert refused["manager"] == "uv"
+    assert refused["restart_required"] is True
+    assert refused["restart_required_by"] == [holder]
+    assert refused["restart_required_by_count"] == 1
+    assert "pid 4242" in refused["restart_notice"]
+    assert "pid 4242" in refused["summary"]
+    # The refusal itself is not weakened by gaining the answer: nothing ran,
+    # nothing is claimed to have run, and the manager is still the thing that
+    # was missing.
+    assert refused["running_version"] == __version__
+    assert refused["side_effect_status"] == "not_started"
+    assert refused["retry_safe"] is False
+    assert "uv is not on PATH" in refused["summary"]
+
+
+def test_the_missing_manager_reports_a_table_that_held_nothing_as_no_restart_needed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same refusal where the read came back empty: `false`, and it means it.
+
+    The one of the three answers that reads the same as the constant it
+    replaces, and the reason it is here: `false` on this result has to be the
+    table's answer rather than a value that was going to be printed whatever the
+    table said. The summary carries the same sentence every other outcome with
+    an empty read carries, which is what a reader can tell the two apart by."""
+    a_manager_that_cannot_be_reached(monkeypatch, holders=[])
+    tools = AgenticHILToolService(upgradable_config(tmp_path))
+    try:
+        refused = tools.call(SERVER_UPGRADE)
+    finally:
+        tools.close()
+
+    assert refused["error_type"] == "upgrade_manager_not_found"
+    assert refused["restart_required"] is False
+    assert "restart_required_by" not in refused
+    assert "restart_notice" not in refused
+    assert "No restart is needed." in refused["summary"]
+
+
+def test_the_missing_manager_on_a_host_that_cannot_read_its_table_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third answer, on the refusal that used to have only one.
+
+    A host that publishes no process table gets the sentence saying so and no
+    `restart_required`, which is the shape #475 gave every result that reads the
+    table. The refusal that could not find a manager is a result that reads the
+    table, so it is one of them."""
+    a_manager_that_cannot_be_reached(monkeypatch, holders=None)
+    tools = AgenticHILToolService(upgradable_config(tmp_path))
+    try:
+        refused = tools.call(SERVER_UPGRADE)
+    finally:
+        tools.close()
+
+    assert refused["error_type"] == "upgrade_manager_not_found"
+    assert "restart_required" not in refused
+    assert "restart_required_by" not in refused
+    assert "could not be read on this host" in refused["restart_notice"]
+    assert "could not be read on this host" in refused["summary"]
+    assert refused["running_version"] == __version__
+
+
+def test_the_manager_that_could_not_be_established_answers_the_same_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second spelling of the same refusal, which reaches the same document.
+
+    `_upgrade_command` raises `upgrade_manager_not_found` when the manager it
+    identified is not on PATH and `upgrade_manager_not_established` when nothing
+    identified one, and both leave `replace_installation` at the same statement,
+    after the same read. A fix that reported the table for one of them and a
+    constant for the other would be a difference in what the operator is told
+    about their own machine that has nothing behind it."""
+    holder = {"pid": 4242, "image": "/opt/agentic-hil/bin/python"}
+    a_manager_that_cannot_be_reached(monkeypatch, holders=[holder], error_type="upgrade_manager_not_established")
+    tools = AgenticHILToolService(upgradable_config(tmp_path))
+    try:
+        refused = tools.call(SERVER_UPGRADE)
+    finally:
+        tools.close()
+
+    assert refused["error_type"] == "upgrade_manager_not_established"
+    assert refused["restart_required"] is True
+    assert refused["restart_required_by"] == [holder]
+    assert refused["restart_required_by_count"] == 1
+    assert "pid 4242" in refused["summary"]
+    assert "could not be established" in refused["summary"]
+
+
 def test_a_pinned_installation_is_refused_with_a_command_that_keeps_the_extras(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -525,6 +676,32 @@ def test_the_tool_offers_no_argument_that_could_choose_a_version(tmp_path: Path)
     # caller looks for a parameter is the sentence describing the tool.
     description = next(str(tool["description"]) for tool in MCP_TOOLS if tool["name"] == SERVER_UPGRADE)
     assert "no arguments" in description
+
+
+def test_the_written_down_meaning_claims_a_restart_answer_only_where_there_is_one() -> None:
+    """What the published texts may say about `restart_required`, pinned (#498).
+
+    Two refusals of this tool answer before the process table is read and one
+    more is refused by the host it runs on, and none of the three carries the
+    field any more. That is only safe while nothing a caller reads promises it
+    is there: a description or a catalogue entry that names a value for a
+    refusal would be read as the contract, and the result would be the one that
+    looked wrong. So the tool description names the field for the successful
+    call and not in the half that lists what is refused, and the catalogue
+    entries for the three refusals state no value for it at all. They may still
+    point at `restart_required_by` on the *command line's* result, which is a
+    different surface and does read the table; what they may not do is claim
+    anything about this refusal's own."""
+    description = next(str(tool["description"]) for tool in MCP_TOOLS if tool["name"] == SERVER_UPGRADE)
+    successful, refused = description.split("Refused ", maxsplit=1)
+
+    assert "restart_required: true" in successful
+    assert "restart_required" not in refused, refused
+    for scope in ("permission_denied:allow_upgrade", "upgrade_in_open_run", "upgrade_cli_only_on_host"):
+        remedy = ERROR_CATALOGUE[scope]
+        written = " ".join((remedy.meaning, *remedy.remediation, *remedy.do_not, *remedy.cli_remediation))
+        assert "restart_required:" not in written, scope
+        assert "restart_required`" not in written, scope
 
 
 def test_the_upgrade_is_the_one_tool_that_reaches_the_open_world(tmp_path: Path) -> None:

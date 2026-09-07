@@ -10,11 +10,16 @@ program that installed it.
 
 The answer this code owes for that is a refusal that names the manager and the
 interpreter, `upgrade_manager_not_found`, exit non-zero at the command line,
-and the same document over MCP with `running_version` beside it and
-`restart_required` false, because nothing was replaced and no server is behind
-anything. Both lines existed and neither had ever run: the receipt that decides
-the manager is uv's own, so the case is made here with the real `uv tool
-install` and a PATH from which every directory holding a `uv` has been taken.
+and the same document over MCP with `running_version` beside it. The restart
+answer on that document is the process table's, read before the manager was
+looked for and reported the way every other outcome reports it (#498): here it
+is `false` because the table was read on this image and held nothing but the
+server making the call, which is excluded from its own answer. It is not false
+because nothing was replaced, and that distinction is the whole of what #498
+changed on this result. Both lines existed and neither had ever run: the
+receipt that decides the manager is uv's own, so the case is made here with the
+real `uv tool install` and a PATH from which every directory holding a `uv` has
+been taken.
 """
 
 from __future__ import annotations
@@ -73,8 +78,14 @@ def test_server_upgrade_without_the_manager_returns_the_refusal_rather_than_rais
     `replace_installation` raises for this one condition and the tool has to
     turn that into a result: a host that got an exception instead of a document
     would show the operator a transport error about a PATH. The document
-    carries `running_version`, because every answer of this tool does, and
-    `restart_required` false, because this run replaced nothing.
+    carries `running_version`, because every answer of this tool does, and the
+    restart answer this image's own process table gives: it is read before the
+    manager is looked for, and on this machine it holds nothing once the server
+    answering the call is taken out of it, so `false` with no
+    `restart_required_by` beside it. That the field is there at all is what
+    separates this refusal from the ones that answer before the read (#498),
+    and it is a claim about /proc in this image rather than about the swap that
+    did not happen.
     """
     uv_tool.install("--find-links", str(wheelhouse.every_version), f"agentic-hil=={ABOVE_EVERY_RELEASE}")
     without_uv = a_path_without("uv", os.environ.get("PATH", ""))
@@ -95,4 +106,10 @@ def test_server_upgrade_without_the_manager_returns_the_refusal_rather_than_rais
     assert Path(result["python"]).parent == uv_tool.interpreter.parent, result
     assert result["running_version"] == ABOVE_EVERY_RELEASE, result
     assert result["restart_required"] is False, result
+    assert "restart_required_by" not in result, result
+    assert "restart_notice" not in result, result
+    # The empty read said so in the summary, which is how a reader tells it from
+    # a host that could not read its table at all.
+    assert "No restart is needed." in result["summary"], result["summary"]
+    assert "could not be read on this host" not in result["summary"], result["summary"]
     assert result["tool"] == SERVER_UPGRADE, result
