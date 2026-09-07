@@ -1354,9 +1354,19 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
                 raise ParticipantError({**error.to_dict(), "bus_id": bus_id, "participant": participant, "retry_safe": False, "side_effect_committed": False}) from error
             started = _spawn_broker(config, bus_id, bus_key, lock_root)
         time.sleep(BROKER_POLL_INTERVAL_S)
-    if started is not None and started.poll() is None:
-        with suppress(BaseException):
-            started.terminate()
+    if started is not None:
+        # The loop tests its deadline *before* it reads an exit code, so a
+        # broker that went inside the final poll window left the loop without
+        # ever being classified: the branch above would have turned that code
+        # into the adapter's or the configuration's own refusal one iteration
+        # earlier, and the code is the same evidence now that the loop has
+        # ended. Ask once more before deciding nothing is known.
+        code = started.poll()
+        if code is not None and code in BROKER_EXITS_EXPLAINED:
+            raise ParticipantError(_explained_exit_refusal(code, bus_id, participant, bus_key, lock_root))
+        if code is None:
+            with suppress(BaseException):
+                started.terminate()
     raise ParticipantError(last)
 
 
