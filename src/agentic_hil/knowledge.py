@@ -186,6 +186,16 @@ CAN_ADAPTER_LIBRARY_MISSING_ERROR = "can_adapter_library_missing"
 # run *after* a successful `Initialize`, which leave a channel that is on the bus
 # and keep the quarantine they earn.
 CAN_CHANNEL_NOT_AVAILABLE_ERROR = "can_channel_not_available"
+# The receive queue an opening session drains could not be read out. Named here
+# beside the rest of the CAN family because the causes table in `agentic_hil.can`
+# is keyed by these names, and a key spelled out as a literal in one place and
+# named in another is how the refusal and the classifier come to disagree.
+CAN_QUEUE_CLEAR_FAILED_ERROR = "can_queue_clear_failed"
+# A frame the adapter would not send. Distinct from `can_read_failed` in what it
+# leaves behind: a failed read transmitted nothing, while a failed send may have
+# put the frame on the wire before it failed, which is why it carries an unknown
+# effect rather than a clean refusal.
+CAN_SEND_FAILED_ERROR = "can_send_failed"
 # A remote frame asked for on a bus configured `fd: true`. Not a variant of
 # `invalid_argument`: CAN FD's FDF bit sits in the position classic CAN's RTR bit
 # held, so an FD controller has no remote frame to send at all, and the request is

@@ -73,6 +73,7 @@ from agentic_hil.bench import (
     resource_digest,
     utc_now_iso,
 )
+from agentic_hil.can import can_likely_causes
 from agentic_hil.config import (
     ConfigError,
     atomic_write_text,
@@ -83,6 +84,7 @@ from agentic_hil.config import (
     safe_read_text,
 )
 from agentic_hil.devices import DeviceError, can_device
+from agentic_hil.knowledge import CAN_SEND_FAILED_ERROR
 from agentic_hil.process import spawn_detached_process
 from agentic_hil.report import logs_directory, safe_filename, timestamp_for_filename
 from agentic_hil.types import AgenticHILConfig, CanBusConfig, CanShareConfig, JsonObject
@@ -983,7 +985,7 @@ class CanBroker:
                 # The adapter positively proved the frame never left the
                 # controller, so this is one participant's failed send and the
                 # bus keeps running for the others.
-                return {"ok": False, "error_type": "can_send_failed", "summary": str(sent.get("summary", "The CAN adapter failed to send a frame.")), "bus_id": self.bus_id, "participant": attached.name, "frame_seq": seq, "frame": wire, "backend_error": sent.get("backend_error"), "side_effect_status": "not_started", "retry_safe": True}
+                return {"ok": False, "error_type": CAN_SEND_FAILED_ERROR, "summary": str(sent.get("summary", "The CAN adapter failed to send a frame.")), "bus_id": self.bus_id, "participant": attached.name, "frame_seq": seq, "frame": wire, "backend_error": sent.get("backend_error"), **can_likely_causes(CAN_SEND_FAILED_ERROR), "side_effect_status": "not_started", "retry_safe": True}
             # Every other post-open send failure leaves the effect unknown: a
             # returned `ok: false` from the adapter's own `send()` does not prove
             # the frame stayed off the wire, and the controller may now be wedged.

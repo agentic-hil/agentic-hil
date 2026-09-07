@@ -31,6 +31,8 @@ from agentic_hil.knowledge import (
     CAN_FD_REMOTE_FRAME_ERROR,
     CAN_INTERFACE_DOWN_ERROR,
     CAN_INTERFACE_NOT_FOUND_ERROR,
+    CAN_QUEUE_CLEAR_FAILED_ERROR,
+    CAN_SEND_FAILED_ERROR,
     LISTEN_ONLY_MODE_ERROR,
     LISTEN_ONLY_UNCONFIRMED_ERROR,
     LISTEN_ONLY_UNSUPPORTED_ERROR,
@@ -125,6 +127,75 @@ IFF_UP = 0x1
 # not read as one: the kernel's own interface names are at most IFNAMSIZ - 1
 # characters and contain no separator or whitespace.
 SOCKETCAN_INTERFACE_NAME = re.compile(r"[^\s/\\:]{1,15}")
+
+# What may have caused each CAN refusal, keyed by the error type it answers with.
+#
+# One table, read from two places that have to agree: every refusal below carries
+# its entry, and `classify_last_error` reads the same entry for a recorded failure
+# whose type is one of these. The classifier prefers a report's own
+# `likely_causes` and otherwise asks a table for them, and the tables it is handed
+# are the COM port's and the bound debugger's, both keyed by their own error types
+# with a generic fallback. A CAN type reached neither, so a session refused on a
+# channel that is not a network device answered `inspect the COM port log for
+# details`, or `inspect the debugger log for details` through a service whose
+# backend is a debugger: an operator sent to read a serial or debug log that does
+# not exist for this failure and would say nothing about it if it did (#517).
+#
+# `can_interface_down` was closed on its own in #511 by carrying these three
+# strings on the refusal, and they are unchanged here: the entry is what that
+# refusal now reads, so the two cannot drift into two wordings of one answer.
+#
+# Keyed by name and not by a `can_` prefix. The CAN error types outside this
+# table keep the generic answer until each is decided on its own terms.
+CAN_LIKELY_CAUSES: dict[str, list[str]] = {
+    CAN_INTERFACE_NOT_FOUND_ERROR: [
+        "the SocketCAN interface was never created (`ip link add dev <dev> type can` has not been run for it, or `type vcan` for a virtual one)",
+        "`can_buses.<id>.channel` names an interface this host does not have, or names it with a typo",
+        "a USB CAN adapter was unplugged, and the interface it registered went away with it",
+    ],
+    CAN_INTERFACE_DOWN_ERROR: [
+        "the interface was created and never brought up (`ip link set <dev> up` has not been run for it)",
+        "the link was taken down out of band, by an operator or by a script, and nothing brought it back",
+        "a USB CAN adapter was re-enumerated and its interface came back down",
+    ],
+    CAN_ADAPTER_LIBRARY_MISSING_ERROR: [
+        "the python-can interface for this adapter is not installed (`agentic-hil[can]` installs python-can itself, and several adapters need a vendor library beside it)",
+        "the vendor library this adapter is driven through is not on the library search path of the interpreter running this server",
+        "the library is installed for a different Python, or for a different architecture, than the one running this server",
+    ],
+    CAN_CHANNEL_NOT_AVAILABLE_ERROR: [
+        "the adapter is not connected, so the driver has no channel of that name to open",
+        "`can_buses.<id>.channel` names a channel handle this driver does not have, and the driver's own enumeration lists the ones it does",
+        "another program holds the channel, and the driver reports it unavailable for as long as that lasts",
+    ],
+    LISTEN_ONLY_UNSUPPORTED_ERROR: [
+        "the kernel CAN controller is not in listen-only mode, which belongs to the link and is set out of band with `ip link set <dev> type can listen-only on`",
+        "the interface is virtual, and a vcan has no controller, so it has no mode to be in and cannot carry the claim",
+        "this python-can installation is too old to express listen-only for this adapter",
+    ],
+    CAN_QUEUE_CLEAR_FAILED_ERROR: [
+        "the adapter stopped answering between the session opening and the queue drain, so the frames already buffered could not be read out",
+        "the link went down under the open session, and every read on it fails from there on",
+        "the driver or the interface was reset out of band while the queue was being drained",
+    ],
+    CAN_SEND_FAILED_ERROR: [
+        "the interface went down under the open session, so the controller had nothing to put the frame on",
+        "no other node is on the bus to acknowledge the frame, and the controller gave up retransmitting it",
+        "the controller is bus-off or error-passive after earlier failed transmissions",
+    ],
+}
+
+
+def can_likely_causes(error_type: object) -> JsonObject:
+    """``{"likely_causes": [...]}`` for a CAN error type, or ``{}`` for any other.
+
+    Spread into a refusal the way `remediation_fields` is, so that a type the
+    table does not key adds nothing rather than an empty list: a refusal carrying
+    ``likely_causes: []`` would read as "nothing may have caused this", and would
+    also take the classifier's own lookup away from it.
+    """
+    causes = CAN_LIKELY_CAUSES.get(error_type) if isinstance(error_type, str) else None
+    return {"likely_causes": list(causes)} if causes else {}
 
 
 @dataclass(frozen=True)
@@ -425,7 +496,12 @@ class CanBusService:
             session.lease.quarantine("can_send_effect_unconfirmed", error)
             raise
         if not sent["ok"]:
-            result = {"tool": "can_send", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "log_path": display_path(self.config, session.log_path), **sent}
+            # The causes go in ahead of `**sent` so that a backend answering with
+            # its own keeps them: the direct python-can adapter does, and a
+            # process bridge is code this project did not write and need not.
+            # Both are the same error type to the caller, so both name the same
+            # causes about the bus (#517).
+            result = {"tool": "can_send", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frame": frame_result(frame), "log_path": display_path(self.config, session.log_path), **can_likely_causes(sent.get("error_type")), **sent}
             if result.get("side_effect_committed") is not False and result.get("side_effect_status") is None:
                 result.update({"side_effect_status": "unknown", "cleanup_required": True})
             audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "error", "direction": "tx", **result})
@@ -562,7 +638,7 @@ class CanBusService:
         if audit_error is not None:
             session.audit_broken = True
             session.lease.quarantine("can_queue_clear_audit_broken", audit_error, audit_broken=True)
-            return mark_audit_failure({"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": "can_queue_clear_failed", "summary": "CAN receive queue clear could not be audited before execution.", "side_effect_committed": False, "side_effect_status": "not_started"}, audit_error)
+            return mark_audit_failure({"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": CAN_QUEUE_CLEAR_FAILED_ERROR, "summary": "CAN receive queue clear could not be audited before execution.", "side_effect_committed": False, "side_effect_status": "not_started", **can_likely_causes(CAN_QUEUE_CLEAR_FAILED_ERROR)}, audit_error)
         # The drain budget bounds adapter time only, so it starts after the pre-drain audit write.
         deadline = time.monotonic() + CAN_DRAIN_TIMEOUT_S
         for _ in range(CAN_DRAIN_BATCH_LIMIT):
@@ -570,11 +646,11 @@ class CanBusService:
                 break
             result = session.adapter_session.read(session.bus_config.max_buffer_frames, 0)
             if not overall_success(result):
-                cleared = {"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": "can_queue_clear_failed", "summary": str(result.get("summary", "CAN receive queue could not be cleared.")), "backend_result": public_backend_result(result), "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "partial" if drained else "not_started", "retry_safe": drained == 0}
+                cleared = {"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": CAN_QUEUE_CLEAR_FAILED_ERROR, "summary": str(result.get("summary", "CAN receive queue could not be cleared.")), **can_likely_causes(CAN_QUEUE_CLEAR_FAILED_ERROR), "backend_result": public_backend_result(result), "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "partial" if drained else "not_started", "retry_safe": drained == 0}
                 return self._audit_queue_clear_result(session, cleared)
             frames = result.get("frames")
             if not isinstance(frames, list):
-                cleared = {"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": "can_queue_clear_failed", "summary": "CAN adapter returned an invalid queue-drain response.", "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "partial" if drained else "not_started", "retry_safe": drained == 0}
+                cleared = {"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": CAN_QUEUE_CLEAR_FAILED_ERROR, "summary": "CAN adapter returned an invalid queue-drain response.", **can_likely_causes(CAN_QUEUE_CLEAR_FAILED_ERROR), "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "partial" if drained else "not_started", "retry_safe": drained == 0}
                 return self._audit_queue_clear_result(session, cleared)
             drained += len(frames)
             if not frames:
@@ -786,7 +862,7 @@ class PythonCanAdapterSession:
             self.bus.send(message, timeout=self.timeout_s)
             return {"ok": True, "backend": self.adapter_name}
         except Exception as error:
-            return {"ok": False, "error_type": "can_send_failed", "summary": "CAN adapter failed to send a frame.", "backend_error": str(error)}
+            return {"ok": False, "error_type": CAN_SEND_FAILED_ERROR, "summary": "CAN adapter failed to send a frame.", "backend_error": str(error), **can_likely_causes(CAN_SEND_FAILED_ERROR)}
 
     def read(self, max_frames: int, wait_timeout_s: float) -> JsonObject:
         frames = []
@@ -945,6 +1021,7 @@ def socketcan_interface_missing(error: BaseException, bus_id: str, bus_config: C
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "retry_safe": True,
+        **can_likely_causes(CAN_INTERFACE_NOT_FOUND_ERROR),
         **remediation_fields(CAN_INTERFACE_NOT_FOUND_ERROR),
     }
 
@@ -1021,17 +1098,13 @@ def socketcan_interface_down(bus_id: str, bus_config: CanBusConfig) -> JsonObjec
             f"was opened: a socket bound to a down link carries no frame in either direction. Bring it up with `sudo "
             f"ip link set {channel} up`."
         ),
-        # Carried on the refusal rather than looked up by error type, so that
-        # `classify_last_error` answers about this link. The classifier prefers a
-        # report's own causes and falls back to a table per backend, and those
-        # tables are the debugger's and the COM port's: a CAN error type reaches
-        # neither, and an operator whose link is down would be sent to read a log
-        # about something else entirely.
-        "likely_causes": [
-            "the interface was created and never brought up (`ip link set <dev> up` has not been run for it)",
-            "the link was taken down out of band, by an operator or by a script, and nothing brought it back",
-            "a USB CAN adapter was re-enumerated and its interface came back down",
-        ],
+        # Carried on the refusal so that `classify_last_error` answers about this
+        # link, and read from `CAN_LIKELY_CAUSES` rather than written out here so
+        # that the classifier's own lookup for this type cannot say anything
+        # else. #511 decided these three strings and this is still them; what
+        # changed in #517 is that every other CAN refusal is answered the same
+        # way instead of falling through to the COM port or debugger table.
+        **can_likely_causes(CAN_INTERFACE_DOWN_ERROR),
         "target_contacted": False,
         "side_effect_committed": False,
         "side_effect_status": "not_started",
@@ -1171,6 +1244,7 @@ def can_adapter_library_missing(error: BaseException, bus_id: str, bus_config: C
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "retry_safe": True,
+        **can_likely_causes(CAN_ADAPTER_LIBRARY_MISSING_ERROR),
         **remediation_fields(CAN_ADAPTER_LIBRARY_MISSING_ERROR),
     }
 
@@ -1229,6 +1303,7 @@ def peak_channel_not_available(error: BaseException, bus_id: str, bus_config: Ca
         "side_effect_committed": False,
         "side_effect_status": "not_started",
         "retry_safe": True,
+        **can_likely_causes(CAN_CHANNEL_NOT_AVAILABLE_ERROR),
         **remediation_fields(CAN_CHANNEL_NOT_AVAILABLE_ERROR),
     }
     if channels:
@@ -1460,6 +1535,7 @@ def listen_only_precondition(can_module: object, interface: str, bus_id: str, bu
             "side_effect_committed": False,
             "side_effect_status": "not_started",
             "retry_safe": True,
+            **can_likely_causes(LISTEN_ONLY_UNSUPPORTED_ERROR),
             **remediation_fields(LISTEN_ONLY_UNSUPPORTED_ERROR, bus_config.adapter),
         }
     # PCAN. python-can takes no `listen_only` keyword; the mode is
@@ -1482,6 +1558,7 @@ def listen_only_precondition(can_module: object, interface: str, bus_id: str, bu
             "side_effect_committed": False,
             "side_effect_status": "not_started",
             "retry_safe": True,
+            **can_likely_causes(LISTEN_ONLY_UNSUPPORTED_ERROR),
             **remediation_fields(LISTEN_ONLY_UNSUPPORTED_ERROR, bus_config.adapter),
         }
     bus_kwargs["state"] = passive
