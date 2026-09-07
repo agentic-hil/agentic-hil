@@ -128,6 +128,11 @@ AUTHKEY_BYTES = 32
 BROKER_START_TIMEOUT_S = 30.0
 BROKER_FIRST_ATTACH_TIMEOUT_S = 30.0
 BROKER_POLL_INTERVAL_S = 0.05
+# How long a client whose start deadline has expired waits for the broker it
+# started before terminating it. A broker that has printed its refusal and is
+# still inside its shutdown answers within it and is classified rather than
+# killed; anything else costs this once, on an attach that has already failed.
+BROKER_SHUTDOWN_GRACE_S = 1.0
 # A counter mismatch is the ordinary outcome of two runs attaching at once, so a
 # client re-reads and retries rather than failing the run; it is bounded because
 # a retry loop against a broker that keeps moving is livelock wearing a retry.
@@ -1355,6 +1360,17 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
             started = _spawn_broker(config, bus_id, bus_key, lock_root)
         time.sleep(BROKER_POLL_INTERVAL_S)
     if started is not None:
+        if started.poll() is None:
+            # A broker that already printed its refusal can still be inside the
+            # `shutdown()` its entry point runs in a `finally`, which closes the
+            # adapter session and which a wedged adapter can block. Killing it
+            # there throws away an answer that is already on disk, so it is
+            # given a short budget to finish leaving and be classified below.
+            # The budget is bounded and is spent only here, on an attach that
+            # has already failed: a broker that is still opening its adapter
+            # costs it once and is terminated anyway.
+            with suppress(subprocess.TimeoutExpired, OSError, ValueError):
+                started.wait(timeout=BROKER_SHUTDOWN_GRACE_S)
         # The loop tests its deadline *before* it reads an exit code, so a
         # broker that went inside the final poll window left the loop without
         # ever being classified: the branch above would have turned that code
