@@ -17,25 +17,32 @@ state.
 What each test is for:
 
 * The two drawings are one drawing in two palettes, so their wording is compared
-  place for place rather than each being read on its own. A correction applied to
-  one and not the other is the failure this repository has already had once.
-* The Markdown alt text is the drawing for a reader who cannot see it, so it is
-  held to the drawing's own `aria-label` and not to a quotation of it.
+  place for place and their geometry box for box, rather than each being read on
+  its own. A correction applied to one and not the other is the failure this
+  repository has already had once.
+* The Markdown alt text is the drawing for a reader who cannot see it, so the
+  whole of it is held to the drawing's own `aria-label` and not to a quotation of
+  it, and both are held positively to the claim that is true.
 * The claim itself is gated across every document a reader receives, as a rule
-  and not as a blacklist: a sentence that pairs an unsettled effect with a hold
-  only an operator lifts has to be a sentence about the audit trail, which is the
+  and not as a blacklist: a clause that holds a resource for an unsettled effect
+  until a person lifts it has to be a clause about the audit trail, which is the
   one family that really stands. The exemption term is read off
-  `AUDIT_BROKEN_MARKER`, so it moves when the code moves.
+  `AUDIT_BROKEN_MARKER`, so it moves when the code moves, and it is applied to
+  the clause that carries the hold rather than to the sentence around it, so a
+  sentence cannot exempt itself by naming the audit chain somewhere else.
 * The terminal box names what stands and nothing wider.
 * The drawings stay renderable. A label that does not fit its chip is a defect
   the reader sees, so the chip rule every shipped drawing already obeys is
   derived from those drawings and applied to the corrected one.
 * The three places that already state the rule correctly are pinned unchanged,
-  because the correction is to the picture and never to the product.
+  because the correction is to the picture and never to the product, and the
+  corrected `docs/security-design.md` sentence is pinned for what it must still
+  say as well as for what it must stop saying.
 
-`docs/` is not in the source distribution (MANIFEST.in ships `docs/mcp-hosts.md`
-alone), so a checkout without the drawings skips rather than fails. Every
-contributor checkout and this project's CI have them.
+`MANIFEST.in` ships `docs/safety-model.md`, `docs/security-design.md`,
+`docs/installation.md` and `docs/mcp-hosts.md`, but not `docs/diagrams/`, so in a
+source distribution the drawing readers skip while the page readers run. Every
+contributor checkout and this project's CI have the drawings.
 """
 
 from __future__ import annotations
@@ -59,6 +66,7 @@ DIAGRAM_PAGE = "docs/safety-model.md"
 LIGHT = "docs/diagrams/action-gate.svg"
 DARK = "docs/diagrams/action-gate-dark.svg"
 DRAWINGS = (LIGHT, DARK)
+DIAGRAM_DIRECTORY = REPOSITORY_ROOT / "docs" / "diagrams"
 
 # The condition half of the claim: a call whose physical effect is not settled.
 # These are the words the drawing and the two pages use for it today, plus the
@@ -108,6 +116,15 @@ def stem(word: str) -> str:
 def claim_words(text: str) -> set[str]:
     """What a phrase claims, with its grammar and its punctuation taken off."""
     return {stem(word) for word in re.findall(r"[a-z0-9-]+", text.lower()) if word not in STOP_WORDS}
+
+
+def clauses(sentence: str) -> list[str]:
+    """A sentence as the pieces a claim is actually made in.
+
+    The hold is read per clause rather than per sentence, because a sentence that
+    names the audit chain in one clause says nothing about what the next clause
+    holds. This is the difference between a rule and an escape hatch."""
+    return [piece.strip() for piece in re.split(r"[,;:]", sentence) if piece.strip()]
 
 
 def terminal_clause(text: str) -> str:
@@ -189,27 +206,39 @@ def boxes_and_runs(relative: str) -> list[tuple[dict[str, float], str, str]]:
     coordinates, because a run that has drifted out of its box is exactly the
     defect this has to catch and hit-testing would silently drop it.
 
+    The walk is over the whole document rather than over the root's direct
+    children, so a run nested inside a group is measured rather than skipped; a
+    run that is invisible to the measurement is a run that can overflow anything.
+
     A run drawn before any box is a free label on the canvas and has no box to be
     measured against; the action gate has none, and
     `test_the_drawing_is_well_formed_svg` is where that is asserted rather than
     assumed."""
     found: list[tuple[dict[str, float], str, str]] = []
     box: dict[str, float] | None = None
-    for element in ElementTree.parse(document(relative)).getroot():
+    outer = ""
+    for element in ElementTree.parse(document(relative)).getroot().iter():
         if element.tag == f"{SVG}rect":
             if "cluster" in (element.get("class") or ""):
                 continue
             box = {key: float(element.get(key, 0.0)) for key in ("x", "y", "width", "height")}
-        elif element.tag == f"{SVG}text":
-            if box is None:
-                continue
-            outer = element.get("class") or ""
-            if (element.text or "").strip():
-                found.append((box, (element.text or "").strip(), outer))
-            for span in element.findall(f"{SVG}tspan"):
-                if (span.text or "").strip():
-                    found.append((box, (span.text or "").strip(), span.get("class") or outer))
+        elif element.tag in (f"{SVG}text", f"{SVG}tspan"):
+            if element.tag == f"{SVG}text":
+                outer = element.get("class") or ""
+            style = element.get("class") or outer
+            if box is not None and (element.text or "").strip():
+                found.append((box, (element.text or "").strip(), style))
     return found
+
+
+def drawn_runs(relative: str) -> list[str]:
+    """Every word drawn in the file, read off the source rather than off the tree.
+
+    Derived a second way on purpose: `boxes_and_runs` is the reading every
+    measurement in this file depends on, and a reading compared only against
+    itself proves nothing about what the file contains."""
+    source = document(relative).read_text(encoding="utf-8")
+    return [run.strip() for run in re.findall(r">([^<>]+)</(?:tspan|text)>", source) if run.strip()]
 
 
 def chips(relative: str) -> list[tuple[dict[str, float], str]]:
@@ -226,6 +255,29 @@ def terminal_box(relative: str) -> str:
     words = [run for box, run, _style in runs if box["y"] == lowest]
     words += [run for box, run in chips(relative) if box["y"] < lowest]
     return " ".join(words)
+
+
+def geometry(relative: str) -> dict[str, object]:
+    """The shape of the drawing, with every colour left out.
+
+    Light and dark are one drawing in two palettes, so everything except the
+    palette has to match: the canvas, every rectangle, and where every run of
+    text is placed."""
+    root = ElementTree.parse(document(relative)).getroot()
+    return {
+        "viewBox": root.get("viewBox"),
+        "size": (root.get("width"), root.get("height")),
+        "rects": [
+            tuple(element.get(key) for key in ("class", "x", "y", "width", "height", "rx"))
+            for element in root.iter(f"{SVG}rect")
+        ],
+        "placements": [
+            tuple(element.get(key) for key in ("class", "x", "y"))
+            for element in root.iter()
+            if element.tag in (f"{SVG}text", f"{SVG}tspan")
+        ],
+        "edges": [element.get("d") for element in root.iter(f"{SVG}path")],
+    }
 
 
 def run_width(text: str, style: str) -> float:
@@ -272,32 +324,71 @@ def test_the_light_and_the_dark_drawing_carry_the_same_wording(place: str) -> No
     assert reader(LIGHT) == reader(DARK), f"the two action gate drawings disagree in their {place}"
 
 
+def test_the_light_and_the_dark_drawing_carry_the_same_geometry() -> None:
+    """The palette is the only thing the two files are allowed to differ in.
+
+    A chip resized to fit a corrected label in one file and not in the other
+    renders as two different pictures to two readers, and every measurement in
+    this file is per file and would not see it."""
+    light = geometry(LIGHT)
+    dark = geometry(DARK)
+
+    differing = sorted(key for key in light if light[key] != dark[key])
+    assert differing == [], f"the two action gate drawings are not one drawing any more; they differ in {differing}"
+
+
 @pytest.mark.parametrize("drawing", DRAWINGS)
 def test_the_alt_text_says_what_the_aria_label_says(drawing: str) -> None:
     """The alt text is the drawing for a reader who cannot see it.
 
-    Both put the outcome of a failed call last, so the two last clauses are held
-    to the same claim, with wording and grammar allowed to differ and the claim
-    not allowed to."""
-    spoken = claim_words(terminal_clause(aria_label(drawing)))
-    written = claim_words(terminal_clause(image_lines()[drawing]))
+    The whole description is held, not only the claim at the end of it, because
+    the flow a reader who cannot see the picture is told about is the rest of the
+    alt text. Wording and grammar are allowed to differ from the `aria-label`;
+    what is claimed is not."""
+    spoken = aria_label(drawing)
+    written = image_lines()[drawing]
 
-    assert written == spoken, f"{DIAGRAM_PAGE} introduces {drawing} with a claim its aria-label does not make: {sorted(written ^ spoken)}"
+    assert claim_words(written) == claim_words(spoken), (
+        f"{DIAGRAM_PAGE} introduces {drawing} with a description its aria-label does not give: "
+        f"{sorted(claim_words(written) ^ claim_words(spoken))}"
+    )
+    assert claim_words(terminal_clause(written)) == claim_words(terminal_clause(spoken)), (
+        f"{DIAGRAM_PAGE} introduces {drawing} with a claim its aria-label does not make: "
+        f"{sorted(claim_words(terminal_clause(written)) ^ claim_words(terminal_clause(spoken)))}"
+    )
+
+
+@pytest.mark.parametrize("drawing", DRAWINGS)
+def test_the_spoken_claim_names_the_audit_trail_and_nothing_wider(drawing: str) -> None:
+    """What the drawing tells a reader who receives it as prose.
+
+    The drawn box is pinned positively below; this is the same pin on the two
+    strings a screen reader is handed instead of the picture, so the correction
+    is checked for being right and not only for having stopped being wrong."""
+    for source, text in ((drawing, aria_label(drawing)), (DIAGRAM_PAGE, image_lines()[drawing])):
+        claim = terminal_clause(text)
+        assert AUDIT_TERM in claim.lower(), f"{source} ends its description of {drawing} without naming the audit trail: {claim!r}"
+        assert not UNSETTLED_EFFECT.search(claim), f"{source} ends its description of {drawing} with an effect the next contact settles: {claim!r}"
 
 
 def test_no_document_a_reader_receives_holds_a_resource_for_an_unsettled_effect() -> None:
     """The claim itself, gated as a rule across everything a reader receives.
 
-    A sentence that pairs an unsettled effect with a hold only a person lifts is
-    a sentence about the audit trail or it is wrong, because every other missing
-    proof comes back at the next contact: the target's at the next reset into
-    halt, a serial handle's and a CAN adapter's at their own next open, which the
-    operating system refuses by itself if the handle is really stuck."""
+    A clause that holds a resource until a person lifts it is a clause about the
+    audit trail or it is wrong, because every other missing proof comes back at
+    the next contact: the target's at the next reset into halt, a serial handle's
+    and a CAN adapter's at their own next open, which the operating system
+    refuses by itself if the handle is really stuck. The audit trail exempts the
+    clause that carries the hold and never the sentence around it."""
     wrong = []
     for relative in tracked_documents():
         for sentence in readable_prose(relative):
-            if UNSETTLED_EFFECT.search(sentence) and STANDING_HOLD.search(sentence) and AUDIT_TERM not in sentence.lower():
-                wrong.append(f"{relative}: {sentence}")
+            if not (UNSETTLED_EFFECT.search(sentence) and STANDING_HOLD.search(sentence)):
+                continue
+            holding = [clause for clause in clauses(sentence) if STANDING_HOLD.search(clause)]
+            if holding and all(AUDIT_TERM in clause.lower() for clause in holding):
+                continue
+            wrong.append(f"{relative}: {sentence}")
 
     assert wrong == [], "these say an unsettled effect holds a resource until an operator recovers it:\n" + "\n".join(wrong)
 
@@ -322,13 +413,16 @@ def test_the_chip_rule_is_the_one_every_shipped_drawing_already_obeys() -> None:
     padding. That is the rule a corrected chip has to keep, and reading it off
     the drawings is what makes the width check below a measurement of this
     repository's own layout instead of a number somebody chose."""
+    shipped = sorted(DIAGRAM_DIRECTORY.glob("*.svg")) if DIAGRAM_DIRECTORY.is_dir() else []
+    if not shipped:
+        pytest.skip("this is a checkout without the drawings; docs/diagrams ships with the repository, not with the sdist")
+
     measured = []
-    for path in sorted((REPOSITORY_ROOT / "docs" / "diagrams").glob("*.svg")) if (REPOSITORY_ROOT / "docs" / "diagrams").is_dir() else []:
+    for path in shipped:
         relative = path.relative_to(REPOSITORY_ROOT).as_posix()
         for box, label in chips(relative):
             measured.append((relative, label, box["width"], round(run_width(label, "chip-label") + CHIP_PADDING, 1)))
-    if not measured:
-        pytest.skip("this is a checkout without the drawings")
+    assert measured, f"{len(shipped)} drawings are present and not one chip was read out of them; the reader has stopped seeing them"
 
     off = [entry for entry in measured if abs(entry[2] - entry[3]) > 0.1]
     assert off == [], f"these chips are not their label wide plus {CHIP_PADDING}: {off}"
@@ -373,19 +467,17 @@ def test_every_box_and_every_label_stays_inside_the_view_box(drawing: str) -> No
 
 @pytest.mark.parametrize("drawing", DRAWINGS)
 def test_the_drawing_is_well_formed_svg(drawing: str) -> None:
+    """Valid SVG, and every word in the file reaches the measurements above.
+
+    The two lists are derived apart, one by parsing the tree and one by reading
+    the source, so a word the measuring walk drops is a word this notices."""
     root = ElementTree.parse(document(drawing)).getroot()
 
     assert root.tag == f"{SVG}svg"
     assert root.get("role") == "img"
     assert (root.findtext(f"{SVG}title") or "").strip(), f"{drawing} carries no title"
 
-    written = [
-        run
-        for element in root
-        if element.tag == f"{SVG}text"
-        for run in [(element.text or "").strip(), *[(span.text or "").strip() for span in element.findall(f"{SVG}tspan")]]
-        if run
-    ]
+    written = drawn_runs(drawing)
     measured = [run for _box, run, _style in boxes_and_runs(drawing)]
     assert measured == written, f"{drawing} draws words this file never measures: {sorted(set(written) - set(measured))}"
 
@@ -426,10 +518,16 @@ def test_the_debug_teardown_sentence_promises_no_operator_recovery() -> None:
     A session that ends without its halt reconfirmed is reported unconfirmed, and
     that report is what a caller acts on. An unconfirmed flash from a bare call
     gets no operator recovery either: its incident stands down when the call
-    ends. The sentence keeps the two field names it reports with and loses the
-    promise of a recovery nobody is owed."""
+    ends. The sentence loses the promise of a recovery nobody is owed and keeps
+    everything else it tells a reader: which two ends reconfirm the halt, the two
+    fields the report carries, that it is not a clean stop, and what happens to
+    the incident instead."""
     statement = statement_under("docs/security-design.md", "## Mitigations", "halt_not_confirmed")
 
+    assert "`stop_session` and service shutdown both re-interrupt the target" in statement
     assert "`safe_state_confirmed: false`" in statement
     assert "`halt_not_confirmed: true`" in statement
+    assert "reported unconfirmed" in statement
+    assert "rather than released as a clean stop" in statement
+    assert "stands down when the call ends" in statement
     assert not STANDING_HOLD.search(statement), f"docs/security-design.md still promises an operator recovery: {statement}"
