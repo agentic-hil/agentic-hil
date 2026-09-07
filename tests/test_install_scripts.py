@@ -190,9 +190,25 @@ def _both_code() -> dict[str, str]:
 
 
 def _posix_shell() -> str:
+    """The `sh` these tests drive the scripts with: the shell itself, never Git for Windows' launcher.
+
+    Git for Windows puts two programs named `sh.exe` on a machine. The one under
+    `usr/bin` is the shell. The one under `bin` is a launcher that starts it
+    after prepending Git's own `/mingw64/bin` and `/usr/bin` to whatever PATH it
+    was handed, so a test that hands it a PATH holding a stand-in `curl` has its
+    stand-in shadowed by the real one, and the fetch-route tests then download
+    the real installer from the network and run it. Which of the two
+    `shutil.which` finds is a matter of PATH order and differs between machines;
+    where it finds the launcher, the shell beside it is what runs.
+    """
     found = shutil.which("sh")
     if found is None:
         pytest.skip("no POSIX sh on this machine; Git Bash provides one on Windows")
+    launcher = Path(found)
+    if os.name == "nt" and launcher.parent.name.lower() == "bin" and launcher.parent.parent.name.lower() != "usr":
+        shell = launcher.parent.parent / "usr" / "bin" / "sh.exe"
+        if shell.is_file():
+            return str(shell)
     return found
 
 
@@ -4567,7 +4583,7 @@ def _real_tool(name: str) -> str | None:
         return found
     shell = shutil.which("sh")
     if shell is not None:
-        beside = Path(shell).parent / "core_perl" / name
+        beside = Path(_posix_shell()).parent / "core_perl" / name
         if beside.is_file():
             return str(beside)
     return None
