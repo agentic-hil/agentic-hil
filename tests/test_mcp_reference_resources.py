@@ -853,3 +853,38 @@ def test_the_remediation_in_a_result_is_the_remediation_the_reference_serves(
     # connection, or it sends the reader back to the source tree.
     for uri in (PLATFORM_PATHS_URI, TARGET_SUPPORT_URI, CONFIG_SCHEMA_URI, LEASE_LIFECYCLE_URI):
         assert read_text(service, uri).strip()
+
+
+# The three buckets a failed flash lands in that the catalogue answered for no
+# backend at all, scoped per tool the way `flash_erase_failed` is: a caller
+# reading the reference after a failed verify, a failed flash or a failed
+# memory read found the error_type in their result and no entry behind it
+# (#516).
+SCOPED_ENTRIES_PER_TOOL = [
+    ("verify_failed", "stlink"),
+    ("verify_failed", "pyocd"),
+    ("flash_failed", "pyocd"),
+    ("flash_failed", "openocd"),
+    ("memory_read_failed", "pyocd"),
+]
+
+
+def test_the_reference_serves_a_per_tool_entry_for_verify_flash_and_memory_read(service: AgenticHILToolService) -> None:
+    """The other of the two channels that can answer a caller with no source tree.
+
+    The remediation on the result and the reference read one catalogue, so these
+    five arrive here the moment they exist; what this pins is that they are
+    listed under their own scope, readable one by one through the template, and
+    that no unscoped entry was added beside them, which every backend without a
+    scoped entry would then be given by the fallback.
+    """
+    catalogue = json.loads(read_text(service, ERRORS_URI))
+    by_key = {(entry["error_type"], entry.get("scope")): entry for entry in catalogue["entries"]}
+
+    for error_type, scope in SCOPED_ENTRIES_PER_TOOL:
+        assert (error_type, scope) in by_key, sorted(key for key in by_key if key[0] == error_type)
+        served = by_key[(error_type, scope)]
+        assert served["meaning"].strip(), served
+        assert served["remediation"], served
+        assert json.loads(read_text(service, ERROR_URI_PREFIX + f"{error_type}:{scope}")) == served
+        assert (error_type, None) not in by_key, error_type

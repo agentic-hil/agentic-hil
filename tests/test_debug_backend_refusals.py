@@ -62,7 +62,7 @@ from agentic_hil.backends.pyocd import PyOCDBackend
 from agentic_hil.backends.stlink import STLinkBackend
 from agentic_hil.config import load_config
 from agentic_hil.gdbmi import GdbMiClient, stop_result_from_line
-from agentic_hil.knowledge import remediation_fields
+from agentic_hil.knowledge import ERROR_CATALOGUE, catalogue_entry, remediation_fields
 from agentic_hil.tools import AgenticHILToolService
 
 T = TypeVar("T")
@@ -1027,3 +1027,169 @@ def test_troubleshooting_still_names_both_plausibility_keys() -> None:
 
     assert "`hex_parseable: false`" in text
     assert "`bin_size_plausible: false`" in text
+
+
+# ---------------------------------------------------------------------------
+# The five backend-scoped remediation entries the classifier buckets are owed.
+#
+# `verify_failed`, `flash_failed` and `memory_read_failed` have no catalogue
+# entry at all today, scoped or unscoped, so the row table above can pin only
+# the bucket and the absence of steps: an operator whose flash failed to verify
+# is told which bucket the failure fell in and nothing about what to do next.
+# What each of them has to say is the tool's own account of that operation, so
+# the entries are scoped per backend the way `flash_erase_failed` already is. A
+# failed verify under STM32CubeProgrammer is a different investigation from a
+# failed verify under pyOCD (one has a connect mode and option bytes, the other
+# has an erase, a program and a flash algorithm out of a pack), and one generic
+# entry that fitted both would name neither tool's options (#516).
+#
+# The lookup is the one the existing scoped entries use: `remediation_fields`
+# forms `<error_type>:<scope>` and falls back to the unscoped key, so nothing
+# on the result path changes for these to arrive.
+
+# (bucket, backend, the tool's name as the catalogue writes it, the operation
+# the steps have to be about, the subjects the decided entry covers).
+OWED_SCOPED_ENTRIES = [
+    ("verify_failed", "stlink", "STM32CubeProgrammer", "verify", ("connect_mode", "option bytes")),
+    ("verify_failed", "pyocd", "pyOCD", "verify", ("erase", "probe", "target_type")),
+    ("flash_failed", "pyocd", "pyOCD", "flash", ("target_type", "frequenc")),
+    ("flash_failed", "openocd", "OpenOCD", "flash", ("target_cfg", "bank", "program")),
+    ("memory_read_failed", "pyocd", "pyOCD", "read", ("probe", "halt", "address", "memory")),
+]
+
+
+@pytest.mark.parametrize(
+    ("bucket", "backend_name", "tool_name", "operation", "subjects"),
+    OWED_SCOPED_ENTRIES,
+    ids=[f"{row[0]}-{row[1]}" for row in OWED_SCOPED_ENTRIES],
+)
+def test_each_bucket_the_catalogue_left_unanswered_has_its_own_backend_scoped_entry(bucket: str, backend_name: str, tool_name: str, operation: str, subjects: tuple[str, ...]) -> None:
+    """A refusal that names a bucket and hands over no next step is the gap this closes.
+
+    Non-empty is the first half; the second is that the steps are about this
+    tool and this operation, because the reason the entries are scoped at all
+    is that a generic answer for `verify_failed` could name neither tool's own
+    verify. The subjects each entry has to cover are the ones the issue's
+    decision names for it, so an entry that reads well and answers a different
+    question fails here rather than shipping.
+    """
+    key = f"{bucket}:{backend_name}"
+
+    assert key in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
+    fields = remediation_fields(bucket, backend_name)
+    assert fields.get("remediation"), key
+    entry = catalogue_entry(key)
+    assert entry["error_type"] == bucket, entry
+    assert entry["scope"] == backend_name, entry
+    assert entry["meaning"].strip(), entry
+    said = json.dumps(entry)
+    assert tool_name in said, said
+    assert operation in said.lower(), (operation, said)
+    for subject in subjects:
+        assert subject in said.lower(), (subject, said)
+
+
+SHARED_BUCKETS = {"verify_failed": ("stlink", "pyocd"), "flash_failed": ("pyocd", "openocd")}
+
+
+@pytest.mark.parametrize("bucket", sorted(SHARED_BUCKETS))
+def test_the_two_backends_that_share_a_bucket_do_not_share_its_steps(bucket: str) -> None:
+    """Scoping is the point: two entries under one bucket that said the same thing would be the generic entry again."""
+    first_backend, second_backend = SHARED_BUCKETS[bucket]
+    first = remediation_fields(bucket, first_backend)
+    second = remediation_fields(bucket, second_backend)
+
+    assert first.get("remediation"), (bucket, first_backend)
+    assert second.get("remediation"), (bucket, second_backend)
+    assert first["remediation"] != second["remediation"], bucket
+    assert first.get("do_not") != second.get("do_not") or not first.get("do_not"), bucket
+
+
+SILENT_PAIRS = [
+    ("verify_failed", "openocd"),
+    ("flash_failed", "stlink"),
+    ("memory_read_failed", "stlink"),
+    ("memory_read_failed", "openocd"),
+]
+
+
+@pytest.mark.parametrize(("bucket", "backend_name"), SILENT_PAIRS, ids=[f"{row[0]}-{row[1]}" for row in SILENT_PAIRS])
+def test_a_bucket_on_a_backend_the_catalogue_does_not_name_stays_silent(bucket: str, backend_name: str) -> None:
+    """The neighbour that must not move: writing five entries is not writing fifteen.
+
+    Each of these pairs is a bucket a backend can produce and for which nobody
+    has written the tool's own steps. Silence is what a result carries there
+    today, and silence is better than another backend's advice arriving under a
+    generic name: an operator whose OpenOCD verify failed must not be told about
+    STM32CubeProgrammer's connect mode.
+    """
+    assert f"{bucket}:{backend_name}" not in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
+    assert remediation_fields(bucket, backend_name) == {}, (bucket, backend_name)
+
+
+@pytest.mark.parametrize("bucket", ["verify_failed", "flash_failed", "memory_read_failed"])
+def test_the_three_buckets_grow_no_unscoped_entry(bucket: str) -> None:
+    """`flash_erase_failed`'s convention, which these follow: scoped entries and no generic one.
+
+    An unscoped entry would be reached by every backend that has no scoped one,
+    which is the fallback `lookup_remedy` performs, so adding one would answer
+    the silent pairs above with advice nobody wrote for them.
+    """
+    assert {key for key in ERROR_CATALOGUE if key.partition(":")[0] == "flash_erase_failed"} == {
+        "flash_erase_failed:stlink",
+        "flash_erase_failed:openocd",
+        "flash_erase_failed:pyocd",
+    }
+    assert bucket not in ERROR_CATALOGUE, bucket
+    assert remediation_fields(bucket) == {}, bucket
+
+
+# The four transcripts the row table already plays for these pairs, driven here
+# for the one thing the row table cannot assert while the catalogue is silent:
+# that the refusal reaching the operator carries this backend's steps and not an
+# empty field.
+SCOPED_REMEDIATION_ROWS = [
+    ("stlink", "", "ST-LINK SN  : STLINK123\nMemory Programming ...\nError: Verify failed at address 0x08000000\n", "verify_failed", "STM32CubeProgrammer"),
+    ("pyocd", "", "0000900 E Verify failed at 0x08000000 [load_cmd]\n", "verify_failed", "pyOCD"),
+    ("pyocd", "", "0000900 C Flash programming failed [load_cmd]\n", "flash_failed", "pyOCD"),
+    ("openocd", f"{PROGRAMMING_FAILED}\n", "Error: failed to write memory at 0x08000000\n", "flash_failed", "OpenOCD"),
+]
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "stdout", "stderr", "error_type", "tool_name"),
+    SCOPED_REMEDIATION_ROWS,
+    ids=[f"{row[0]}-{row[3]}" for row in SCOPED_REMEDIATION_ROWS],
+)
+def test_a_failed_verify_or_flash_hands_the_operator_that_tools_own_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str, stdout: str, stderr: str, error_type: str, tool_name: str) -> None:
+    """The whole point of the entries, seen where an operator meets them: on the refusal itself."""
+    play_transcript(monkeypatch, stdout=stdout, stderr=stderr, returncode=1)
+    config = config_for(tmp_path, backend_name, FAKE_TRANSCRIPT)
+
+    result = call(config, "flash_firmware", {"image_path": "build/firmware.elf"})
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == error_type, result
+    assert result.get("remediation"), result
+    assert result["remediation"] == remediation_fields(error_type, backend_name)["remediation"], result["remediation"]
+    assert any(tool_name in step for step in result["remediation"]), result["remediation"]
+    # The scoped entry is what arrives, not the fallback: there is no unscoped
+    # entry for these buckets, and a result carrying one would mean somebody
+    # wrote the generic entry this design decided against.
+    assert remediation_fields(error_type) == {}, error_type
+
+
+def test_a_failed_pyocd_read_hands_the_operator_the_read_steps(tmp_path: Path) -> None:
+    """The third bucket, through the one path that can produce it: a read against a flashed ELF."""
+    service = read_service(tmp_path, FAKE_PYOCD_READ_FAILED)
+    try:
+        assert service.call("flash_firmware", {"image_path": "build/app.elf"})["ok"] is True
+        value = service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+    assert value["ok"] is False, value
+    assert value["error_type"] == "memory_read_failed", value
+    assert value.get("remediation"), value
+    assert value["remediation"] == remediation_fields("memory_read_failed", "pyocd")["remediation"], value["remediation"]
+    assert any("pyOCD" in step for step in value["remediation"]), value["remediation"]
