@@ -56,13 +56,13 @@ from conftest import (
     elf_with_symbols,
     write_config,
 )
-from support import scaled_time_bound
 
 # What the fake GDB answers for a refused read, which is what the product puts in
 # the summary. Imported rather than repeated: a placeholder that drifted between
 # the fake and the assertion would read like a product regression. The fixture
 # says why it is a placeholder and names the recording that is owed.
 from fixtures.fake_gdb import MEMORY_READ_REFUSAL as GDB_MEMORY_READ_REFUSAL
+from support import scaled_time_bound
 
 from agentic_hil.backends.common import NOT_CONTACTED
 from agentic_hil.backends.gdbdebug import GdbDebugSession
