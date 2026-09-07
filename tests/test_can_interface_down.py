@@ -640,6 +640,12 @@ def test_a_constructor_time_enetdown_keeps_the_markerless_result(tmp_path: Path,
 
     assert result["error_type"] == "can_adapter_open_failed", result
     assert "side_effect_status" not in result, result
+    # The markerless result still carries causes about the bus (#523). Asserted
+    # inline for the reason the send failure above is: importing the shared
+    # helper here would close a cycle through `test_can_listen_only`.
+    open_causes = result["likely_causes"]
+    assert open_causes and not any("COM port" in cause or "debugger" in cause for cause in open_causes), result
+    assert any(("bus" in cause or "adapter" in cause or "interface" in cause or "driver" in cause) for cause in open_causes), result
 
 
 # ---------------------------------------------------------------------------

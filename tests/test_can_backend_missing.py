@@ -272,6 +272,10 @@ def test_a_host_with_the_driver_keeps_the_markerless_result(tmp_path: Path, monk
 
     assert result["error_type"] == "can_adapter_open_failed", result
     assert "side_effect_status" not in result
+    # An open that failed for an unclassified reason still says what may have
+    # caused it in terms of the adapter and the driver, rather than leaving the
+    # reader to the COM port's or the debugger's generic line (#523).
+    assert_causes_are_about_the_bus(result["likely_causes"], "can_adapter_open_failed", result)
 
 
 # ---------------------------------------------------------------------------

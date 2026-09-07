@@ -407,6 +407,9 @@ def test_peak_refuses_and_closes_when_the_driver_reports_listen_only_off(tmp_pat
     assert result["cleanup_confirmed"] is True
     assert bus.closed is True
     assert any("driver_state" in step for step in result["remediation"])
+    # A guarantee that could not be confirmed says what may have kept the driver
+    # from confirming it, in the bus's terms and not a serial log's (#523).
+    assert_causes_are_about_the_bus(result["likely_causes"], LISTEN_ONLY_UNCONFIRMED_ERROR, result)
 
 
 def test_peak_refuses_when_the_driver_will_not_report_the_parameter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -539,6 +542,10 @@ def test_a_bridge_answering_a_non_boolean_listen_only_is_a_protocol_error(tmp_pa
 
     assert result["ok"] is False
     assert result["error_type"] == "can_adapter_protocol_unsupported"
+    # The bridge is part of the CAN path, so its protocol refusal names the
+    # bridge and the adapter rather than falling through to another transport's
+    # log (#523).
+    assert_causes_are_about_the_bus(result["likely_causes"], "can_adapter_protocol_unsupported", result)
 
 
 # --- A transmit on a listen-only bus ------------------------------------------
@@ -596,6 +603,10 @@ def test_can_send_refuses_by_name_on_a_listen_only_bus(tmp_path: Path, adapter: 
     # Both ways out are named in the refusal itself, not only in the catalogue.
     assert "second can_buses entry" in result["summary"]
     assert "listen_only: false" in result["summary"]
+    # And the causes say the same thing to a reader who arrives through
+    # `classify_last_error` instead: this is a bus declared to carry no
+    # transmit, not a serial port to go and read a log on (#523).
+    assert_causes_are_about_the_bus(result["likely_causes"], LISTEN_ONLY_MODE_ERROR, result)
     assert result["remediation"]
 
 

@@ -667,6 +667,11 @@ def test_listen_only_is_refused_on_a_virtual_interface_and_the_send_gate_answers
         assert sent["listen_only"] is True, sent
         assert sent["listen_only_enforcement"] == "link_verified", sent
         assert sent["side_effect_committed"] is False and sent["retry_safe"] is False, sent
+        # Over the real kernel too, the mode refusal names the bus and the entry
+        # that declared it rather than a serial or debugger log (#523).
+        mode_causes = sent["likely_causes"]
+        assert mode_causes and not any("COM port" in cause or "debugger" in cause for cause in mode_causes), sent
+        assert any("listen_only" in cause for cause in mode_causes), sent
         assert a_frame_at_the_far_end(peer, timeout_s=1.0) is None, "a refused send put a frame on the interface"
 
 
@@ -857,6 +862,11 @@ def test_an_interface_deleted_under_a_session_fails_the_read_and_quarantines_not
         assert failed["retry_safe"] is True, failed
         assert failed["quarantined"] is False, failed
         assert failed["lease_state"] == "active", failed
+        # The failed read carries causes about the interface it was reading, on
+        # the real kernel as in the fakes (#523).
+        read_causes = failed["likely_causes"]
+        assert read_causes and not any("COM port" in cause or "debugger" in cause for cause in read_causes), failed
+        assert any(("interface" in cause or "link" in cause or "adapter" in cause or "bus" in cause) for cause in read_causes), failed
 
         stopped = server.call("can_session_stop", {"bus_id": "bus"})
         assert stopped["ok"] is True and stopped["was_active"] is True, stopped
@@ -1163,6 +1173,11 @@ def test_a_receive_queue_that_never_empties_is_the_clear_limit_and_the_lease_is_
         assert refused["cleanup_confirmed"] is True, refused
         assert refused["lease_state"] == "released", refused
         assert refused["quarantined"] is False, refused
+        # The clear limit is a fact about the traffic on this bus, and says so
+        # rather than sending the reader to another transport's log (#523).
+        limit_causes = refused["likely_causes"]
+        assert limit_causes and not any("COM port" in cause or "debugger" in cause for cause in limit_causes), refused
+        assert any(("bus" in cause or "queue" in cause or "frames" in cause or "traffic" in cause) for cause in limit_causes), refused
         assert server.call("can_buses_list")["buses"]["bus"]["session_active"] is False
 
 

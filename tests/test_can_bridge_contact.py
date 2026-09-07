@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import write_config
+from test_can_likely_causes import assert_causes_are_about_the_bus
 
 from agentic_hil.can import CanBusService, ProcessCanAdapterSession, bridge_opened_before_failing, open_process_adapter
 from agentic_hil.config import load_config
@@ -105,6 +106,10 @@ def test_a_bridge_that_opened_then_answered_in_the_wrong_shape_does_not_claim_no
     assert "side_effect_committed" not in result
     assert result["cleanup_confirmed"] is True
     assert bridge.closed is True
+    # The refusal also says what may have caused it, about the bridge and the
+    # adapter it drives, rather than about whichever probe or COM port happens to
+    # be configured beside them (#523).
+    assert_causes_are_about_the_bus(result["likely_causes"], "can_adapter_protocol_unsupported", result)
 
 
 def test_a_bridge_on_the_wrong_protocol_version_does_not_claim_nothing_happened(
@@ -173,7 +178,11 @@ def test_an_unreadable_answer_to_open_is_not_read_as_never_started(
     )
 
     assert result["ok"] is False
+    assert result["error_type"] == "can_adapter_invalid_response"
     assert "side_effect_committed" not in result
+    # An unreadable answer is still a CAN failure, and its causes are about the
+    # bridge that gave it rather than about a serial or debug log (#523).
+    assert_causes_are_about_the_bus(result["likely_causes"], "can_adapter_invalid_response", result)
 
 
 # --- Where the bus provably was not touched, the report still says so ---------

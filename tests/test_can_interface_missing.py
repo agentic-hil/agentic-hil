@@ -174,6 +174,10 @@ def test_every_other_errno_keeps_the_markerless_result(tmp_path: Path, monkeypat
 
     assert result["error_type"] == "can_adapter_open_failed"
     assert "side_effect_status" not in result
+    # A failure that cannot say what it did to the bus can still say what may
+    # have caused it, and says it about the adapter rather than about a serial
+    # or debug log (#523).
+    assert_causes_are_about_the_bus(result["likely_causes"], "can_adapter_open_failed", result)
 
 
 def test_the_peak_adapter_is_left_alone(tmp_path: Path) -> None:
