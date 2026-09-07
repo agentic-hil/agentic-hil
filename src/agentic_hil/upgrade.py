@@ -3255,6 +3255,18 @@ def replace_installation(*, tool: str) -> JsonObject:
 # reporting a transient reason there would send a caller to close a run and come
 # back for a refusal that was waiting all along. The bench hold is last because
 # it is the only one of the three that changes by itself.
+#
+# None of them carries `restart_required` (#498). Each answers before anything
+# has read the process table, so none of them knows whether a server started out
+# of this installation is still running, and `false` there was read as "every
+# server is current" on exactly the machine where it is not: a server started
+# before an earlier upgrade goes on answering with that release whatever this
+# refusal did. The field is left off the way a table that could not be read
+# leaves it off, and the summaries gain nothing, because a sentence about a
+# question nobody put is not an answer either. This is a property of what each
+# refusal did rather than of the number of them: the refusal raised inside
+# `replace_installation` for a missing manager reads the table first and
+# therefore owes what the read found.
 
 
 def _upgrade_permission_denied(config: AgenticHILConfig) -> JsonObject:
@@ -3271,7 +3283,6 @@ def _upgrade_permission_denied(config: AgenticHILConfig) -> JsonObject:
         # scope the catalogue is looked up by below (round 1, finding 3).
         "permission": "permissions.allow_upgrade",
         "running_version": __version__,
-        "restart_required": False,
         "path": config.config_path,
         "workspace_root": config.workspace_root,
         **remediation_fields("permission_denied", "allow_upgrade"),
@@ -3329,7 +3340,6 @@ def _upgrade_cli_only_on_host() -> JsonObject:
         ),
         "platform": sys.platform,
         "running_version": __version__,
-        "restart_required": False,
         "upgrade_command": "agentic-hil upgrade",
         "installed_extras": list(_installed_extras()),
         **remediation_fields("upgrade_cli_only_on_host"),
@@ -3359,7 +3369,6 @@ def _upgrade_in_open_run(bench: JsonObject) -> JsonObject:
             "underneath them would move the rules during the run they govern, so nothing was changed."
         ),
         "running_version": __version__,
-        "restart_required": False,
         "held_devices": list(bench.get("held_devices") or []),
         "device_holds": list(bench.get("device_holds") or []),
         "owner_active": bool(bench.get("owner_active")),
