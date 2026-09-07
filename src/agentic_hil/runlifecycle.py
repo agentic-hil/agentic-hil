@@ -443,6 +443,28 @@ def prune_run_records(config: AgenticHILConfig) -> None:
     _sweep_orphaned_run_files(config, directory)
 
 
+def _prune_after_a_start_that_left_no_record(config: AgenticHILConfig) -> None:
+    """Prune from the one route that produces files nothing else will clear.
+
+    Every other prune on a bench is paid for by a registration, which happens
+    when a worker comes alive and writes its first record. A start that gives up
+    on a worker, or whose worker died before it could say anything, leaves a
+    stop and a log under a handle that never registers, and on a bench where
+    that is what keeps happening no registration ever comes: the sweep would
+    never run on the one bench that needs it. So the route that leaves those
+    files behind clears the ones the routes before it left.
+
+    What this start itself left is inside the window and stays; it is the
+    attempts old enough that nothing is coming for them that go. Refusals are
+    swallowed for the reason the prune swallows its own: this is housekeeping
+    after a failure that has already been decided, and it may not change the
+    answer the caller is about to be handed."""
+    try:
+        prune_run_records(config)
+    except (ConfigError, OSError):
+        return
+
+
 def _runs_directory_unwritable(config: AgenticHILConfig, handle: str, summary: str, error: BaseException, **named: str) -> ConfigError:
     """The refusal for a runs directory this process cannot write into.
 
@@ -719,6 +741,8 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
         if worker.poll() is not None and exited_at is None:
             exited_at = time.monotonic()
         if record is None and exited_at is not None and time.monotonic() - exited_at > WORKER_EXIT_GRACE_S:
+            output = worker_output(config, handle)
+            _prune_after_a_start_that_left_no_record(config)
             return {
                 "ok": False,
                 "tool": "test_reactor_start",
@@ -726,7 +750,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
                 "summary": "The detached run's worker process ended before it could say what it was doing.",
                 "run": handle,
                 "exit_code": worker.poll(),
-                "worker_output": worker_output(config, handle),
+                "worker_output": output,
                 "retry_safe": True,
                 "side_effect_committed": False,
             }
@@ -737,13 +761,15 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
             # and reach the board it ends at the first step boundary instead of
             # running the whole plan behind a caller told the start had failed.
             _plant_stop_after_unresponsive(config, handle)
+            output = worker_output(config, handle)
+            _prune_after_a_start_that_left_no_record(config)
             return {
                 "ok": False,
                 "tool": "test_reactor_start",
                 "error_type": "run_worker_unresponsive",
                 "summary": "The detached run's worker process did not say what it was doing within the startup window; a cooperative stop was left under its handle in case it is still alive.",
                 "run": handle,
-                "worker_output": worker_output(config, handle),
+                "worker_output": output,
                 "retry_safe": False,
                 "side_effect_committed": False,
             }

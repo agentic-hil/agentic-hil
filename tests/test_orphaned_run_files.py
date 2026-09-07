@@ -29,6 +29,8 @@ The decided behaviour, and what the tests here encode, one per line:
   lifecycle: it goes when the record goes and never before,
 * a record whose lock is held is a live run and neither it nor its files are
   touched however old they are,
+* the sweep is reached from the start command that gives up, because the bench
+  in the report never completes the registration every other prune hangs off,
 * the prune stays silent about what it removed, the way it is today,
 * and the orphan handle is not a run either side of the prune: status answers
   `run_not_found` before and after.
@@ -220,12 +222,12 @@ def test_an_orphan_is_pruned_with_the_runs_directory_under_the_record_cap(tmp_pa
 def test_the_orphan_threshold_follows_the_publish_window_constant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The age is read from the start command's own constant, not written down.
 
-    Both directions, because either one alone is satisfied by a number that
-    happens to sit on the right side of the ages this file plants. With the
-    window widened past any age here, a file the unpatched module would remove
-    stays; with the window narrowed, a file the unpatched module would keep
-    goes. Only a threshold computed from `worker_publish_window_s`, and so from
-    `WORKER_PUBLISH_TIMEOUT_S`, satisfies both.
+    Both directions over one file, because either alone is satisfied by a number
+    that happens to sit on the right side of the ages planted here. Widened past
+    that age the file stays, which no written down threshold below the widened
+    window can do; narrowed to seconds the same file goes, which none above it
+    can. Only a threshold computed from `worker_publish_window_s`, and so from
+    `WORKER_PUBLISH_TIMEOUT_S`, answers both ways without the file moving.
     """
     workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
     config = load_authoritative_config(workspace)
