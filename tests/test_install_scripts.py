@@ -4573,20 +4573,27 @@ _FETCH_ROUTE_TOOLS = ("mktemp", "rm", "cat", "head", "tr", "sed", "awk", "grep",
 
 
 def _real_tool(name: str) -> str | None:
-    """Where this host keeps `name`: on PATH, or, for the Perl `shasum`, beside the POSIX shell under `core_perl`.
+    """Where this host keeps `name`: beside the POSIX shell under `core_perl` for the Perl `shasum`, else on PATH.
 
     Git for Windows keeps its Perl scripts one directory down from the shell,
-    where its own PATH reaches them and the Python process's does not.
+    where its own PATH reaches them and the Python process's does not. On
+    Windows that copy comes first, before whatever PATH finds, because a
+    `shasum.bat` there (Strawberry Perl installs one, and the hosted Windows
+    runners carry it) is run by cmd.exe and starts `perl` by name, which cmd.exe
+    looks for on the PATH these tests hand the script, where the stand-in
+    `perl` is a shell script it cannot start. The script beside the shell names
+    its interpreter on its first line by a path the shell resolves itself. A
+    batch wrapper found anywhere is not a tool for these tests, for the same
+    reason.
     """
-    found = shutil.which(name)
-    if found is not None:
-        return found
-    shell = shutil.which("sh")
-    if shell is not None:
+    if os.name == "nt" and shutil.which("sh") is not None:
         beside = Path(_posix_shell()).parent / "core_perl" / name
         if beside.is_file():
             return str(beside)
-    return None
+    found = shutil.which(name)
+    if found is None or Path(found).suffix.lower() in {".bat", ".cmd"}:
+        return None
+    return found
 
 
 def _path_exposing_only(tmp_path: Path, hashing_tool: str) -> Path:
