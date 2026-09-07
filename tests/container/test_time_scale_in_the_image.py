@@ -31,6 +31,12 @@ pytestmark = [pytest.mark.container, CONTAINER_ONLY]
 # tier holds rather than a round example: the hanging-debugger call ceiling in
 # test_debugger_processes_against_openocd.py and the probeless pyOCD bound in
 # test_pyocd_without_a_probe.py, which is half of a configured 40 s timeout.
+#
+# Copies, and deliberately not imports: this file has to be readable inside the
+# image with nothing but the helper. That they are still the tier's numbers is
+# somebody else's claim, and it is made in tests/test_scaled_time_bounds.py,
+# whose BASE_CONSTANTS map pins `CALL_CEILING_S = 15.0` and `TIMEOUT_S = 40` in
+# the two files that state them.
 CALL_CEILING_S = 15.0
 PROBELESS_PYOCD_BOUND_S = 20.0
 
