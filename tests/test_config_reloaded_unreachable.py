@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import subprocess
 import sys
 from dataclasses import replace
@@ -242,15 +243,51 @@ def attribute_call_sites(owner_attribute: str, method: str) -> set[tuple[str, st
     return sites
 
 
-def method_call_sites(method: str) -> set[tuple[str, str]]:
-    """Where the shipped source calls ``<something>.<method>()``, whatever holds it."""
-    sites: set[tuple[str, str]] = set()
+BARE_CALL = "<bare name>"
+
+
+def call_sites(method: str) -> set[tuple[str, str, str]]:
+    """Every call of ``<method>()`` in the shipped source, named by its receiver.
+
+    Deliberately wider than a search for one owner attribute. A caller written
+    as
+
+        service = self.com_ports
+        service.reconfigure(config)
+
+    or as a helper taking a `ComPortService` parameter is exactly the caller a
+    later refactor produces, and exactly the one that could reach the loops with
+    a session open, so it has to be seen here rather than pass unnoticed because
+    the receiver is not spelled `self.com_ports`. Each site is (module,
+    enclosing function, receiver source); a call on a bare name carries
+    `BARE_CALL` instead of a receiver."""
+    sites: set[tuple[str, str, str]] = set()
     for path in source_modules():
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        relative = path.relative_to(REPOSITORY_ROOT).as_posix()
         for enclosing, node in nodes_with_owner(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == method:
-                sites.add((path.relative_to(REPOSITORY_ROOT).as_posix(), enclosing))
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr == method:
+                sites.add((relative, enclosing, ast.unparse(node.func.value)))
+            elif isinstance(node.func, ast.Name) and node.func.id == method:
+                sites.add((relative, enclosing, BARE_CALL))
     return sites
+
+
+# Every `reconfigure` call the shipped source makes today, and what each one is.
+# Written out rather than counted, so a new one has to be classified here before
+# the suite goes green again: a caller of the two service methods is a caller
+# that could reach the loops with a session open, and a caller of anything else
+# named `reconfigure` still has to be looked at once to see which it is.
+RECONFIGURE_CALL_SITES: dict[tuple[str, str, str], str] = {
+    ("src/agentic_hil/tools.py", "_swap_config", "self.coordinator"): "the coordinator takes the new configuration",
+    ("src/agentic_hil/tools.py", "_swap_config", "self.backend"): "the debugger backend, on the branch where its kind did not move",
+    ("src/agentic_hil/tools.py", "_swap_config", "self.artifacts"): "the artifact service",
+    ("src/agentic_hil/tools.py", "_swap_config", "self.com_ports"): "the COM loop that would write the stop reason",
+    ("src/agentic_hil/tools.py", "_swap_config", "self.can_buses"): "the CAN loop that would write the stop reason",
+    ("src/agentic_hil/stdio.py", "utf8_reply_stream", BARE_CALL): "a text stream pinning its own codec, nothing to do with the config swap",
+}
 
 
 def function_in(path: Path, name: str) -> ast.FunctionDef:
@@ -267,6 +304,16 @@ def test_the_two_reconfigure_calls_live_only_in_the_config_swap() -> None:
     the package is a caller that could reach the loops with a session open, and
     it fails here rather than being found in a session log that was not supposed
     to be able to carry this line."""
+    found = call_sites("reconfigure")
+    expected = set(RECONFIGURE_CALL_SITES)
+    assert found == expected, (
+        f"the shipped source grew or lost a `reconfigure` call. Added: {sorted(found - expected)}. "
+        f"Gone: {sorted(expected - found)}. A new one on a COM or CAN service is a caller that could "
+        f"reach the loops with a session open, and has to be classified in RECONFIGURE_CALL_SITES."
+    )
+    assert all(reason.strip() for reason in RECONFIGURE_CALL_SITES.values()), "every allowed call site has to say what it is"
+    # And the two narrow assertions as well, so a failure says which of the two
+    # methods is the one that grew a caller.
     assert attribute_call_sites("com_ports", "reconfigure") == {("src/agentic_hil/tools.py", "_swap_config")}
     assert attribute_call_sites("can_buses", "reconfigure") == {("src/agentic_hil/tools.py", "_swap_config")}
     # And the methods those two lines reach are the ones carrying the loops, so a
@@ -286,36 +333,73 @@ def test_the_two_reconfigure_calls_live_only_in_the_config_swap() -> None:
         assert len(stops) == 1, f"{service_class}.reconfigure writes {STOP_REASON} {len(stops)} time(s)"
 
 
+def reconfigure_prose(module: str, service_class: str) -> str:
+    """Everything written about `reconfigure`, comments above the `def` included.
+
+    The window runs from the end of the previous member of the class body (or
+    from the `class` line, when `reconfigure` is the first member) through the
+    end of the method, so a comment attached above the `def`, a decorator, the
+    docstring and the body are all inside it. Taking it from
+    `FunctionDef.lineno` instead would start at the `def` line, and the claim
+    under test could be satisfied by moving three comment lines one line up
+    while the sentence a reader acts on still stood in the file."""
+    path = SOURCE_ROOT / module
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == service_class]
+    assert len(classes) == 1, f"{module} holds {len(classes)} definitions of {service_class}"
+    body = classes[0].body
+    positions = [index for index, node in enumerate(body) if isinstance(node, ast.FunctionDef) and node.name == "reconfigure"]
+    assert len(positions) == 1, f"{service_class} holds {len(positions)} reconfigure methods"
+    index = positions[0]
+    start = body[index - 1].end_lineno if index else classes[0].lineno
+    return "\n".join(source.split("\n")[start : body[index].end_lineno])
+
+
+# The claim the issue asks to be withdrawn, in the words the tree carries today.
+# Kept as a literal beside the sentence rule below, because a colon can hold a
+# negation in the same sentence as the claim and the sentence rule alone would
+# then let it stand.
+WITHDRAWN_CLAIM = "also covers a revoked grant"
+
+# Words that turn a mention of revocation into a statement about what a reload
+# does not do. The correct explanation names revocation and denies it, so the
+# vocabulary is not what is banned here; an unqualified claim is.
+NEGATIONS = ("no ", "not ", "never", "nothing", "cannot", "n't")
+
+
 def test_the_two_loops_say_why_they_are_unreachable_and_why_they_stay() -> None:
     """The writing around the loops, held to the same standard as the loops.
 
     Pinned on the claims rather than on the phrasing, because a claim is what a
-    reader acts on. Three of them, one per assertion:
+    reader acts on. Four of them, one per assertion:
 
     * a reload re-reads no permission at all, so the comparison cannot catch a
-      revoked grant, and the comment may not say that it does;
+      revoked grant, and the comment may not claim that it does. Saying so and
+      denying it is allowed and is the useful sentence to leave behind, so what
+      the assertion forbids is an unqualified mention, not the word;
     * the stop is unreachable for as long as an open hold refuses the reload,
       and the refusal has a name, so the reader can follow it;
     * the loops stay because they are what keeps a held device name meaning the
       same board if that refusal is ever narrowed.
     """
     for module, service_class in (("comports.py", "ComPortService"), ("can.py", "CanBusService")):
-        path = SOURCE_ROOT / module
-        source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == service_class]
-        assert len(classes) == 1, f"{module} holds {len(classes)} definitions of {service_class}"
-        method = [node for node in classes[0].body if isinstance(node, ast.FunctionDef) and node.name == "reconfigure"]
-        assert len(method) == 1, f"{service_class} holds {len(method)} reconfigure methods"
-        lines = source.split("\n")
-        # From the decorator or def line to the end of the body, so a comment
-        # above the loop, a docstring, or both are all read.
-        prose = "\n".join(lines[method[0].lineno - 1 : method[0].end_lineno])
+        prose = reconfigure_prose(module, service_class)
+        # Comment markers out, so a claim that wraps across two comment lines is
+        # one string here and not two halves with a `#` between them.
+        normalised = " ".join(prose.replace("#", " ").lower().split())
 
-        assert "revoke" not in prose.lower(), f"{module}: {service_class}.reconfigure still claims the comparison catches a revoked grant"
-        assert "unreachable" in prose.lower(), f"{module}: {service_class}.reconfigure does not say the stop is unreachable"
+        assert WITHDRAWN_CLAIM not in normalised, f"{module}: {service_class}.reconfigure still claims the comparison covers a revoked grant"
+        for sentence in re.split(r"[.;:]", normalised):
+            if "revok" in sentence:
+                assert any(word in sentence for word in NEGATIONS), (
+                    f"{module}: {service_class}.reconfigure names revocation without denying it, in "
+                    f"'{sentence.strip()}'. A reload revokes nothing, so a sentence about revocation "
+                    f"here has to say so rather than leave the comparison looking like a permission check."
+                )
+        assert "unreachable" in normalised, f"{module}: {service_class}.reconfigure does not say the stop is unreachable"
         assert "config_reload_in_open_run" in prose, f"{module}: {service_class}.reconfigure does not name the refusal that makes it unreachable"
-        assert "narrow" in prose.lower(), f"{module}: {service_class}.reconfigure does not say why the loop stays if the refusal is narrowed"
+        assert "narrow" in normalised, f"{module}: {service_class}.reconfigure does not say why the loop stays if the refusal is narrowed"
 
 
 def test_the_config_swap_runs_only_on_the_path_the_reload_agreed_to() -> None:
@@ -325,7 +409,7 @@ def test_the_config_swap_runs_only_on_the_path_the_reload_agreed_to() -> None:
     covers them for as long as nothing else calls the swap and nothing reaches
     the swap past the refusal."""
     tools_py = SOURCE_ROOT / "tools.py"
-    assert method_call_sites("_swap_config") == {("src/agentic_hil/tools.py", "reload_description")}
+    assert call_sites("_swap_config") == {("src/agentic_hil/tools.py", "reload_description", "self")}
 
     body = function_in(tools_py, "reload_description").body
     swaps = [
@@ -353,9 +437,27 @@ def test_the_config_swap_runs_only_on_the_path_the_reload_agreed_to() -> None:
     keywords = {keyword.arg for keyword in decisions[0].value.keywords}
     assert "open_holds" in keywords, "the reload decision is taken without being told what is held"
 
-    # And the statement immediately before the swap is the refusal returning.
+    # And the statement immediately before the swap is that decision refusing,
+    # tied to the decision by name rather than merely being an early return: an
+    # unrelated `if ...: return` in the same place would leave the swap running
+    # on a refusal, and the shape alone cannot tell the two apart.
+    assigned = decisions[0].targets[0]
+    elements = assigned.elts if isinstance(assigned, ast.Tuple) else [assigned]
+    assert isinstance(elements[0], ast.Name), "the reload decision does not assign its new configuration to a plain name"
+    decided = elements[0].id
+
     guard = body[index - 1]
     assert isinstance(guard, ast.If), "the configuration swap is not guarded by the refusal"
+    test = guard.test
+    assert isinstance(test, ast.Compare), f"the guard in front of the swap is not a comparison: {ast.unparse(test)}"
+    assert isinstance(test.left, ast.Name) and test.left.id == decided, (
+        f"the guard in front of the swap tests {ast.unparse(test)} and not the {decided} the reload decision assigned"
+    )
+    assert len(test.ops) == 1 and isinstance(test.ops[0], ast.Is), f"the guard in front of the swap is not an identity test: {ast.unparse(test)}"
+    assert len(test.comparators) == 1, f"the guard in front of the swap compares more than two things: {ast.unparse(test)}"
+    assert isinstance(test.comparators[0], ast.Constant) and test.comparators[0].value is None, (
+        f"the guard in front of the swap does not check for the refusal's None: {ast.unparse(test)}"
+    )
     assert all(isinstance(statement, ast.Return) for statement in guard.body), "the guard in front of the swap does not return"
     assert not guard.orelse, "the guard in front of the swap has an else branch"
 
@@ -425,6 +527,56 @@ def test_a_reload_while_a_can_session_is_open_is_refused_and_swaps_nothing(tmp_p
 
         assert tools.call("can_session_stop", {"bus_id": BUS_ID})["ok"] is True
         assert tools.call(PROJECT_CONFIG_RELOAD)["ok"] is True
+        assert sorted(tools.config.can_buses) == ["renamed_bus"], sorted(tools.config.can_buses)
+    finally:
+        tools.close()
+
+
+def test_a_reload_with_a_com_and_a_can_session_open_is_refused_for_both(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two sessions, two loops, one refusal.
+
+    The case where a partial fix shows: a swap that reached one service and not
+    the other would leave one session stopped and the other running, and that is
+    only visible with both open at once. Nothing may move here, on either side,
+    and both leases have to be named as what refused it."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    holds = Holds()
+    install_fake_serial(monkeypatch, holds)
+    install_fake_can(monkeypatch, holds)
+    tools = service(workspace)
+    holds.service = tools
+    try:
+        assert tools.call("com_session_start", {"port_id": PORT_ID})["ok"] is True
+        assert tools.call("can_session_start", {"bus_id": BUS_ID})["ok"] is True
+        com_session = tools.com_ports.sessions[PORT_ID]
+        can_session = tools.can_buses.sessions[BUS_ID]
+        rename_the_uart(path)
+        rename_the_bus(path)
+
+        refused = tools.call(PROJECT_CONFIG_RELOAD)
+
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == RELOAD_IN_OPEN_RUN_ERROR, refused
+        assert refused["side_effect_committed"] is False, refused
+        assert sorted(refused["open_holds"]["open_leases"]) == sorted([com_session.lease.lease_id, can_session.lease.lease_id]), refused
+        assert sorted(tools.config.com_ports) == [PORT_ID], sorted(tools.config.com_ports)
+        assert sorted(tools.config.can_buses) == [BUS_ID], sorted(tools.config.can_buses)
+        assert tools.com_ports.sessions[PORT_ID] is com_session
+        assert tools.can_buses.sessions[BUS_ID] is can_session
+        assert com_session.active is True and can_session.active is True
+        assert all(line.get("reason") != STOP_REASON for line in audit_lines(com_session.log_path)), audit_lines(com_session.log_path)
+        assert all(line.get("reason") != STOP_REASON for line in audit_lines(can_session.log_path)), audit_lines(can_session.log_path)
+
+        # One of the two closed is still a hold, so it is still refused.
+        assert tools.call("com_session_stop", {"port_id": PORT_ID})["ok"] is True
+        still_refused = tools.call(PROJECT_CONFIG_RELOAD)
+        assert still_refused["ok"] is False, still_refused
+        assert still_refused["error_type"] == RELOAD_IN_OPEN_RUN_ERROR, still_refused
+        assert still_refused["open_holds"]["open_leases"] == [can_session.lease.lease_id], still_refused
+
+        assert tools.call("can_session_stop", {"bus_id": BUS_ID})["ok"] is True
+        assert tools.call(PROJECT_CONFIG_RELOAD)["ok"] is True
+        assert sorted(tools.config.com_ports) == ["renamed_uart"], sorted(tools.config.com_ports)
         assert sorted(tools.config.can_buses) == ["renamed_bus"], sorted(tools.config.can_buses)
     finally:
         tools.close()
@@ -501,6 +653,69 @@ def test_a_can_session_holds_its_lease_from_before_the_open_until_after_the_rele
         tools.close()
 
 
+def failing_record_writer(tools: AgenticHILToolService, switch: dict[str, bool]):
+    """The coordinator's record write, refusing to record a release.
+
+    The same injection tests/test_coordination.py uses to make a release fail,
+    aimed here at the state that ends a hold. `switch` is what turns it off
+    again, so the lease can be released for real before the service closes."""
+    original = type(tools.coordinator)._write_record.__get__(tools.coordinator)
+
+    def wrapper(resource: str, record: dict) -> None:
+        if switch["failing"] and record.get("state") == "released":
+            raise OSError("injected write fault")
+        original(resource, record)
+
+    return wrapper
+
+
+def test_a_session_whose_release_did_not_confirm_goes_on_refusing_the_reload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The window has no hole on the unclean path either.
+
+    The coordinator drops a lease only on a fully clean release, so a session
+    whose release did not confirm keeps its lease registered. The two tests
+    above walk the clean path; this is the one where a stop has already been
+    attempted, which is the moment a reader would expect the hold to be over.
+    It is not, and the reload is refused for exactly as long as it is not."""
+    workspace, path = bench(tmp_path, monkeypatch)
+    holds = Holds()
+    install_fake_serial(monkeypatch, holds)
+    tools = service(workspace)
+    holds.service = tools
+    switch = {"failing": True}
+    try:
+        assert tools.call("com_session_start", {"port_id": PORT_ID})["ok"] is True
+        session = tools.com_ports.sessions[PORT_ID]
+        rename_the_uart(path)
+        monkeypatch.setattr(tools.coordinator, "_write_record", failing_record_writer(tools, switch))
+
+        stopped = tools.call("com_session_stop", {"port_id": PORT_ID})
+        assert stopped["ok"] is False, stopped
+        assert session.lease.valid is True, "the lease was dropped on a release that did not confirm"
+        assert session.lease.lease_id in tools.coordinator.leases, sorted(tools.coordinator.leases)
+
+        held = tools.open_hardware_holds()
+        assert held is not None and held["open_leases"] == [session.lease.lease_id], held
+        refused = tools.call(PROJECT_CONFIG_RELOAD)
+        assert refused["ok"] is False, refused
+        assert refused["error_type"] == RELOAD_IN_OPEN_RUN_ERROR, refused
+        assert refused["side_effect_committed"] is False, refused
+        assert refused["open_holds"]["open_leases"] == [session.lease.lease_id], refused
+        assert sorted(tools.config.com_ports) == [PORT_ID], sorted(tools.config.com_ports)
+        assert sorted(tools.com_ports.config.com_ports) == [PORT_ID], sorted(tools.com_ports.config.com_ports)
+
+        # And once the release does confirm, the hold ends and the same call goes
+        # through: the refusal followed the lease, not the stop attempt.
+        switch["failing"] = False
+        assert tools.call("com_session_stop", {"port_id": PORT_ID})["ok"] is True
+        assert tools.open_hardware_holds() is None, tools.open_hardware_holds()
+        assert tools.call(PROJECT_CONFIG_RELOAD)["ok"] is True
+        assert sorted(tools.config.com_ports) == ["renamed_uart"], sorted(tools.config.com_ports)
+    finally:
+        switch["failing"] = False
+        tools.close()
+
+
 # ---------------------------------------------------------------------------
 # 4. Nobody is told to expect it.
 
@@ -514,10 +729,14 @@ ALLOWED_TO_NAME_IT: dict[str, str] = {
     "tests/test_config_reloaded_unreachable.py": "this file, which cannot check for a string without spelling it",
 }
 
-# The changelog is out of the walk rather than allowlisted. It records what the
-# tree did, including the name of a symbol whose comment moved, and a line in it
-# is not a document telling a reader that a stop reason will arrive in a log.
-NOT_WALKED = ("CHANGELOG.md",)
+# The changelog is walked like everything else, but line by line rather than as
+# a whole file. It records what the tree did, and naming a symbol whose comment
+# moved is a legitimate thing for it to do; telling a reader that the stop can
+# now arrive, be reached, or turn up in a log is not, for as long as it cannot.
+# Exempting the file instead would exempt exactly the bullet this test exists to
+# notice.
+CHANGELOG = "CHANGELOG.md"
+CHANGELOG_PROMISE_WORDS = ("log", "reach", "observ", "arriv", "written", "writes", "emit")
 
 
 def tracked_files() -> list[str]:
@@ -554,13 +773,19 @@ def test_the_stop_reason_is_written_down_in_no_tracked_file() -> None:
     """
     carriers: dict[str, list[int]] = {}
     for relative in tracked_files():
-        if relative in NOT_WALKED or relative in ALLOWED_TO_NAME_IT:
+        if relative in ALLOWED_TO_NAME_IT:
             continue
         try:
             text = (REPOSITORY_ROOT / relative).read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-        lines = [number for number, line in enumerate(text.split("\n"), 1) if STOP_REASON in line]
+        lines = []
+        for number, line in enumerate(text.split("\n"), 1):
+            if STOP_REASON not in line:
+                continue
+            if relative == CHANGELOG and not any(word in line.lower() for word in CHANGELOG_PROMISE_WORDS):
+                continue
+            lines.append(number)
         if lines:
             carriers[relative] = lines
 
@@ -568,7 +793,9 @@ def test_the_stop_reason_is_written_down_in_no_tracked_file() -> None:
         f"{STOP_REASON} is a stop reason nothing can reach, and it now appears in "
         f"{sorted(carriers)}. Either the reload was narrowed so that it can be "
         f"written, in which case say so where the reader of a session log will "
-        f"look, or the mention is a promise the product does not keep."
+        f"look, or the mention is a promise the product does not keep. In "
+        f"{CHANGELOG} a line may name the symbol; what it may not do is say the "
+        f"stop can arrive, be reached, or turn up in a log."
     )
 
 
@@ -613,7 +840,6 @@ def test_the_com_loop_still_stops_a_session_whose_entry_moved(tmp_path: Path, mo
     install_fake_serial(monkeypatch, holds)
     tools = service(workspace)
     holds.service = tools
-    session = None
     try:
         assert tools.call("com_session_start", {"port_id": PORT_ID})["ok"] is True
         session = tools.com_ports.sessions[PORT_ID]
@@ -625,9 +851,11 @@ def test_the_com_loop_still_stops_a_session_whose_entry_moved(tmp_path: Path, mo
         last = audit_lines(session.log_path)[-1]
         assert last["event"] == "stop", last
         assert last["reason"] == STOP_REASON, last
+        # Checked rather than asserted by calling release: the stop is what has
+        # to have released the lease, and a stop that quietly did not would
+        # otherwise be papered over by a release call in a finally block.
+        assert tools.open_hardware_holds() is None, tools.open_hardware_holds()
     finally:
-        if session is not None:
-            session.lease.release()
         tools.close()
 
 
@@ -637,7 +865,6 @@ def test_the_can_loop_still_stops_a_session_whose_entry_moved(tmp_path: Path, mo
     install_fake_can(monkeypatch, holds)
     tools = service(workspace)
     holds.service = tools
-    session = None
     try:
         assert tools.call("can_session_start", {"bus_id": BUS_ID})["ok"] is True
         session = tools.can_buses.sessions[BUS_ID]
@@ -649,9 +876,121 @@ def test_the_can_loop_still_stops_a_session_whose_entry_moved(tmp_path: Path, mo
         last = audit_lines(session.log_path)[-1]
         assert last["event"] == "stop", last
         assert last["reason"] == STOP_REASON, last
+        assert tools.open_hardware_holds() is None, tools.open_hardware_holds()
     finally:
-        if session is not None:
-            session.lease.release()
+        tools.close()
+
+
+def test_the_com_loop_still_stops_a_session_whose_entry_changed_a_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of the comparison: the entry stays, the description moves.
+
+    The issue says the comparison can only ever differ on a description field or
+    on the entry disappearing. The disappearing half is pinned above; this is
+    the field half, and it is the half a real reload would produce most often."""
+    workspace, _ = bench(tmp_path, monkeypatch)
+    holds = Holds()
+    install_fake_serial(monkeypatch, holds)
+    tools = service(workspace)
+    holds.service = tools
+    try:
+        assert tools.call("com_session_start", {"port_id": PORT_ID})["ok"] is True
+        session = tools.com_ports.sessions[PORT_ID]
+        assert session.port_config.baudrate == 115200, session.port_config.baudrate
+
+        moved = replace(session.port_config, baudrate=9600)
+        tools.com_ports.reconfigure(replace(tools.config, com_ports={PORT_ID: moved}))
+
+        assert PORT_ID not in tools.com_ports.sessions, sorted(tools.com_ports.sessions)
+        assert session.active is False
+        last = audit_lines(session.log_path)[-1]
+        assert last["event"] == "stop", last
+        assert last["reason"] == STOP_REASON, last
+        assert tools.open_hardware_holds() is None, tools.open_hardware_holds()
+    finally:
+        tools.close()
+
+
+def test_the_can_loop_still_stops_a_session_whose_entry_changed_a_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, _ = bench(tmp_path, monkeypatch)
+    holds = Holds()
+    install_fake_can(monkeypatch, holds)
+    tools = service(workspace)
+    holds.service = tools
+    try:
+        assert tools.call("can_session_start", {"bus_id": BUS_ID})["ok"] is True
+        session = tools.can_buses.sessions[BUS_ID]
+        assert session.bus_config.channel == CHANNEL, session.bus_config.channel
+
+        moved = replace(session.bus_config, channel=f"{CHANNEL}b")
+        tools.can_buses.reconfigure(replace(tools.config, can_buses={BUS_ID: moved}))
+
+        assert BUS_ID not in tools.can_buses.sessions, sorted(tools.can_buses.sessions)
+        assert session.active is False
+        last = audit_lines(session.log_path)[-1]
+        assert last["event"] == "stop", last
+        assert last["reason"] == STOP_REASON, last
+        assert tools.open_hardware_holds() is None, tools.open_hardware_holds()
+    finally:
+        tools.close()
+
+
+def test_the_com_loop_leaves_a_session_whose_entry_did_not_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The negative the guard exists for, and the neighbour a fix must not break.
+
+    Without this, deleting the comparison and stopping every session
+    unconditionally passes every other test in this file: the refusal tests never
+    reach the loop, and the tests above hand it a configuration the entry is
+    gone from. The configuration here is a different object carrying an equal
+    entry, so what is pinned is that the loop compares values and not identity."""
+    workspace, _ = bench(tmp_path, monkeypatch)
+    holds = Holds()
+    install_fake_serial(monkeypatch, holds)
+    tools = service(workspace)
+    holds.service = tools
+    try:
+        assert tools.call("com_session_start", {"port_id": PORT_ID})["ok"] is True
+        session = tools.com_ports.sessions[PORT_ID]
+        unchanged = replace(tools.config, com_ports=dict(tools.config.com_ports))
+        assert unchanged is not tools.config
+
+        tools.com_ports.reconfigure(unchanged)
+
+        assert tools.com_ports.sessions.get(PORT_ID) is session, sorted(tools.com_ports.sessions)
+        assert session.active is True
+        assert all(line.get("event") != "stop" for line in audit_lines(session.log_path)), audit_lines(session.log_path)
+        assert tools.call("com_ports_list")["ports"][PORT_ID]["session_active"] is True
+        # And the session still holds what refuses the reload.
+        held = tools.open_hardware_holds()
+        assert held is not None and held["open_leases"] == [session.lease.lease_id], held
+
+        assert tools.call("com_session_stop", {"port_id": PORT_ID})["ok"] is True
+    finally:
+        tools.close()
+
+
+def test_the_can_loop_leaves_a_session_whose_entry_did_not_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, _ = bench(tmp_path, monkeypatch)
+    holds = Holds()
+    install_fake_can(monkeypatch, holds)
+    tools = service(workspace)
+    holds.service = tools
+    try:
+        assert tools.call("can_session_start", {"bus_id": BUS_ID})["ok"] is True
+        session = tools.can_buses.sessions[BUS_ID]
+        unchanged = replace(tools.config, can_buses=dict(tools.config.can_buses))
+        assert unchanged is not tools.config
+
+        tools.can_buses.reconfigure(unchanged)
+
+        assert tools.can_buses.sessions.get(BUS_ID) is session, sorted(tools.can_buses.sessions)
+        assert session.active is True
+        assert all(line.get("event") != "stop" for line in audit_lines(session.log_path)), audit_lines(session.log_path)
+        assert tools.call("can_buses_list")["buses"][BUS_ID]["session_active"] is True
+        held = tools.open_hardware_holds()
+        assert held is not None and held["open_leases"] == [session.lease.lease_id], held
+
+        assert tools.call("can_session_stop", {"bus_id": BUS_ID})["ok"] is True
+    finally:
         tools.close()
 
 
