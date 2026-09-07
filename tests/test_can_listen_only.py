@@ -223,6 +223,7 @@ def test_socketcan_refuses_when_ctrlmode_is_absent(tmp_path: Path, monkeypatch: 
 
     assert result["ok"] is False
     assert result["error_type"] == LISTEN_ONLY_UNSUPPORTED_ERROR
+    assert_causes_are_about_the_bus(result["likely_causes"], LISTEN_ONLY_UNSUPPORTED_ERROR, result)
 
 
 def test_socketcan_refuses_on_a_virtual_interface(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -447,6 +448,10 @@ def test_peak_refuses_before_contact_when_python_can_has_no_passive_state(tmp_pa
     assert result["error_type"] == LISTEN_ONLY_UNSUPPORTED_ERROR
     assert result["side_effect_committed"] is False
     assert result["retry_safe"] is True
+    # The second refusal site for this type, reached with no `can.BusState`
+    # at all rather than through a link reading, and it names the same kind of
+    # cause (#517): one error type, one answer, whichever branch produced it.
+    assert_causes_are_about_the_bus(result["likely_causes"], LISTEN_ONLY_UNSUPPORTED_ERROR, result)
 
 
 def test_peak_without_listen_only_asks_for_no_bus_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

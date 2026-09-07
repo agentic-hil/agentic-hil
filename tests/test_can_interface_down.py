@@ -618,7 +618,9 @@ def test_a_link_that_goes_down_under_a_session_keeps_the_send_answer(tmp_path: P
         assert "interface_state" not in failed, failed
         # The send failure carries causes of its own about the bus (#517).
         # Asserted inline rather than through the shared helper in
-        # `test_can_likely_causes`, which imports this module's fixtures.
+        # `test_can_likely_causes`, because importing it here would close a
+        # cycle: this module imports `test_can_listen_only`, which imports
+        # `test_can_likely_causes`.
         send_causes = failed["likely_causes"]
         assert send_causes and not any("COM port" in cause or "debugger" in cause for cause in send_causes), failed
         assert any(("bus" in cause or "adapter" in cause or "interface" in cause or "node" in cause) for cause in send_causes), failed

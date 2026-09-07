@@ -155,6 +155,10 @@ def test_a_bare_oserror_carrying_enodev_is_classified_the_same_way(tmp_path: Pat
     result = open_python_can_adapter(config, BUS_ID, config.can_buses[BUS_ID], False)
 
     assert result["error_type"] == CAN_INTERFACE_NOT_FOUND_ERROR
+    # "The same way" includes the causes: the pair exists to prove the two paths
+    # answer alike, and an answer that named the interface on one of them only
+    # would be a difference the operator sees (#517).
+    assert_causes_are_about_the_bus(result["likely_causes"], CAN_INTERFACE_NOT_FOUND_ERROR, result)
 
 
 @pytest.mark.parametrize("number", [errno.ENETDOWN, errno.EPERM, errno.ENXIO])

@@ -64,7 +64,10 @@ DOWN_CHANNEL = "can517down"
 # Recorded inside the container image on 2026-09-06 for #511 (kernel 6.18 under
 # WSL2, iproute2-6.15.0, python-can 4.6.1, Python 3.12.14) and carried here
 # verbatim: a down vcan's `flags` and `operstate`. IFF_UP is bit 0; 0x80 is
-# IFF_NOARP, which a vcan carries whatever its state.
+# IFF_NOARP, which a vcan carries whatever its state. Copies of
+# `tests/test_can_interface_down.py`'s constants of the same names rather than
+# imports of them, because importing that module here would close a cycle: it
+# imports `test_can_listen_only`, which imports this module.
 RECORDED_DOWN_FLAGS = "0x80\n"
 RECORDED_DOWN_OPERSTATE = "down\n"
 
@@ -142,6 +145,43 @@ TYPE_ANCHORS = {
 
 DEBUGGER_TYPES = ["openocd", "stlink", "pyocd"]
 
+# One debugger cause list per backend, verbatim from each backend's own table, so
+# that a rewrite of the debugger causes is caught here rather than passing as
+# "still not about a bus". `target_not_detected` because all three answer it and
+# all three word it differently.
+DEBUGGER_TARGET_NOT_DETECTED = {
+    "openocd": ["DUT is not powered", "wrong interface configuration", "SWD/JTAG wiring issue", "debug probe already in use"],
+    "stlink": ["DUT is not powered", "wrong SWD/JTAG interface selection", "SWD/JTAG wiring issue", "debug probe already in use"],
+    "pyocd": ["DUT is not powered", "SWD/JTAG wiring issue", "debug probe already in use", "wrong debuggers.<name>.target_type for this device"],
+}
+
+# The CAN error types `agentic_hil.can` writes that this issue does not name. The
+# table is keyed by the seven above and not by the `can_` prefix, so these keep
+# answering whichever generic table the classifier was handed. Recorded because
+# the difference between the two keyings is invisible to every other test here,
+# and widening the table later is a decision somebody should take on purpose.
+CAN_ERROR_TYPES_OUTSIDE_THE_TABLE = [
+    "can_listen_only_mode",
+    "can_listen_only_unconfirmed",
+    "can_queue_clear_limit",
+    "can_read_failed",
+    "can_adapter_open_failed",
+    "can_adapter_close_failed",
+    "can_adapter_not_found",
+    "can_adapter_process_start_failed",
+    "can_adapter_invalid_response",
+    "can_adapter_protocol_unsupported",
+    "can_backend_not_available",
+    "can_bus_not_configured",
+    "can_fd_remote_frame_unsupported",
+    "can_classic_frame_too_large",
+    "can_fd_frame_length_invalid",
+]
+
+# Distinctive by design, as above: a bus whose receive queue refuses to drain.
+QUEUE_BUS_ID = "likely_causes_queue_bus"
+QUEUE_CHANNEL = "can517queue"
+
 
 def says_any(text: str, words: tuple[str, ...]) -> bool:
     return any(re.search(rf"(?<![a-z]){re.escape(word)}(?![a-z])", text.lower()) for word in words)
@@ -191,6 +231,39 @@ def publish_down_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (root / "flags").write_text(RECORDED_DOWN_FLAGS, encoding="utf-8")
     (root / "operstate").write_text(RECORDED_DOWN_OPERSTATE, encoding="utf-8")
     monkeypatch.setattr(can_module_under_test, "SYSFS_NET_CLASS", str(root.parent))
+
+
+def queue_bus_config(tmp_path: Path):
+    yaml = "".join(
+        [
+            "can_buses:\n",
+            f"  {QUEUE_BUS_ID}:\n",
+            '    adapter: "socketcan"\n',
+            f'    channel: "{QUEUE_CHANNEL}"\n',
+            "    max_buffer_frames: 2\n",
+        ]
+    )
+    return load_config(str(write_config(tmp_path, can_buses_yaml=yaml)))
+
+
+class RefusingDrainAdapter:
+    """An adapter session whose receive queue will not drain: `read` refuses.
+
+    Enough of the adapter-session surface for `CanBusService` to drive it, the
+    way `tests/test_hardening.py` drives the drain limit with a queue that never
+    empties. Nothing is opened and no bus exists.
+    """
+
+    adapter_name = "fake"
+
+    def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+        return {"ok": False, "error_type": "can_read_failed", "summary": "CAN adapter failed to read frames.", "backend_error": "staged drain failure"}
+
+    def status(self) -> dict:
+        return {"active": True}
+
+    def close(self) -> dict:
+        return {"ok": True, "safe_state_confirmed": True, "process_reaped": True}
 
 
 def assert_causes_are_about_the_bus(causes: object, error_type: str, context: object) -> None:
@@ -295,6 +368,47 @@ def test_the_table_answers_the_interface_down_causes_the_refusal_carries(tmp_pat
     assert classified["likely_causes"] == INTERFACE_DOWN_CAUSES, classified
 
 
+def test_a_queue_clear_that_will_not_drain_refuses_with_causes_of_its_own(tmp_path: Path) -> None:
+    """`can_queue_clear_failed` at the refusal, not only at the classifier.
+
+    The other six types are pinned on a real payload by the modules that own
+    them; this one is written by `CanBusService._drain_rx_queue` and had no
+    refusal-level test anywhere, so an implementation that keyed the table and
+    left this payload bare would have gone unnoticed. The refusal and
+    `classify_last_error` have to answer with the same list.
+    """
+    config = queue_bus_config(tmp_path)
+    service = can_module_under_test.CanBusService(config)
+    session = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], RefusingDrainAdapter(), str(tmp_path / "can-queue.jsonl"))
+    service.sessions[QUEUE_BUS_ID] = session
+
+    result = service.session_start(QUEUE_BUS_ID, clear_rx_queue=True)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == QUEUE_CLEAR_FAILED_ERROR, result
+    assert_causes_are_about_the_bus(result["likely_causes"], QUEUE_CLEAR_FAILED_ERROR, result)
+    classified = classify_failure_report(config, com_port_likely_causes)
+    assert classified["likely_causes"] == result["likely_causes"], classified
+
+
+@pytest.mark.parametrize("error_type", CAN_ERROR_TYPES_OUTSIDE_THE_TABLE)
+def test_a_can_type_outside_the_table_still_answers_the_table_it_was_handed(tmp_path: Path, error_type: str) -> None:
+    """The boundary, recorded rather than left to be read off the code.
+
+    This issue names seven types and the table is keyed by those seven names, not
+    by the `can_` prefix: the rest keep the generic answer until somebody decides
+    otherwise. `can_listen_only_mode` is the one that will want revisiting, being
+    as much a fact about a bus as the seven.
+    """
+    config = config_for(tmp_path)
+    write_report(config, can_report(error_type))
+
+    classified = classify_failure_report(config, com_port_likely_causes)
+
+    assert classified["error_type"] == error_type, classified
+    assert classified["likely_causes"] == COM_PORT_FALLBACK, classified
+
+
 def test_a_can_report_that_carries_its_own_causes_still_wins(tmp_path: Path) -> None:
     """The pass-through branch is unchanged: a refusal that carried causes has
     already decided them, and the table must not overwrite what the failing call
@@ -338,15 +452,25 @@ def test_the_com_port_causes_are_unchanged() -> None:
 
 @pytest.mark.parametrize("debugger_type", DEBUGGER_TYPES)
 def test_the_debugger_causes_are_unchanged(tmp_path: Path, debugger_type: str) -> None:
+    """Verbatim, and over the public path a caller takes.
+
+    One type per backend rather than the whole table, chosen because the three
+    backends word it differently: a rewrite that flattened them would be caught
+    here. Read back through `classify_last_error` rather than off the backend's
+    table attribute, so this pins what a caller receives.
+    """
     config = config_for(tmp_path, debugger_type=debugger_type)
+    write_report(config, {"ok": False, "tool": "probe_target", "error_type": "target_not_detected", "summary": "Debugger could not detect the target."})
     service = AgenticHILToolService(config)
     try:
-        table = service.backend._likely_causes
-        assert table("target_not_detected"), debugger_type
-        assert not says_any(" ".join(table("target_not_detected")), ("bus",)), debugger_type
-        assert table("no_such_debugger_error") == DEBUGGER_FALLBACK, debugger_type
+        detected = service.call("classify_last_error")["likely_causes"]
+        write_report(config, {"ok": False, "tool": "probe_target", "error_type": "no_such_debugger_error", "summary": "Debugger failed."})
+        unknown = service.call("classify_last_error")["likely_causes"]
     finally:
         service.close()
+
+    assert detected == DEBUGGER_TARGET_NOT_DETECTED[debugger_type], detected
+    assert unknown == DEBUGGER_FALLBACK, unknown
 
 
 def test_a_serial_report_still_answers_the_com_port_table(tmp_path: Path) -> None:
@@ -356,19 +480,6 @@ def test_a_serial_report_still_answers_the_com_port_table(tmp_path: Path) -> Non
     classified = classify_failure_report(config, com_port_likely_causes)
 
     assert classified["likely_causes"] == com_port_likely_causes("serial_read_failed"), classified
-
-
-def test_a_debugger_report_still_answers_the_debugger_table(tmp_path: Path) -> None:
-    config = config_for(tmp_path)
-    write_report(config, {"ok": False, "tool": "probe_target", "error_type": "target_not_detected", "summary": "Debugger could not detect the target."})
-    service = AgenticHILToolService(config)
-    try:
-        classified = service.call("classify_last_error")
-        expected = service.backend._likely_causes("target_not_detected")
-    finally:
-        service.close()
-
-    assert classified["likely_causes"] == expected, classified
 
 
 def test_a_type_that_is_neither_still_falls_back_to_the_table_it_was_handed(tmp_path: Path) -> None:
