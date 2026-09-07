@@ -57,6 +57,12 @@ from conftest import (
     write_config,
 )
 
+# What the fake GDB answers for a refused read, which is what the product puts in
+# the summary. Imported rather than repeated: a placeholder that drifted between
+# the fake and the assertion would read like a product regression. The fixture
+# says why it is a placeholder and names the recording that is owed.
+from fixtures.fake_gdb import MEMORY_READ_REFUSAL as GDB_MEMORY_READ_REFUSAL
+
 from agentic_hil.backends.common import NOT_CONTACTED
 from agentic_hil.backends.gdbdebug import GdbDebugSession
 from agentic_hil.backends.openocd import OpenOCDBackend
@@ -1327,26 +1333,38 @@ PLANTED_TIMEOUT_ENTRY = ErrorRemedy(
 # test_debug_sessions gives its own cap: on a loaded machine a tighter one times
 # out a healthy round trip and the test reports the wrong shape.
 MEMORY_READ_TIMEOUT_CAP_S = 2.0
-# What the fake GDB answers for a refused read, which is what the product puts
-# in the summary. Not a recording: no GDB refusing a read has been driven on the
-# bench and the issue quotes no GDB text, so fixtures/fake_gdb.py carries the
-# message and names the recording that is owed.
-GDB_MEMORY_READ_REFUSAL = "Cannot access memory at address 0x20000080"
-# The fake GDB answer each of the three session shapes is driven by.
-GDB_READ_BEHAVIOR = {
-    "gdb-refused": "memory_read_refused",
-    "gdb-unparsable-contents": "memory_read_without_contents",
-    "gdb-short-read": "memory_read_short",
+# The fake GDB answer each session shape is driven by, and the tool the read is
+# driven through. `_read_memory_bytes` has two callers, and the merge belongs
+# where the result is built rather than in either of them, so one shape is driven
+# through the dump as well: an implementation that merged in `symbol_value` alone
+# would leave `debug_dump_symbol_ihex` with exactly the gap this pins.
+GDB_READ_CASES = {
+    "gdb-refused": ("memory_read_refused", "debug_symbol_value"),
+    "gdb-refused-dump": ("memory_read_refused", "debug_dump_symbol_ihex"),
+    "gdb-unparsable-contents": ("memory_read_without_contents", "debug_symbol_value"),
+    "gdb-short-read": ("memory_read_short", "debug_symbol_value"),
 }
+# The output the dump would have written, had the read it needs come back. The
+# file is asserted absent: a read that failed writes nothing.
+DUMP_OUTPUT_PATH = "build/symbol.hex"
 
 
-def gdb_read_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, behavior: str) -> dict:
-    """One failed `debug_symbol_value` over a session, on the fake GDB's answer named by `behavior`."""
-    monkeypatch.setattr("agentic_hil.backends.gdbdebug.GDB_COMMAND_TIMEOUT_CAP_S", MEMORY_READ_TIMEOUT_CAP_S)
+def gdb_read_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, behavior: str, tool: str = "debug_symbol_value") -> dict:
+    """One failed read over a session, on the fake GDB's answer named by `behavior`."""
+    if behavior == "memory_read_hangs":
+        # Only the hang waits this cap out. The other answers come straight back,
+        # and shortening their margin on a loaded machine would buy a flake for
+        # nothing.
+        monkeypatch.setattr("agentic_hil.backends.gdbdebug.GDB_COMMAND_TIMEOUT_CAP_S", MEMORY_READ_TIMEOUT_CAP_S)
+    arguments: dict = {"symbol": "boot_counter"}
+    if tool == "debug_dump_symbol_ihex":
+        arguments["output_path"] = DUMP_OUTPUT_PATH
     service = debug_service(tmp_path, fake_gdb_behavior=behavior)
     try:
         assert service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "load", "timeout_s": START_TIMEOUT_S})["ok"] is True
-        value = answered_within(60.0, lambda: service.call("debug_symbol_value", {"symbol": "boot_counter"}))
+        value = answered_within(60.0, lambda: service.call(tool, arguments))
+        if tool == "debug_dump_symbol_ihex":
+            assert not (tmp_path / DUMP_OUTPUT_PATH).exists(), "the dump wrote a file for a read that failed"
     finally:
         closing = answered_within(60.0, lambda: closed_reporting_its_own_failure(service))
     # Unchanged by any of this: a session command that failed leaves where the
@@ -1397,7 +1415,8 @@ def drive_hand_built_read_failure(case: str, tmp_path: Path, monkeypatch: pytest
         return stlink_read_without_a_staging_file(tmp_path, monkeypatch)
     if case == "stlink-no-parseable-hex":
         return stlink_read_without_parseable_hex(tmp_path)
-    return gdb_read_failure(tmp_path, monkeypatch, GDB_READ_BEHAVIOR[case])
+    behavior, tool = GDB_READ_CASES[case]
+    return gdb_read_failure(tmp_path, monkeypatch, behavior, tool)
 
 
 # (case, the backend the result names, its summary, its `target_contacted`). The
@@ -1408,6 +1427,7 @@ def drive_hand_built_read_failure(case: str, tmp_path: Path, monkeypatch: pytest
 # incident they open, and this must not start answering it a second way.
 HAND_BUILT_READ_FAILURES = [
     ("gdb-refused", "openocd", GDB_MEMORY_READ_REFUSAL, None),
+    ("gdb-refused-dump", "openocd", GDB_MEMORY_READ_REFUSAL, None),
     ("gdb-unparsable-contents", "openocd", "GDB returned unparsable memory contents.", None),
     ("gdb-short-read", "openocd", "GDB returned fewer memory bytes than requested.", None),
     ("stlink-staging-file", "stlink", "The private file this read needs could not be created.", False),

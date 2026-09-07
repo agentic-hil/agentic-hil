@@ -151,11 +151,13 @@ STOP_WAIT_EXIT_DELAY_S = 0.5
 # answers with half the bytes the command asked for.
 #
 # None of the four is a recording: no GDB refusing a read has been driven on the
-# bench, and the issue quotes no GDB text either. The refusal message below is
-# the one arm-none-eabi-gdb is documented to print for an unreadable address and
-# a recording of a real one is owed; the other three shapes are answered by the
-# structure of the reply rather than by any text, so what the product reads out
-# of them does not depend on a tool's wording.
+# bench, and the issue quotes no GDB text either. The refusal message below is a
+# placeholder, shared by this fake and by the test that reads it back off the
+# summary, until a recording of a real arm-none-eabi-gdb refusing an unreadable
+# address exists, with its version and the date; that recording is owed. The
+# other three shapes are answered by the structure of the reply rather than by
+# any text, so what the product reads out of them does not depend on a tool's
+# wording.
 MEMORY_READ_REFUSED = "memory_read_refused"
 MEMORY_READ_HANGS = "memory_read_hangs"
 MEMORY_READ_WITHOUT_CONTENTS = "memory_read_without_contents"
