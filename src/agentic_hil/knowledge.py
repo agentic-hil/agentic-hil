@@ -2205,6 +2205,217 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "once `allow_mass_erase` is granted.",
         ),
     ),
+    # -- The three buckets a flash or a read lands in when the tool named no more
+    # specific operation, scoped per backend the way the erase entries above are.
+    #
+    # `verify_failed`, `flash_failed` and `memory_read_failed` had no entry at
+    # all, so a refusal an operator meets on a failed verify, a failed flash or a
+    # failed read named the bucket and handed over no next step. One generic
+    # entry per bucket could not have been written: a failed verify under
+    # STM32CubeProgrammer is a connect mode and a set of option bytes, and a
+    # failed verify under pyOCD is an erase, a program and a flash algorithm out
+    # of a CMSIS pack, and an entry that fitted both would name neither tool's
+    # own options. So each entry is the tool's own account of that operation,
+    # reached through the scoped lookup `remediation_fields` already performs,
+    # and a bucket on a backend nobody has written for stays silent rather than
+    # being handed another tool's advice under a generic name (#516).
+    "verify_failed:stlink": ErrorRemedy(
+        meaning=(
+            "STM32CubeProgrammer wrote the image and then refused to confirm it. The verify is its own step, the `-v` "
+            "this backend passes after `-w`, and it read the flash back and found it different from the file: "
+            "`Error: Verify failed at address <address>` is the line that says so, and the whole transcript travels "
+            "with the result under `programmer_output`.\n\n"
+            "The write happened. This is not one of the refusals that promise the target was never touched: the board "
+            "holds an image nothing has vouched for, and how much of it is the file that was flashed is exactly what "
+            "the failed verify declined to say."
+        ),
+        remediation=(
+            "Read `programmer_output.stdout` before anything else. It is the programmer's own account of what it "
+            "erased, wrote and verified, and the address in `Error: Verify failed at address <address>` places the "
+            "mismatch inside the image, which is what separates a write that never landed from one sector that would "
+            "not take it.",
+            "If the mismatch is at or near the start of the image, ask whether the core was running while the "
+            "programmer wrote. STM32CubeProgrammer connects hot plug here unless it is told otherwise, and a core "
+            "executing out of the flash being written corrupts the write rather than refusing it. Setting "
+            "`debuggers.<name>.connect_mode` to `under_reset` (the CLI's `mode=UR`) holds the core in reset for the "
+            "flash; `project_config_set` writes it, it needs the probe's reset line wired to the target's NRST, and a "
+            "running server takes it up with `project_config_reload_description` or a restart.",
+            "If the same addresses fail on every attempt, ask the device about protection rather than about the image. "
+            "Read the option bytes with STM32CubeProgrammer yourself (`-ob displ`) and look for write protection, PCROP "
+            "or a read-out protection level over the sectors the image covers: a protected sector that takes the write "
+            "and keeps its old contents reads back as precisely this mismatch.",
+            "If neither fits, check that the artifact is the one meant for this part, and that a `.bin` is being "
+            "written at the address it was linked for. `debuggers.<name>.flash_address` is where a raw binary goes, and "
+            "one written at the wrong base differs from the file from its first sector on.",
+            "Treat the board as holding an indeterminate image until a flash programs and verifies. A refused verify "
+            "does not say how much of the write landed, so reflashing is the way through it rather than a retry taken "
+            "as proof that nothing changed.",
+        ),
+        do_not=(
+            "Do not report the firmware as flashed because the download step printed its own success. The verify is the "
+            "step that says the board holds this image, and it is the one that failed.",
+            "Do not grant `allow_mass_erase` to force the image through. That permission makes this service refuse "
+            "flashing outright, and it answers a question about one address by erasing the whole device.",
+        ),
+    ),
+    "verify_failed:pyocd": ErrorRemedy(
+        meaning=(
+            "pyOCD flashed the image and its own verify refused it. `pyocd flash` erases, programs and then reads the "
+            "flash back in one run, and this run reported the read-back different from the file: `Verify failed at "
+            "<address>` is the line, and the whole transcript travels with the result under `programmer_output`.\n\n"
+            "The program step ran, so the board holds an image nothing has vouched for rather than the one that was "
+            "flashed."
+        ),
+        remediation=(
+            "Read `programmer_output.stdout` and `programmer_output.stderr` before anything else, and the log the "
+            "result names by `log_path`. They are pyOCD's own account of the erase, the program and the verify, and the "
+            "address the verify names places the mismatch inside the image.",
+            "Read what came before it in the same transcript. pyOCD's flash is an erase, a program and a verify in one "
+            "command, and a verify that fails after a program which reported nothing is a different fault from one that "
+            "follows a sector either earlier step complained about.",
+            "Ask whether the link read the flash back correctly before doubting the write. `debugger_probes_list` says "
+            "what this host enumerates, and a probe on long or unshielded wiring, on a shared hub, or held by a second "
+            "session between the program and the read-back produces a mismatch out of bytes that were written "
+            "correctly.",
+            "Check that the flash algorithm pyOCD programmed and verified with is this device's. It comes from the "
+            "CMSIS pack behind `debuggers.<name>.target_type`, so a value that resolves to a near neighbour of this "
+            "part writes at page sizes and addresses the device does not have while the connect and the identification "
+            "both succeed. `agentic-hil doctor` reports what the configured value resolves to, in "
+            "`debuggers.<name>.target_support`; provenance is in MCP resource " + TARGET_SUPPORT_URI + ".",
+            "Treat the board as holding an indeterminate image until a flash programs and verifies. A refused verify "
+            "does not say how much of the program landed, so reflashing is the way through it rather than a retry taken "
+            "as proof that nothing changed.",
+        ),
+        do_not=(
+            "Do not read this as a refused erase. pyOCD names an erase it could not perform in its own words and this "
+            "service classifies that as `flash_erase_failed`; these words are about the read-back after a program that "
+            "ran.",
+            "Do not answer it with a chip erase (`pyocd erase --chip` or a `--erase chip` flash). That erases the whole "
+            "device rather than the sectors the image covers, and the same reasoning is why this service refuses to "
+            "flash at all once `allow_mass_erase` is granted.",
+        ),
+    ),
+    "flash_failed:pyocd": ErrorRemedy(
+        meaning=(
+            "pyOCD's flash reported a failure that is neither an erase it named nor a verify mismatch. The run is "
+            "`pyocd flash --no-reset` over the artifact this call passed, with the configured target and probe on the "
+            "command line, and `Flash programming failed` is the wording it most often carries. The whole transcript "
+            "travels with the result under `programmer_output`.\n\n"
+            "Nothing is confirmed about how much of the image reached the flash, so the board holds an indeterminate "
+            "image rather than either the old one or the new one."
+        ),
+        remediation=(
+            "Read `programmer_output.stdout` and `programmer_output.stderr` before anything else, and the log the "
+            "result names by `log_path`. They are pyOCD's own account of the run, and the line before the failure is "
+            "what places it: the probe opening, the connect, the image being loaded, or the programming itself.",
+            "Check the image is one for this part and this address. `pyocd flash` takes the load address out of an ELF "
+            "or a hex file, and out of `debuggers.<name>.flash_address` for a raw `.bin`, so a binary written at the "
+            "wrong base fails the moment the address falls outside a region the target describes.",
+            "Check `debuggers.<name>.target_type` names this device. pyOCD gets the memory map and the flash algorithm "
+            "from the CMSIS pack behind that value, so a value that resolves to a near neighbour of this part programs "
+            "at addresses and page sizes the device does not have. `agentic-hil doctor` reports what the configured "
+            "value resolves to, in `debuggers.<name>.target_support`; provenance is in MCP resource "
+            + TARGET_SUPPORT_URI
+            + ".",
+            "If the run fails part-way rather than at the first sector, put pyOCD's own options to it yourself. This "
+            "server passes the target and the probe and no clock of its own, so the link runs at pyOCD's default "
+            "frequency: `pyocd flash --target <target_type> --frequency 1M` against the same board says whether a "
+            "slower SWD clock carries the image, and `--erase sector` against the default says whether the erase "
+            "strategy is what the device refuses. Report what those runs answered rather than changing the bench on "
+            "the strength of one of them.",
+            "Treat the board as holding an indeterminate image until a flash programs and verifies, and read the "
+            "reflash as writing over an unknown image rather than a clean one.",
+        ),
+        do_not=(
+            "Do not reach for `--erase chip` or `pyocd erase --chip` to get the image through. That erases the whole "
+            "device rather than the sectors the image covers, and it answers a question about an address or a pack by "
+            "destroying everything else on the part; the same reasoning is why this service refuses to flash at all "
+            "once `allow_mass_erase` is granted.",
+            "Do not read this as a failed reset. `--no-reset` is on the command this backend runs, so no reset was "
+            "attempted in it, and a post-flash reset that fails is reported as `reset_failed` with the flash already "
+            "committed.",
+        ),
+    ),
+    "flash_failed:openocd": ErrorRemedy(
+        meaning=(
+            "OpenOCD's `program` command did not finish the flash, and the failure is neither an erase it named nor a "
+            "verify mismatch. This backend runs `init`, then `program` over the image with `verify`, and `reset` too "
+            "when the call asked for one; a run that reported a failure stopped somewhere inside that command, with "
+            "`** Programming Failed **` as OpenOCD's own line for it. The whole transcript travels with the result "
+            "under `programmer_output`.\n\n"
+            "How far it got is not claimed. `program` stops at the first step that fails, so the board holds an "
+            "indeterminate image rather than either the old one or the new one."
+        ),
+        remediation=(
+            "Read `programmer_output.stdout` and `programmer_output.stderr` before anything else, and the log the "
+            "result names by `log_path`. They are OpenOCD's own account of what it opened, examined and wrote, and the "
+            "line before `** Programming Failed **` is what places the failure.",
+            "Ask which half of `program` failed. It is a write, a read-back and an optional reset in one command here, "
+            "so a failure after the image was written is a different fault from one before it, and the transcript is "
+            "the only place that order is written down.",
+            "Read the flash bank OpenOCD was working from. `flash info <bank>` names the driver, the base address and "
+            "the sector map it chose, and a bank whose base or size is not this device's fails at the first write "
+            "outside it while the connect and the examine both succeeded.",
+            "Check `debuggers.<name>.target_cfg` is this part's script and not a near neighbour's. The bank comes from "
+            "that script, so `target/stm32f4x.cfg` against a part from another family declares a flash the device does "
+            "not have. `project_config_describe` reports the value this bench is running with.",
+            "Treat the board as holding an indeterminate image until a flash programs and verifies, and read the "
+            "reflash as writing over an unknown image rather than a clean one.",
+        ),
+        do_not=(
+            "Do not reach for a device unlock command such as `stm32f2x unlock`, or for a chip erase, to force the "
+            "image through. Those answer a question about a bank or an address with a mass erase of the whole part, "
+            "which destroys more than the failed operation asked for; the same reasoning is why this service refuses "
+            "to flash at all once `allow_mass_erase` is granted.",
+            "Do not read this as a reset problem. OpenOCD warns about the reset on nearly every `reset halt`, and this "
+            "failure is about a command that had already reached the flash.",
+        ),
+    ),
+    "memory_read_failed:pyocd": ErrorRemedy(
+        meaning=(
+            "A read of the target's memory through pyOCD did not produce the bytes that were asked for. "
+            "`debug_symbol_value` and `debug_dump_symbol_ihex` run `pyocd commander` with a `savemem` over an address "
+            "and a size resolved out of the ELF `flash_firmware` put on the board, and the read is settled on that "
+            "window rather than on the exit code: the commander reporting a failure and a run that exits 0 leaving no "
+            "file holding exactly `size_bytes` are both this failure, because half a status word is a different number "
+            "rather than a smaller one.\n\n"
+            "A read writes nothing, but it attached a probe to a live core, so a run that stopped part-way through "
+            "leaves the board's state unproven and the result says so. Two shapes are the exception and name themselves "
+            "in their own summary: a temporary file this host would not create, and a temporary path pyOCD's command "
+            "tokenizer could not carry. Neither reached the target."
+        ),
+        remediation=(
+            "Read the summary on the result first. `The private file this read needs could not be created.` and `The "
+            "private file this read needs cannot be named on pyOCD's command line.` are about this host's temporary "
+            "directory rather than about the board, nothing on the bench answers them, and everything below is for a "
+            "read that was actually sent.",
+            "Confirm the probe is still there and still this bench's. `debugger_probes_list` says what this host "
+            "enumerates, and a read taken after a flash on a probe a second session has since claimed fails at the "
+            "connect rather than at the address.",
+            "Ask what the core was doing. This read attaches to a running core on purpose and passes nothing that "
+            "resets or halts it, because a read that halted the target would not measure what the firmware did, so a "
+            "core that faulted, entered a low-power mode gating the debug clock, or lost debug access after the flash "
+            "refuses the read while the probe itself is healthy. `reset_target` and a fresh read say whether the memory "
+            "is readable when the core starts clean, and that is the operator's call to make: it destroys the very RAM "
+            "the read was asked for.",
+            "Check the range the read asked for. The result carries the `address` and the `size_bytes` resolved out of "
+            "the ELF, and a symbol whose window crosses the end of a region this target describes, or sits in memory "
+            "that is not powered or not mapped yet, is one pyOCD cannot take however healthy the link is. "
+            "`debug_symbol_info` answers where the symbol lives without touching the board.",
+            "If the run completed and left no bytes at all, read `debuggers.<name>.target_type` as the next suspect. "
+            "The memory map pyOCD reads by comes from the CMSIS pack behind it, and a value that resolves to a near "
+            "neighbour of this part answers a read outside this device's map with silence rather than with an error. "
+            "`agentic-hil doctor` reports what the configured value resolves to, in "
+            "`debuggers.<name>.target_support`.",
+        ),
+        do_not=(
+            "Do not report the value as zero, or as whatever bytes did arrive. Nothing was read, and a partial window "
+            "is a different number rather than a smaller one.",
+            "Do not reach for `pyocd commander` or another debugger by hand to get the value anyway. That takes the "
+            "probe out from under this bench's coordination while an incident over it may still be open, and it leaves "
+            "the operator with no record of what ran.",
+        ),
+    ),
     # -- A capability this configuration does not have, and the way to one ------
     # Scoped per backend, because "not supported" is only half an answer: the
     # useful half is which configuration would support it, and that differs by

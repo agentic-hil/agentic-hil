@@ -734,14 +734,19 @@ class PyOCDBackend:
 
         A run that succeeded and left no usable file is a failed read that did
         reach the target, which is the one case the exit code alone would report
-        as success.
+        as success. It is also the one failure of this kind that no classifier
+        saw, because pyOCD reported none: the result was built as a success and
+        is turned into a refusal here, so the catalogue's steps for the bucket
+        have to be merged here too. Without that the operator met the only shape
+        of `memory_read_failed` that carries no next step, while the same bucket
+        out of the same backend carried one whenever pyOCD had said something.
         """
         result = read["result"]
         result.update({"symbol": symbol, "address": resolved["address"], "size_bytes": int(resolved["size_bytes"]), "resolved_from": resolved["resolved_from"], "symbol_source": resolved["symbol_source"]})
         if not result.get("ok") and "side_effect_status" not in result:
             result.update({"side_effect_status": "unknown", "retry_safe": False})
         if result.get("ok") and read["data"] is None:
-            result.update({"ok": False, "error_type": "memory_read_failed", "summary": "pyOCD reported a completed run but left no file holding the requested bytes.", "target_contacted": True})
+            result.update({"ok": False, "error_type": "memory_read_failed", "summary": "pyOCD reported a completed run but left no file holding the requested bytes.", "target_contacted": True, **remediation_fields("memory_read_failed", self.backend_name)})
         return result
 
     def _connection_args(self) -> list[str]:
