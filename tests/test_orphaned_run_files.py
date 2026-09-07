@@ -207,8 +207,10 @@ def test_an_orphan_is_pruned_with_the_runs_directory_under_the_record_cap(tmp_pa
     workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
     config = load_authoritative_config(workspace)
     monkeypatch.setattr(runlifecycle, "RUN_RECORDS_KEPT", 100)
-    for handle in (ORPHAN_HANDLE, SECOND_ORPHAN_HANDLE, "run-fffffffffffffffd"):
-        plant_orphan_files(config, handle, age_s=past_every_publish_window_s(), with_lock=True)
+    # One of them with the lock file a probe of that handle leaves on disk and
+    # two without, because the sweep has to end with neither kind still there.
+    for handle, planted_lock in ((ORPHAN_HANDLE, True), (SECOND_ORPHAN_HANDLE, False), ("run-fffffffffffffffd", False)):
+        plant_orphan_files(config, handle, age_s=past_every_publish_window_s(), with_lock=planted_lock)
 
     runlifecycle.prune_run_records(config)
 
@@ -304,20 +306,42 @@ def test_an_orphan_whose_lock_is_held_is_left_alone_however_old_it_is(tmp_path: 
     sweep is for, and the stop among them is the one thing that will end it at
     its first step boundary if it does reach the board. Age decides nothing
     here: the lock does, the same way it decides for a record.
+
+    What the files still being there proves depends on the platform, and this
+    has to hold on both. Windows refuses to unlink a file whose lock is held, so
+    a sweep that never asked about the lock leaves the same directory behind
+    here as one that asked; POSIX lets that unlink through and the worker's stop
+    is gone. So the removal is asserted at the attempt: the files of a handle
+    whose lock is held are not offered for removal at all.
     """
     workspace, _ = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
     config = load_authoritative_config(workspace)
     monkeypatch.setattr(runlifecycle, "RUN_RECORDS_KEPT", 0)
-    stop, log = plant_orphan_files(config, ORPHAN_HANDLE, age_s=past_every_publish_window_s())
+    # The lock is planted with the byte the acquire would have written and aged
+    # with the rest, so that taking it leaves the age of the set where it is:
+    # otherwise a fresh lock file would keep this set through the age rule and
+    # say nothing about whether the lock itself was consulted.
+    stop, log, _ = plant_orphan_files(config, ORPHAN_HANDLE, age_s=past_every_publish_window_s(), with_lock=True)
+    attempted: list[str] = []
+    unlink = Path.unlink
+
+    def spying_unlink(self: Path, *args: object, **kwargs: object) -> None:
+        attempted.append(self.name)
+        return unlink(self, *args, **kwargs)
+
     lock = _LifetimeLock(runlifecycle.lock_path(config, ORPHAN_HANDLE))
     lock.acquire()
     try:
+        monkeypatch.setattr(Path, "unlink", spying_unlink)
+
         runlifecycle.prune_run_records(config)
 
+        assert attempted == [], attempted
         assert stop.exists(), directory_listing(config)
         assert log.exists(), directory_listing(config)
         assert runlifecycle.lock_path(config, ORPHAN_HANDLE).exists(), directory_listing(config)
     finally:
+        monkeypatch.setattr(Path, "unlink", unlink)
         lock.release()
 
 
