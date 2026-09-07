@@ -19,13 +19,15 @@ things carry it here:
 * a description reload attempted while a COM session is open is refused and
   swaps no configuration, and the same for a CAN session;
 * a session's lease is registered from before its device is opened until after
-  its release is confirmed, so the window the refusal covers has no hole;
+  its release is confirmed, and a release that did not confirm keeps it, so the
+  window the refusal covers has no hole on either path;
 * `config_reloaded` is written down nowhere, so the day it becomes reachable is
   the day somebody has to write it down.
 
-The neighbours that must not change are here too: the loops still stop a session
-whose entry moved when they are called directly, under exactly that reason, and
-a reload with nothing held still goes through and reaches both services.
+The neighbours that must not change are here too: called directly, the loops
+still stop a session whose entry moved, whether the entry disappeared or only a
+description field of it did, and they leave a session whose entry did not move
+alone; a reload with nothing held still goes through and reaches both services.
 
 The refusal against a declared run and against a bare lease taken outside one is
 already pinned in tests/test_config_reload.py. What is new here is the refusal
@@ -736,7 +738,12 @@ ALLOWED_TO_NAME_IT: dict[str, str] = {
 # Exempting the file instead would exempt exactly the bullet this test exists to
 # notice.
 CHANGELOG = "CHANGELOG.md"
-CHANGELOG_PROMISE_WORDS = ("log", "reach", "observ", "arriv", "written", "writes", "emit")
+# Whole words, so a bullet saying a comment was rewritten is not read as a
+# promise that the stop is written.
+CHANGELOG_PROMISE = re.compile(
+    r"\b(log|logs|logged|reach|reaches|reached|reachable|observable|observed|arrive|arrives|written|writes|emit|emits|emitted)\b",
+    re.IGNORECASE,
+)
 
 
 def tracked_files() -> list[str]:
@@ -783,7 +790,7 @@ def test_the_stop_reason_is_written_down_in_no_tracked_file() -> None:
         for number, line in enumerate(text.split("\n"), 1):
             if STOP_REASON not in line:
                 continue
-            if relative == CHANGELOG and not any(word in line.lower() for word in CHANGELOG_PROMISE_WORDS):
+            if relative == CHANGELOG and not CHANGELOG_PROMISE.search(line):
                 continue
             lines.append(number)
         if lines:
