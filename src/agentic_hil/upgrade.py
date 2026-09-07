@@ -3058,6 +3058,24 @@ def _running_processes_as_a_notice(holders: list[JsonObject] | None, previous_ve
     }
 
 
+class ManagerRefusalOverATableThatWasRead(ConfigError):
+    """The missing-manager refusal, carrying what the process table said first.
+
+    `replace_installation` reads the table as its first statement and looks for
+    the manager several statements later, so the one condition it raises for is
+    raised over an answer it already has. That answer travels with the refusal
+    rather than being read again by whoever catches it: a second read is a
+    second machine state, and what a result says about the operator's processes
+    has to be what was true before anything ran. `holders` carries the three
+    states the read has, the list, the empty list and `None` for a table that
+    could not be read, and no caller has to know which one it is.
+    """
+
+    def __init__(self, error: ConfigError, holders: list[JsonObject] | None) -> None:
+        super().__init__(error.error_type, error.summary, error.details)
+        self.holders = holders
+
+
 def replace_installation(*, tool: str) -> JsonObject:
     """Hand this installation to its own package manager and report what moved.
 
@@ -3084,7 +3102,14 @@ def replace_installation(*, tool: str) -> JsonObject:
     # the upgrade before it are sitting.
     _remove_superseded_launchers()
 
-    manager, command = _upgrade_command()
+    try:
+        manager, command = _upgrade_command()
+    except ConfigError as error:
+        # The one raise here is over a table that has already been read, so the
+        # read goes with it (#498). Dropping it made the one refusal of this
+        # tool that had an answer report a constant instead, which is the error
+        # #475 fixed everywhere the manager did run.
+        raise ManagerRefusalOverATableThatWasRead(error, still_running) from error
     previous_version = __version__
     # Both read before anything runs. They describe the installation as it is
     # now, and the one result that needs them is the one where it is not there
@@ -3409,8 +3434,32 @@ def server_upgrade(config: AgenticHILConfig, bench: JsonObject) -> JsonObject:
     try:
         result = replace_installation(tool=SERVER_UPGRADE)
     except ConfigError as error:
-        return {"tool": SERVER_UPGRADE, **error.to_dict(), "running_version": __version__, "restart_required": False, **NOT_STARTED, "retry_safe": False}
+        return _no_manager_to_hand_it_to(error)
     return _reported_as_running_code(result, config)
+
+
+def _no_manager_to_hand_it_to(error: ConfigError) -> JsonObject:
+    """The one refusal this tool raises rather than returns, as a document.
+
+    A host that got an exception here would show its operator a transport error
+    about a PATH, so the raise becomes a result like every other refusal. What
+    it is not is one of the three gates above: this one is raised from inside
+    `replace_installation`, after that function has read the process table, so
+    it owes what the read found rather than the silence a question nobody put
+    owes (#498). The answer and its sentence are the ones every other outcome
+    that replaced nothing gives, because that is what this is: `false` where the
+    table was read and held none, the holders named where it held some, and the
+    sentence with no field at all where it could not be read.
+
+    A `ConfigError` from anywhere else would not have that read behind it and
+    gets no restart fields, which is the same rule applied to a refusal that
+    never asked.
+    """
+    refusal: JsonObject = {"tool": SERVER_UPGRADE, **error.to_dict(), "running_version": __version__}
+    if isinstance(error, ManagerRefusalOverATableThatWasRead):
+        waiting = _nothing_new_to_load(error.holders)
+        refusal = {**refusal, **waiting, "summary": f"{error.summary} {_restart_sentence(waiting)}"}
+    return {**refusal, **NOT_STARTED, "retry_safe": False}
 
 
 def _reported_as_running_code(result: JsonObject, config: AgenticHILConfig) -> JsonObject:
