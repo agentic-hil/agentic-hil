@@ -17,7 +17,10 @@ of twenty-five, and the limit cancelled two runs whose tests were green: one
 inside the test step with 2307 tests already passed, one in the step after
 pytest had printed its own summary. Nothing was hanging. The runner was slow,
 and a serial suite has no answer to that except the retry, which costs the same
-again for a result that was already known.
+again for a result that was already known. Running across the runner's cores
+bought those minutes back; at 4174 tests the Windows legs reached the same limit
+again, so the limit is now held here as a floor with the measurements behind it,
+and why a Windows leg costs four times a Linux one is #536.
 
 The suite is parallel by construction rather than by permission: every test gets
 its own HOME, config, state and temporary storage, and its device-lock root, its
@@ -84,6 +87,29 @@ def test_the_hosted_suite_runs_across_the_runners_cores() -> None:
 
     assert command[0] == "pytest", command
     assert worker_setting(command) == "auto", command
+
+
+def test_the_matrix_limit_stays_above_what_a_slow_windows_leg_takes() -> None:
+    """The limit is margin for a slow runner, not a deadline a slow runner beats.
+
+    Running the suite across the runner's cores bought back the minutes the
+    serial run had lost, and then the suite grew again. On one commit, the four
+    Windows legs of the same suite took 20m13s, 21m17s and 22m17s, and the
+    fourth was cancelled at the limit with every test that had run green; the
+    next run cancelled a different leg the same way. A Linux leg of that same
+    suite is about five and a half minutes, so it is the platform's own cost
+    and not one slow machine.
+
+    A cancelled leg is the least readable red this repository can produce,
+    because the summary names no test, so the limit is held here well above the
+    slowest leg anybody has measured. It is a floor rather than the number
+    itself: raising it needs no edit here, lowering it back into the measured
+    range does. Why a Windows leg costs four times a Linux one is #536 and is
+    not answered by this bound.
+    """
+    job = workflow_document(WORKFLOW)["jobs"]["test"]
+
+    assert job["timeout-minutes"] >= 40, job["timeout-minutes"]
 
 
 def test_the_source_distribution_is_still_only_collected() -> None:

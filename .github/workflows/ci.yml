@@ -21,16 +21,22 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # 25 minutes for the whole job, and the suite is the part that grew into
+    # 45 minutes for the whole job, and the suite is the part that grows into
     # it. In one process the Windows legs took about fourteen minutes of pytest
-    # alone on an ordinary runner and twenty-three on a slow one, which is close
-    # enough to the limit that it cancelled two runs whose tests were green: one
-    # inside `Run tests` at 25m18s with 2307 tests already passed, one after
-    # pytest had printed `2754 passed, 84 skipped in 1400.29s`, in the step
-    # after it. The step below now runs the suite across the runner's cores, so
-    # the same work is minutes rather than tens of minutes and this limit is
-    # margin for a slow runner instead of a deadline a slow runner beats.
-    timeout-minutes: 25
+    # alone on an ordinary runner and twenty-three on a slow one, which was
+    # close enough to the limit of the day to cancel two runs whose tests were
+    # green: one inside `Run tests` at 25m18s with 2307 tests already passed,
+    # one after pytest had printed `2754 passed, 84 skipped in 1400.29s`, in the
+    # step after it. The step below runs the suite across the runner's cores,
+    # which bought those minutes back, and the suite has since grown to 4174
+    # tests: the Windows legs of one commit took 20m13s, 21m17s and 22m17s, the
+    # fourth was cancelled at 25 minutes with every test that had run green, and
+    # the next run cancelled a different leg the same way. A Linux leg of that
+    # same suite is about five and a half minutes, so the four is the platform's
+    # own cost rather than one slow machine, and #536 is where that is being
+    # answered. This limit is margin for a slow runner rather than a deadline a
+    # slow runner beats, and a leg that reaches it is a hang and not a queue.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
