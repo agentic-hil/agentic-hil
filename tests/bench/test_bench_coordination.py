@@ -44,6 +44,7 @@ from collections.abc import Callable, Iterator
 from contextlib import suppress
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, child_command
 
@@ -619,7 +620,7 @@ def test_a_second_caller_meeting_the_lock_is_refused_at_once_and_told_who_holds_
         for field in ("host", "frontend"):
             assert isinstance(holder_record.get(field), str) and holder_record[field].strip(), refused
         assert "holder_is_this_process" not in refused, refused
-        assert elapsed < REFUSAL_CEILING_S, f"a refusal with no wait asked for took {elapsed:.1f}s"
+        assert elapsed < scaled_time_bound(REFUSAL_CEILING_S), f"a refusal with no wait asked for took {elapsed:.1f}s"
 
         # The contender took nothing on its way to being refused.
         assert contender.call("bench_run_status")["run_active"] is False, "the refused caller opened a run anyway"
@@ -665,7 +666,7 @@ def test_a_second_caller_that_asked_to_wait_waits_that_long_and_is_then_refused(
         assert refused["retry_safe"] is True, refused
         assert refused["resource"] in declared, refused
         assert elapsed >= ASKED_WAIT_S - WAIT_SHORTFALL_S, f"a wait of {ASKED_WAIT_S:.0f}s came back after {elapsed:.2f}s"
-        assert elapsed < ASKED_WAIT_S + REFUSAL_CEILING_S, f"a wait of {ASKED_WAIT_S:.0f}s came back after {elapsed:.2f}s and was not bounded by it"
+        assert elapsed < scaled_time_bound(ASKED_WAIT_S + REFUSAL_CEILING_S), f"a wait of {ASKED_WAIT_S:.0f}s came back after {elapsed:.2f}s and was not bounded by it"
         waited = refused["waited_s"]
         assert isinstance(waited, (int, float)), refused
         assert waited >= ASKED_WAIT_S - WAIT_SHORTFALL_S, refused

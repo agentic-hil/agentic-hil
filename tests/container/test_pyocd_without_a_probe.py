@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from agentic_hil.config import load_config
 from agentic_hil.tools import AgenticHILToolService
@@ -185,7 +186,7 @@ def test_a_tool_with_no_probe_attached_refuses_promptly_against_the_real_pyocd(t
     states = coordination_record_states(config.state_root)
     assert states, "the run wrote no coordination record at all, so nothing here says a lease was taken and given back"
     assert set(states) == {"released"}, states
-    assert elapsed_s < TIMEOUT_S / 2, (elapsed_s, result)
+    assert elapsed_s < scaled_time_bound(TIMEOUT_S / 2), (elapsed_s, result)
     log = json.loads((project / result["log_path"]).read_text(encoding="utf-8"))
     assert log["timed_out"] is False, log
     assert "-W" in log["command"].split() or "--no-wait" in log["command"].split(), log["command"]

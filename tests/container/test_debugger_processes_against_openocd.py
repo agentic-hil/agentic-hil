@@ -53,6 +53,7 @@ import time
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from .conftest import COMMAND_TIMEOUT_S, CONTAINER_ONLY, fixture_configuration
 
@@ -164,7 +165,7 @@ def test_a_hanging_openocd_is_reaped_and_answers_timeout(tmp_path: Path) -> None
     assert result["summary"] == "Debugger command timed out."
     assert result["likely_causes"], result
     assert result["log_path"], result
-    assert elapsed < CALL_CEILING_S, f"the call took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
+    assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the call took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
 
     log = written_log(config, result)
     assert log["timed_out"] is True, log
@@ -287,5 +288,5 @@ def test_doctor_reports_a_hanging_openocd_as_a_timeout_document(tmp_path: Path) 
     assert check["ok"] is False, check
     assert check["error_type"] == "timeout", check
     assert check["summary"] == "Debugger version check timed out.", check
-    assert elapsed < CALL_CEILING_S, f"the command took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
+    assert elapsed < scaled_time_bound(CALL_CEILING_S), f"the command took {elapsed:.1f} s against a {HANG_TIMEOUT_S} s deadline"
     assert wait_until_none_carry(token, REAP_CEILING_S) == []

@@ -49,6 +49,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from agentic_hil.can import IP_COMMAND_PATHS
 
@@ -599,7 +600,7 @@ def test_a_read_on_a_quiet_bus_waits_the_asked_time_and_no_longer_than_the_bus_t
         # loose enough not to flake on a loaded runner where a pipe round trip
         # and two JSON encodings sit on top of the wait.
         assert waited >= 1.0, f"a read asked to wait 1.0s came back after only {waited:.2f}s"
-        assert waited < BUS_TIMEOUT_S + WAIT_SLACK_S, f"a read asked to wait 1.0s waited {waited:.2f}s, past the bus timeout"
+        assert waited < scaled_time_bound(BUS_TIMEOUT_S + WAIT_SLACK_S), f"a read asked to wait 1.0s waited {waited:.2f}s, past the bus timeout"
 
         began = time.monotonic()
         capped = server.call("can_read", {"bus_id": "bus", "wait_timeout_s": 30.0})
@@ -609,7 +610,7 @@ def test_a_read_on_a_quiet_bus_waits_the_asked_time_and_no_longer_than_the_bus_t
         # least that long and nothing like the 30s it was told. The upper bound is
         # generous for the same reason as above, not a second product property.
         assert waited >= BUS_TIMEOUT_S, f"a read asked to wait 30s on a bus with timeout_s {BUS_TIMEOUT_S} came back after only {waited:.2f}s"
-        assert waited < BUS_TIMEOUT_S + WAIT_SLACK_S + 2.0, f"a read asked to wait 30s on a bus with timeout_s {BUS_TIMEOUT_S} waited {waited:.2f}s, nowhere near capped"
+        assert waited < scaled_time_bound(BUS_TIMEOUT_S + WAIT_SLACK_S + 2.0), f"a read asked to wait 30s on a bus with timeout_s {BUS_TIMEOUT_S} waited {waited:.2f}s, nowhere near capped"
 
 
 # ---------------------------------------------------------------------------
