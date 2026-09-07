@@ -1050,11 +1050,20 @@ def test_the_record_writer_publishes_only_by_rename_and_never_unlinks_first(tmp_
     published = path.read_bytes()
     runlifecycle.write_run_record(config, handle, running)
 
-    assert len(at_the_rename) == 2, at_the_rename
-    # Nothing existed before the first publication, and the first publication was
-    # still whole and still the published bytes when the second one landed.
-    assert at_the_rename[0] is None
-    assert at_the_rename[1] == published
+    # Two publications, so at least two renames, and possibly more: a rename over
+    # a file another process has open is refused on Windows, which is the whole
+    # reason write_run_record retries, and on a host whose scanner opens a file
+    # the moment it appears the refusal is ordinary rather than exceptional. A
+    # count would call that retry a defect. What is actually claimed here is a
+    # property of every rename, however many there are, so it is asserted over
+    # all of them: the name leads to nothing until the first document lands, and
+    # from then on it leads to the whole of that document and never to half of
+    # one. A writer that unlinked before renaming would be caught by the last of
+    # these, because the name would lead to nothing at the second publication.
+    assert len(at_the_rename) >= 2, at_the_rename
+    assert at_the_rename[0] is None, at_the_rename
+    assert all(seen is None or seen == published for seen in at_the_rename), at_the_rename
+    assert at_the_rename[-1] == published, at_the_rename
     assert json.loads(published.decode("utf-8")) == starting
     assert json.loads(path.read_text(encoding="utf-8")) == running
 
