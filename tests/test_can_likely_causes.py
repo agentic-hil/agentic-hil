@@ -73,7 +73,7 @@ import agentic_hil.bridge as bridge_module_under_test
 import agentic_hil.can as can_module_under_test
 import agentic_hil.canbroker as canbroker_module_under_test
 import agentic_hil.knowledge as knowledge_module_under_test
-from agentic_hil.bridge import ProcessBridgeSession
+from agentic_hil.bridge import BridgeCleanupError, ProcessBridgeSession
 from agentic_hil.comports import likely_causes as com_port_likely_causes
 from agentic_hil.config import load_config
 from agentic_hil.debugger import UnboundDebuggerBackend
@@ -637,6 +637,37 @@ class NeverEmptyingAdapter:
         return {"ok": True, "safe_state_confirmed": True, "process_reaped": True}
 
 
+class RefusedOpenBridgeThatWillNotClose:
+    """A bridge transport that refuses `open` with an error type of its own and
+    then fails its own cleanup, which is the branch where the refusal and a
+    cleanup error are reported together."""
+
+    def __init__(self, error_type: str) -> None:
+        self.error_type = error_type
+
+    def request(self, method: str, params: dict, timeout_s: float) -> dict:
+        return {"ok": False, "error_type": self.error_type, "summary": "CAN adapter bridge refused to open the channel."}
+
+    def close(self) -> dict:
+        raise BridgeCleanupError({"ok": False, "error_type": "bridge_process_reap_failed", "summary": "Bridge process cleanup could not be confirmed."})
+
+
+class MalformedFrameAdapter:
+    """An adapter session that answers a read with frame data that cannot be read
+    back, which is the second place `can_adapter_invalid_response` is written."""
+
+    adapter_name = "fake"
+
+    def read(self, max_frames: int, wait_timeout_s: float) -> dict:
+        return {"ok": True, "frames": [{"id": "not an identifier"}]}
+
+    def status(self) -> dict:
+        return {"active": True}
+
+    def close(self) -> dict:
+        return {"ok": True, "safe_state_confirmed": True, "process_reaped": True}
+
+
 class RefusingCloseAdapter:
     """An adapter session that cannot be closed, which is what leaves a bus
     registered for a cleanup retry."""
@@ -818,6 +849,61 @@ def test_a_read_the_adapter_refuses_carries_causes_of_its_own(tmp_path: Path) ->
 
     assert result["ok"] is False and result["error_type"] == READ_FAILED_ERROR, result
     assert_causes_are_about_the_bus(result["likely_causes"], READ_FAILED_ERROR, result)
+    assert classify_failure_report(config, com_port_likely_causes)["likely_causes"] == result["likely_causes"]
+
+
+def test_an_open_refused_by_the_bridge_whose_cleanup_also_fails_still_carries_causes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`open_process_adapter` returns the refusal at two places, and the second
+    one reports a cleanup error beside it.
+
+    A bridge is a program this project did not write: it may name one of these
+    CAN error types and carry no causes with it. Both returns attach the row for
+    that reason, and this is the one that a failing close reaches.
+    """
+    config = process_bus_config(tmp_path, executable_exists=True)
+    monkeypatch.setattr(can_module_under_test, "spawn_managed_process", lambda *args, **kwargs: SimpleNamespace(pid=1))
+    monkeypatch.setattr(can_module_under_test, "ProcessCanAdapterSession", lambda child, timeout_s=10.0: RefusedOpenBridgeThatWillNotClose(ADAPTER_OPEN_FAILED_ERROR))
+
+    result = can_module_under_test.open_process_adapter(config, PROCESS_BUS_ID, config.can_buses[PROCESS_BUS_ID], False)
+
+    assert result["ok"] is False and result["error_type"] == ADAPTER_OPEN_FAILED_ERROR, result
+    assert result["cleanup_required"] is True, result
+    assert_causes_are_about_the_bus(result["likely_causes"], ADAPTER_OPEN_FAILED_ERROR, result)
+
+
+def test_a_read_the_bridge_answers_in_the_wrong_shape_refuses_with_causes_of_its_own(tmp_path: Path) -> None:
+    """`can_adapter_invalid_response` on the read path, which is the one place it
+    is not covered by another spread.
+
+    `can_read` copies the adapter dictionary into the report unchanged, so the
+    causes have to be on the dictionary `invalid_can_bridge_response` builds. The
+    open path attaches them a second time in `open_process_adapter`; the read
+    path does not, and a bare payload here reaches the operator generic.
+    """
+    config = queue_bus_config(tmp_path)
+    service = can_module_under_test.CanBusService(config)
+    adapter = can_module_under_test.ProcessCanAdapterSession(SimpleNamespace(poll=lambda: None, stdout=iter(()), stderr=iter(())), 1.0)
+    adapter.request = lambda method, params, timeout_s: {"ok": True, "frames": [], "unexpected": 1}
+    service.sessions[QUEUE_BUS_ID] = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], adapter, str(tmp_path / "can-shape.jsonl"))
+
+    result = service.read(QUEUE_BUS_ID, 1, 0.0)
+
+    assert result["ok"] is False and result["error_type"] == ADAPTER_INVALID_RESPONSE_ERROR, result
+    assert_causes_are_about_the_bus(result["likely_causes"], ADAPTER_INVALID_RESPONSE_ERROR, result)
+    assert classify_failure_report(config, com_port_likely_causes)["likely_causes"] == result["likely_causes"]
+
+
+def test_frames_that_cannot_be_read_back_refuse_with_causes_of_their_own(tmp_path: Path) -> None:
+    """The second `can_adapter_invalid_response` on the read path: the adapter
+    claimed success and handed over frame data `CanBusService` cannot read."""
+    config = queue_bus_config(tmp_path)
+    service = can_module_under_test.CanBusService(config)
+    service.sessions[QUEUE_BUS_ID] = can_module_under_test.CanBusSession(QUEUE_BUS_ID, config.can_buses[QUEUE_BUS_ID], MalformedFrameAdapter(), str(tmp_path / "can-frames.jsonl"))
+
+    result = service.read(QUEUE_BUS_ID, 1, 0.0)
+
+    assert result["ok"] is False and result["error_type"] == ADAPTER_INVALID_RESPONSE_ERROR, result
+    assert_causes_are_about_the_bus(result["likely_causes"], ADAPTER_INVALID_RESPONSE_ERROR, result)
     assert classify_failure_report(config, com_port_likely_causes)["likely_causes"] == result["likely_causes"]
 
 
