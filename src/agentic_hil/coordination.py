@@ -229,6 +229,11 @@ def record_audit_broken(record: JsonObject | None) -> bool:
     return any(AUDIT_BROKEN_MARKER in reason for reason in _record_cleanup_reasons(record))
 
 
+# The record states that hold a resource against every other workspace. A
+# record in any of them refuses the next acquire from a project that does not
+# own it; `released` and an absent state do not, which is what separates a
+# workspace that finished from one that stopped.
+STANDING_INCIDENT_STATES = frozenset({"cleanup_required", "quarantined", "recovery_pending"})
 # The scope under which the error catalogue answers for a refusal raised by
 # somebody else's incident. The advice is the opposite of the local one: this
 # workspace's `recover` cannot clear it and will say so, so a single unscoped
@@ -361,6 +366,81 @@ def foreign_incident_next_step(entry: JsonObject) -> str:
             "workspace answers it."
         )
     return f"{where} {act} Nothing in this workspace clears it: `agentic-hil recover` here answers `nothing_to_recover`, by design."
+
+
+def foreign_incident_sentence(entries: list[JsonObject]) -> str:
+    """The sentence that replaces the claim that nothing is standing.
+
+    Two clauses because there are two ways a resource can be held by something
+    this project cannot see: a neighbour's incident, and a record this build
+    could not read at all. The second is reported rather than dropped: a walk
+    that swallowed a corrupt record would answer that the bench is free on
+    exactly the state that stops it."""
+    parts: list[str] = []
+    named = [entry for entry in entries if entry.get("project_resource")]
+    unreadable = [entry for entry in entries if entry.get("state") == "unreadable"]
+    if named:
+        resources = ", ".join(sorted({str(entry.get("resource")) for entry in named}))
+        owners = ", ".join(sorted({str(entry.get("project_resource")) for entry in named}))
+        parts.append(
+            f"Another project on this machine holds an unresolved incident on {resources}: every hardware call from "
+            f"here against those resources is refused until the workspace that raised it ({owners}) resolves it."
+        )
+    if unreadable:
+        resources = ", ".join(sorted({str(entry.get("resource")) for entry in unreadable}))
+        parts.append(f"The coordination record for {resources} could not be read, so whether it holds this bench is unknown.")
+    return " ".join(parts)
+
+
+def _record_directory_if_present(config: AgenticHILConfig) -> Path | None:
+    """The coordination record directory, without creating it.
+
+    A read-only report may not bring the state tree into existence: nothing can
+    be standing where nothing was ever written, and `doctor` runs on benches
+    whose state root is exactly what is being questioned. Present, it is
+    reopened through the same symlink-refusing walk every other caller uses."""
+    plain = Path(config.state_root) / "coordination" / "records"
+    if not plain.is_dir():
+        return None
+    return derived_state_directory(config.state_root, "coordination", "records")
+
+
+def standing_foreign_incidents(config: AgenticHILConfig, project_key: str) -> list[JsonObject]:
+    """Every unresolved incident of another workspace on the resources this one declares.
+
+    Defined over exactly the resources `device_holds` already walks, plus the
+    debugger discovery pseudo-resource, which is not a device and is where the
+    reported incident sat. That is the completion of a behaviour that was
+    already half there: `status` answers machine-wide for a live hold through
+    `device_holds` and per project for everything else, and the half it did not
+    answer is the half that refuses the call.
+
+    No lock of any kind is taken. Records are written atomically, so a read is
+    either the old document or the new one, and a report that took the
+    coordination locks would contend with the very session whose incident it is
+    describing. It is what lets `doctor`, which builds no coordinator, reach the
+    same facts.
+
+    Matched on the project digest alone rather than on the fuller
+    `_record_matches_project`: the digest is derived from the same two paths,
+    and this walk has only the asking configuration to compare with."""
+    directory = _record_directory_if_present(config)
+    if directory is None:
+        return []
+    entries: list[JsonObject] = []
+    for resource in (DEBUGGER_DISCOVERY_RESOURCE, *config_devices(config).lock_keys):
+        path = directory / f"{resource_digest(resource)}.json"
+        try:
+            record = _read_record_at(path, resource)
+        except CoordinationError as error:
+            entries.append({"resource": resource, "state": "unreadable", **{key: value for key, value in error.result.items() if key in {"error_type", "summary"}}})
+            continue
+        if record is None or record.get("state") not in STANDING_INCIDENT_STATES:
+            continue
+        if record.get("project_resource") == project_key:
+            continue
+        entries.append(foreign_incident_entry(resource, record))
+    return entries
 
 
 class CoordinationError(RuntimeError):
@@ -1500,6 +1580,15 @@ class HardwareCoordinator:
                 "bench_held": bool(owner_active or holds),
                 "held_devices": sorted({str(item["resource"]) for item in holds if isinstance(item.get("resource"), str)}),
                 "device_holds": holds,
+                # The other half of the same question, and the half that refuses
+                # the call. `device_holds` above answers machine-wide for a live
+                # hold; this answers machine-wide for an unresolved record left
+                # on the same devices by a session that has ended, which is what
+                # `blocked` and the fields below it cannot see because they are
+                # derived from this project's own record. `blocked` deliberately
+                # keeps its meaning, because callers read it as "this project is
+                # blocked"; the neighbour's incident gets its own section.
+                "standing_incidents": standing_foreign_incidents(self.config, self.project_key),
                 "snapshot_atomic": snapshot_atomic,
                 "blocked": blocked,
                 # Whether the blocked bench above owes a gate, which since the
@@ -2074,34 +2163,7 @@ class HardwareCoordinator:
         # The record's absolute path lives under the environment-derived state_root
         # and must never appear in a result destined for an operator/MCP sink; the
         # resource name identifies the record safely for diagnostics.
-        path = self._record_path(resource)
-        try:
-            text = safe_read_text(path)
-        except FileNotFoundError:
-            return None
-        except (OSError, UnicodeDecodeError, ConfigError) as error:
-            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state could not be read and requires operator recovery.", "resource": resource, **filesystem_error_detail(error)}) from error
-        try:
-            value = json.loads(text)
-        except ValueError as error:
-            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is corrupted and requires operator recovery.", "resource": resource, "backend_error": str(error)}) from error
-        if not isinstance(value, dict) or value.get("version") not in {1, LEASE_VERSION}:
-            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is invalid and requires operator recovery.", "resource": resource})
-        if value.get("version") == 1:
-            value = {**value, "version": LEASE_VERSION}
-            if value.get("state") in {"cleanup_required", "quarantined"}:
-                value["quarantine_id"] = legacy_quarantine_id(value)
-        state = value.get("state")
-        resources_field = value.get("resources", [])
-        typed = (
-            (state is None or isinstance(state, str))
-            and isinstance(resources_field, list)
-            and all(isinstance(item, str) for item in resources_field)
-            and all(value.get(field) is None or isinstance(value.get(field), str) for field in ("quarantine_id", "project_resource", "workspace", "config_path", "config_sha256", "owner_marker", "recovered_quarantine_id"))
-        )
-        if not typed:
-            raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state has invalid field types and requires operator recovery.", "resource": resource})
-        return value
+        return _read_record_at(self._record_path(resource), resource)
 
     def _write_record(self, resource: str, record: JsonObject) -> None:
         atomic_write_text(self._record_path(resource), json.dumps(record, indent=2) + "\n")
@@ -2239,6 +2301,36 @@ class HardwareCoordinator:
                 lock.release()
 
 
+def _read_record_at(path: Path, resource: str) -> JsonObject | None:
+    try:
+        text = safe_read_text(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError, ConfigError) as error:
+        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state could not be read and requires operator recovery.", "resource": resource, **filesystem_error_detail(error)}) from error
+    try:
+        value = json.loads(text)
+    except ValueError as error:
+        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is corrupted and requires operator recovery.", "resource": resource, "backend_error": str(error)}) from error
+    if not isinstance(value, dict) or value.get("version") not in {1, LEASE_VERSION}:
+        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state is invalid and requires operator recovery.", "resource": resource})
+    if value.get("version") == 1:
+        value = {**value, "version": LEASE_VERSION}
+        if value.get("state") in {"cleanup_required", "quarantined"}:
+            value["quarantine_id"] = legacy_quarantine_id(value)
+    state = value.get("state")
+    resources_field = value.get("resources", [])
+    typed = (
+        (state is None or isinstance(state, str))
+        and isinstance(resources_field, list)
+        and all(isinstance(item, str) for item in resources_field)
+        and all(value.get(field) is None or isinstance(value.get(field), str) for field in ("quarantine_id", "project_resource", "workspace", "config_path", "config_sha256", "owner_marker", "recovered_quarantine_id"))
+    )
+    if not typed:
+        raise CoordinationError({"ok": False, "error_type": "coordination_state_invalid", "summary": "Hardware coordination state has invalid field types and requires operator recovery.", "resource": resource})
+    return value
+
+
 def _with_status_sentences(status: JsonObject) -> JsonObject:
     """The lease status with the sentence a person reads first, and the next step.
 
@@ -2256,6 +2348,15 @@ def _with_status_sentences(status: JsonObject) -> JsonObject:
     reasons = [str(item) for item in status.get("cleanup_reasons") or [] if isinstance(item, str)]
     quarantine_id = status.get("quarantine_id")
     incident = f" under incident {quarantine_id}" if isinstance(quarantine_id, str) and quarantine_id else ""
+    # A neighbour's standing incident is a fact about this bench in every one of
+    # the three states below, and in two of them the sentence said the opposite
+    # outright. It is appended rather than folded in, because it is a different
+    # claim from the one about this project and an operator has to be able to
+    # tell them apart: this project's incident is theirs to sign for, and the
+    # neighbour's is not theirs to touch at all.
+    standing = [entry for entry in status.get("standing_incidents") or [] if isinstance(entry, dict)]
+    foreign = foreign_incident_sentence(standing)
+    foreign_step = next((foreign_incident_next_step(entry) for entry in standing if entry.get("project_resource")), None)
     if status.get("cleanup_required") is True:
         opening = f"This bench is quarantined{incident}" + (f" for {', '.join(reasons)}" if reasons else "") + "."
         if status.get("incident_stands") is True:
@@ -2267,10 +2368,16 @@ def _with_status_sentences(status: JsonObject) -> JsonObject:
         else:
             summary = f"{opening} Nothing needs signing: the next hardware call settles it on its own evidence, and `cleanup_reasons` names what it has to confirm."
             next_step = "Nothing to sign for. The next hardware call settles this incident, or stands it down, on what it reads back from the board."
+        if foreign:
+            summary = f"{summary} {foreign}"
         return {**status, "summary": summary, "next_step": next_step}
     if status.get("bench_held") is True:
         held = f"This bench is held: {', '.join(devices)} under a live session." if devices else "This bench is held by a live session and no device is held under it yet."
+        if foreign:
+            return {**status, "summary": f"{held} {foreign}", **({"next_step": foreign_step} if foreign_step else {})}
         return {**status, "summary": f"{held} No incident is standing."}
+    if foreign:
+        return {**status, "summary": f"Nothing in this workspace is held or standing. {foreign}", **({"next_step": foreign_step} if foreign_step else {})}
     return {**status, "summary": "Nothing on this bench is held and no incident is standing."}
 
 
@@ -2301,6 +2408,21 @@ def nothing_standing_result(status: JsonObject) -> JsonObject:
     }
     if reasons:
         result["cleanup_reasons"] = reasons
+    # The third dead end (#531). This is the command the documented operator
+    # path sends a refused caller to with the id the refusal named, and on a
+    # bench held by a neighbour's incident it answered that nothing was
+    # standing, which the caller had just been refused for. It still clears
+    # nothing and settles nothing: a second workspace may not resolve an
+    # incident it does not own, and that rule is what the quarantine is. What it
+    # stops doing is contradicting the refusal.
+    standing = [entry for entry in status.get("standing_incidents") or [] if isinstance(entry, dict)]
+    if standing:
+        sentence = foreign_incident_sentence(standing)
+        result["standing_incidents"] = standing
+        result["summary"] = f"{sentence} Nothing in this workspace is standing, so there is nothing here to sign for."
+        next_step = next((foreign_incident_next_step(entry) for entry in standing if entry.get("project_resource")), None)
+        if next_step:
+            result["next_step"] = next_step
     return result
 
 
