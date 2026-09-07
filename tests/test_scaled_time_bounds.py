@@ -40,10 +40,22 @@ So the accepted values are the finite numbers from `TIME_SCALE_MINIMUM` to
 `TIME_SCALE_MAXIMUM` inclusive, and the message on everything else names the
 variable, the value it was given and the two ends of that range, because the
 reader is an operator looking at a runner's environment.
+
+#522 is the rest of the suite. The helper landed in front of two bounds; every
+other assertion that compares an elapsed measurement with a constant was left
+with no slack a slower host can be granted, in every tier, and each of them has
+turned a loaded run red with nothing wrong under it. So the last section here
+walks the suite's own source and refuses a wall-clock ceiling that does not go
+through the helper, the base values stay written where they were chosen, and
+the two pyOCD phrase tests stop reporting a terminated stub as a stub that lost
+pyOCD.
 """
 
 from __future__ import annotations
 
+import importlib
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -349,3 +361,334 @@ def test_the_two_bounds_the_issue_names_keep_their_base_values() -> None:
         text = (TESTS / name).read_text(encoding="utf-8")
         assert "scaled_time_bound(" in text, f"{name} mentions the helper without calling it"
         assert base in text, f"{name} no longer states its base bound as {base}"
+
+
+# ---------------------------------------------------------------------------
+# #522: the rest of the suite's wall-clock ceilings, in every tier, and the
+# pyOCD stub that a loaded host was terminating instead of timing out.
+
+
+# What this walk counts as a measured duration. The vocabulary is deliberately
+# small and is the one the issue's own list is written in: `elapsed`,
+# `elapsed_s`, `elapsed_ms` however they are spelled or subscripted, and the
+# `_age_s` a heartbeat's age is read under. Every name in it is a wall-clock
+# measurement and nothing else, which is what lets the walk be positive about
+# each line it reports rather than arguable about it.
+MEASUREMENT = re.compile(r"(?<![A-Za-z0-9_])(?:elapsed[A-Za-z0-9_]*|[A-Za-z0-9_]*_age_s)(?![A-Za-z0-9_])")
+
+
+@dataclass(frozen=True)
+class Ceiling:
+    """One assertion line that bounds a measured duration from above."""
+
+    path: Path
+    number: int
+    line: str
+
+    @property
+    def name(self) -> str:
+        return self.path.relative_to(TESTS).as_posix()
+
+    @property
+    def where(self) -> str:
+        return f"{self.name}:{self.number}"
+
+    @property
+    def through_the_helper(self) -> bool:
+        return "scaled_time_bound(" in self.line
+
+
+def ceilings_in(text: str, path: Path) -> list[Ceiling]:
+    """Every line in ``text`` that bounds a measured duration from above.
+
+    A line counts when three things are true of it at once: it is an assertion,
+    it holds a ``<``, and one of the measurement words above stands to the left
+    of that ``<``. The last part is what separates a ceiling from a floor, since
+    a floor is written ``elapsed >= ...`` and holds no ``<`` at all, and a floor
+    must never take this factor: widening it would have the suite demand that a
+    loaded host be slower still.
+
+    A regex over assertion lines, on purpose. What it catches is the shape the
+    issue is about and the shape a revert would be written in, and what it does
+    not catch is worth stating rather than pretending away:
+
+    * a measurement named outside the vocabulary above, `waited` and `duration`
+      among them, which the suite does use in a few places;
+    * a ceiling written the other way round, ``BOUND > elapsed``, which the
+      suite writes nowhere today;
+    * an assertion spread over more than one physical line;
+    * a bound applied outside an `assert`, a `pytest.approx` window, or a sleep
+      chosen to match one;
+    * a commented-out line, which is skipped deliberately: it asserts nothing.
+
+    So this is a floor under the rule and not a proof of it. It fails on every
+    line the issue lists, and it goes on failing if one of them comes back.
+    """
+    found: list[Ceiling] = []
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line.startswith("assert "):
+            continue
+        head, separator, _ = line.partition("<")
+        if not separator or not MEASUREMENT.search(head):
+            continue
+        found.append(Ceiling(path, number, line))
+    return found
+
+
+def walked_files() -> list[Path]:
+    """Every Python file under `tests/`, which is every tier the suite has.
+
+    The plain tier, the container tier and the bench tier are all read: a bound
+    only a bench or only the image can reach is exactly the bound whose failure
+    costs the most to diagnose, so none of them is exempt.
+    """
+    return sorted(TESTS.rglob("*.py"))
+
+
+def suite_ceilings() -> list[Ceiling]:
+    return [entry for path in walked_files() for entry in ceilings_in(path.read_text(encoding="utf-8"), path)]
+
+
+# A file of the shape the walk reads, written as a list of strings so that no
+# line of this module is itself an assertion the walk would then report.
+SCANNER_SAMPLE = "\n".join(
+    [
+        "def sample() -> None:",
+        '    assert elapsed < CALL_CEILING_S, "a bare ceiling, the shape this walk exists to find"',
+        '    assert elapsed_s < scaled_time_bound(2.0), "the same ceiling, taken through the helper"',
+        '    assert result["elapsed_ms"] < scaled_time_bound(5.0) * 1000, "a measurement read out of an envelope"',
+        '    assert refusal["heartbeat_age_s"] < scaled_time_bound(1.0), "an age, a duration under another name"',
+        '    assert elapsed >= FLOOR_S, "a floor, which this factor must never be allowed to move"',
+        '    # assert elapsed < CALL_CEILING_S, "a line that asserts nothing"',
+        '    assert waited < 2.0, "a measurement outside the vocabulary, and the walk says so"',
+    ]
+)
+
+
+def test_the_walk_tells_a_bare_ceiling_from_a_scaled_one_and_leaves_a_floor_alone() -> None:
+    """The scanner's own claim, on a sample holding one of each shape.
+
+    Without this the walk could be narrowed to nothing and the pin below would
+    stay green while the suite went back to bare bounds.
+    """
+    found = ceilings_in(SCANNER_SAMPLE, TESTS / "sample.py")
+
+    assert [entry.number for entry in found] == [2, 3, 4, 5], [entry.line for entry in found]
+    assert [entry.through_the_helper for entry in found] == [False, True, True, True], [entry.line for entry in found]
+
+
+def test_the_walk_reads_every_tier_the_suite_has() -> None:
+    """The plain tier, the container tier and the bench tier, all of them."""
+    tiers = {("tests" if path.parent == TESTS else path.parent.name) for path in walked_files()}
+
+    assert {"tests", "container", "bench"} <= tiers, sorted(tiers)
+
+
+def test_every_wall_clock_ceiling_in_the_suite_is_taken_through_the_helper() -> None:
+    """The pin the issue asks for: no ceiling on a measured duration without the factor.
+
+    The failure lists the offenders by file and line, because the reader is
+    somebody deciding what to change, not somebody deciding whether to rerun.
+    """
+    offenders = [entry for entry in suite_ceilings() if not entry.through_the_helper]
+
+    assert not offenders, "wall-clock ceilings a loaded host cannot be granted any slack on:\n" + "\n".join(
+        f"  {entry.where}: {entry.line}" for entry in offenders
+    )
+
+
+# How many such ceilings each file holds today. Asserted so the pin above cannot
+# be made green by deleting the assertions instead of scaling them, and so a
+# walk that quietly stopped reading a tier says so here.
+CEILINGS_PER_FILE = {
+    "bench/test_bench_coordination.py": 2,
+    "container/test_debugger_processes_against_openocd.py": 2,
+    "container/test_pyocd_without_a_probe.py": 1,
+    "test_bench_mutex.py": 2,
+    "test_com_stdio_bridge.py": 3,
+    "test_debug_backend_refusals.py": 1,
+    "test_debugger_processes.py": 4,
+    "test_install_eval.py": 1,
+    "test_pyocd_without_a_probe.py": 6,
+    "test_reactor_runtime.py": 2,
+    "test_redact.py": 2,
+    "test_run_lifecycle.py": 2,
+}
+
+
+def test_the_ceilings_the_walk_finds_are_the_ones_the_suite_holds() -> None:
+    """The count per file, unchanged by this issue: the fix scales them, it moves none.
+
+    A file the walk expects and cannot find is not asserted about, because a
+    source distribution ships only part of this tree (MANIFEST.in excludes the
+    evaluation tests among others) and a from-sdist collection has to pass here
+    too. What is not allowed is the tree shrinking to nothing unnoticed, so the
+    number of files that did answer is asserted as well.
+    """
+    counted: dict[str, int] = {}
+    for entry in suite_ceilings():
+        counted[entry.name] = counted.get(entry.name, 0) + 1
+    expected = {name: count for name, count in CEILINGS_PER_FILE.items() if (TESTS / name).is_file()}
+
+    assert counted == expected, sorted(counted.items())
+    assert len(expected) >= 10, sorted(expected)
+
+
+# The base value behind each ceiling, stated where it was chosen. The factor is
+# the runner's to set; the claim is the test author's, and this issue moves none
+# of them. Named constants first.
+BASE_CONSTANTS = {
+    "bench/test_bench_coordination.py": ("REFUSAL_CEILING_S = 30.0",),
+    "container/test_debugger_processes_against_openocd.py": ("CALL_CEILING_S = 15.0",),
+    "container/test_pyocd_without_a_probe.py": ("TIMEOUT_S = 40",),
+    "test_bench_mutex.py": ("FRESH_HEARTBEAT_AGE_S = 1.0",),
+    "test_com_stdio_bridge.py": ("SHUTDOWN_CEILING_S = 1.5",),
+    "test_debug_backend_refusals.py": ("START_TIMEOUT_S = 10.0",),
+    "test_debugger_processes.py": ("CALL_CEILING_S = 15.0", "EMPTIED_GROUP_CEILING_S = 4.0"),
+    "test_pyocd_without_a_probe.py": ("CONFIGURED_TIMEOUT_S = 5",),
+}
+
+# And the ones written as a literal on the assertion line itself, with how many
+# of that file's ceiling lines have to carry each.
+LITERAL_BASES = {
+    "test_install_eval.py": (("20", 1),),
+    "test_reactor_runtime.py": (("1.0", 1), ("WORKER_EXIT_GRACE_S + 3.0", 1)),
+    "test_redact.py": (("5.0", 2),),
+    "test_run_lifecycle.py": (("30", 1), ("60", 1)),
+}
+
+
+def test_the_named_base_constants_keep_the_values_they_had() -> None:
+    """Every ceiling constant the issue lists, at the number it already stood at."""
+    for name, bases in BASE_CONSTANTS.items():
+        path = TESTS / name
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for base in bases:
+            assert base in text, f"{name} no longer states its base bound as {base}"
+
+
+def test_the_literal_bounds_keep_the_numbers_they_had() -> None:
+    """The bounds written on the assertion line, still on it after the helper wraps them.
+
+    `assert elapsed < 5.0` becoming `assert elapsed < scaled_time_bound(5.0)`
+    keeps the 5.0 where the author put it, which is the whole property: the
+    factor widens, it does not decide.
+    """
+    for name, bases in LITERAL_BASES.items():
+        path = TESTS / name
+        if not path.is_file():
+            continue
+        lines = [entry.line for entry in ceilings_in(path.read_text(encoding="utf-8"), path)]
+        for base, expected in bases:
+            carrying = [line for line in lines if base in line]
+            assert len(carrying) == expected, f"{name}: {len(carrying)} of its ceilings carry {base}, not {expected}"
+
+
+# ---------------------------------------------------------------------------
+# The pyOCD stub that was being terminated rather than timing out.
+#
+# `tests/test_pyocd_unknown_target_phrases.py` runs a stub that is a Python
+# process importing pyOCD twice, under the `timeout_s` its configuration writes.
+# On a loaded host that budget runs out, the child is terminated, its stderr is
+# empty, and both tests report a stub that stopped reaching pyOCD, which is the
+# one failure the file exists to catch and is here the wrong answer. The log
+# envelope says so all along: it carries `timed_out`, and neither test reads it.
+#
+# Two things follow, and both are pinned here. The configured budget takes the
+# same factor as every bound above, so the test measures what it measured. And
+# both tests read `timed_out` and name the factor when it is true, so a slow
+# host is reported as slow.
+
+PYOCD_PHRASES = TESTS / "test_pyocd_unknown_target_phrases.py"
+
+# The two that run the stub through the service. The other tests in that file
+# drive the installed pyOCD in this process and time nothing.
+PYOCD_PHRASE_TESTS_THAT_RUN_THE_STUB = (
+    "test_the_real_refusal_reaches_the_cmsis_pack_remediation",
+    "test_the_stub_carries_the_installed_pyocd_wording",
+)
+
+# What `tests/conftest.py` writes today, and what the base has to stay.
+STUB_BASE_TIMEOUT_S = 5.0
+
+
+def function_body(text: str, name: str) -> str:
+    """The source of one top-level function, from its `def` to the next one."""
+    lines = text.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.startswith(f"def {name}(")]
+    assert len(starts) == 1, f"{name} is not defined exactly once in the file"
+    start = starts[0]
+    end = start + 1
+    while end < len(lines) and not lines[end].startswith("def "):
+        end += 1
+    return "\n".join(lines[start:end])
+
+
+def configured_timeout_s(config_path: Path) -> float:
+    """The one `timeout_s` a written test configuration carries."""
+    written = re.findall(r"timeout_s:\s*([0-9]+(?:\.[0-9]+)?)", config_path.read_text(encoding="utf-8"))
+    assert len(written) == 1, f"{config_path} carries {len(written)} timeout_s entries: {written}"
+    return float(written[0])
+
+
+def test_both_pyocd_phrase_tests_read_the_envelope_s_timed_out() -> None:
+    """A terminated stub is reported as a terminated stub, not as lost wording.
+
+    The envelope already knows. What was missing is a test that asks it, and a
+    message naming the variable an operator can act on, because "the stub did
+    not reach pyOCD" sends the reader to the stub and to pyOCD, and the answer
+    was neither.
+    """
+    text = PYOCD_PHRASES.read_text(encoding="utf-8")
+
+    for name in PYOCD_PHRASE_TESTS_THAT_RUN_THE_STUB:
+        body = function_body(text, name)
+        assert "timed_out" in body, f"{name} never reads the log envelope's timed_out"
+        assert TIME_SCALE_VARIABLE in body or "TIME_SCALE_VARIABLE" in body, (
+            f"{name} can report a terminated stub without naming {TIME_SCALE_VARIABLE}"
+        )
+
+
+def test_the_stub_s_configured_timeout_follows_the_factor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The budget the stub runs under is scaled like every bound above it.
+
+    Read through one seam, `stub_config`, the single helper both tests write
+    their configuration with: a pin that only read the source could not tell a
+    scaled value from the words `scaled_time_bound` sitting nearby, and the
+    number on disk is the number the child actually runs under.
+
+    Unset, the file still says 5, which is what keeps the test the test it was.
+    """
+    pytest.importorskip("pyocd", reason="pyOCD is an optional extra (install agentic-hil[pyocd])")
+    phrases = importlib.import_module("test_pyocd_unknown_target_phrases")
+    write = getattr(phrases, "stub_config", None)
+    assert callable(write), "test_pyocd_unknown_target_phrases has no stub_config writing the stub's configuration"
+
+    monkeypatch.delenv(TIME_SCALE_VARIABLE, raising=False)
+    assert configured_timeout_s(write(tmp_path / "unset")) == STUB_BASE_TIMEOUT_S
+
+    monkeypatch.setenv(TIME_SCALE_VARIABLE, "3")
+    assert scaled_time_bound(STUB_BASE_TIMEOUT_S) == 15.0
+    assert configured_timeout_s(write(tmp_path / "scaled")) == pytest.approx(scaled_time_bound(STUB_BASE_TIMEOUT_S))
+
+
+def test_the_helper_ships_where_the_container_tier_can_import_it() -> None:
+    """`tests/support.py` is package content, so the container tier and a source
+    distribution both find it beside the tests that import it.
+
+    The image copies this checkout in whole and the tier is a package under
+    `tests/`, so the directory holding the helper is on the path there for the
+    same reason it is here. What could still break it is an exclusion, so the
+    exclusion list is what this reads.
+    """
+    manifest = REPOSITORY_ROOT / "MANIFEST.in"
+    if not manifest.is_file():
+        pytest.skip("MANIFEST.in is repository content and is read from a checkout")
+    text = manifest.read_text(encoding="utf-8")
+
+    assert "recursive-include tests *.py" in text, text
+    excluded = [line for line in text.splitlines() if line.startswith(("exclude ", "prune ")) and "support" in line]
+    assert not excluded, excluded
