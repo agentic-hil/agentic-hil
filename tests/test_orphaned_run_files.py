@@ -38,6 +38,19 @@ The decided behaviour, and what the tests here encode, one per line:
 Everything here is in process and over the coordination state files only. No
 worker is spawned: what the module is asked is what it does with files that are
 already there, and planting them is the whole of the arrangement.
+
+The last three tests are #529, and they are about the margin the give-up path
+has rather than about what it removes. The sweep decides on wall clock age and
+runs several file operations after the start planted its own stop, so what keeps
+a start from deleting the files it just wrote for itself is a relation between
+three product numbers: the threshold is `worker_publish_window_s(MAX_WAIT_S)`,
+every start's own deadline is `worker_publish_window_s(wait_s)` for the wait it
+was handed, and `validated_wait` refuses any wait above `MAX_WAIT_S`. Together
+those make the threshold an upper bound over every window a start can wait in,
+so a live attempt's files are never older than the cutoff when its own start
+sweeps. Those three tests read the constants the product ships and never a
+patched pair, so moving either constant, or loosening `validated_wait`, is red
+here instead of red once a month on a loaded runner.
 """
 
 from __future__ import annotations
@@ -51,8 +64,8 @@ import pytest
 from test_run_lifecycle import LONG_DELAY_PLAN, bench_workspace
 
 import agentic_hil.runlifecycle as runlifecycle
-from agentic_hil.bench import MAX_WAIT_S, _LifetimeLock
-from agentic_hil.config import load_authoritative_config
+from agentic_hil.bench import MAX_WAIT_S, _LifetimeLock, validated_wait
+from agentic_hil.config import ConfigError, load_authoritative_config
 
 # A handle no generated record collides with: the record handles below are
 # minted from a counter, so the top of the space is free for the orphan.
@@ -517,3 +530,97 @@ def test_status_answers_run_not_found_for_the_orphan_handle_before_and_after_the
         assert answer["error_type"] == "run_not_found", answer
         assert answer["run"] == ORPHAN_HANDLE, answer
         assert answer["side_effect_committed"] is False, answer
+
+
+def test_the_sweep_threshold_covers_every_wait_the_validator_admits() -> None:
+    """The threshold is an upper bound over every window a start can wait in.
+
+    The sweep dates a handle's files against one number and the start's own
+    give-up dates against another, and the two are computed from the same pair
+    of constants: `orphan_sweep_window_s` is `worker_publish_window_s(
+    MAX_WAIT_S)` while a start's deadline is `worker_publish_window_s(wait_s)`
+    for the wait that start was handed. What makes the first the larger of the
+    two for every start on the bench is that `validated_wait` admits nothing
+    above `MAX_WAIT_S`, so the widest deadline any start can be given is the
+    threshold itself and no attempt's files are ever older than the cutoff while
+    that attempt is still live.
+
+    Read from the constants the product ships rather than from a patched pair,
+    because the relation is what keeps the give-up path safe and a change to
+    either number should be red here rather than on a loaded runner.
+    """
+    threshold = runlifecycle.orphan_sweep_window_s()
+
+    # Not merely above the widest window: it is that window, which is what makes
+    # the bound tight rather than a margin somebody chose.
+    assert threshold == runlifecycle.worker_publish_window_s(validated_wait(MAX_WAIT_S))
+    for asked in (0, 0.0, 0.5, 1.0, 30.0, MAX_WAIT_S / 2, MAX_WAIT_S - 1.0, MAX_WAIT_S):
+        assert runlifecycle.worker_publish_window_s(validated_wait(asked)) <= threshold, asked
+
+
+def test_a_wait_the_validator_refuses_cannot_widen_a_start_past_the_threshold() -> None:
+    """The other half of the bound: what is refused cannot get past it either.
+
+    `validated_wait` is the gate, but it is not the only reader of a caller's
+    wait, and a value that never reaches a worker is still handed to
+    `worker_publish_window_s` on the way to the refusal. So each value the
+    validator names is asserted twice: that it is refused, and that the window
+    computed from it is still no wider than the sweep's threshold, because the
+    window clamps to `MAX_WAIT_S` and falls back to the base window for anything
+    that is not a number. Negative, over the maximum, non finite, a bool and a
+    string: a caller cannot buy a deadline past the cutoff with any of them.
+    """
+    threshold = runlifecycle.orphan_sweep_window_s()
+
+    for refused in (-1.0, MAX_WAIT_S + 1.0, MAX_WAIT_S * 2, float("inf"), float("-inf"), float("nan"), True, "5", [5]):
+        with pytest.raises(ConfigError) as caught:
+            validated_wait(refused)
+        assert caught.value.error_type == "invalid_argument", refused
+        assert runlifecycle.worker_publish_window_s(refused) <= threshold, refused
+
+
+def test_a_start_that_gives_up_keeps_its_own_files_on_the_shipped_maximum_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the bound buys, at the bench's own number and not at a chosen one.
+
+    The give-up path plants its stop, reads the worker log, prunes the records,
+    globs and sorts a directory and only then sweeps, and everything it wrote
+    for itself is dated by that stop. Its safety is the distance between the
+    deadline it gave up at and the cutoff the sweep computes, and that distance
+    is `MAX_WAIT_S`.
+
+    So only the base startup window is shortened here, which is what keeps the
+    test as fast as the neighbour above it, and `MAX_WAIT_S` is left where the
+    bench sets it. The margin under this attempt's files is then the product's
+    own, the fifteen minutes a caller may ask a worker to wait for a held board,
+    rather than a number this test picked to be comfortable. The orphan planted
+    beside it is older than the widened threshold, so the sweep did run and the
+    survival of the attempt's own pair is a contrast rather than a sweep that
+    never happened.
+    """
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    monkeypatch.setattr(runlifecycle, "WORKER_PUBLISH_TIMEOUT_S", 0.05)
+    earlier = plant_orphan_files(config, ORPHAN_HANDLE, age_s=past_every_publish_window_s(), with_lock=True)
+
+    def spawn_that_never_publishes(config, handle: str, test_config_path: str, *, wait_s: float) -> UnresponsiveWorker:
+        runlifecycle.worker_log_path(config, handle).write_text(LOG_TEXT, encoding="utf-8")
+        return UnresponsiveWorker()
+
+    monkeypatch.setattr(runlifecycle, "spawn_run_worker", spawn_that_never_publishes)
+
+    answer = runlifecycle.start_detached_run(config, str(plan), wait_s=0.0)
+
+    assert answer["ok"] is False, answer
+    assert answer["error_type"] == "run_worker_unresponsive", answer
+    for path in earlier:
+        assert not path.exists(), directory_listing(config)
+    this_attempt = answer["run"]
+    assert runlifecycle.stop_path(config, this_attempt).exists(), directory_listing(config)
+    assert log_path(config, this_attempt).exists(), directory_listing(config)
+    # The refusal quotes this log, so a sweep that took it would leave the
+    # caller with a give-up that cannot say what the worker managed to print.
+    assert runlifecycle.worker_output(config, this_attempt) == LOG_TEXT
+    # And the reason none of that was luck: the whole of the bench's maximum
+    # wait stands between the deadline this start gave up at and the cutoff its
+    # own sweep computed a few file operations later.
+    assert runlifecycle.orphan_sweep_window_s() - runlifecycle.worker_publish_window_s(0.0) == MAX_WAIT_S
