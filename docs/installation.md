@@ -41,8 +41,14 @@ can run pip, and it fetches one pinned release of Astral's uv installer where
 there is neither, which includes the pip-less `python3` a Debian or Ubuntu server
 ships) and then runs
 `agentic-hil agent-install` for every agent CLI it finds on `PATH`. That is the
-machine half and nothing else: it writes no project configuration, edits no
-shell profile, and asks for no admin rights. After one restart of your agent,
+machine half and nothing else: it writes no project configuration, asks for no
+admin rights, and of a shell profile it writes one line, and only where the
+directory the command landed in is not on your `PATH` already. That line is in
+the one file the shell you run reads, the transcript names it, and a second run
+finds it and adds nothing. On Windows it is your own `Path` value instead, read
+and written with the kind it already had so that a `%USERPROFILE%` in it stays
+written that way. `--no-path` keeps the edit for you and prints the exact line
+in its place. After one restart of your agent,
 the agent itself creates this project's configuration over MCP at the first
 hardware question, which is the same file `init` would have written.
 
@@ -50,8 +56,9 @@ Its flags are the same in both scripts: `--agent <claude-code|codex|opencode>`
 registers one agent instead of every one it finds, `--no-agent-install` stops
 after the package, `--version <x.y.z>` installs exactly that release (later
 upgrades go through `agentic-hil upgrade`, not through a second run with a new
-pin), `--no-can` drops the `[can]` extra that is on by default, and `--help`
-prints all of them. Piped, `sh` takes them after `-s --`:
+pin), `--no-can` drops the `[can]` extra that is on by default, `--no-path`
+leaves your shell profile and your `Path` alone, and `--help` prints all of
+them. Piped, `sh` takes them after `-s --`:
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/agentic-hil/agentic-hil/master/install.sh | sh -s -- --agent claude-code

@@ -18,17 +18,15 @@ Nothing in that run is staged. One restart after the install line, in a freshly 
 
 ```bash
 curl -LsSf https://agentic-hil.github.io/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
 ```
 
 **Windows**, in PowerShell:
 
 ```powershell
 irm https://agentic-hil.github.io/install.ps1 | iex
-[Environment]::SetEnvironmentVariable('Path', "$env:USERPROFILE\.local\bin;" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')
 ```
 
-Each second line adds `uv`'s default user bin directory (`$HOME/.local/bin`, or `%USERPROFILE%\.local\bin` on Windows) to your `PATH`, which is where the copy of `uv` the script fetches for itself installs the command. A `pip --user` install often lands there too, but its destination follows the selected interpreter on every platform, so it is `$HOME/.local/bin` only where that interpreter puts its user scripts there: a macOS framework Python installs into an interpreter-specific base instead (commonly `~/Library/Python/X.Y/bin`), and on Windows it is the interpreter's own user scripts directory (for example `%APPDATA%\Python\PythonXY\Scripts`), neither of them `.local\bin`. So the one line reaches a uv install everywhere and a pip install only where the interpreter's user bin happens to be that directory. The installer does not assume any of this, though: it asks the package manager where the command actually went (`uv tool dir --bin` honours `UV_TOOL_BIN_DIR` and XDG placement, and for `pip --user` it asks the selected interpreter itself, via `sysconfig.get_path("scripts", "posix_user")` on Linux and macOS) and when that directory is not already on your `PATH` it prints the exact line to add it. If the directory it names differs from the default above, copy the line the installer printed rather than the one here. Put the POSIX form in your shell profile and open a new shell, while the PowerShell form writes your user `Path` once.
+The command lands in the user bin directory of the package manager that installed it, and the installer asks that manager where it went rather than assuming: `uv tool dir --bin` for a uv install, and the selected interpreter itself for a `pip --user` one. When that directory is not on your `PATH` already, the installer puts it there and says so: one line in the one shell profile your shell reads, or on Windows the directory in front of your own `Path`. Open a new shell and the command is there. Pass `--no-path` (`-NoPath` in PowerShell) to keep that edit for yourself, and the installer prints the exact line instead.
 
 One line installs the package user-local and registers the agent skill and the MCP server for every agent CLI it finds on your `PATH`. **No admin rights required, ever**, and it touches nothing inside any repository. Finding no `claude`, `codex` or `opencode` CLI there, it says so and writes nothing of any agent's: install the agent CLI, then run `agentic-hil agent-install --agent <claude-code|codex|opencode>` yourself, which is the line the installer prints for that case. Then **restart your agent once**, and after that one restart your agent sets this project up itself, at the first hardware question you ask it.
 

@@ -2,7 +2,8 @@
 #   1. the agentic-hil package, installed user-local (uv tool, or pip --user).
 #   2. your agent's skill file, under your own home directory.
 #   3. your agent's user-level MCP registration, under your own home directory.
-#   4. nothing in any repository, no project configuration, no profile script.
+#   4. nothing in any repository and no project configuration; of your own
+#      settings, only your Path, to add that directory; -NoPath leaves it alone.
 #   5. nothing that needs administrator rights: it never elevates and changes no machine setting.
 
 param(
@@ -11,6 +12,7 @@ param(
     [string]$Version = '',
     [switch]$Can,
     [switch]$NoCan,
+    [switch]$NoPath,
     [switch]$SystemCerts,
     [switch]$NoSystemCerts,
     [switch]$Help,
@@ -29,7 +31,7 @@ $ErrorActionPreference = 'Stop'
 # Deliberately not a capability floor either: step 4 registers the skill out of
 # whatever copy step 1 left in place, so a floor left a returning user on an old
 # package and an old skill at once.
-$Release = '0.21.4'
+$Release = '0.21.5'
 $StepTotal = 5
 
 # The PATH this run was handed, recorded before anything of ours has prepended to
@@ -74,6 +76,9 @@ Options:
   --can               Install the [can] extra for PEAK and SocketCAN adapters.
                       This is the default.
   --no-can            Install without the [can] extra.
+  --no-path           Do not change your Path. Step 3 then prints the line
+                      to run yourself, as it always does when it cannot
+                      write the value.
   --system-certs      Validate TLS against this machine's own certificate
                       store, the one curl and apt already read, from the start.
                       Rarely needed: a failure that carries the signature of a
@@ -85,12 +90,13 @@ Options:
   --help              Print this text and exit.
 
 PowerShell spells the same flags -Agent, -NoAgentInstall, -Version, -Can,
--NoCan, -SystemCerts, -NoSystemCerts and -Help; both spellings bind to the same
-options.
+-NoCan, -NoPath, -SystemCerts, -NoSystemCerts and -Help; both spellings bind to
+the same options.
 '@
 }
 
 $WithCan = -not $NoCan
+$WithPath = -not $NoPath
 $WithAgentInstall = -not $NoAgentInstall
 $ShowHelp = [bool]$Help
 $SystemCertsMode = if ($NoSystemCerts) { 'never' } elseif ($SystemCerts) { 'always' } else { 'auto' }
@@ -110,6 +116,7 @@ foreach ($token in @($Rest)) {
         '^--version=(.+)$' { $Version = $Matches[1] }
         '^--no-agent-install$' { $WithAgentInstall = $false }
         '^--no-can$' { $WithCan = $false }
+        '^--no-path$' { $WithPath = $false }
         '^--can$' { $WithCan = $true }
         '^--system-certs$' { $SystemCertsMode = 'always' }
         '^--no-system-certs$' { $SystemCertsMode = 'never' }
@@ -877,7 +884,67 @@ $AgenticHilCmd = 'agentic-hil'
 # version actually moved, rather than claiming a refresh for every run.
 $ResolvedVersion = ''
 
-# Step 3: say where it landed, and edit nobody's profile script.
+# The one setting of yours step 3 changes, and only when the directory the
+# command landed in is not on your Path already.
+#
+# Written through the registry rather than through
+# [Environment]::SetEnvironmentVariable, which reads the value with its
+# variables already expanded and writes it back as a plain string: a Path
+# holding %USERPROFILE%\bin comes out of that call flattened to whatever it
+# pointed at on this machine today, for good. Here the value is read
+# unexpanded, the kind it already had is kept, and the new directory goes in
+# front of it.
+function Add-DirectoryToUserPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [string]$SubKey = 'Environment'
+    )
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($SubKey, $true)
+    if (-not $key) { $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($SubKey) }
+    try {
+        $unexpanded = $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $kind = if ($null -eq $unexpanded) { [Microsoft.Win32.RegistryValueKind]::ExpandString } else { $key.GetValueKind('Path') }
+        $entries = @([string]$unexpanded -split ';' | Where-Object { $_ -ne '' })
+        foreach ($entry in $entries) {
+            if ($entry.Trim().TrimEnd('\') -eq $Directory.TrimEnd('\')) { return 'present' }
+        }
+        $key.SetValue('Path', ((@($Directory) + $entries) -join ';'), $kind)
+        return 'written'
+    } finally {
+        if ($key) { $key.Close() }
+    }
+}
+
+# A process started from Explorer inherits the copy of the environment Explorer
+# holds, so a Path written into the registry reaches a new terminal only once
+# something tells the desktop to read it again. This is that message. Failing to
+# send it costs the run nothing: the value is written either way, and a terminal
+# started after the next sign-in reads it.
+function Publish-EnvironmentChange {
+    try {
+        if (-not ('AgenticHilNative.Env' -as [type])) {
+            Add-Type -Namespace AgenticHilNative -Name Env -ErrorAction Stop -MemberDefinition '[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
+        }
+        $answered = [UIntPtr]::Zero
+        [void][AgenticHilNative.Env]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x2, 5000, [ref]$answered)
+    } catch {
+        # Nothing to report here: the value is written, and this only decides
+        # whether a terminal opened before the next sign-in already sees it.
+    }
+}
+
+# What a reader runs when this script did not write the value, either because
+# -NoPath said not to or because the write failed. It is the same read
+# unexpanded, keep the kind, prepend the directory that the function above does,
+# for the same reason.
+function Write-UserPathLine {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+    Write-Host ''
+    Write-Host "    `$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', `$true); `$old = `$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); `$key.SetValue('Path', '$Directory;' + `$old, `$key.GetValueKind('Path')); `$key.Close()"
+    Write-Host ''
+}
+
+# Step 3: say where it landed, and put it on the Path of the terminals that come after this one.
 if (-not $needsPackage) {
     # Nothing was installed: the development copy step 1 kept on this PATH is the
     # one the machine half uses, and it already resolves here.
@@ -932,10 +999,23 @@ if (-not $needsPackage) {
             Write-Step 3 "PATH: agentic-hil is installed in $found, already on your PATH"
         } else {
             Write-Step 3 "PATH: agentic-hil landed in $found, which is not on your PATH"
-            Write-Say 'PATH: run this line yourself once, then open a new terminal:'
-            Write-Host ''
-            Write-Host "    [Environment]::SetEnvironmentVariable('Path', '$found;' + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
-            Write-Host ''
+            if (-not $WithPath) {
+                Write-Say 'PATH: -NoPath was given, so nothing of yours was changed; run this line yourself once, then open a new terminal:'
+                Write-UserPathLine $found
+            } else {
+                try {
+                    $outcome = Add-DirectoryToUserPath -Directory $found
+                    Publish-EnvironmentChange
+                    if ($outcome -eq 'written') {
+                        Write-Say 'PATH: added it to your own Path, so the next terminal you open finds the command; this one has it already'
+                    } else {
+                        Write-Say 'PATH: your own Path already names that directory, so the next terminal you open finds the command; this one has it already'
+                    }
+                } catch {
+                    Write-Say "PATH: your own Path could not be written ($($_.Exception.Message)), so run this line yourself once, then open a new terminal:"
+                    Write-UserPathLine $found
+                }
+            }
         }
         $env:Path = "$found;$env:Path"
     } else {

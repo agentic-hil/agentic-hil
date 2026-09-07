@@ -16,8 +16,9 @@ else's program, and both were wrong:
 * Astral's installer edits `~/.profile` and `~/.bashrc`, and creates `~/.zshrc`,
   unless `UV_NO_MODIFY_PATH` is set, and install.sh never set it. The five lines
   at the top of the script, which a stranger reads before piping it into a
-  shell, promise it touches no shell rc file, and step 3 then tells the reader
-  to add the same directory to their profile a second time.
+  shell, account for one line in one file, and three files edited on the way to
+  installing uv is not that. What step 3 writes itself is that one line, for the
+  directory it installed the command into rather than for uv's own.
 
 Both routes run here against the real tools: the real pip and the real uv in
 this image, and the pinned Astral installer fetched from astral.sh and checked
@@ -150,15 +151,17 @@ def test_the_anchor_upgrades_a_pip_user_copy_when_uv_is_present(tmp_path: Path, 
     assert re.search(r"^agentic-hil v", listed.stdout, re.MULTILINE), f"{listed.stdout}\n{listed.stderr}"
 
 
-def test_the_uv_fetch_route_leaves_every_shell_rc_file_untouched(tmp_path: Path, uv_cache: Path) -> None:
+def test_the_uv_fetch_route_writes_one_line_into_one_rc_file(tmp_path: Path, uv_cache: Path) -> None:
     """No uv and no Python on PATH, so step 2 fetches Astral's pinned installer and runs it.
 
     The bytes that run are the ones the pin in install.sh vouches for, fetched
     from astral.sh and checked here by the script itself, because the rc-file
     edit is that installer's own behaviour and a stand-in cannot reproduce it.
-    Two rc files exist before the run and one does not; afterwards the two are
-    byte for byte what they were and the third is still absent, and uv and
-    agentic-hil are both where the run says they landed.
+    Two rc files exist before the run and one does not. Afterwards `.bashrc` is
+    byte for byte what it was and `.zshrc` is still absent, which is Astral's
+    spread turned off, and `.profile` carries the one line step 3 wrote for the
+    directory it installed the command into, which is the whole PATH edit this
+    script makes. A second run finds that line and adds nothing.
     """
     curl = shutil.which("curl")
     assert curl is not None, "curl is not on PATH: install.sh fetches the pinned uv installer with curl or wget, so this image has to carry one of them"
@@ -190,6 +193,20 @@ def test_the_uv_fetch_route_leaves_every_shell_rc_file_untouched(tmp_path: Path,
     assert "fetching Astral's uv installer first" in transcript, transcript
     assert (home / ".local" / "bin" / "uv").is_file(), transcript
     assert (home / ".local" / "bin" / "agentic-hil").is_file(), transcript
-    for rc_file, before in recorded.items():
-        assert rc_file.read_bytes() == before, f"{rc_file.name} was edited:\n{rc_file.read_text(encoding='utf-8')}\n{transcript}"
+    assert bashrc.read_bytes() == recorded[bashrc], f"{bashrc.name} was edited:\n{bashrc.read_text(encoding='utf-8')}\n{transcript}"
     assert not zshrc.exists(), f"{zshrc.name} was created:\n{zshrc.read_text(encoding='utf-8')}\n{transcript}"
+    user_bin = home / ".local" / "bin"
+    assert f"PATH: added one line to {profile}" in transcript, transcript
+    written = profile.read_text(encoding="utf-8")
+    assert written.startswith(recorded[profile].decode("utf-8")), written
+    assert f'export PATH="{user_bin}:$PATH"' in written, written
+    assert written.count("added by the agentic-hil installer") == 1, written
+
+    again = run_install(project, environment)
+
+    transcript = f"{again.stdout}{again.stderr}"
+    assert again.returncode == 0, transcript
+    assert f"PATH: {profile} already names that directory" in transcript, transcript
+    assert profile.read_text(encoding="utf-8") == written, profile.read_text(encoding="utf-8")
+    assert bashrc.read_bytes() == recorded[bashrc], bashrc.read_text(encoding="utf-8")
+    assert not zshrc.exists(), zshrc.read_text(encoding="utf-8")
