@@ -358,7 +358,7 @@ def _orphan_files_by_handle(directory: Path) -> dict[str, list[Path]]:
     return orphans
 
 
-def _sweep_orphaned_run_files(config: AgenticHILConfig, directory: Path) -> None:
+def _sweep_orphaned_run_files(config: AgenticHILConfig, directory: Path, *, this_attempt: str | None = None) -> None:
     """Remove the files of handles that never became runs.
 
     A start that gives up on a worker which published nothing plants a stop
@@ -369,17 +369,34 @@ def _sweep_orphaned_run_files(config: AgenticHILConfig, directory: Path) -> None
     set of files per attempt for the life of the bench, invisible to a reader,
     which is what the cap of kept records exists to prevent.
 
-    Two things hold them back. Age, because inside the window a start waits in
-    the worker may yet publish and the files are its own. And the lock, because
+    Three things hold them back. Age, because inside the window a start waits in
+    the worker may yet publish and the files are its own. The lock, because
     a registration takes it before it writes its first record, so a handle whose
     lock is held is a worker alive between those two steps, and the stop among
     its files is what will end it at its first step boundary if it does reach
-    the board. Only when both say the attempt is over does the set go, the lock
-    with it: a probe leaves the lock file behind, so a sweep that removed the
-    pair and not the lock would trade unbounded growth for slower unbounded
-    growth."""
+    the board. Only when age and lock both say the attempt is over does the set
+    go, the lock with it: a probe leaves the lock file behind, so a sweep that
+    removed the pair and not the lock would trade unbounded growth for slower
+    unbounded growth.
+
+    And ``this_attempt``, the handle of the attempt the prune was called from,
+    which is never a candidate whatever its age says. The age is the only one of
+    the three that decides in the caller's own favour, and it is the one that
+    cannot be trusted here: it compares a wall clock reading with a modification
+    time while the window the caller waited in was measured on the monotonic
+    clock, so a forward adjustment of the wall clock during a start lands on
+    this cutoff and on nothing the start did, and the attempt's own files are
+    inside the cutoff the moment it is computed. What follows is a start
+    deleting the stop it planted seconds earlier, which is the one thing that
+    ends its worker if that worker does come alive, and the log its own refusal
+    quotes. The handle is passed in rather than inferred, because only the
+    caller knows which attempt is its own; every other handle in the directory
+    is decided by age and lock as before, so an attempt whose start has moved on
+    is still swept by the next prune that comes past."""
     cutoff = time.time() - orphan_sweep_window_s()
     for handle, paths in _orphan_files_by_handle(directory).items():
+        if handle == this_attempt:
+            continue
         try:
             newest = max(path.stat().st_mtime for path in paths)
         except OSError:
@@ -393,7 +410,7 @@ def _sweep_orphaned_run_files(config: AgenticHILConfig, directory: Path) -> None
                 continue
 
 
-def prune_run_records(config: AgenticHILConfig) -> None:
+def prune_run_records(config: AgenticHILConfig, *, this_attempt: str | None = None) -> None:
     """Drop the oldest ended runs once there are more than a bench needs, and
     the leftovers of attempts that never became runs at all.
 
@@ -409,7 +426,13 @@ def prune_run_records(config: AgenticHILConfig) -> None:
     The sweep that follows is not part of the cap and does not wait for it. A
     bench whose starts keep timing out writes no records at all, so its count
     never reaches the cap while its directory grows by a set of files per
-    attempt, and that is the bench the growth was reported from."""
+    attempt, and that is the bench the growth was reported from.
+
+    ``this_attempt`` names the handle of the attempt the caller has just made,
+    for the one caller that has one, and holds it back from that sweep. The cap
+    above never sees it: an attempt with a record is not what this parameter is
+    for, and a run whose record exists is held back by its state and its lock
+    the way every other record is."""
     directory = runs_directory(config)
     try:
         records = _records_newest_first(directory)
@@ -440,10 +463,10 @@ def prune_run_records(config: AgenticHILConfig) -> None:
                 # way there is nothing to do about it here: pruning is
                 # housekeeping and must never be the reason a run fails.
                 continue
-    _sweep_orphaned_run_files(config, directory)
+    _sweep_orphaned_run_files(config, directory, this_attempt=this_attempt)
 
 
-def _prune_after_a_start_that_left_no_record(config: AgenticHILConfig) -> None:
+def _prune_after_a_start_that_left_no_record(config: AgenticHILConfig, this_attempt: str) -> None:
     """Prune from the one route that produces files nothing else will clear.
 
     Every other prune on a bench is paid for by a registration, which happens
@@ -454,13 +477,17 @@ def _prune_after_a_start_that_left_no_record(config: AgenticHILConfig) -> None:
     never run on the one bench that needs it. So the route that leaves those
     files behind clears the ones the routes before it left.
 
-    What this start itself left is inside the window and stays; it is the
-    attempts old enough that nothing is coming for them that go. Refusals are
-    swallowed for the reason the prune swallows its own: this is housekeeping
-    after a failure that has already been decided, and it may not change the
-    answer the caller is about to be handed."""
+    What this start itself left is not swept, and it is named rather than left
+    to its age: the age is a wall clock reading against a modification time, and
+    the window this start waited out was measured on the monotonic clock, so a
+    wall clock moved forward while it waited would have it delete the stop it
+    planted a moment ago and the log the answer below quotes. It is the attempts
+    old enough that nothing is coming for them that go. Refusals are swallowed
+    for the reason the prune swallows its own: this is housekeeping after a
+    failure that has already been decided, and it may not change the answer the
+    caller is about to be handed."""
     try:
-        prune_run_records(config)
+        prune_run_records(config, this_attempt=this_attempt)
     except (ConfigError, OSError):
         return
 
@@ -742,7 +769,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
             exited_at = time.monotonic()
         if record is None and exited_at is not None and time.monotonic() - exited_at > WORKER_EXIT_GRACE_S:
             output = worker_output(config, handle)
-            _prune_after_a_start_that_left_no_record(config)
+            _prune_after_a_start_that_left_no_record(config, handle)
             return {
                 "ok": False,
                 "tool": "test_reactor_start",
@@ -762,7 +789,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
             # running the whole plan behind a caller told the start had failed.
             _plant_stop_after_unresponsive(config, handle)
             output = worker_output(config, handle)
-            _prune_after_a_start_that_left_no_record(config)
+            _prune_after_a_start_that_left_no_record(config, handle)
             return {
                 "ok": False,
                 "tool": "test_reactor_start",

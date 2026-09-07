@@ -128,6 +128,11 @@ AUTHKEY_BYTES = 32
 BROKER_START_TIMEOUT_S = 30.0
 BROKER_FIRST_ATTACH_TIMEOUT_S = 30.0
 BROKER_POLL_INTERVAL_S = 0.05
+# How long a client whose start deadline has expired waits for the broker it
+# started before terminating it. A broker that has printed its refusal and is
+# still inside its shutdown answers within it and is classified rather than
+# killed; anything else costs this once, on an attach that has already failed.
+BROKER_SHUTDOWN_GRACE_S = 1.0
 # A counter mismatch is the ordinary outcome of two runs attaching at once, so a
 # client re-reads and retries rather than failing the run; it is bounded because
 # a retry loop against a broker that keeps moving is livelock wearing a retry.
@@ -1354,9 +1359,37 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
                 raise ParticipantError({**error.to_dict(), "bus_id": bus_id, "participant": participant, "retry_safe": False, "side_effect_committed": False}) from error
             started = _spawn_broker(config, bus_id, bus_key, lock_root)
         time.sleep(BROKER_POLL_INTERVAL_S)
-    if started is not None and started.poll() is None:
-        with suppress(BaseException):
-            started.terminate()
+    if started is not None:
+        if started.poll() is None:
+            # A broker that already printed its refusal can still be inside the
+            # `shutdown()` its entry point runs in a `finally`, which closes the
+            # adapter session and which a wedged adapter can block. Killing it
+            # there throws away an answer that is already on disk, so it is
+            # given a short budget to finish leaving and be classified below.
+            # The budget is bounded and is spent only here, on an attach that
+            # has already failed: a broker that is still opening its adapter
+            # costs it once and is terminated anyway.
+            with suppress(subprocess.TimeoutExpired, OSError, ValueError):
+                started.wait(timeout=BROKER_SHUTDOWN_GRACE_S)
+        # The loop tests its deadline *before* it reads an exit code, so a
+        # broker that went inside the final poll window left the loop without
+        # ever being classified: the branch above would have turned that code
+        # into the adapter's or the configuration's own refusal one iteration
+        # earlier, and the code is the same evidence now that the loop has
+        # ended. Ask once more before deciding nothing is known.
+        code = started.poll()
+        if code is not None and code in BROKER_EXITS_EXPLAINED:
+            raise ParticipantError(_explained_exit_refusal(code, bus_id, participant, bus_key, lock_root))
+        if code is None:
+            with suppress(BaseException):
+                started.terminate()
+        if attempts == 0:
+            # No descriptor was ever read, so `last` is still the sentence set
+            # up before the loop, which says a broker could not be reached or
+            # started and nothing else. A broker *was* started, and saying so,
+            # with the log to read and the two timeouts that did not fit each
+            # other, is the whole of what is honestly known here.
+            raise ParticipantError(_deadline_refusal(code, bus_id, participant, bus_key, lock_root, start_timeout_s, config.can_buses[bus_id].timeout_s))
     raise ParticipantError(last)
 
 
@@ -1472,6 +1505,51 @@ def _explained_exit_refusal(exit_code: int, bus_id: str, participant: str, bus_k
     backend_error = document.get("backend_error") or document.get("stderr_tail")
     if isinstance(backend_error, str) and backend_error.strip():
         refusal["backend_error"] = backend_error.strip()
+    return refusal
+
+
+def _deadline_refusal(exit_code: int | None, bus_id: str, participant: str, bus_key: str, lock_root: Path, start_timeout_s: float, bus_timeout_s: float) -> JsonObject:
+    """The refusal for a broker that never published and never explained itself.
+
+    Nothing in the broker log is known to belong to this attempt. Either the
+    broker was still inside its adapter open when the deadline arrived, and was
+    terminated before it could write anything, or it exited with a code no
+    branch here can read, which attributes nothing either. `_last_broker_document`
+    would still return something, because that file is appended by every broker
+    ever started for this bus, and quoting it here would hand the caller an
+    earlier broker's failure as this attempt's cause. A confidently wrong cause
+    is worse than a generic one, so the log is named as a place to look and not
+    quoted.
+
+    What the refusal can say honestly is what this client did: it started a
+    broker, it waited this long, and the bus's own adapter timeout is that long.
+    The two numbers stand beside each other because they are set independently,
+    and a bus whose adapter may take longer than the client waits is the
+    ordinary way a broker gets terminated with nothing written.
+    """
+    log_path = broker_log_path(bus_key, lock_root)
+    refusal: JsonObject = {
+        "ok": False,
+        "error_type": "can_broker_unavailable",
+        "summary": (
+            f"The CAN broker started for this bus exited with code {exit_code} before it published, and the attach deadline expired; the broker log holds every broker ever started for this bus, so nothing in it is attributed to this one."
+            if exit_code is not None
+            else "The CAN broker started for this bus published nothing before the attach deadline and was terminated; nothing about this attempt reached its log."
+        ),
+        "bus_id": bus_id,
+        "participant": participant,
+        "bus_key": bus_key,
+        "broker_log": str(log_path),
+        "broker_start_timeout_s": start_timeout_s,
+        "bus_timeout_s": bus_timeout_s,
+        "retry_safe": True,
+        "side_effect_committed": False,
+    }
+    if exit_code is not None:
+        # The one thing an unreadable exit still attributes is itself. A code
+        # this client's own `terminate` produced is not passed here, because a
+        # signal this client sent is not evidence about the adapter.
+        refusal["broker_exit_code"] = exit_code
     return refusal
 
 

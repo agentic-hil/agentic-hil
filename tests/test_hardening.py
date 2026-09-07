@@ -3598,12 +3598,27 @@ def test_a_state_write_that_never_lands_records_the_run_as_the_last_failure(tmp_
 
 
 def test_path_lock_registry_does_not_keep_short_lived_paths(tmp_path: Path) -> None:
-    _PATH_LOCKS.clear()
+    """A path leaves the registry with its last holder, and these are the paths.
 
-    for index in range(100):
-        assert append_jsonl(str(tmp_path / f"event-{index}.jsonl"), {"event_id": index}) is None
+    The claim is about the hundred keys written here and not about the registry
+    being empty. `_PATH_LOCKS` is one dictionary for the whole process, other
+    threads in this worker take their own paths in it, and a run that asserted
+    emptiness read one of theirs, a held device-lock holder with a live
+    reference, as a leak of this test's (#537).
 
-    assert _PATH_LOCKS == {}
+    The same reason rules out clearing it first, which is the more dangerous
+    half: a cleared entry is taken out from under the thread holding it, and the
+    next acquirer of that key builds a second lock object for the same path, so
+    two threads stand inside the section the registry exists to serialise.
+    """
+    written = [tmp_path / f"event-{index}.jsonl" for index in range(100)]
+    keys = {os.path.normcase(str(path)) for path in written}
+
+    for index, path in enumerate(written):
+        assert append_jsonl(str(path), {"event_id": index}) is None
+
+    left_behind = sorted(keys & set(_PATH_LOCKS))
+    assert not left_behind, left_behind
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows directory-handle behavior")

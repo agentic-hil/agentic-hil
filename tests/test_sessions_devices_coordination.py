@@ -23,6 +23,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ from agentic_hil.artifacts import decode_base64_payload
 from agentic_hil.bench import HEARTBEAT_INTERVAL_S, BenchMutex, DeviceBusyError, resource_digest
 from agentic_hil.canbroker import (
     BROKER_EXIT_ADAPTER,
+    BROKER_START_TIMEOUT_S,
     ParticipantError,
     attach_participant,
     broker_log_path,
@@ -976,6 +978,22 @@ def failing_bridge_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return load_authoritative_config(workspace)
 
 
+# What the whole refusal is allowed to take, and why the number is the
+# product's own rather than one scaled for this host. The attach ends the
+# moment the broker exits with an explained code and never on the clock, so a
+# healthy run costs a fresh interpreter, the authoritative configuration, the
+# bus lock, a bridge process and the one second the fixture gives the adapter,
+# and it is measured here in under two. Half the start timeout is generous
+# room for all of that on a loaded host and is the one ceiling that keeps its
+# meaning at every value of the time scale factor: a run that waited its
+# deadline out instead of reading the broker's exit code fails this line
+# whatever the runner set, which is what a scaled ceiling stops doing once the
+# factor is large enough to reach the deadline it is measured against. It is
+# registered as a product envelope in EXEMPT_BOUNDS in
+# tests/test_scaled_time_bounds.py for that reason.
+BROKER_REFUSAL_CEILING_S = BROKER_START_TIMEOUT_S / 2
+
+
 def test_a_broker_whose_adapter_cannot_open_refuses_the_participant_with_the_adapter_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_brokers: list[subprocess.Popen]) -> None:  # noqa: F811
     """One broker is spawned, and the participant learns why the bus is not there.
 
@@ -987,17 +1005,32 @@ def test_a_broker_whose_adapter_cannot_open_refuses_the_participant_with_the_ada
     adapter's error type, its summary, the bridge's last words as
     `backend_error`, the broker's exit code and the path of the log that holds
     the whole of it, and `retry_safe` stated as a value.
+
+    What ends the attach is that exit code and not a deadline, which is why no
+    start timeout is passed here and why the refusal is timed (#530). A client
+    whose own deadline expired first would terminate the broker it was waiting
+    for, hand this test the terminate's exit code instead of the broker's and
+    raise the generic `can_broker_unavailable` with no cause in it; a death this
+    path does not explain would spawn a second broker and be caught by the
+    count. And the elapsed time keeps the product's wide default honest, because
+    widening a bound is only free while nothing waits it out: a broker that
+    hangs instead of exiting has to be visible here.
     """
     config = failing_bridge_config(tmp_path, monkeypatch)
     bus_key = bus_lock_key(config, "sdcbroker")
 
+    started_at = time.monotonic()
     with pytest.raises(ParticipantError) as refused:
-        attach_participant(config, "sdcbroker", "alpha", start_timeout_s=4.0)
+        attach_participant(config, "sdcbroker", "alpha")
+    elapsed = time.monotonic() - started_at
     result = refused.value.result
     diagnostics = broker_diagnostics(config, bus_key)
 
     assert len(reaped_brokers) == 1, f"{len(reaped_brokers)} brokers were spawned for one adapter that cannot open\n{diagnostics}"
-    assert reaped_brokers[0].wait(timeout=15) == BROKER_EXIT_ADAPTER, diagnostics
+    # `poll` and not `wait`: the loop read this child's exit code to build the
+    # refusal, so a broker that has not exited by now is the defect and not
+    # something to be given more time.
+    assert reaped_brokers[0].poll() == BROKER_EXIT_ADAPTER, diagnostics
     assert result["ok"] is False, result
     assert result["bus_id"] == "sdcbroker", result
     assert result["participant"] == "alpha", result
@@ -1012,3 +1045,5 @@ def test_a_broker_whose_adapter_cannot_open_refuses_the_participant_with_the_ada
     # was not what ended the attach: one broker, one refusal, well inside it.
     assert "adapter gone" in diagnostics and "can_adapter_timeout" in diagnostics, diagnostics
     assert "can_broker_unavailable" not in json.dumps(result), result
+    assert elapsed < BROKER_REFUSAL_CEILING_S, (elapsed, diagnostics)
+

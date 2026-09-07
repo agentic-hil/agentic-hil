@@ -1428,6 +1428,65 @@ ERROR_CATALOGUE: dict[str, ErrorRemedy] = {
             "be able to rewrite the policy that governs the hardware.",
         ),
     ),
+    # The refusal that stops a bench outright had no entry at all, while the
+    # retryable neighbour below has had one for as long as it has existed. Two
+    # entries and not one, in the scoped form the lookup already supports: an
+    # incident this project can clear and one it cannot need opposite advice,
+    # and a single entry would send half its readers to a command that answers
+    # `nothing_to_recover` by design (#531).
+    "resource_quarantined": ErrorRemedy(
+        meaning=(
+            "A hardware resource is held by an unresolved incident, so nothing was touched. An incident is what a "
+            "call leaves behind when it could not confirm what it did to the board, and it outlives the process that "
+            "raised it on purpose: the record is what keeps the next caller off a bench nobody can vouch for. "
+            "`cleanup_reasons` names what is unconfirmed and `quarantine_guidance` says, per reason, what was "
+            "attempted, what still holds, what nobody on this host can know, and what to check on the board. "
+            "`quarantine_id` identifies this incident and changes when a new one is raised."
+        ),
+        remediation=(
+            "Read `auto_recoverable` first. True means no signature is owed: the next hardware call settles the "
+            "incident on the evidence it reads back, so make the call again. False means an operator has to look at "
+            "the board.",
+            "Where a signature is owed, read `quarantine_guidance` and check the board against it, then run "
+            "`agentic-hil recover --confirm-safe-state --quarantine-id <quarantine_id>` with the id "
+            "`agentic-hil lease-status` reports right now.",
+            "If that id has changed since the refusal, a newer incident has replaced this one. Read `lease-status` "
+            "again and sign for the incident it names, never for the one an older result carried.",
+        ),
+        do_not=(
+            "Do not delete the coordination record to get past this. It is the only thing keeping a second caller "
+            "off a board whose state nobody has confirmed, and removing it turns an incident into a silent one.",
+            "Do not sign `--confirm-safe-state` without looking at the bench. The flag attests a physical state, and "
+            "that is the one claim no process on this host can make on the operator's behalf.",
+        ),
+    ),
+    "resource_quarantined:foreign_project": ErrorRemedy(
+        meaning=(
+            "The resource is held by an incident belonging to a different project on this machine, so this workspace "
+            "cannot clear it and the advice is the opposite of the local case. `project_resource` names the owning "
+            "workspace as the digest `agentic-hil lease-status` prints for it, which is how the two are matched "
+            "without a path leaving either one. `auto_recoverable`, where it is present, is derived under that "
+            "project's own recovery policy and probe grants rather than this one's; absent, the record was written "
+            "by a version that did not record what its policy permitted, and no claim is made rather than a stale "
+            "one."
+        ),
+        remediation=(
+            "Find the workspace whose `agentic-hil lease-status` reports the same `project_resource` digest. That is "
+            "the only place this incident resolves.",
+            "With `auto_recoverable: true`, nothing has to be signed at all: any hardware call made in that "
+            "workspace stands the incident down on its own evidence, and this bench is free straight after it.",
+            "With `auto_recoverable: false`, an operator has to check the board as `quarantine_guidance` describes "
+            "and run `agentic-hil recover --confirm-safe-state --quarantine-id <quarantine_id>` in that workspace.",
+            "`agentic-hil lease-status` and `agentic-hil doctor` here both report it under `standing_incidents`, so "
+            "the bench can be diagnosed from either side.",
+        ),
+        do_not=(
+            "Do not run `agentic-hil recover` in this workspace expecting it to help. Recovery requires a matching "
+            "project on the record and on every marker, so it answers `nothing_to_recover` here by design.",
+            "Do not delete the other workspace's coordination record, and do not point this configuration at "
+            "different devices to get around it. The board is shared, and the incident is about the board.",
+        ),
+    ),
     "device_busy": ErrorRemedy(
         meaning=(
             "A physical device is held by another owner for the duration of their run. The refusal names the holder in "

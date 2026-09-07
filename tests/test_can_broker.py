@@ -14,6 +14,7 @@ and a broker that is not a process cannot be shown to be that.
 """
 from __future__ import annotations
 
+import ast
 import dataclasses
 import json
 import os
@@ -31,6 +32,7 @@ from conftest import write_authoritative_config, write_config
 from agentic_hil import canbroker
 from agentic_hil.can import CanBusService
 from agentic_hil.canbroker import (
+    BROKER_START_TIMEOUT_S,
     PROTOCOL_DIGEST,
     PROTOCOL_VERSION,
     ParticipantError,
@@ -1520,3 +1522,336 @@ def test_a_participant_argument_is_refused_by_the_schema_until_sharing_lands(tmp
         assert service.can_buses.sessions == {}
     finally:
         service.close()
+
+
+# ---------------------------------------------------------------------------
+# What a spawning attach may do to the broker's start timeout (#530).
+
+
+# Every test file the suite has, in every tier, because an attach that spawns a
+# broker is not confined to this one and the tier that runs least often is the
+# tier whose failure costs most to read.
+SUITE_FILES = sorted(Path(__file__).resolve().parent.rglob("*.py"))
+
+# The narrowest start a spawning attach may allow itself, and where the number
+# comes from. `_attach_with_broker` measures the whole start against it: a fresh
+# interpreter, the product's own import, the authoritative configuration, the
+# bus lock, whatever the adapter costs before it answers or gives up, and the
+# descriptor. Half the product's default is the narrowest such claim the suite
+# has evidence for, and it is the ceiling the refusal in
+# `test_sessions_devices_coordination.py` measures that same start against, so a
+# bound below it expires before the refusal the suite is already prepared to
+# wait for. A bound at or above it still has to be taken through
+# `scaled_time_bound`, because the number that widens it on a loaded host is the
+# runner's and belongs in one place.
+SPAWNING_START_FLOOR_S = BROKER_START_TIMEOUT_S / 2
+
+# The spawning attaches that may keep a narrow bare number, named one by one
+# with the reason the number is not a deadline in that test. In the first four
+# the refusal is decided before anything is waited for, so the bound is dead
+# weight rather than a budget:
+#
+# * `test_participant_name_collision_is_refused_and_distinct_names_run_in_parallel`
+#   is refused by `acquire_named` inside `attach_participant`, on the participant
+#   lock the first attach still holds, before `_attach_with_broker` is entered at
+#   all and therefore before the bound is read.
+# * the three listen-only tests each make their call while a broker started by an
+#   earlier attach is running and serving, so the loop reads the descriptor that
+#   is already there on its first pass and `_attach_once` answers
+#   `can_listen_only_conflict`, which is not retry safe and is raised from inside
+#   the body of the loop. The deadline is evaluated once, at the top of that
+#   first pass, and can never be reached on this path however slow the host is.
+#
+# The last two are exempt for the only other reason there is: no broker is
+# started. Every attach in `test_can_broker_deadline.py` replaces
+# `canbroker._spawn_broker` with a double, so nothing inside the bound starts an
+# interpreter, loads the authoritative configuration or takes the bus lock, and
+# `attach_against` hands the module a fake clock as well. The number there is the
+# scripted deadline each case is built around, and widening it would erase the
+# case rather than protect it:
+# `test_the_budget_after_the_deadline_is_bounded_on_a_real_clock`
+# runs on the real clock to show that the budget spent after that deadline stays
+# short, which is a claim about the product's own bookkeeping and not about this
+# host's speed.
+#
+# An entry has to go on naming exactly one call the rule would otherwise refuse,
+# so an exemption cannot outlive the call it was written for, grow to cover a
+# second one, or stay behind after the bound it excuses has been widened.
+ATTACHES_THAT_NEVER_WAIT_FOR_A_START = {
+    "test_can_broker.py": (
+        "test_participant_name_collision_is_refused_and_distinct_names_run_in_parallel",
+        "test_listen_only_and_transmitting_participants_cannot_coexist",
+        "test_a_transmitting_participant_cannot_join_a_listen_only_sniffer",
+        "test_a_listen_only_bus_refuses_a_participant_that_may_transmit",
+    ),
+    "test_can_broker_deadline.py": (
+        "attach_against",
+        "test_the_budget_after_the_deadline_is_bounded_on_a_real_clock",
+    ),
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class AttachCall:
+    """One `attach_participant(...)` in the suite's own source that bounds the start."""
+
+    path: Path
+    line: int
+    test: str
+    spelling: str
+    base: float | None
+    through_the_helper: bool
+
+    @property
+    def where(self) -> str:
+        return f"{self.path.name}:{self.line} ({self.test})"
+
+    @property
+    def refused(self) -> str:
+        """Why the rule refuses this bound, or the empty string when it does not."""
+        if self.base is None:
+            return "the bound cannot be read from the source, so nobody can tell how long the start is given"
+        if self.base < SPAWNING_START_FLOOR_S:
+            return f"the start is bounded at {self.base}s, below the {SPAWNING_START_FLOOR_S}s a start may cost"
+        if not self.through_the_helper:
+            return "the bound is a bare number, so a loaded host cannot widen it with the rest of the suite"
+        return ""
+
+
+def _called_name(node: ast.Call) -> str:
+    return node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+
+
+def _module_constants(tree: ast.Module) -> dict[str, ast.expr]:
+    """The module-scope names a bound may be spelled as, and what they are bound to."""
+    values: dict[str, ast.expr] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    values[target.id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            values[node.target.id] = node.value
+    return values
+
+
+def _read_bound(expression: ast.expr, constants: dict[str, ast.expr], seen: tuple[str, ...] = ()) -> tuple[float | None, bool]:
+    """The number a start bound comes to, and whether the factor was handed it.
+
+    A literal, a module constant holding one, and either of those inside
+    `scaled_time_bound(...)`, because those are the three spellings that put a
+    number in front of the deadline. Anything else comes back unread: a bound
+    forwarded from a parameter or computed at run time is a bound no reader of
+    this file can judge, and the rule refuses it for that reason rather than
+    letting it through unexamined.
+    """
+    if isinstance(expression, ast.Constant) and isinstance(expression.value, (int, float)) and not isinstance(expression.value, bool):
+        return float(expression.value), False
+    if isinstance(expression, ast.Call) and _called_name(expression) == "scaled_time_bound" and expression.args:
+        base, _ = _read_bound(expression.args[0], constants, seen)
+        return base, True
+    if isinstance(expression, ast.Name) and expression.id in constants and expression.id not in seen:
+        return _read_bound(constants[expression.id], constants, (*seen, expression.id))
+    return None, False
+
+
+def spawning_start_bounds_in(text: str, path: Path) -> list[AttachCall]:
+    """Every attach in one module that may start a broker and bounds that start.
+
+    Spawning is read from the source, which is the only place it can be read
+    from without running the call: `allow_start=False` states that no broker
+    will be started, and everything else may start one. An attach that passes no
+    `start_timeout_s` takes the product's own default and is not this rule's
+    business.
+
+    The whole module is walked, not its top-level functions: a call in a nested
+    helper, in a class body, in an async definition or at module scope is the
+    same deadline on the same host, and each of those was a way past the first
+    version of this walk. What it still does not see is a keyword hidden in a
+    `**kwargs` mapping, which the suite spells nowhere today; that is a floor
+    under the rule rather than a proof of it, and the behavioural test in
+    `test_sessions_devices_coordination.py` is what actually pins the refusal.
+    """
+    try:
+        tree = ast.parse(text, filename=str(path))
+    except SyntaxError:  # pragma: no cover  (no such file in this tree)
+        return []
+    constants = _module_constants(tree)
+    found: list[AttachCall] = []
+
+    def visit(node: ast.AST, enclosing: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            # The outermost function is the name an exemption is written under,
+            # so a nested helper is reported as the test that holds it.
+            named = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and enclosing == "<module>" else enclosing
+            if isinstance(child, ast.Call) and _called_name(child) == "attach_participant":
+                keywords = {keyword.arg: keyword.value for keyword in child.keywords if keyword.arg}
+                bound = keywords.get("start_timeout_s")
+                allow_start = keywords.get("allow_start")
+                starts = not (isinstance(allow_start, ast.Constant) and allow_start.value is False)
+                if bound is not None and starts:
+                    base, through_the_helper = _read_bound(bound, constants)
+                    found.append(
+                        AttachCall(
+                            path=path,
+                            line=child.lineno,
+                            test=named,
+                            spelling=ast.unparse(bound),
+                            base=base,
+                            through_the_helper=through_the_helper,
+                        )
+                    )
+            visit(child, named)
+
+    visit(tree, "<module>")
+    return found
+
+
+def spawning_start_bounds(path: Path) -> list[AttachCall]:
+    return spawning_start_bounds_in(path.read_text(encoding="utf-8"), path)
+
+
+def suite_start_bounds() -> list[AttachCall]:
+    return [call for path in SUITE_FILES for call in spawning_start_bounds(path)]
+
+
+def is_exempt(call: AttachCall) -> bool:
+    return call.test in ATTACHES_THAT_NEVER_WAIT_FOR_A_START.get(call.path.name, ())
+
+
+# A module of the shape the walk reads, written as a list of strings so that no
+# line of it is itself an attach the walk would then report. It holds one of
+# every spelling a bound has been written in or could be written in, including
+# the three that a walk over top-level functions and literal arguments alone
+# lets through with a four second start still in place.
+ATTACH_SAMPLE = "\n".join(
+    [
+        "NARROW_S = 4.0",
+        "WIDE_S = 20.0",
+        "",
+        "attach_participant(config, 'bench', 'alpha', start_timeout_s=4.0)",
+        "",
+        "def test_a_literal():",
+        "    attach_participant(config, 'bench', 'alpha', start_timeout_s=4.0)",
+        "",
+        "def test_a_module_constant():",
+        "    attach_participant(config, 'bench', 'alpha', start_timeout_s=NARROW_S)",
+        "",
+        "def test_the_helper_over_the_same_number():",
+        "    attach_participant(config, 'bench', 'alpha', start_timeout_s=scaled_time_bound(4.0))",
+        "",
+        "def test_the_helper_over_a_wide_base():",
+        "    attach_participant(config, 'bench', 'alpha', start_timeout_s=scaled_time_bound(WIDE_S))",
+        "",
+        "def test_a_wide_bare_number():",
+        "    attach_participant(config, 'bench', 'alpha', start_timeout_s=WIDE_S)",
+        "",
+        "def test_a_forwarded_parameter(budget):",
+        "    def attach():",
+        "        return attach_participant(config, 'bench', 'alpha', start_timeout_s=budget)",
+        "    return attach()",
+        "",
+        "async def test_an_async_definition():",
+        "    attach_participant(config, 'bench', 'alpha', start_timeout_s=4.0)",
+        "",
+        "class TestAClassBody:",
+        "    def test_a_method(self):",
+        "        attach_participant(config, 'bench', 'alpha', start_timeout_s=4.0)",
+        "",
+        "def test_a_start_that_is_not_allowed():",
+        "    attach_participant(config, 'bench', 'alpha', allow_start=False, start_timeout_s=4.0)",
+        "",
+        "def test_the_products_own_default():",
+        "    attach_participant(config, 'bench', 'alpha')",
+    ]
+)
+
+
+def sample_start_bounds() -> list[AttachCall]:
+    return spawning_start_bounds_in(ATTACH_SAMPLE, Path(__file__).resolve().parent / "sample.py")
+
+
+def test_the_walk_sees_every_spelling_of_a_start_bound_and_no_attach_without_one() -> None:
+    """The walk's own claim, on a module holding one of each shape.
+
+    Without this the walk could be narrowed back to top-level functions and
+    literal arguments and stay green, which is exactly how a four second start
+    would come back: named as a constant, or handed to `scaled_time_bound`
+    without widening the base it is given.
+    """
+    found = sample_start_bounds()
+
+    assert [call.test for call in found] == [
+        "<module>",
+        "test_a_literal",
+        "test_a_module_constant",
+        "test_the_helper_over_the_same_number",
+        "test_the_helper_over_a_wide_base",
+        "test_a_wide_bare_number",
+        "test_a_forwarded_parameter",
+        "test_an_async_definition",
+        "test_a_method",
+    ], [call.where for call in found]
+    assert [(call.base, call.through_the_helper) for call in found] == [
+        (4.0, False),
+        (4.0, False),
+        (4.0, False),
+        (4.0, True),
+        (20.0, True),
+        (20.0, False),
+        (None, False),
+        (4.0, False),
+        (4.0, False),
+    ], [(call.test, call.spelling) for call in found]
+
+
+def test_the_rule_refuses_a_narrow_or_unreadable_bound_and_accepts_a_widened_one() -> None:
+    """One bound passes: a base at or above the floor, handed to the factor."""
+    by_test = {call.test: call for call in sample_start_bounds()}
+
+    assert [test for test, call in by_test.items() if not call.refused] == ["test_the_helper_over_a_wide_base"]
+    assert "below the" in by_test["test_a_module_constant"].refused
+    assert "below the" in by_test["test_the_helper_over_the_same_number"].refused
+    assert "cannot be read" in by_test["test_a_forwarded_parameter"].refused
+    assert "bare number" in by_test["test_a_wide_bare_number"].refused
+
+
+def test_no_attach_that_may_start_a_broker_narrows_the_start_below_what_a_start_costs() -> None:
+    """A number here is a deadline on a machine, and the machine is not the test's.
+
+    Inside a spawning attach's bound a broker has to start an interpreter, load
+    the authoritative configuration, take the bus lock, reach its adapter and
+    answer. When the number expires first the client terminates the broker it
+    was waiting for and raises the generic `can_broker_unavailable`, so the test
+    reads the terminate's exit code where it expected the broker's and reports a
+    defect in the code under test rather than a loaded runner.
+
+    The product's default costs nothing to take, because this path ends on the
+    broker's own explained exit and never on the clock. Where a bound really is
+    the claim, it is at least `SPAWNING_START_FLOOR_S` and it is spelled through
+    `scaled_time_bound`, so one variable widens it with every other bound in the
+    suite.
+    """
+    offenders = [call for call in suite_start_bounds() if call.refused and not is_exempt(call)]
+
+    assert not offenders, "attaches that may start a broker and bound that start too narrowly:\n" + "\n".join(
+        f"  {call.where}: start_timeout_s={call.spelling}, {call.refused}" for call in offenders
+    )
+
+
+def test_every_exemption_still_names_one_attach_the_rule_would_refuse() -> None:
+    """An exemption nobody is reading is an exemption that has stopped being true.
+
+    Bookkeeping over the list above and nothing more: it says the six names are
+    still six calls this rule would otherwise refuse, so the list cannot outlive
+    them or quietly excuse a seventh. Whether such a call really waits for a start
+    is not a question source can answer, which is why each entry carries its
+    reason in prose and why the refusal itself is pinned by running one.
+    """
+    for name, tests in ATTACHES_THAT_NEVER_WAIT_FOR_A_START.items():
+        path = Path(__file__).resolve().parent / name
+        if not path.exists():  # pragma: no cover  (a source distribution ships part of this tree)
+            continue
+        refused = [call.test for call in spawning_start_bounds(path) if call.refused]
+        for test in tests:
+            assert refused.count(test) == 1, f"{name}: {test} names {refused.count(test)} bounds this rule would refuse, not one"

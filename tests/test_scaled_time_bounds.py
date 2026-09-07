@@ -619,13 +619,32 @@ def walked_files() -> list[Path]:
 # one statement, so an exemption cannot quietly outlive the assertion it was
 # written for or grow to cover a second one.
 #
-# `test_run_lifecycle.py` holds the only one. `step["waited_ms"] < 600_000`
-# reads a number the product wrote into its own step envelope and holds it
-# against the ten minutes the plan asked for, so the claim is that a stop cut
-# the wait short. The product answers that the same way on a fast host and a
-# slow one; a factor there would loosen a product claim while granting a loaded
-# host nothing, which is the opposite of what this issue is for.
-EXEMPT_BOUNDS = {"test_run_lifecycle.py": ('step["waited_ms"] < 600_000',)}
+# `test_run_lifecycle.py` holds the first. `step["waited_ms"] < 600_000` reads a
+# number the product wrote into its own step envelope and holds it against the
+# ten minutes the plan asked for, so the claim is that a stop cut the wait
+# short. The product answers that the same way on a fast host and a slow one; a
+# factor there would loosen a product claim while granting a loaded host
+# nothing, which is the opposite of what this issue is for.
+#
+# `test_sessions_devices_coordination.py` holds the second (#530).
+# `elapsed < BROKER_REFUSAL_CEILING_S` is half `canbroker.BROKER_START_TIMEOUT_S`
+# and its whole claim is that the refusal came from the broker's own exit code
+# rather than from the client's deadline running out. Scaling it would let the
+# factor carry the ceiling up to that deadline and past it, at which point the
+# line stops telling the two apart and a green run says nothing; the number it
+# already grants a loaded host is nine times what the refusal costs.
+#
+# `test_can_broker_deadline.py` holds the third, and it is the same kind of
+# claim (#532). `broker.waited_for` is the list of timeout arguments the client
+# handed a process double whose clock is a fake, so the sum is the budget the
+# product asked for and not one second this host spent; the ceiling is the
+# envelope that makes the shutdown budget a short one. A factor there would let
+# the product's own budget grow on a slow host, which is the envelope inverted.
+EXEMPT_BOUNDS = {
+    "test_run_lifecycle.py": ('step["waited_ms"] < 600_000',),
+    "test_sessions_devices_coordination.py": ("elapsed < BROKER_REFUSAL_CEILING_S",),
+    "test_can_broker_deadline.py": ("sum(broker.waited_for) <= GRACE_CEILING_S",),
+}
 
 
 def is_exempt(entry: Comparison) -> bool:
@@ -795,6 +814,7 @@ def test_every_exemption_still_names_one_comparison_the_walk_finds() -> None:
 # the suite without editing this map, which is friction bought with nothing.
 CEILINGS_PER_FILE = {
     "bench/test_bench_coordination.py": 2,
+    "test_can_broker_deadline.py": 1,
     "container/test_can_over_vcan.py": 2,
     "container/test_debugger_processes_against_openocd.py": 2,
     "container/test_pyocd_without_a_probe.py": 1,
@@ -838,6 +858,7 @@ def test_every_file_still_holds_the_ceilings_it_held() -> None:
 # once here rather than being argued three times during the sweep.
 BASE_EXPRESSIONS = {
     "bench/test_bench_coordination.py": {"REFUSAL_CEILING_S": 1, "ASKED_WAIT_S + REFUSAL_CEILING_S": 1},
+    "test_can_broker_deadline.py": {"REAL_ATTACH_DEADLINE_S + GRACE_CEILING_S": 1},
     "container/test_can_over_vcan.py": {"BUS_TIMEOUT_S + WAIT_SLACK_S": 1, "BUS_TIMEOUT_S + WAIT_SLACK_S + 2.0": 1},
     "container/test_debugger_processes_against_openocd.py": {"CALL_CEILING_S": 2},
     "container/test_pyocd_without_a_probe.py": {"TIMEOUT_S / 2": 1},
@@ -858,6 +879,7 @@ BASE_EXPRESSIONS = {
 # constant, so its default is what is pinned.
 BASE_CONSTANTS = {
     "bench/test_bench_coordination.py": ("REFUSAL_CEILING_S = 30.0", "ASKED_WAIT_S = 3.0"),
+    "test_can_broker_deadline.py": ("GRACE_CEILING_S = 3.0", "REAL_ATTACH_DEADLINE_S = 0.5"),
     "container/test_can_over_vcan.py": ("BUS_TIMEOUT_S = 2.0", "WAIT_SLACK_S = 1.5"),
     "container/test_debugger_processes_against_openocd.py": ("CALL_CEILING_S = 15.0",),
     "container/test_pyocd_without_a_probe.py": ("TIMEOUT_S = 40",),
