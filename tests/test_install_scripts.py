@@ -4201,7 +4201,14 @@ def test_the_powershell_fetch_route_leaves_the_users_registry_path_untouched(tmp
 # plausibly has one of those two open, and a matcher that read the real one
 # would make the test report on somebody's session instead of on its own child.
 STEP_FIVE_AGENT = "opencode"
-LINGER_S = 30
+# Long enough that the child cannot die inside the run it was planted for. Step 5
+# is the last thing the script does, and on a contended host the four steps ahead
+# of it take longer than any figure written down here on its own would allow, so
+# the lifetime is derived from the ceiling the run itself is held to rather than
+# chosen a second time. A child that goes first leaves step 5 reading a table
+# without it and answering that no agent CLI is running, which is the one
+# sentence these two tests exist to tell apart.
+LINGER_S = SCRIPT_TIMEOUT_S + 60
 # The machine's process table is the one thing the two tests below share, and
 # they are the only tests in this suite that share anything. Step 5 reads the
 # whole of it, which is its job: an operator's agent CLI is wherever they
@@ -4299,16 +4306,30 @@ def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(
     (bench.early_bin / "claude.cmd").unlink()
     (bench.early_bin / f"{STEP_FIVE_AGENT}.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
     node = _a_node_shaped_interpreter(tmp_path / "npm" / "node_modules" / ".bin")
-    started = _a_process_that_lingers(node, node.parent / f"{STEP_FIVE_AGENT}.js")
-    unrelated = _a_process_that_lingers(node, node.parent / "some-other-tool.js", "--report", STEP_FIVE_AGENT)
+    # Every child that starts is registered before the next one is attempted, so
+    # a second planting that fails cannot leave the first one alive. The other
+    # test in this group asserts that no agent CLI is running and follows this
+    # one on the same worker, and a survivor here is a process it would find.
+    children: list[subprocess.Popen[bytes]] = []
 
     try:
+        started = _a_process_that_lingers(node, node.parent / f"{STEP_FIVE_AGENT}.js")
+        children.append(started)
+        unrelated = _a_process_that_lingers(node, node.parent / "some-other-tool.js", "--report", STEP_FIVE_AGENT)
+        children.append(unrelated)
         result, transcript = bench.run("--no-can", manager_bin_on_path=False)
+        # Read before the kill below, and asserted after it: a child that exited
+        # during the run leaves step 5 with nothing to find, and the calm
+        # sentence it then prints is correct about the table it read. That is a
+        # failure of the planting, not of the block, and it says so here rather
+        # than arriving as the assertion about RESTART REQUIRED.
+        outlived_the_run = (started.poll(), unrelated.poll())
     finally:
-        for child in (started, unrelated):
+        for child in children:
             child.kill()
             child.wait(timeout=SCRIPT_TIMEOUT_S)
 
+    assert outlived_the_run == (None, None), f"a planted child exited before step 5 read the process table: {outlived_the_run}\n{transcript}"
     assert result.returncode == 0, transcript
     assert f"registering the skill and the MCP server for {STEP_FIVE_AGENT}" in transcript, transcript
     assert "RESTART REQUIRED" in transcript, transcript
@@ -4343,10 +4364,14 @@ def test_step_five_says_there_is_nothing_to_restart_when_only_an_unrelated_node_
 
     try:
         result, transcript = bench.run("--no-can", manager_bin_on_path=False)
+        # This test would pass on an empty table for the wrong reason, so the
+        # watcher has to have been there for the whole run as well.
+        outlived_the_run = unrelated.poll()
     finally:
         unrelated.kill()
         unrelated.wait(timeout=SCRIPT_TIMEOUT_S)
 
+    assert outlived_the_run is None, f"the planted watcher exited before step 5 read the process table: {outlived_the_run}\n{transcript}"
     assert result.returncode == 0, transcript
     assert f"registering the skill and the MCP server for {STEP_FIVE_AGENT}" in transcript, transcript
     assert "restart: no agent CLI of yours is running, so there is nothing to restart" in transcript, transcript
