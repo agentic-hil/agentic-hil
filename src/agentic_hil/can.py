@@ -183,6 +183,108 @@ CAN_LIKELY_CAUSES: dict[str, list[str]] = {
         "no other node is on the bus to acknowledge the frame, and the controller gave up retransmitting it",
         "the controller is bus-off or error-passive after earlier failed transmissions",
     ],
+    # The rest of the CAN error types this path raises (#523). Every one of them
+    # answered the COM port's or the bound debugger's generic line until it got a
+    # row here, `can_listen_only_mode` most visibly: a bus declared to carry no
+    # transmit is not a fault at all, and its refusal sent the reader to a serial
+    # log. The four at the end are built by `agentic_hil.bridge` out of
+    # `ProcessCanAdapterSession.error_prefix` and the kind at the call site, so
+    # this table is the only place in the tree they are spelled.
+    LISTEN_ONLY_MODE_ERROR: [
+        "`can_buses.<id>.listen_only: true` declares this bus to be observed and not driven, so a transmit on it is refused before any driver is called",
+        "the transmit was meant for a second entry: one channel may be listed twice, once `listen_only: true` to observe it and once `listen_only: false` to drive it",
+        "the declaration no longer matches what this bus is for, and `can_buses.<id>.listen_only: false` is the one place that changes it",
+    ],
+    LISTEN_ONLY_UNCONFIRMED_ERROR: [
+        "the driver took the listen-only request and would not report it back, so the mode this bus claims could not be confirmed on the controller it was opened on",
+        "this adapter's python-can interface does not expose the listen-only parameter, so there is no state to read the confirmation out of",
+        "the channel was opened by another program first and is in the mode that program set, which is not the one this bus asked for",
+    ],
+    "can_queue_clear_limit": [
+        "the bus carries more traffic than the bounded drain can read out, so the receive queue refilled as fast as it was emptied",
+        "`can_buses.<id>.max_buffer_frames` is small for this bus, so each drain pass reads few frames and the queue outlives the budget",
+        "a node on this bus is transmitting continuously, which is a fact about the bus rather than a fault in the adapter",
+    ],
+    "can_read_failed": [
+        "the interface went down under the open session, so every read on the socket fails from there on",
+        "the adapter was unplugged or reset while the session held it open, and the driver refuses further work on the handle it left behind",
+        "another program reconfigured the channel underneath this session, and the driver reports the receive path as broken",
+    ],
+    "can_adapter_open_failed": [
+        "the adapter is not connected, or its driver is not running, so the open had nothing to attach to",
+        "the channel is already open in another program, and the driver hands out one handle for it at a time",
+        "the bus parameters this entry asks for cannot be applied to this adapter, `can_buses.<id>.bitrate` and `fd` among them",
+    ],
+    "can_adapter_close_failed": [
+        "the adapter stopped answering before the session could be closed, so the close was never confirmed and the bus stays registered for a cleanup retry",
+        "the driver's own shutdown raised, which leaves the channel open on a handle this session no longer controls",
+        "a bridge was still running when the close was attempted, and the bus is kept until a retry confirms it is gone",
+    ],
+    "can_adapter_not_found": [
+        "`can_buses.<id>.executable` names a file that is not there, or names it relative to a directory other than the workspace root it is resolved against",
+        "the bridge program was moved or renamed after this bus entry was written",
+        "the path exists and is not a regular file, a directory or a dangling link where the adapter bridge was expected",
+    ],
+    "can_adapter_process_start_failed": [
+        "the bridge file is there and is not executable, so the operating system refused to run it",
+        "the interpreter or runtime the bridge needs is not installed, so the command could not be started",
+        "the directory the bridge is started in no longer exists, or this account may not spawn a process there",
+    ],
+    "can_adapter_invalid_response": [
+        "the bridge answered in a shape this protocol cannot read, so what it did on the bus for that request cannot be accounted for",
+        "the bridge writes something other than one JSON object per line on its output, a log line or a banner among the answers",
+        "the bridge and this adapter disagree about the fields an answer carries, which is a version skew between the two",
+    ],
+    "can_adapter_protocol_unsupported": [
+        "the bridge speaks an older protocol version than this adapter requires, and the open response is where the two are compared",
+        "the bridge answered the open with fields this protocol does not define, so its answer cannot be read as a version 2 open result",
+        "a program that is not a CAN adapter bridge at all is configured as one, and its first answer happened to parse",
+    ],
+    "can_backend_not_available": [
+        "python-can is not installed for the interpreter running this server, and `agentic-hil[can]` is what installs it",
+        "this server runs on a different interpreter than the one the backend was installed into",
+        "the installation is broken rather than absent, and importing the backend raises where the driver bindings are loaded",
+    ],
+    "can_bus_not_configured": [
+        "`can_buses` in the authoritative configuration has no entry under this id, and the ids it does have are listed beside this refusal",
+        "the bus id is spelled differently here than in `can_buses`, a hyphen for an underscore or a differing case",
+        "a configuration reload removed this bus, or a different configuration file is authoritative for this project than the one that declared it",
+    ],
+    CAN_FD_REMOTE_FRAME_ERROR: [
+        "the frame was built for a classic bus and sent on one configured `fd: true`, where the bit that would mark it remote is the bit that marks it FD",
+        "`rtr: true` was carried over from a template, and a remote request has no meaning on this bus",
+        "the frame was meant for a second `can_buses` entry on this channel that is not configured `fd: true`",
+    ],
+    CAN_CLASSIC_FRAME_TOO_LARGE_ERROR: [
+        "the payload is longer than the eight bytes a classic CAN frame carries, and this bus is not configured `fd: true`",
+        "`can_buses.<id>.fd: true` is what a payload of this size needs, on a bus and a controller that can carry FD frames",
+        "the payload was assembled for an FD bus and sent on the classic entry for the same channel",
+    ],
+    CAN_FD_FRAME_LENGTH_INVALID_ERROR: [
+        "CAN FD carries a discrete set of payload lengths, and a length between two of them has no DLC code to be sent as",
+        "the payload was padded to a round number of bytes rather than to the next length the standard defines",
+        "the payload was built for a classic bus, where any length up to eight bytes is legal, and sent on this FD one",
+    ],
+    "can_adapter_timeout": [
+        "the bridge did not answer within `can_buses.<id>.timeout_s`, and what it did on the bus in that time is the bridge's to know",
+        "the bridge is blocked on the bus or on its own driver, so the answer is late rather than absent",
+        "the adapter stopped responding under the bridge, and the bridge is still waiting on it as this request timed out",
+    ],
+    "can_adapter_process_exited": [
+        "the bridge is no longer running: it exited, or it was killed, after this bus was opened",
+        "the bridge ended itself on an error of its own, and its last output is captured beside this refusal",
+        "this session was already closed, so the request had no running bridge left to be written to",
+    ],
+    "can_adapter_invalid_request": [
+        "the request could not be written to the bridge, whose input stream was closed under this session",
+        "the frame carried a value that cannot be written as JSON, so nothing was handed to the bridge",
+        "the bridge ended between the check on it and the write, and the pipe to it was already gone",
+    ],
+    "can_adapter_close_interrupted": [
+        "the close request to the bridge was interrupted, so whether the bridge left the bus is unknown and it is kept for a cleanup retry",
+        "the server was stopped while this bus was being closed, and the interrupt reached the close before the bridge answered",
+        "the bridge took longer over the close than the session waited, and it may still be on the bus",
+    ],
 }
 
 
