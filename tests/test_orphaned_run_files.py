@@ -429,6 +429,56 @@ def test_the_stop_and_log_of_a_kept_record_go_with_the_record_and_not_before(tmp
     assert not log.exists(), directory_listing(config)
 
 
+class UnresponsiveWorker:
+    """A spawned worker that is still there and has published nothing.
+
+    What the give-up path is built for, and the only part of a worker the start
+    command reads while it waits: whether the process has ended."""
+
+    def poll(self) -> int | None:
+        return None
+
+
+def test_a_start_that_gives_up_on_its_worker_sweeps_the_attempts_before_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep has to run on the bench that grows, and that bench never registers.
+
+    `prune_run_records` is reached from one place, a registration that has just
+    written its first record, so every prune on a bench is paid for by a worker
+    that came alive. The bench in the report is the one where none of them do:
+    each start plants a stop over a log and gives up, no registration ever
+    happens, and a sweep that only registrations reach is a sweep that bench
+    never gets. So the start that gives up is also the one that clears what the
+    starts before it left.
+
+    What this start leaves behind itself is untouched, because it is new: the
+    stop it just planted and the log its spawn opened are inside the window, and
+    the worker they belong to may still be alive.
+    """
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    monkeypatch.setattr(runlifecycle, "WORKER_PUBLISH_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(runlifecycle, "MAX_WAIT_S", 0.0)
+    earlier = plant_orphan_files(config, ORPHAN_HANDLE, age_s=60.0, with_lock=True)
+
+    def spawn_that_never_publishes(config, handle: str, test_config_path: str, *, wait_s: float) -> UnresponsiveWorker:
+        # The real spawn opens the log before the worker exists, and the file it
+        # leaves is half of what this issue is about.
+        runlifecycle.worker_log_path(config, handle).write_text(LOG_TEXT, encoding="utf-8")
+        return UnresponsiveWorker()
+
+    monkeypatch.setattr(runlifecycle, "spawn_run_worker", spawn_that_never_publishes)
+
+    answer = runlifecycle.start_detached_run(config, str(plan), wait_s=0.0)
+
+    assert answer["ok"] is False, answer
+    assert answer["error_type"] == "run_worker_unresponsive", answer
+    for path in earlier:
+        assert not path.exists(), directory_listing(config)
+    this_attempt = answer["run"]
+    assert runlifecycle.stop_path(config, this_attempt).exists(), directory_listing(config)
+    assert log_path(config, this_attempt).exists(), directory_listing(config)
+
+
 def test_status_answers_run_not_found_for_the_orphan_handle_before_and_after_the_prune(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The neighbour that must not move: the orphan handle is not a run either way.
 
