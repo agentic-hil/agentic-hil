@@ -955,6 +955,21 @@ class HardwareCoordinator:
                     reasons = sorted(set(_record_cleanup_reasons(self._read_record(self.project_key))))
                 except CoordinationError:
                     reasons = []
+            if not reasons and self.adopted_reason:
+                # An inherited incident whose reason never reached disk. A call
+                # that releases its lease inside itself persists the project
+                # record as `cleanup_required`, the state `_persist_project`
+                # writes the adopted reason onto, and the lookup above then
+                # finds it there. A session start keeps its lease, so its record
+                # goes out `active` and the reason exists nowhere but here.
+                # Ending an incident without naming it leaves the ledger line
+                # unauditable and tells the caller that something it never saw
+                # is over, so the memory the adoption kept is the last resort.
+                # `adopted_reason` is only ever set by adopting a previous
+                # owner's record, so this invents nothing for an incident this
+                # process raised itself, and the record is left alone: the state
+                # of a running session is not the place to carry a name.
+                reasons = [self.adopted_reason]
             quarantine_id = self.quarantine_id
             resources = sorted(self.incident_resources)
             if not self._append_stand_down(reasons, quarantine_id, resources):
