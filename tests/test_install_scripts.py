@@ -4959,11 +4959,20 @@ def test_the_powershell_refresh_keeps_the_interpreter_the_real_uv_recorded(tmp_p
     assert installed.returncode == 0, f"{installed.stdout}\n{installed.stderr}"
     before = _receipt_document(bench.receipt)
     assert before["tool"]["python"] == str(interpreter), before
+    on_disk = bench.installed_version()
+    assert on_disk, f"{installed.stdout}\n{installed.stderr}"
 
     refreshed, transcript = bench.run("--no-agent-install", "--no-can", tool_bin_on_path=True)
 
     assert refreshed.returncode == 0, transcript
-    assert "refreshing this current installation" in transcript, transcript
+    # Which verdict step 1 reaches is decided by the release the index served
+    # against the number this checkout stamps, the same release window the
+    # refresh test above skips on. Here it decides nothing: both verdicts
+    # reinstall the tool through the one branch that reads the receipt, and
+    # keeping the recorded interpreter across that reinstall is the claim. So
+    # this reads that the probe saw the installation and leaves the verdict to
+    # the window (#539).
+    assert f"probe: agentic-hil {on_disk} is " in transcript, transcript
     assert f"the receipt records the interpreter {interpreter}, so the reinstall keeps it" in transcript, transcript
     after = _receipt_document(bench.receipt)
     assert after["tool"].get("python") == str(interpreter), after
