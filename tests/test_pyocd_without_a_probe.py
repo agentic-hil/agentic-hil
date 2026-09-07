@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 from conftest import FAKE_GDB, elf_with_symbols, write_config
+from support import scaled_time_bound
 
 from agentic_hil.backends.pyocd import PyOCDBackend
 from agentic_hil.config import load_config
@@ -46,6 +47,12 @@ RECORDED_WAITING = "Waiting for a debug probe to be connected...\n"
 
 # `write_config` writes `timeout_s: 5`; a refusal that took that long is the
 # wait the issue measured, not a refusal.
+#
+# Every comparison against this number goes through `scaled_time_bound`, which
+# multiplies it by `AGENTIC_HIL_TEST_TIME_SCALE` and leaves it alone when that
+# variable is unset (#515). The base stays what the claim needs; only the
+# allowance a loaded host gets on top of it is configurable, because a run that
+# measured 5.07 s here had nothing wrong with it but the machine it shared.
 CONFIGURED_TIMEOUT_S = 5
 
 THE_THREE_TOOLS = [
@@ -202,8 +209,8 @@ def test_a_tool_with_no_probe_attached_refuses_promptly_instead_of_timing_out(tm
     # clock around the whole call also holds two interpreter starts and
     # whatever the host was doing beside them, so it is held to twice the
     # timeout, which the three waits the issue measured still cannot pass.
-    assert result["elapsed_ms"] < CONFIGURED_TIMEOUT_S * 1000, result
-    assert elapsed_s < 2 * CONFIGURED_TIMEOUT_S, (elapsed_s, result)
+    assert result["elapsed_ms"] < scaled_time_bound(CONFIGURED_TIMEOUT_S) * 1000, result
+    assert elapsed_s < scaled_time_bound(2 * CONFIGURED_TIMEOUT_S), (elapsed_s, result)
     # pyOCD's own sentence travels with the refusal, as the evidence it is.
     assert "No connected debug probes" in json.dumps(result), result
     log = log_of(config, result)
@@ -247,8 +254,8 @@ def test_a_probe_that_vanished_after_its_uid_was_resolved_is_refused_the_same_wa
         # and whatever the host was doing beside them, so it is held to twice
         # the timeout: a call that did wait it out cannot hide under that bound
         # beside one that did not.
-        assert result["elapsed_ms"] < CONFIGURED_TIMEOUT_S * 1000, result
-    assert elapsed_s < 2 * CONFIGURED_TIMEOUT_S, elapsed_s
+        assert result["elapsed_ms"] < scaled_time_bound(CONFIGURED_TIMEOUT_S) * 1000, result
+    assert elapsed_s < scaled_time_bound(2 * CONFIGURED_TIMEOUT_S), elapsed_s
     assert len(written_logs(config)) == 2, [path.name for path in written_logs(config)]
 
 
@@ -291,8 +298,8 @@ def test_a_sessionless_read_with_no_probe_attached_is_refused_the_same_way(tmp_p
     # one, and the wall clock around the offline symbol read and the spawn
     # is held to twice the timeout.
     if "elapsed_ms" in result:
-        assert result["elapsed_ms"] < CONFIGURED_TIMEOUT_S * 1000, result
-    assert elapsed_s < 2 * CONFIGURED_TIMEOUT_S, (elapsed_s, result)
+        assert result["elapsed_ms"] < scaled_time_bound(CONFIGURED_TIMEOUT_S) * 1000, result
+    assert elapsed_s < scaled_time_bound(2 * CONFIGURED_TIMEOUT_S), (elapsed_s, result)
     log = log_of(config, result)
     assert "-W" in log["command"].split() or "--no-wait" in log["command"].split(), log["command"]
     assert log["stdout"] == RECORDED_NO_PROBE, log
