@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 from conftest import write_config
+from test_can_likely_causes import assert_causes_are_about_the_bus
 
 from agentic_hil.can import open_python_can_adapter, socketcan_interface_missing
 from agentic_hil.config import load_config
@@ -137,6 +138,10 @@ def test_a_wrapped_enodev_is_classified_as_no_contact(tmp_path: Path, monkeypatc
     assert result["retry_safe"] is True
     assert result["target_contacted"] is False
     assert any("ip link" in step for step in result["remediation"])
+    # The refusal says what may have caused it, about this interface (#517). Not
+    # the remediation, which says what to do next: an operator reads both, and
+    # the classifier reads this one back out of the record.
+    assert_causes_are_about_the_bus(result["likely_causes"], CAN_INTERFACE_NOT_FOUND_ERROR, result)
 
 
 def test_a_bare_oserror_carrying_enodev_is_classified_the_same_way(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,6 +223,9 @@ def test_a_missing_socketcan_interface_refuses_and_frees_the_lease(tmp_path: Pat
         assert result["lease_state"] == "released"
         assert result["retry_safe"] is True
         assert service.coordinator.blocked is False
+        assert_causes_are_about_the_bus(result["likely_causes"], CAN_INTERFACE_NOT_FOUND_ERROR, result)
+        classified = service.call("classify_last_error")
+        assert classified["likely_causes"] == result["likely_causes"], classified
     finally:
         service.close()
     assert not coordination_record_states(config) & {"cleanup_required", "quarantined", "recovery_pending"}

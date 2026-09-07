@@ -825,6 +825,11 @@ def test_a_link_taken_down_under_a_session_fails_the_send_as_an_unknown_effect_t
         assert failed["cleanup_reasons"] == ["can_effect_unconfirmed"], failed
         assert failed["incident_stood_down"]["stood_down"] is True, failed
         assert failed["quarantined"] is False, failed
+        # Over the real kernel too, the send failure names causes about the bus
+        # rather than falling through to a serial or debugger table (#517).
+        causes = failed["likely_causes"]
+        assert causes and not any("COM port" in cause or "debugger" in cause for cause in causes), failed
+        assert any(("bus" in cause or "adapter" in cause or "interface" in cause or "node" in cause) for cause in causes), failed
 
         read = server.call("can_read", {"bus_id": "bus", "wait_timeout_s": 0.0})
         assert read["ok"] is True and read["lease_state"] == "active", read

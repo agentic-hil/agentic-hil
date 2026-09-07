@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 from conftest import write_config
+from test_can_likely_causes import assert_causes_are_about_the_bus
 
 from agentic_hil.can import (
     can_adapter_library_missing,
@@ -254,6 +255,7 @@ def test_an_absent_pcan_basic_api_is_no_contact(tmp_path: Path, monkeypatch: pyt
     assert result["side_effect_status"] == "not_started"
     assert result["retry_safe"] is True
     assert any("PCAN-Basic" in step for step in result["remediation"])
+    assert_causes_are_about_the_bus(result["likely_causes"], CAN_ADAPTER_LIBRARY_MISSING_ERROR, result)
 
 
 def test_a_host_with_the_driver_keeps_the_markerless_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -293,6 +295,10 @@ def test_an_illegal_handle_from_initialize_is_no_contact(tmp_path: Path, monkeyp
     assert result["side_effect_status"] == "not_started"
     assert result["retry_safe"] is True
     assert result["target_contacted"] is False
+    # The causes are this refusal's own and about this driver's channels (#517),
+    # so `classify_last_error` reads them back rather than a table keyed by
+    # somebody else's error types.
+    assert_causes_are_about_the_bus(result["likely_causes"], CAN_CHANNEL_NOT_AVAILABLE_ERROR, result)
 
 
 def test_a_channel_missing_from_a_real_enumeration_is_no_contact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -394,6 +400,9 @@ def test_neither_failure_quarantines_the_bench(tmp_path: Path, monkeypatch: pyte
         assert result["lease_state"] == "released"
         assert result["retry_safe"] is True
         assert service.coordinator.blocked is False
+        assert_causes_are_about_the_bus(result["likely_causes"], expected, result)
+        classified = service.call("classify_last_error")
+        assert classified["likely_causes"] == result["likely_causes"], classified
     finally:
         service.close()
 

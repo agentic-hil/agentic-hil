@@ -29,6 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import DEFAULT_TEST_PERMISSIONS, write_config
+from test_can_likely_causes import assert_causes_are_about_the_bus
 
 from agentic_hil.can import (
     CanBusService,
@@ -207,6 +208,9 @@ def test_socketcan_refuses_when_the_interface_is_up_without_listen_only(tmp_path
     assert result["side_effect_committed"] is False
     assert result["retry_safe"] is True
     assert any("listen-only on" in step for step in result["remediation"])
+    # And the causes are about this controller's mode (#517), so the classifier
+    # does not answer the refusal out of a table of somebody else's failures.
+    assert_causes_are_about_the_bus(result["likely_causes"], LISTEN_ONLY_UNSUPPORTED_ERROR, result)
 
 
 def test_socketcan_refuses_when_ctrlmode_is_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
