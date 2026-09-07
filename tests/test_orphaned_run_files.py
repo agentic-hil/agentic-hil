@@ -39,18 +39,28 @@ Everything here is in process and over the coordination state files only. No
 worker is spawned: what the module is asked is what it does with files that are
 already there, and planting them is the whole of the arrangement.
 
-The last three tests are #529, and they are about the margin the give-up path
-has rather than about what it removes. The sweep decides on wall clock age and
-runs several file operations after the start planted its own stop, so what keeps
-a start from deleting the files it just wrote for itself is a relation between
-three product numbers: the threshold is `worker_publish_window_s(MAX_WAIT_S)`,
-every start's own deadline is `worker_publish_window_s(wait_s)` for the wait it
-was handed, and `validated_wait` refuses any wait above `MAX_WAIT_S`. Together
-those make the threshold an upper bound over every window a start can wait in,
-so a live attempt's files are never older than the cutoff when its own start
-sweeps. Those three tests read the constants the product ships and never a
-patched pair, so moving either constant, or loosening `validated_wait`, is red
-here instead of red once a month on a loaded runner.
+The tests from `test_the_sweep_threshold_covers_every_wait_the_validator_admits`
+on are #529, and they are about the margin the give-up path has rather than
+about what it removes. The sweep decides on wall clock age and runs several file
+operations after the start planted its own stop, so what keeps a start from
+deleting the files it just wrote for itself is a relation between three product
+numbers: the threshold is `worker_publish_window_s(MAX_WAIT_S)`, every start's
+own deadline is `worker_publish_window_s(wait_s)` for the wait it was handed,
+and `validated_wait` refuses any wait above `MAX_WAIT_S`. Together those make
+the threshold an upper bound over every window a start can wait in, so a live
+attempt's files are never older than the cutoff when its own start sweeps. Those
+tests read the constants the product ships and never a patched pair, so moving
+either constant, or loosening `validated_wait`, or building a start's deadline
+from anything but the wait the validator returned, is red here instead of red
+once a month on a loaded runner.
+
+That relation is between durations, and the sweep compares no durations: it
+compares a wall clock reading with a modification time, while the deadline it
+has to stay above is monotonic. A forward adjustment of the wall clock during a
+start lands on the cutoff and not on the deadline, and the last two tests are
+that corner. What holds there is not the arithmetic but ownership: the prune a
+start runs after it has stopped waiting is told which attempt is that start's
+own, and the sweep never offers those files however the clock moved under them.
 """
 
 from __future__ import annotations
@@ -561,14 +571,17 @@ def test_the_sweep_threshold_covers_every_wait_the_validator_admits() -> None:
 def test_a_wait_the_validator_refuses_cannot_widen_a_start_past_the_threshold() -> None:
     """The other half of the bound: what is refused cannot get past it either.
 
-    `validated_wait` is the gate, but it is not the only reader of a caller's
-    wait, and a value that never reaches a worker is still handed to
-    `worker_publish_window_s` on the way to the refusal. So each value the
-    validator names is asserted twice: that it is refused, and that the window
-    computed from it is still no wider than the sweep's threshold, because the
-    window clamps to `MAX_WAIT_S` and falls back to the base window for anything
-    that is not a number. Negative, over the maximum, non finite, a bool and a
-    string: a caller cannot buy a deadline past the cutoff with any of them.
+    The start command itself never asks: it validates first and returns the
+    refusal, so a wait the validator rejects reaches no window on that path. The
+    clamp inside `worker_publish_window_s` is a second line all the same, and
+    the line that matters if a caller of the helper is ever added that does not
+    validate first, because the helper is where a wait becomes a duration and
+    the duration is what the sweep's threshold has to stand above. So each value
+    the validator names is asserted twice: that the gate refuses it, and that
+    the window computed from it regardless is still no wider than the threshold,
+    because the helper clamps to `MAX_WAIT_S` and falls back to the base window
+    for anything that is not a number. Negative, over the maximum, non finite, a
+    bool and a string: none of them buys a window past the cutoff.
     """
     threshold = runlifecycle.orphan_sweep_window_s()
 
@@ -579,48 +592,225 @@ def test_a_wait_the_validator_refuses_cannot_widen_a_start_past_the_threshold() 
         assert runlifecycle.worker_publish_window_s(refused) <= threshold, refused
 
 
-def test_a_start_that_gives_up_keeps_its_own_files_on_the_shipped_maximum_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """What the bound buys, at the bench's own number and not at a chosen one.
+class ExitedWorker:
+    """A spawned worker whose process is already gone.
 
-    The give-up path plants its stop, reads the worker log, prunes the records,
-    globs and sorts a directory and only then sweeps, and everything it wrote
-    for itself is dated by that stop. Its safety is the distance between the
-    deadline it gave up at and the cutoff the sweep computes, and that distance
-    is `MAX_WAIT_S`.
+    The other route out of the start command's wait: a worker that ended before
+    it could publish anything leaves a log and no stop, and the start reports
+    `run_worker_failed` once the exit has outlasted the grace period."""
 
-    So only the base startup window is shortened here, which is what keeps the
-    test as fast as the neighbour above it, and `MAX_WAIT_S` is left where the
-    bench sets it. The margin under this attempt's files is then the product's
-    own, the fifteen minutes a caller may ask a worker to wait for a held board,
-    rather than a number this test picked to be comfortable. The orphan planted
-    beside it is older than the widened threshold, so the sweep did run and the
-    survival of the attempt's own pair is a contrast rather than a sweep that
-    never happened.
+    def poll(self) -> int:
+        return 1
+
+
+class ScriptedClock:
+    """The clock `runlifecycle` reads, with its two hands moved apart.
+
+    A start dates its own deadline on `time.monotonic` and the sweep it runs a
+    few file operations later dates the directory on `time.time`. The tests
+    below are about a start handed the bench's maximum wait, and about what
+    happens when those two hands disagree, and neither can be arranged by
+    waiting: the widest deadline a start can be given is fifteen minutes plus
+    the startup window, and no test may take that long.
+
+    So `monotonic` hands out the readings it was given, in order, and keeps
+    them, which walks a start to the far side of its own deadline in two
+    readings and lets the deadline it computed be read back off the reading it
+    gave up at. Past the script it answers with a number no deadline can be
+    beyond, so a start whose deadline this arrangement got wrong ends its loop
+    and fails an assertion instead of hanging. `time` is the real wall clock
+    with an offset, which is the forward adjustment that lands on the sweep and
+    not on the deadline. `sleep` returns at once, because the poll interval is
+    time the script has already accounted for.
+    """
+
+    PAST_EVERY_DEADLINE = 1e9
+
+    def __init__(self, readings: tuple[float, ...], *, wall_clock_offset: float = 0.0) -> None:
+        self.scripted = list(readings)
+        self.readings: list[float] = []
+        self.wall_clock_offset = wall_clock_offset
+
+    def monotonic(self) -> float:
+        reading = self.scripted.pop(0) if self.scripted else self.PAST_EVERY_DEADLINE
+        self.readings.append(reading)
+        return reading
+
+    def time(self) -> float:
+        return time.time() + self.wall_clock_offset
+
+    def sleep(self, seconds: float) -> None:
+        return None
+
+
+def spawn_that_never_publishes(config, handle: str, test_config_path: str, *, wait_s: float) -> UnresponsiveWorker:
+    """A spawn that opens the log the real one opens and then says nothing.
+
+    The real `spawn_run_worker` creates `<handle>.log` before the worker exists,
+    and that file is half of what the sweep decides about."""
+    runlifecycle.worker_log_path(config, handle).write_text(LOG_TEXT, encoding="utf-8")
+    return UnresponsiveWorker()
+
+
+def test_a_start_builds_its_own_deadline_from_the_wait_the_validator_returned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The half of the relation the two tests above cannot see: the start's own window.
+
+    Those two read `worker_publish_window_s` and `validated_wait` directly, and
+    a start that computed its deadline some other way, by adding the wait a
+    second time to the window that already contains it, would leave both of them
+    green while its own window went past the threshold its own sweep uses. So
+    this reads the deadline off the start itself, at the widest wait the bench
+    admits and with no constant patched.
+
+    The clock is scripted rather than waited out, and the assertion is on the
+    readings it handed over: the start does not give up one second before the
+    window computed for its wait, it does give up at it, and it asks the clock
+    nothing further. A deadline built from anything but that wait is a different
+    list of readings, whichever direction it moved in.
     """
     workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
     config = load_authoritative_config(workspace)
-    monkeypatch.setattr(runlifecycle, "WORKER_PUBLISH_TIMEOUT_S", 0.05)
-    earlier = plant_orphan_files(config, ORPHAN_HANDLE, age_s=past_every_publish_window_s(), with_lock=True)
-
-    def spawn_that_never_publishes(config, handle: str, test_config_path: str, *, wait_s: float) -> UnresponsiveWorker:
-        runlifecycle.worker_log_path(config, handle).write_text(LOG_TEXT, encoding="utf-8")
-        return UnresponsiveWorker()
-
+    window = runlifecycle.worker_publish_window_s(validated_wait(MAX_WAIT_S))
+    # The relation this closes: the widest deadline a start can be handed is the
+    # cutoff its own sweep computes, and not some number near it.
+    assert window == runlifecycle.orphan_sweep_window_s()
+    clock = ScriptedClock((0.0, window - 1.0, window))
+    monkeypatch.setattr(runlifecycle, "time", clock)
     monkeypatch.setattr(runlifecycle, "spawn_run_worker", spawn_that_never_publishes)
 
-    answer = runlifecycle.start_detached_run(config, str(plan), wait_s=0.0)
+    answer = runlifecycle.start_detached_run(config, str(plan), wait_s=MAX_WAIT_S)
+
+    assert answer["ok"] is False, answer
+    assert answer["error_type"] == "run_worker_unresponsive", answer
+    assert clock.readings == [0.0, window - 1.0, window], clock.readings
+
+
+def test_a_start_that_gives_up_at_the_maximum_wait_keeps_the_log_its_spawn_opened(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the bound buys, at the bench's own numbers and on the file that is oldest.
+
+    A start handed the maximum wait opens its log when it spawns and plants its
+    stop fifteen and a half minutes later, so by the time its own sweep runs the
+    log is the whole of the threshold old and past the cutoff, while the stop is
+    a moment old. Nothing about the two numbers saves that log: what saves it is
+    that the files of one handle are one attempt and the newest of them dates
+    the set. The refusal the caller is holding quotes that log.
+
+    No constant is patched. The window is crossed by the scripted clock and the
+    log carries the age a spawn at the start of that window would have left it,
+    so this is the shipped arrangement rather than a compressed one. Two other
+    handles are in the directory for the contrast, and one sweep decides all
+    three: an attempt of an earlier start that gave up a moment ago, an old log
+    under a new stop, which is the same rule applied to a handle this start does
+    not own; and an orphan nothing is coming for, which goes and so says the
+    sweep ran at all.
+    """
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    window = runlifecycle.worker_publish_window_s(validated_wait(MAX_WAIT_S))
+    earlier = plant_orphan_files(config, ORPHAN_HANDLE, age_s=past_every_publish_window_s(), with_lock=True)
+    just_gave_up = plant_orphan_files(config, SECOND_ORPHAN_HANDLE, age_s=past_every_publish_window_s(), stop_age_s=0.0)
+
+    def spawn_whose_log_is_as_old_as_the_window(config, handle: str, test_config_path: str, *, wait_s: float) -> UnresponsiveWorker:
+        log = runlifecycle.worker_log_path(config, handle)
+        log.write_text(LOG_TEXT, encoding="utf-8")
+        # Aged here because the start crosses its window in two clock readings
+        # rather than in fifteen minutes: this is the age the file would carry
+        # by the time the sweep looked at it, five seconds past the cutoff so
+        # that a loaded host cannot make the point by accident.
+        opened = time.time() - (window + 5.0)
+        os.utime(log, (opened, opened))
+        return UnresponsiveWorker()
+
+    clock = ScriptedClock((0.0, window))
+    monkeypatch.setattr(runlifecycle, "time", clock)
+    monkeypatch.setattr(runlifecycle, "spawn_run_worker", spawn_whose_log_is_as_old_as_the_window)
+
+    answer = runlifecycle.start_detached_run(config, str(plan), wait_s=MAX_WAIT_S)
 
     assert answer["ok"] is False, answer
     assert answer["error_type"] == "run_worker_unresponsive", answer
     for path in earlier:
         assert not path.exists(), directory_listing(config)
+    for path in just_gave_up:
+        assert path.exists(), directory_listing(config)
     this_attempt = answer["run"]
     assert runlifecycle.stop_path(config, this_attempt).exists(), directory_listing(config)
     assert log_path(config, this_attempt).exists(), directory_listing(config)
     # The refusal quotes this log, so a sweep that took it would leave the
     # caller with a give-up that cannot say what the worker managed to print.
     assert runlifecycle.worker_output(config, this_attempt) == LOG_TEXT
-    # And the reason none of that was luck: the whole of the bench's maximum
-    # wait stands between the deadline this start gave up at and the cutoff its
-    # own sweep computed a few file operations later.
-    assert runlifecycle.orphan_sweep_window_s() - runlifecycle.worker_publish_window_s(0.0) == MAX_WAIT_S
+
+
+def test_a_clock_moved_forward_during_a_start_does_not_cost_it_its_own_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The corner where the arithmetic stops helping, and ownership has to.
+
+    Every number here is the shipped one and the relation between them holds,
+    and it is still not enough: the deadline is monotonic and the cutoff is the
+    wall clock against a modification time, so an operator or a time service
+    moving the clock forward past the threshold in the middle of a start makes
+    every file in the runs directory look older than the cutoff, this attempt's
+    two among them. The stop is the one thing that will end this worker at its
+    first step boundary if it does come alive after all, and a start that
+    deletes it a few file operations after planting it has taken back the only
+    promise the refusal makes.
+
+    So the prune this route runs is told whose attempt it was called from, and
+    the sweep leaves that handle alone whatever the clock says. The orphan of an
+    earlier attempt is swept in the same call, which is what keeps this from
+    passing on a sweep that stopped working.
+    """
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    window = runlifecycle.worker_publish_window_s(validated_wait(MAX_WAIT_S))
+    earlier = plant_orphan_files(config, ORPHAN_HANDLE, age_s=past_every_publish_window_s(), with_lock=True)
+    clock = ScriptedClock((0.0, window), wall_clock_offset=window + 60.0)
+    monkeypatch.setattr(runlifecycle, "time", clock)
+    monkeypatch.setattr(runlifecycle, "spawn_run_worker", spawn_that_never_publishes)
+
+    answer = runlifecycle.start_detached_run(config, str(plan), wait_s=MAX_WAIT_S)
+
+    assert answer["ok"] is False, answer
+    assert answer["error_type"] == "run_worker_unresponsive", answer
+    this_attempt = answer["run"]
+    assert runlifecycle.stop_path(config, this_attempt).exists(), directory_listing(config)
+    assert log_path(config, this_attempt).exists(), directory_listing(config)
+    assert runlifecycle.worker_output(config, this_attempt) == LOG_TEXT
+    for path in earlier:
+        assert not path.exists(), directory_listing(config)
+
+
+def test_a_clock_moved_forward_does_not_cost_a_failed_start_its_worker_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same ownership on the other route out of the wait.
+
+    A worker that ended before it could publish leaves a log and no stop, so its
+    handle's set is one file and the newest of one file is that file. Under a
+    clock moved forward it is past the cutoff at once, and the start that
+    spawned it is the caller of the prune. The log is what a reader asking why
+    the launch failed reads afterwards, so it belongs to the attempt that just
+    ended and not to the sweep, and the exclusion has to hold on both routes
+    rather than on the one the issue was written from.
+    """
+    workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
+    config = load_authoritative_config(workspace)
+    window = runlifecycle.worker_publish_window_s(validated_wait(MAX_WAIT_S))
+    earlier = plant_orphan_files(config, ORPHAN_HANDLE, age_s=past_every_publish_window_s(), with_lock=True)
+
+    def spawn_that_exits_at_once(config, handle: str, test_config_path: str, *, wait_s: float) -> ExitedWorker:
+        runlifecycle.worker_log_path(config, handle).write_text(LOG_TEXT, encoding="utf-8")
+        return ExitedWorker()
+
+    # The readings are the deadline's base, the moment the exit is noticed, and
+    # a moment past the grace period the start allows an exited worker.
+    clock = ScriptedClock((0.0, 1.0, 1.0 + runlifecycle.WORKER_EXIT_GRACE_S + 1.0), wall_clock_offset=window + 60.0)
+    monkeypatch.setattr(runlifecycle, "time", clock)
+    monkeypatch.setattr(runlifecycle, "spawn_run_worker", spawn_that_exits_at_once)
+
+    answer = runlifecycle.start_detached_run(config, str(plan), wait_s=MAX_WAIT_S)
+
+    assert answer["ok"] is False, answer
+    assert answer["error_type"] == "run_worker_failed", answer
+    assert answer["worker_output"] == LOG_TEXT, answer
+    this_attempt = answer["run"]
+    assert log_path(config, this_attempt).exists(), directory_listing(config)
+    for path in earlier:
+        assert not path.exists(), directory_listing(config)
