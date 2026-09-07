@@ -1021,7 +1021,7 @@ def test_a_broker_whose_adapter_cannot_open_refuses_the_participant_with_the_ada
 
     started_at = time.monotonic()
     with pytest.raises(ParticipantError) as refused:
-        attach_participant(config, "sdcbroker", "alpha", start_timeout_s=4.0)
+        attach_participant(config, "sdcbroker", "alpha")
     elapsed = time.monotonic() - started_at
     result = refused.value.result
     diagnostics = broker_diagnostics(config, bus_key)
