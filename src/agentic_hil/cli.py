@@ -80,7 +80,14 @@ from agentic_hil.configwrite import (
     permission_surface,
     set_permission,
 )
-from agentic_hil.coordination import CoordinationError, HardwareCoordinator, nothing_standing_result
+from agentic_hil.coordination import (
+    CoordinationError,
+    HardwareCoordinator,
+    foreign_incident_sentence,
+    nothing_standing_result,
+    project_resource,
+    standing_foreign_incidents,
+)
 from agentic_hil.devices import config_devices
 from agentic_hil.humanize import JSON_FLAG_HELP, PROTOCOL_COMMANDS, render_result, write_rendered
 from agentic_hil.junit import detached_junit_refusal, write_refusal_junit_xml
@@ -1983,7 +1990,14 @@ def _kept_configuration_findings(target_path: Path) -> list[JsonObject]:
 # report #433 is about. So `doctor` is red and `setup` keeps the file, and the
 # absent bench stays what `setup`'s own headline already reports it as.
 DOCTOR_UNBOUND_FINDING = "bench_binding"
-DOCTOR_FINDINGS_SETUP_KEEPS = frozenset({DOCTOR_UNBOUND_FINDING})
+# A neighbour's unresolved incident on the devices this configuration declares.
+# It counts against the verdict because `doctor.ok` is read as "will this bench
+# work", and on the bench this was reported from it answered yes three seconds
+# before the first flash was refused (#531). `setup` keeps the file it wrote
+# over it, for the same reason it keeps one over an unbound bench: the finding is
+# about the state of the machine and says nothing about the document.
+DOCTOR_STANDING_INCIDENT_FINDING = "standing_incident"
+DOCTOR_FINDINGS_SETUP_KEEPS = frozenset({DOCTOR_UNBOUND_FINDING, DOCTOR_STANDING_INCIDENT_FINDING})
 
 
 def doctor_findings_setup_keeps(doctor_result: JsonObject) -> bool:
@@ -5055,6 +5069,18 @@ def doctor(config_path: str | None = None) -> JsonObject:
     # refuses the whole bench before it touches anything. A green doctor over
     # exactly that is what #387 was, and what let nine more commands run.
     state_root_ok = state_root_check.get("ok") is True
+    # What a neighbour's unresolved incident does to this bench, asked here for
+    # the first time: `doctor` builds no coordinator, calls no status and read no
+    # coordination record, and reported a ready bench on a machine whose next
+    # hardware call was refused. It reaches the records the way nothing else
+    # here needs to: the files are written atomically and this takes no
+    # coordination lock and no device lock, so it answers beside a live session
+    # without contending with the very owner whose incident it is reporting.
+    #
+    # Only where the state root itself is usable. The records live under that
+    # root, `doctor` is already red on it when it is not, and a walk over a root
+    # the enforcer refuses would answer nothing while looking like an all-clear.
+    standing = standing_foreign_incidents(config, project_resource(config)) if state_root_ok else []
     # And the binding counts the same way, for the same reason: a file that
     # names no hardware refuses the first plan run against it, and a green
     # verdict over that is a newcomer being told to go ahead (#433).
@@ -5072,6 +5098,7 @@ def doctor(config_path: str | None = None) -> JsonObject:
         *(["target_support"] if unsupported else []),
         *([] if state_root_ok else ["state_root"]),
         *([] if binding_ok else [DOCTOR_UNBOUND_FINDING]),
+        *([DOCTOR_STANDING_INCIDENT_FINDING] if standing else []),
     ]
     all_ok = not unhealthy
     if not checked:
@@ -5106,6 +5133,12 @@ def doctor(config_path: str | None = None) -> JsonObject:
         summary = f"{summary} {binding_check['summary']} {binding_check['next_step']}"
     if undetermined:
         summary += f" Target support could not be determined here for: {', '.join(undetermined)}; that is unknown, not broken."
+    if standing:
+        # In the headline for the same reason the state root and the binding
+        # are: a caller that keeps only `summary` is left with it, and what it
+        # has to be told is that the next hardware call from this workspace is
+        # refused by something no check above this one looks at.
+        summary = f"{summary} {foreign_incident_sentence(standing)}"
     # Checked at the end, against the configuration this run was decided by. The
     # probe checks spawn debugger processes and take seconds, so the file can
     # move inside a single `doctor`; a report printed out of a document that has
@@ -5166,6 +5199,12 @@ def doctor(config_path: str | None = None) -> JsonObject:
         # A caller that has to tell "this bench is broken" from "this bench is
         # not bound yet" reads this rather than diffing the sections itself.
         "unhealthy": unhealthy,
+        # Always present, empty on a bench nobody else is holding: the
+        # unresolved incidents of other projects on the devices this
+        # configuration declares, with the resource, the incident id, what it is
+        # held for, the owning workspace as a digest, and whether that
+        # workspace's own policy would settle it without a signature.
+        "standing_incidents": standing,
         **({"missing_extras": missing_extras} if missing_extras is not None else {}),
         "installation": _doctor_installation_report(),
         "mcp": _doctor_mcp_report(),
