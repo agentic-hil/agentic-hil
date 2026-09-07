@@ -1101,6 +1101,23 @@ class GdbDebugSessions:
         return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "summary": message or "Symbol could not be resolved.", "symbol": symbol, "side_effect_committed": False}
 
     def _read_memory_bytes(self, tool: str, session: GdbDebugSession, address: int, size_bytes: int) -> JsonObject:
+        """The bytes, or the failure that says why they did not come back.
+
+        Every failure here is assembled by hand rather than read out of a
+        classified run, so each one asks the catalogue for its own bucket where
+        it is built (#521). Nothing is on screen today, because no entry names
+        this backend's read; the merge is what lets one arrive the moment it is
+        written, instead of reaching every result a classifier builds and none
+        of these. It is done here and not in the two callers because this is
+        where the result is built, and `debug_symbol_value` and
+        `debug_dump_symbol_ihex` must not differ in what a failed read tells an
+        operator.
+
+        The bucket the merge asks for is the one the result actually carries: a
+        GDB that never answered is a `timeout` and reaches the timeout's entry,
+        because what to do about waiting is not what to do about memory the
+        target refused.
+        """
         data = bytearray()
         offset = 0
         while offset < size_bytes:
@@ -1108,14 +1125,14 @@ class GdbDebugSessions:
             response = self._gdb_command(session, f"-data-read-memory-bytes {hex(address + offset)} {chunk_size}")
             if not response.ok:
                 error_type = "timeout" if response.timed_out else "memory_read_failed"
-                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "summary": response.error_message or "Target memory could not be read.", "address": hex(address + offset)}
+                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": error_type, "summary": response.error_message or "Target memory could not be read.", "address": hex(address + offset), **remediation_fields(error_type, self.backend_name)}
             contents = mi_field(response.line, "contents")
             if contents is None or MEMORY_CONTENTS_PATTERN.match(contents) is None:
-                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "GDB returned unparsable memory contents.", "address": hex(address + offset)}
+                return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "GDB returned unparsable memory contents.", "address": hex(address + offset), **remediation_fields("memory_read_failed", self.backend_name)}
             data.extend(bytes.fromhex(contents))
             offset += chunk_size
         if len(data) != size_bytes:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "GDB returned fewer memory bytes than requested.", "bytes_requested": size_bytes, "bytes_read": len(data)}
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "GDB returned fewer memory bytes than requested.", "bytes_requested": size_bytes, "bytes_read": len(data), **remediation_fields("memory_read_failed", self.backend_name)}
         return {"ok": True, "data": bytes(data)}
 
     def _confirm_halted_before_end(self, session: GdbDebugSession, timeout_s: float) -> bool:

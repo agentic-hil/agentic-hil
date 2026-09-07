@@ -458,7 +458,11 @@ class STLinkBackend:
             # same removal, as the staged ELF the resolution above copies.
             staging_dir = Path(tempfile.mkdtemp(prefix="agentic-hil-symbol-value-"))
         except OSError as error:
-            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs could not be created.", "backend_error": str(error), "symbol": symbol, **NOT_CONTACTED}
+            # Assembled here rather than classified out of a run, so the
+            # catalogue is asked here too (#521): this refusal never reached the
+            # CLI, and without the merge it would be the one shape of the bucket
+            # an entry for this backend could not reach.
+            return {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs could not be created.", "backend_error": str(error), "symbol": symbol, **NOT_CONTACTED, **remediation_fields("memory_read_failed", self.backend_name)}
         try:
             # `.hex` because the CLI picks Intel HEX off the extension, which is
             # the same thing that makes the dump's output what it promises.
@@ -478,7 +482,11 @@ class STLinkBackend:
                 # file's own idea of what it holds.
                 data = read_intel_hex_file(memory_path, address_value, size_bytes)
                 if data is None:
-                    result.update({"ok": False, "error_type": "memory_read_failed", "summary": "STM32CubeProgrammer confirmed the read but left no parseable Intel HEX covering the requested bytes.", "target_contacted": True})
+                    # The run was a success until this line turned it into a
+                    # failed read, so nothing classified it and no bucket was
+                    # looked up for it. The catalogue is asked here, where the
+                    # verdict is made (#521).
+                    result.update({"ok": False, "error_type": "memory_read_failed", "summary": "STM32CubeProgrammer confirmed the read but left no parseable Intel HEX covering the requested bytes.", "target_contacted": True, **remediation_fields("memory_read_failed", self.backend_name)})
                     result.pop("success_confirmed", None)
                     return self._write_action_report(result)
                 result.update(decode_symbol_value(data, resolved["image_byte_order"]))
