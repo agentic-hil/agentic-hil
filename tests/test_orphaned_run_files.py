@@ -62,16 +62,14 @@ LOG_TEXT = "the worker never got far enough to say anything\n"
 
 
 def log_path(config, handle: str) -> Path:
-    """Where `spawn_run_worker` opens the worker's output, named the same way.
+    """Where `spawn_run_worker` opens the worker's output, asked of the module.
 
-    The name is repeated here because the module states it inline in two places
-    and exports it from neither. That the repetition is still the file the code
-    means is not left to the eye: the primary test reads the planted log back
-    through `worker_output`, which is the reader the start command's refusal
-    uses, so a log name that moved in the code takes that assertion with it
-    rather than leaving this file planting something nothing reads.
+    Asked rather than spelled out again, so that a log name which moves in the
+    code moves what these tests plant with it. The primary test reads the
+    planted log back through `worker_output` as well, which is the reader the
+    start command's refusal uses.
     """
-    return runlifecycle.runs_directory(config) / f"{runlifecycle.validated_run_handle(handle)}.log"
+    return runlifecycle.worker_log_path(config, handle)
 
 
 def past_every_publish_window_s() -> float:

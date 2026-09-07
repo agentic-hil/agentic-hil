@@ -151,6 +151,15 @@ def stop_path(config: AgenticHILConfig, handle: str) -> Path:
     return runs_directory(config) / f"{validated_run_handle(handle)}.stop"
 
 
+def worker_log_path(config: AgenticHILConfig, handle: str) -> Path:
+    """Where a detached worker's output goes, beside the record it will write.
+
+    Named here rather than at each of the three places that want it: the spawn
+    opens it, a refusal reads it, and the prune removes it. A name spelled out
+    three times is a name two of those can drift away from."""
+    return runs_directory(config) / f"{validated_run_handle(handle)}.log"
+
+
 def read_run_record(config: AgenticHILConfig, handle: str) -> JsonObject | None:
     """One run's record, or None when this bench has never heard of it.
 
@@ -309,8 +318,84 @@ def _records_newest_first(directory: Path) -> list[Path]:
     return [path for _, path in dated]
 
 
+def orphan_sweep_window_s() -> float:
+    """How old a handle's files must be before a handle with no record is one.
+
+    The window a detached start waits for its worker in, computed for the
+    largest device wait the bench admits, and not a second number: the prune
+    runs inside another run's registration and cannot know which wait the start
+    that left these files behind was handed, so the only age it can be sure has
+    outlasted every start is the widest window any of them can wait in. A
+    threshold built from the startup window alone would delete the log of a
+    start still legitimately holding for a busy bench, and that log is what its
+    refusal quotes."""
+    return worker_publish_window_s(MAX_WAIT_S)
+
+
+def _orphan_files_by_handle(directory: Path) -> dict[str, list[Path]]:
+    """The stop, lock and log files whose handle has no record, per handle.
+
+    One listing for all of them, and grouped by handle rather than treated file
+    by file, because the files of one attempt are one thing: the log is as old
+    as the spawn and the stop is written at the end of the window, so dating
+    each on its own would take the log of a handle whose stop was planted a
+    moment ago."""
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        # The same silence the record listing keeps, and for the same reason:
+        # housekeeping owes the run it was called from a return, never a raise.
+        return {}
+    records = {entry.name[: -len(".json")] for entry in entries if entry.suffix == ".json"}
+    orphans: dict[str, list[Path]] = {}
+    for entry in entries:
+        if entry.suffix not in (".stop", ".lock", ".log"):
+            continue
+        handle = entry.name[: -len(entry.suffix)]
+        if RUN_HANDLE_PATTERN.match(handle) is None or handle in records:
+            continue
+        orphans.setdefault(handle, []).append(entry)
+    return orphans
+
+
+def _sweep_orphaned_run_files(config: AgenticHILConfig, directory: Path) -> None:
+    """Remove the files of handles that never became runs.
+
+    A start that gives up on a worker which published nothing plants a stop
+    under its handle, and the log the spawn opened is already there; a worker
+    that hung before it could take its registration writes no record, so the
+    handle is not among the candidates the record prune globs and its files
+    outlive every prune. On a bench whose workers are killed or hang that is one
+    set of files per attempt for the life of the bench, invisible to a reader,
+    which is what the cap of kept records exists to prevent.
+
+    Two things hold them back. Age, because inside the window a start waits in
+    the worker may yet publish and the files are its own. And the lock, because
+    a registration takes it before it writes its first record, so a handle whose
+    lock is held is a worker alive between those two steps, and the stop among
+    its files is what will end it at its first step boundary if it does reach
+    the board. Only when both say the attempt is over does the set go, the lock
+    with it: a probe leaves the lock file behind, so a sweep that removed the
+    pair and not the lock would trade unbounded growth for slower unbounded
+    growth."""
+    cutoff = time.time() - orphan_sweep_window_s()
+    for handle, paths in _orphan_files_by_handle(directory).items():
+        try:
+            newest = max(path.stat().st_mtime for path in paths)
+        except OSError:
+            continue
+        if newest > cutoff or not worker_is_gone(config, handle):
+            continue
+        for candidate in {*paths, lock_path(config, handle)}:
+            try:
+                candidate.unlink()
+            except OSError:
+                continue
+
+
 def prune_run_records(config: AgenticHILConfig) -> None:
-    """Drop the oldest ended runs once there are more than a bench needs.
+    """Drop the oldest ended runs once there are more than a bench needs, and
+    the leftovers of attempts that never became runs at all.
 
     A run still going is never a candidate, so this cannot take the record out
     from under a reader asking what a live run is doing. Whether it is going is
@@ -319,7 +404,12 @@ def prune_run_records(config: AgenticHILConfig) -> None:
     only the field kept every one of those, so a bench whose runners get
     rebooted grew past the cap without bound and paid one lock probe per such
     record on every listing. A record whose lock can be taken is a run that has
-    ended however it ended, and past the cap it goes with its own files."""
+    ended however it ended, and past the cap it goes with its own files.
+
+    The sweep that follows is not part of the cap and does not wait for it. A
+    bench whose starts keep timing out writes no records at all, so its count
+    never reaches the cap while its directory grows by a set of files per
+    attempt, and that is the bench the growth was reported from."""
     directory = runs_directory(config)
     try:
         records = _records_newest_first(directory)
@@ -338,6 +428,10 @@ def prune_run_records(config: AgenticHILConfig) -> None:
             record = None
         if record is not None and record.get("state") not in TERMINAL_RUN_STATES and not worker_is_gone(config, handle):
             continue
+        # Built by name rather than through the path helpers: a `run-*.json`
+        # file whose stem is not a valid handle is not this code's file, and it
+        # is still swept out from under the cap rather than left to the refusal
+        # a helper would raise over it.
         for candidate in (path, directory / f"{handle}.stop", directory / f"{handle}.lock", directory / f"{handle}.log"):
             try:
                 candidate.unlink()
@@ -346,6 +440,7 @@ def prune_run_records(config: AgenticHILConfig) -> None:
                 # way there is nothing to do about it here: pruning is
                 # housekeeping and must never be the reason a run fails.
                 continue
+    _sweep_orphaned_run_files(config, directory)
 
 
 def _runs_directory_unwritable(config: AgenticHILConfig, handle: str, summary: str, error: BaseException, **named: str) -> ConfigError:
@@ -786,7 +881,7 @@ def spawn_run_worker(config: AgenticHILConfig, handle: str, test_config_path: st
     the plan run behind a start command that reported the worker never came
     up. So it is the refusal the registration raises for its record, with the
     log named, and no worker is spawned."""
-    log_path = runs_directory(config) / f"{validated_run_handle(handle)}.log"
+    log_path = worker_log_path(config, handle)
     try:
         # Closed by the `with` below; opened apart from it so the refusal is the open's alone and never the spawn's.
         handle_log = open(log_path, "ab")  # noqa: SIM115
@@ -827,7 +922,7 @@ def worker_output(config: AgenticHILConfig, handle: str, limit: int = 4000) -> s
     and a start command that answered "it did not come up" without it would send
     an operator to a file they do not know exists."""
     try:
-        text = (runs_directory(config) / f"{validated_run_handle(handle)}.log").read_text(encoding="utf-8", errors="replace")
+        text = worker_log_path(config, handle).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
     return text[-limit:]
