@@ -3,7 +3,7 @@
 Agentic Hardware-in-the-Loop (Agentic HIL) exposes the same local MCP stdio server and the same tool semantics in every host. Only the host configuration syntax changes.
 
 Every block below was verified against the linked host documentation on
-2026-08-19. Moving that date is a release chore, described under "The Host
+2026-09-07. Moving that date is a release chore, described under "The Host
 Documentation Check" in [Release Strategy](release-strategy.md), because a date
 nobody moves invites more trust than it can carry.
 
@@ -166,7 +166,7 @@ If CLion uses the GitHub Copilot plugin instead of JetBrains AI Assistant, open 
 
 The AI Assistant and Copilot plugin use different JSON containers. Their server and tool semantics remain identical.
 
-Sources: [JetBrains AI Assistant MCP setup](https://www.jetbrains.com/help/ai-assistant/configure-an-mcp-server.html) and [GitHub Copilot MCP setup for JetBrains IDEs](https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp-in-your-ide/extend-copilot-chat-with-mcp?tool=jetbrains).
+Sources: [JetBrains AI Assistant MCP setup](https://www.jetbrains.com/help/ai-assistant/mcp.html) and [GitHub Copilot MCP setup for JetBrains IDEs](https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp-in-your-ide/extend-copilot-chat-with-mcp?tool=jetbrains). JetBrains renamed its own page to `mcp.html`; the address this file used before still redirects there.
 
 ## OpenAI Codex
 
