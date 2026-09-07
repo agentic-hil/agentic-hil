@@ -1547,9 +1547,9 @@ SUITE_FILES = sorted(Path(__file__).resolve().parent.rglob("*.py"))
 SPAWNING_START_FLOOR_S = BROKER_START_TIMEOUT_S / 2
 
 # The spawning attaches that may keep a narrow bare number, named one by one
-# with the reason the number is not a deadline in that test. In all four the
-# refusal is decided before anything is waited for, so the bound is dead weight
-# rather than a budget:
+# with the reason the number is not a deadline in that test. In the first four
+# the refusal is decided before anything is waited for, so the bound is dead
+# weight rather than a budget:
 #
 # * `test_participant_name_collision_is_refused_and_distinct_names_run_in_parallel`
 #   is refused by `acquire_named` inside `attach_participant`, on the participant
@@ -1562,6 +1562,18 @@ SPAWNING_START_FLOOR_S = BROKER_START_TIMEOUT_S / 2
 #   the body of the loop. The deadline is evaluated once, at the top of that
 #   first pass, and can never be reached on this path however slow the host is.
 #
+# The last two are exempt for the only other reason there is: no broker is
+# started. Every attach in `test_can_broker_deadline.py` replaces
+# `canbroker._spawn_broker` with a double, so nothing inside the bound starts an
+# interpreter, loads the authoritative configuration or takes the bus lock, and
+# `attach_against` hands the module a fake clock as well. The number there is the
+# scripted deadline each case is built around, and widening it would erase the
+# case rather than protect it:
+# `test_the_budget_after_the_deadline_is_bounded_on_a_real_clock`
+# runs on the real clock to show that the budget spent after that deadline stays
+# short, which is a claim about the product's own bookkeeping and not about this
+# host's speed.
+#
 # An entry has to go on naming exactly one call the rule would otherwise refuse,
 # so an exemption cannot outlive the call it was written for, grow to cover a
 # second one, or stay behind after the bound it excuses has been widened.
@@ -1571,7 +1583,11 @@ ATTACHES_THAT_NEVER_WAIT_FOR_A_START = {
         "test_listen_only_and_transmitting_participants_cannot_coexist",
         "test_a_transmitting_participant_cannot_join_a_listen_only_sniffer",
         "test_a_listen_only_bus_refuses_a_participant_that_may_transmit",
-    )
+    ),
+    "test_can_broker_deadline.py": (
+        "attach_against",
+        "test_the_budget_after_the_deadline_is_bounded_on_a_real_clock",
+    ),
 }
 
 
@@ -1826,9 +1842,9 @@ def test_no_attach_that_may_start_a_broker_narrows_the_start_below_what_a_start_
 def test_every_exemption_still_names_one_attach_the_rule_would_refuse() -> None:
     """An exemption nobody is reading is an exemption that has stopped being true.
 
-    Bookkeeping over the list above and nothing more: it says the four names are
-    still four calls this rule would otherwise refuse, so the list cannot outlive
-    them or quietly excuse a fifth. Whether such a call really waits for a start
+    Bookkeeping over the list above and nothing more: it says the six names are
+    still six calls this rule would otherwise refuse, so the list cannot outlive
+    them or quietly excuse a seventh. Whether such a call really waits for a start
     is not a question source can answer, which is why each entry carries its
     reason in prose and why the refusal itself is pinned by running one.
     """
