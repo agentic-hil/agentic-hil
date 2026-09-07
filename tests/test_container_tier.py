@@ -29,6 +29,8 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = REPOSITORY_ROOT / "tools" / "container" / "Dockerfile"
+CONTAINER_REQUIREMENTS_IN = REPOSITORY_ROOT / "requirements" / "container.in"
+CONTAINER_REQUIREMENTS = REPOSITORY_ROOT / "requirements" / "container.txt"
 DOCKERIGNORE = REPOSITORY_ROOT / "tools" / "container" / "Dockerfile.dockerignore"
 CONTAINER_README = REPOSITORY_ROOT / "tools" / "container" / "README.md"
 WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
@@ -265,15 +267,15 @@ def test_a_missing_curl_is_named_by_the_gate(tmp_path: Path) -> None:
 def test_the_image_carries_pyocd_and_curl() -> None:
     """The gate looks for both, so the build has to be what installs them.
 
-    pyOCD from the package index at one pinned version, named the way the same
-    file names `UV_VERSION` and for the same reason: the fixture under
-    tests/fixtures reproduces what pyOCD 0.45.1 printed, a different release may
-    word its refusal differently, and the drift test in the tier should go red
-    on a deliberate bump with a test run behind it, not on a rebuild. The reason
-    the distribution's own packages stay unpinned (the mirror drops superseded
-    versions) does not reach pyOCD: the package index keeps every release. curl
-    from the distribution, because install.sh fetches the pinned Astral
-    installer with it.
+    pyOCD from the package index at one pinned version, named in
+    `requirements/container.in` the way uv is and for the same reason: the
+    fixture under tests/fixtures reproduces what pyOCD 0.45.1 printed, a
+    different release may word its refusal differently, and the drift test in
+    the tier should go red on a deliberate bump with a test run behind it, not
+    on a rebuild. The reason the distribution's own packages stay unpinned (the
+    mirror drops superseded versions) does not reach pyOCD: the package index
+    keeps every release. curl from the distribution, because install.sh fetches
+    the pinned Astral installer with it.
     """
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
     commands = [line for line in dockerfile.splitlines() if line.startswith("RUN ")]
@@ -281,29 +283,66 @@ def test_the_image_carries_pyocd_and_curl() -> None:
     apt = next(line for line in commands if "apt-get" in line)
     apt_block = dockerfile[dockerfile.index(apt) :].split("\n\n", 1)[0]
     assert "curl" in apt_block, apt_block
-    pinned = re.search(r"^ARG PYOCD_VERSION=(\d+\.\d+\.\d+)$", dockerfile, re.MULTILINE)
-    assert pinned is not None, "pyocd is not pinned by an ARG the way uv is"
-    pip_lines = [line for line in dockerfile.splitlines() if "pip install" in line or line.strip().startswith('"')]
-    assert any("pyocd==${PYOCD_VERSION}" in line for line in pip_lines), pip_lines
+    wanted = CONTAINER_REQUIREMENTS_IN.read_text(encoding="utf-8")
+    assert re.search(r"^pyocd==\d+\.\d+\.\d+$", wanted, re.MULTILINE), wanted
+    assert re.search(r"^uv==\d+\.\d+\.\d+$", wanted, re.MULTILINE), wanted
+    assert "requirements/container.txt" in dockerfile, dockerfile
+
+
+def test_the_lock_the_image_bootstraps_from_carries_a_hash_for_every_pin() -> None:
+    """A version pin still takes whatever the index serves under that name.
+
+    Scorecard read the build's own pip command and said so. The layer that
+    installs uv, pyOCD and the build backend is the environment the required
+    container check reaches its verdict in, and it took those and everything
+    they pull in on the index's word alone. What the version pins are for is
+    drift; what the hashes are for is the bytes.
+    """
+    lock = CONTAINER_REQUIREMENTS.read_text(encoding="utf-8")
+    entries: dict[str, list[str]] = {}
+    for line in lock.splitlines():
+        pin = re.match(r"^([A-Za-z0-9._-]+)==", line)
+        if pin is not None:
+            current = entries.setdefault(pin.group(1), [])
+        elif entries:
+            current.append(line)
+
+    assert {"uv", "pyocd", "setuptools", "wheel"} <= entries.keys(), sorted(entries)
+    for name, tail in entries.items():
+        assert any("--hash=sha256:" in line for line in tail), name
+
+
+def test_no_layer_installs_from_the_index_without_hashes() -> None:
+    """One unpinned pip command is enough to make the digest above cosmetic.
+
+    The checkout's own editable install is the exception: it comes out of the
+    build context rather than off an index, and `--no-deps` is what keeps it
+    from resolving anything of its own.
+    """
+    installs = [line for line in DOCKERFILE.read_text(encoding="utf-8").splitlines() if "pip install" in line]
+
+    assert installs
+    for line in installs:
+        assert line.rstrip().endswith("-e .") or "--require-hashes" in line, line
 
 
 def test_the_pinned_pyocd_is_the_one_the_locked_dependency_set_installs() -> None:
     """Two pins on one package, and the later one wins.
 
-    The `ARG` above installs pyOCD before the checkout is copied in; the locked
-    dependency set is installed after it and pins pyOCD too, so whatever
-    `requirements/dev.txt` says is the release that ends up in the image and the
-    release the recorded refusals in this tier were taken from. Let the two
-    drift and the `ARG` documents a version the image does not have, which is
-    the one thing a pin is for. Regenerating the lock and bumping the `ARG` are
-    the same decision, and this is what says so.
+    `requirements/container.in` installs pyOCD before the checkout is copied in;
+    the locked dependency set is installed after it and pins pyOCD too, so
+    whatever `requirements/dev.txt` says is the release that ends up in the image
+    and the release the recorded refusals in this tier were taken from. Let the
+    two drift and `requirements/container.in` documents a version the image does
+    not have, which is the one thing a pin is for. Regenerating the one lock and
+    bumping the other are the same decision, and this is what says so.
     """
-    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
-    argument = re.search(r"^ARG PYOCD_VERSION=(\d+\.\d+\.\d+)$", dockerfile, re.MULTILINE)
-    assert argument is not None, "pyocd is not pinned by an ARG the way uv is"
+    wanted = CONTAINER_REQUIREMENTS_IN.read_text(encoding="utf-8")
+    bootstrap = re.search(r"^pyocd==(\d+\.\d+\.\d+)$", wanted, re.MULTILINE)
+    assert bootstrap is not None, "requirements/container.in does not pin pyocd the way it pins uv"
 
     lock = (REPOSITORY_ROOT / "requirements" / "dev.txt").read_text(encoding="utf-8")
     locked = re.search(r"^pyocd==(\S+)", lock, re.MULTILINE)
 
-    assert locked is not None, "requirements/dev.txt pins no pyocd, so the image's ARG is the only pin and the hosted legs have no pyOCD at all"
-    assert locked.group(1) == argument.group(1), (locked.group(1), argument.group(1))
+    assert locked is not None, "requirements/dev.txt pins no pyocd, so the container's own pin is the only one and the hosted legs have no pyOCD at all"
+    assert locked.group(1) == bootstrap.group(1), (locked.group(1), bootstrap.group(1))
