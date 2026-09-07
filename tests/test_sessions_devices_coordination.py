@@ -933,11 +933,18 @@ def test_missing_optional_extras_refuse_by_their_own_names(tmp_path: Path, monke
 # ---------------------------------------------------------------------------
 # A broker whose adapter cannot open.
 
-# A bridge that exits before it can answer the broker's open: the adapter is
-# gone, and the exit status is the bridge's own, unrelated to the broker's.
+# A bridge that reads the broker's open and exits without answering it: the
+# adapter is gone, and the exit status is the bridge's own, unrelated to the
+# broker's. It reads the request first on purpose. The transport polls the child
+# before it writes and answers `can_adapter_process_exited` for a child that is
+# already gone, so a bridge that exited on startup would give the broker one of
+# two documents depending on whether the child or the broker's write came first,
+# and on a loaded host the child did. Blocking on the request pins the one
+# outcome this test is about: the request was written, and nothing came back.
 FAILING_BRIDGE = textwrap.dedent(
     """
     import sys
+    sys.stdin.readline()
     sys.stderr.write("adapter gone\\n")
     sys.exit(3)
     """
