@@ -142,6 +142,25 @@ GDB_EXITS_BEFORE_ANSWERING = "gdb_exits_before_answering"
 # Long enough for the product to have entered its stop wait, short enough that
 # a test waiting on that wait is not slowed by it.
 STOP_WAIT_EXIT_DELAY_S = 0.5
+# The four answers to `-data-read-memory-bytes` that are not the bytes that were
+# asked for, each opted into by name so the default fake keeps answering the
+# full window the rest of the suite reads (#521). `memory_read_refused` is the
+# refusal GDB gives for an address the target will not read, `memory_read_hangs`
+# never answers at all, `memory_read_without_contents` answers `^done` with an
+# empty memory list and therefore no `contents` field, and `memory_read_short`
+# answers with half the bytes the command asked for.
+#
+# None of the four is a recording: no GDB refusing a read has been driven on the
+# bench, and the issue quotes no GDB text either. The refusal message below is
+# the one arm-none-eabi-gdb is documented to print for an unreadable address and
+# a recording of a real one is owed; the other three shapes are answered by the
+# structure of the reply rather than by any text, so what the product reads out
+# of them does not depend on a tool's wording.
+MEMORY_READ_REFUSED = "memory_read_refused"
+MEMORY_READ_HANGS = "memory_read_hangs"
+MEMORY_READ_WITHOUT_CONTENTS = "memory_read_without_contents"
+MEMORY_READ_SHORT = "memory_read_short"
+MEMORY_READ_REFUSAL = "Cannot access memory at address 0x20000080"
 
 
 def emit(line: str) -> None:
@@ -233,6 +252,16 @@ def evaluate_expression(token: str, expression: str) -> None:
 def read_memory(token: str, address_text: str, length_text: str) -> None:
     address = int(address_text, 16 if address_text.lower().startswith("0x") else 10)
     length = int(length_text)
+    if has_behavior(MEMORY_READ_HANGS):
+        return
+    if has_behavior(MEMORY_READ_REFUSED):
+        emit(f'{token}^error,msg="{MEMORY_READ_REFUSAL}"')
+        return
+    if has_behavior(MEMORY_READ_WITHOUT_CONTENTS):
+        emit(f"{token}^done,memory=[]")
+        return
+    if has_behavior(MEMORY_READ_SHORT):
+        length = max(1, length // 2)
     contents = "".join(f"{(address + index) & 0xFF:02x}" for index in range(length))
     emit(f'{token}^done,memory=[{{begin="{hex(address)}",offset="0x0",end="{hex(address + length)}",contents="{contents}"}}]')
 

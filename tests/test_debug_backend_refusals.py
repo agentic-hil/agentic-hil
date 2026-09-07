@@ -38,6 +38,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -51,6 +52,7 @@ from conftest import (
     FAKE_OPENOCD_MISSING_CFG,
     FAKE_PYOCD,
     FAKE_STLINK,
+    FAKE_STLINK_SHORT_READ,
     elf_with_symbols,
     write_config,
 )
@@ -62,7 +64,7 @@ from agentic_hil.backends.pyocd import PyOCDBackend
 from agentic_hil.backends.stlink import STLinkBackend
 from agentic_hil.config import load_config
 from agentic_hil.gdbmi import GdbMiClient, stop_result_from_line
-from agentic_hil.knowledge import ERROR_CATALOGUE, catalogue_entry, remediation_fields
+from agentic_hil.knowledge import ERROR_CATALOGUE, ErrorRemedy, catalogue_entry, remediation_fields
 from agentic_hil.tools import AgenticHILToolService
 
 T = TypeVar("T")
@@ -1279,3 +1281,232 @@ def test_a_read_that_never_left_this_host_carries_the_same_steps(tmp_path: Path,
     assert value["target_contacted"] is False, value
     assert value["remediation"] == remediation_fields("memory_read_failed", "pyocd")["remediation"], value.get("remediation")
     assert any(value["summary"] in step for step in value["remediation"]), value["remediation"]
+
+
+# ---------------------------------------------------------------------------
+# The five `memory_read_failed` results the other two backends build by hand.
+#
+# #516 wrote the read bucket its first entry, `memory_read_failed:pyocd`, and
+# that backend merges it where each result is built, including the three it
+# assembles by hand rather than reads out of a transcript. The GDB session
+# backend and the ST-Link backend build the same bucket in five more places and
+# none of them asks the catalogue: the response GDB refuses, the contents that
+# do not parse, the read that comes back short, the read whose private staging
+# file could not be created, and the run STM32CubeProgrammer confirmed that left
+# no parseable Intel HEX covering the requested bytes. Nothing is missing on
+# screen today only because `memory_read_failed:openocd` and
+# `memory_read_failed:stlink` have no entry; the day either is written it would
+# arrive on every result the classifier builds and on none of these five (#521).
+#
+# Whether those two entries get written is a separate decision about each tool's
+# own investigation, so none is added here and the silence #516 pinned stands.
+# Each test plants an entry for the duration of the test instead and reads it
+# back off the result, which is exactly what the result path has to do the
+# moment a real entry exists, and the silence without a planted entry is pinned
+# beside it so writing this merge cannot invent advice nobody wrote.
+
+# The planted entries. Their words say nothing about a read on purpose: what is
+# under test is that whatever the catalogue holds for this bucket on this
+# backend reaches the result, and a step that read like real advice would let a
+# hand-copied sentence pass for the lookup.
+PLANTED_READ_ENTRY = ErrorRemedy(
+    meaning="Planted for one test: what this backend's failed read would mean.",
+    remediation=("Planted first step for the read bucket.", "Planted second step for the read bucket."),
+    do_not=("Planted step this backend's failed read must not be answered with.",),
+)
+# The timeout keeps its own error_type, so it has to reach its own entry: a
+# merge that handed every shape of this branch the read bucket's steps would
+# tell an operator whose command never came back what to do about a read the
+# target refused. No `do_not`, so a result carrying one is the read entry.
+PLANTED_TIMEOUT_ENTRY = ErrorRemedy(
+    meaning="Planted for one test: what a GDB/MI command that did not answer would mean.",
+    remediation=("Planted first step for the timeout bucket.",),
+)
+# The fake GDB answers a hang by never replying, so the read waits out this cap
+# rather than the configured `timeout_s`. Two seconds for the reason
+# test_debug_sessions gives its own cap: on a loaded machine a tighter one times
+# out a healthy round trip and the test reports the wrong shape.
+MEMORY_READ_TIMEOUT_CAP_S = 2.0
+# What the fake GDB answers for a refused read, which is what the product puts
+# in the summary. Not a recording: no GDB refusing a read has been driven on the
+# bench and the issue quotes no GDB text, so fixtures/fake_gdb.py carries the
+# message and names the recording that is owed.
+GDB_MEMORY_READ_REFUSAL = "Cannot access memory at address 0x20000080"
+# The fake GDB answer each of the three session shapes is driven by.
+GDB_READ_BEHAVIOR = {
+    "gdb-refused": "memory_read_refused",
+    "gdb-unparsable-contents": "memory_read_without_contents",
+    "gdb-short-read": "memory_read_short",
+}
+
+
+def gdb_read_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, behavior: str) -> dict:
+    """One failed `debug_symbol_value` over a session, on the fake GDB's answer named by `behavior`."""
+    monkeypatch.setattr("agentic_hil.backends.gdbdebug.GDB_COMMAND_TIMEOUT_CAP_S", MEMORY_READ_TIMEOUT_CAP_S)
+    service = debug_service(tmp_path, fake_gdb_behavior=behavior)
+    try:
+        assert service.call("debug_start_session", {"image_path": "build/app.elf", "mode": "load", "timeout_s": START_TIMEOUT_S})["ok"] is True
+        value = answered_within(60.0, lambda: service.call("debug_symbol_value", {"symbol": "boot_counter"}))
+    finally:
+        closing = answered_within(60.0, lambda: closed_reporting_its_own_failure(service))
+    # Unchanged by any of this: a session command that failed leaves where the
+    # target stopped unproven, so the close refuses to call it settled.
+    assert isinstance(closing, RuntimeError), f"closing a session whose read failed answered {closing!r}"
+    return value
+
+
+def stlink_read_service(tmp_path: Path, executable: Path = FAKE_STLINK) -> AgenticHILToolService:
+    """An ST-Link bench whose reads resolve their symbol against the ELF a flash put on the board."""
+    config_path = write_config(tmp_path, debugger_type="stlink", debugger_executable=executable, gdb_executable=FAKE_GDB)
+    elf_path = tmp_path / "build" / "app.elf"
+    elf_path.parent.mkdir(parents=True, exist_ok=True)
+    elf_path.write_bytes(b"\x7fELF" + b"\x00" * 12)
+    return AgenticHILToolService(load_config(str(config_path)))
+
+
+def stlink_read_without_a_staging_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """The read this host would not give a private file to, so nothing was sent."""
+    real_mkdtemp = tempfile.mkdtemp
+
+    def refuse_the_read_staging_directory(*args: object, **kwargs: object):
+        if kwargs.get("prefix") == "agentic-hil-symbol-value-":
+            raise OSError("no space left on device")
+        return real_mkdtemp(*args, **kwargs)
+
+    service = stlink_read_service(tmp_path)
+    try:
+        assert service.call("flash_firmware", {"image_path": "build/app.elf"})["ok"] is True
+        monkeypatch.setattr(tempfile, "mkdtemp", refuse_the_read_staging_directory)
+        return service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+
+def stlink_read_without_parseable_hex(tmp_path: Path) -> dict:
+    """The confirmed read whose file does not cover the window that was asked for."""
+    service = stlink_read_service(tmp_path, FAKE_STLINK_SHORT_READ)
+    try:
+        assert service.call("flash_firmware", {"image_path": "build/app.elf"})["ok"] is True
+        return service.call("debug_symbol_value", {"symbol": "boot_counter"})
+    finally:
+        service.close()
+
+
+def drive_hand_built_read_failure(case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    if case == "stlink-staging-file":
+        return stlink_read_without_a_staging_file(tmp_path, monkeypatch)
+    if case == "stlink-no-parseable-hex":
+        return stlink_read_without_parseable_hex(tmp_path)
+    return gdb_read_failure(tmp_path, monkeypatch, GDB_READ_BEHAVIOR[case])
+
+
+# (case, the backend the result names, its summary, its `target_contacted`). The
+# summary is the result's own and is asserted unchanged in both directions,
+# because the merge may add fields to these results and may move nothing else.
+# `target_contacted` is None where the result does not carry the field: the
+# session backend's reads answer that question through the session and the
+# incident they open, and this must not start answering it a second way.
+HAND_BUILT_READ_FAILURES = [
+    ("gdb-refused", "openocd", GDB_MEMORY_READ_REFUSAL, None),
+    ("gdb-unparsable-contents", "openocd", "GDB returned unparsable memory contents.", None),
+    ("gdb-short-read", "openocd", "GDB returned fewer memory bytes than requested.", None),
+    ("stlink-staging-file", "stlink", "The private file this read needs could not be created.", False),
+    ("stlink-no-parseable-hex", "stlink", "STM32CubeProgrammer confirmed the read but left no parseable Intel HEX covering the requested bytes.", True),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "backend_name", "summary", "target_contacted"),
+    HAND_BUILT_READ_FAILURES,
+    ids=[row[0] for row in HAND_BUILT_READ_FAILURES],
+)
+def test_a_hand_built_read_failure_carries_the_entry_its_backend_has(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, backend_name: str, summary: str, target_contacted: bool | None) -> None:
+    """The gap: an entry for this backend's read bucket reaches every other result and none of these.
+
+    The entry is planted for the duration of the test rather than written into
+    the catalogue, because whether these two backends get real steps is a
+    separate decision about each tool's own investigation. What is decided is
+    that the lookup happens where the result is built, so an entry arrives the
+    moment one exists.
+
+    `do_not` is asserted with the steps: the merge is the catalogue's whole
+    answer for this bucket, and a merge that carried only `remediation` would
+    drop the wrong fix an entry names on purpose.
+    """
+    monkeypatch.setitem(ERROR_CATALOGUE, f"memory_read_failed:{backend_name}", PLANTED_READ_ENTRY)
+
+    result = drive_hand_built_read_failure(case, tmp_path, monkeypatch)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "memory_read_failed", result
+    assert result["summary"] == summary, result
+    assert result.get("target_contacted") is target_contacted, result
+    assert result.get("remediation") == list(PLANTED_READ_ENTRY.remediation), result.get("remediation")
+    assert result.get("do_not") == list(PLANTED_READ_ENTRY.do_not), result.get("do_not")
+    # The lookup and not a copy: what arrives is what the catalogue answers for
+    # this bucket on this backend, through the same scoped lookup every other
+    # result on this path already goes through.
+    assert result["remediation"] == remediation_fields("memory_read_failed", backend_name)["remediation"], result["remediation"]
+
+
+@pytest.mark.parametrize(
+    ("case", "backend_name", "summary", "target_contacted"),
+    HAND_BUILT_READ_FAILURES,
+    ids=[row[0] for row in HAND_BUILT_READ_FAILURES],
+)
+def test_a_hand_built_read_failure_stays_silent_while_its_backend_has_no_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, backend_name: str, summary: str, target_contacted: bool | None) -> None:
+    """The neighbour that must not move, on the result rather than on the lookup.
+
+    #516 pins that `remediation_fields` answers nothing for a bucket on a
+    backend nobody has written for. This is the same silence where an operator
+    would meet it: writing the merge must not put another tool's advice on these
+    five under a generic name, and it must add no empty field either.
+    """
+    assert f"memory_read_failed:{backend_name}" not in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
+
+    result = drive_hand_built_read_failure(case, tmp_path, monkeypatch)
+
+    assert result["ok"] is False, result
+    assert result["error_type"] == "memory_read_failed", result
+    assert result["summary"] == summary, result
+    assert result.get("target_contacted") is target_contacted, result
+    assert "remediation" not in result, result
+    assert "do_not" not in result, result
+
+
+def test_a_read_that_timed_out_carries_the_timeout_entry_and_not_the_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one shape of this branch that is not the read bucket, and keeps its own entry.
+
+    `_read_memory_bytes` answers a GDB that did not reply at all with `timeout`
+    and everything else it refused with `memory_read_failed`, and that split is
+    what a caller reads to know whether waiting longer is the answer. So the
+    merge is over the error_type the result actually carries: both entries are
+    planted here, and the timeout result has to carry the timeout's steps and
+    not the read's.
+    """
+    monkeypatch.setitem(ERROR_CATALOGUE, "memory_read_failed:openocd", PLANTED_READ_ENTRY)
+    monkeypatch.setitem(ERROR_CATALOGUE, "timeout:openocd", PLANTED_TIMEOUT_ENTRY)
+
+    value = gdb_read_failure(tmp_path, monkeypatch, "memory_read_hangs")
+
+    assert value["ok"] is False, value
+    assert value["error_type"] == "timeout", value
+    assert value["summary"] == "GDB/MI command timed out.", value
+    assert value.get("remediation") == list(PLANTED_TIMEOUT_ENTRY.remediation), value.get("remediation")
+    # The read entry is the one carrying a `do_not`, so its absence is the
+    # second half of the claim: the read bucket's advice did not arrive here.
+    assert "do_not" not in value, value
+
+
+def test_a_read_that_timed_out_stays_silent_while_the_catalogue_names_no_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The timeout's own silence, unchanged: nothing has written that bucket either."""
+    assert "timeout" not in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
+    assert "timeout:openocd" not in ERROR_CATALOGUE, sorted(ERROR_CATALOGUE)
+
+    value = gdb_read_failure(tmp_path, monkeypatch, "memory_read_hangs")
+
+    assert value["ok"] is False, value
+    assert value["error_type"] == "timeout", value
+    assert value["summary"] == "GDB/MI command timed out.", value
+    assert "remediation" not in value, value
+    assert "do_not" not in value, value
