@@ -235,21 +235,39 @@ def _record_cleanup_reasons(record: JsonObject | None) -> list[str]:
     An adopted incident keeps one top-level ``reason``; a quarantine this owner
     raised keeps one per lease. Both have to reach the operator, because the
     reason is the only field that separates a retryable toolchain fault from an
-    unconfirmed physical effect that needs a bench inspection."""
+    unconfirmed physical effect that needs a bench inspection.
+
+    The third shape is the per-resource marker, and it was silently answering
+    "no reasons at all". A project record carries its leases under ``leases``,
+    where each entry is a ``HardwareLease.status()`` with its ``cleanup_reasons``
+    in it; a marker written for one resource by ``_persist_lease`` carries that
+    same lease's ``errors`` and ``cleanup_events`` instead, one reason inside
+    each entry. Nothing read the marker for its reasons while every incident was
+    the reading project's own, because the project record was always there to
+    read; the moment another workspace's marker is the only record in hand, an
+    empty list is an incident that refuses a bench and declines to say what for.
+    """
     if not isinstance(record, dict):
         return []
     reasons: list[str] = []
-    top_level = record.get("reason")
-    if isinstance(top_level, str) and top_level:
-        reasons.append(top_level)
+
+    def add(reason: object) -> None:
+        if isinstance(reason, str) and reason and reason not in reasons:
+            reasons.append(reason)
+
+    add(record.get("reason"))
     leases = record.get("leases")
     for lease in leases if isinstance(leases, list) else []:
         if not isinstance(lease, dict):
             continue
         lease_reasons = lease.get("cleanup_reasons")
         for reason in lease_reasons if isinstance(lease_reasons, list) else []:
-            if isinstance(reason, str) and reason and reason not in reasons:
-                reasons.append(reason)
+            add(reason)
+    for field in ("errors", "cleanup_events"):
+        entries = record.get(field)
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, dict):
+                add(entry.get("reason"))
     return reasons
 
 
