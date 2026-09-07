@@ -71,7 +71,7 @@ Both files carry one variable, `AGENTIC_HIL_VERSION`, set to the exact release
 these examples are written for:
 
 ```yaml
-AGENTIC_HIL_VERSION: "0.21.5"
+AGENTIC_HIL_VERSION: "0.21.6"
 ```
 
 An exact version, never a range, never `latest`, and never a git reference. A
