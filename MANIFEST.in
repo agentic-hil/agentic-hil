@@ -45,6 +45,9 @@ exclude tests/container/test_protocol_startup_refusal.py
 # rather than from the distribution, so the pins on them have nothing to read in
 # a source distribution.
 exclude tests/test_install_scripts.py
+# The pin on how that module is scheduled imports it at module scope, so it
+# cannot collect from a distribution that does not carry it either.
+exclude tests/test_process_table_grouping.py
 recursive-include examples *.py *.md *.yaml *.yml
 # The firmware demo is repository content, not package content.
 prune examples/nucleo-f446re_demo
