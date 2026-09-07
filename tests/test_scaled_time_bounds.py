@@ -619,13 +619,24 @@ def walked_files() -> list[Path]:
 # one statement, so an exemption cannot quietly outlive the assertion it was
 # written for or grow to cover a second one.
 #
-# `test_run_lifecycle.py` holds the only one. `step["waited_ms"] < 600_000`
-# reads a number the product wrote into its own step envelope and holds it
-# against the ten minutes the plan asked for, so the claim is that a stop cut
-# the wait short. The product answers that the same way on a fast host and a
-# slow one; a factor there would loosen a product claim while granting a loaded
-# host nothing, which is the opposite of what this issue is for.
-EXEMPT_BOUNDS = {"test_run_lifecycle.py": ('step["waited_ms"] < 600_000',)}
+# `test_run_lifecycle.py` holds the first. `step["waited_ms"] < 600_000` reads a
+# number the product wrote into its own step envelope and holds it against the
+# ten minutes the plan asked for, so the claim is that a stop cut the wait
+# short. The product answers that the same way on a fast host and a slow one; a
+# factor there would loosen a product claim while granting a loaded host
+# nothing, which is the opposite of what this issue is for.
+#
+# `test_sessions_devices_coordination.py` holds the second (#530).
+# `elapsed < BROKER_REFUSAL_CEILING_S` is half `canbroker.BROKER_START_TIMEOUT_S`
+# and its whole claim is that the refusal came from the broker's own exit code
+# rather than from the client's deadline running out. Scaling it would let the
+# factor carry the ceiling up to that deadline and past it, at which point the
+# line stops telling the two apart and a green run says nothing; the number it
+# already grants a loaded host is nine times what the refusal costs.
+EXEMPT_BOUNDS = {
+    "test_run_lifecycle.py": ('step["waited_ms"] < 600_000',),
+    "test_sessions_devices_coordination.py": ("elapsed < BROKER_REFUSAL_CEILING_S",),
+}
 
 
 def is_exempt(entry: Comparison) -> bool:
