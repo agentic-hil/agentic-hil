@@ -865,9 +865,22 @@ class ComPortService:
         self.sessions: dict[str, ComPortSession] = {}
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
-        # The port config carries its own permissions, so an inequality here also
-        # covers a revoked grant: a session may not outlive the permission that
-        # authorized it.
+        # Unreachable with a session open, and kept for the day it is not. The
+        # description reload is the only caller, and it refuses with
+        # config_reload_in_open_run as soon as this server holds one lease; a COM
+        # session holds one from before its port is opened until after its
+        # release is confirmed, so the stop below cannot be written while there
+        # is a session to write it for.
+        #
+        # The comparison is not a permission check. A reload revokes nothing:
+        # every entry it builds carries the grants parsed at startup, so for a
+        # port this server already knows, the permissions block of the new entry
+        # is the one the session is already holding, and what can differ is a
+        # description field or the entry disappearing.
+        #
+        # The loop stays because it is the local fail-safe. If that refusal is
+        # ever narrowed to the sections nothing holds, this is what keeps a held
+        # device name meaning the same physical board.
         for port_id, session in list(self.sessions.items()):
             if config.com_ports.get(port_id) != session.port_config:
                 self._stop_session(session, "config_reloaded")
