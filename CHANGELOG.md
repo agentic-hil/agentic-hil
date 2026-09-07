@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Changed
+
+- Both one-line installers pin Astral's uv installer at 0.12.10 and carry the SHA-256 of exactly those bytes, `a3196b75f697a1adaa5e4af34ffba7629c710931ab1dac33bab59ecf228080bb` for the POSIX installer and `a4925067919bb02c1b2a5d3b4471e8cf20da76567197ab67d451a08d95421c78` for the PowerShell one. Version and digest move together in each script, and both scripts name the same uv release, because either half alone fails every install rather than loosening one. The pin vouches for the installer and not for the uv binaries it goes on to fetch: at that release Astral's POSIX installer still verifies each archive it downloads against a per-artifact SHA-256 and their PowerShell installer still unpacks with no checksum step at all, so on Windows this pin remains the only integrity check between `astral.sh` and an executed script, and the comment in `install.ps1` that says so names the release it was read at.
+
 ## [0.21.5] - 2026-09-07
 
 ### Added
