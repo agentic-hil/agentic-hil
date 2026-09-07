@@ -1150,7 +1150,13 @@ def _machine_whose_only_python_is(tmp_path: Path, python_body: str) -> tuple[dic
     assert digest is not None
     _stub_executable(early_bin / "sha256sum", f'echo "{digest.group(1)}  $1"\nexit 0\n')
 
-    env = {"HOME": str(home), "PATH": f"{early_bin}:/usr/bin:/bin"}
+    # `SHELL` decides which profile file step 3 writes into, and leaving it out
+    # of this environment does not leave it unset: on macOS `/bin/sh` is bash,
+    # and bash fills `SHELL` in from the account's login shell when it starts
+    # without one, so the file would be whichever shell the machine running the
+    # suite gives its user. A shell that says nothing about itself is the case
+    # these tests mean, and the test whose subject is that choice sets its own.
+    env = {"HOME": str(home), "PATH": f"{early_bin}:/usr/bin:/bin", "SHELL": "/bin/sh"}
     return env, project, marker, uv_log, fetched
 
 
