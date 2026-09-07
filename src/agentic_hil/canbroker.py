@@ -1532,7 +1532,7 @@ def _deadline_refusal(exit_code: int | None, bus_id: str, participant: str, bus_
         "ok": False,
         "error_type": "can_broker_unavailable",
         "summary": (
-            f"The CAN broker started for this bus exited with code {exit_code}, which this client has no reading for, before it published; its log is the only account of it."
+            f"The CAN broker started for this bus exited with code {exit_code} before it published, and the attach deadline expired; the broker log holds every broker ever started for this bus, so nothing in it is attributed to this one."
             if exit_code is not None
             else "The CAN broker started for this bus published nothing before the attach deadline and was terminated; nothing about this attempt reached its log."
         ),
