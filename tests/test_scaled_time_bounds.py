@@ -704,6 +704,7 @@ def test_a_message_that_names_the_helper_does_not_count_as_scaling() -> None:
 
     found = comparisons_in(pretending, TESTS / "sample.py")
 
+    assert [entry.bound for entry in found] == ["5.0"], [entry.statement for entry in found]
     assert [entry.through_the_helper for entry in found] == [False], [entry.bound for entry in found]
 
 
