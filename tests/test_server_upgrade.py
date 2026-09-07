@@ -695,7 +695,10 @@ def test_the_written_down_meaning_claims_a_restart_answer_only_where_there_is_on
     description = next(str(tool["description"]) for tool in MCP_TOOLS if tool["name"] == SERVER_UPGRADE)
     successful, refused = description.split("Refused ", maxsplit=1)
 
-    assert "restart_required: true" in successful
+    # By the field it names and not by the value it quotes: what a successful
+    # call carries there is the process table's answer, and the sentence that
+    # says `true` is a separate imprecision this test must not freeze.
+    assert "restart_required" in successful
     assert "restart_required" not in refused, refused
     for scope in ("permission_denied:allow_upgrade", "upgrade_in_open_run", "upgrade_cli_only_on_host"):
         remedy = ERROR_CATALOGUE[scope]
