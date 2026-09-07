@@ -12,6 +12,11 @@
 #          it -- the code under review, exercised live rather than through a stub.
 # Proof 3: the released one-line installer meets the same failure, recognises
 #          it, switches to this machine's own store and finishes the install.
+# Proof 4: the one-line installer *in this checkout*, on the same bench, met by
+#          a machine that has none of it yet. Proof 3 measures the installer as
+#          it was published; this measures the file that gets published next,
+#          so a change to the retry is read here rather than off an operator's
+#          proxy after the release.
 #
 # Every step's decisive output is printed whole. A line that is filtered out is
 # a line the next reader has to reproduce for themselves, and the certificate
@@ -20,8 +25,9 @@
 # The first assertion that fails ends the run non-zero. Later proofs depend on
 # earlier ones (proof 1 needs the seeded 0.16.0, proof 2 reprovisions it unpinned
 # and overlays this checkout, proof 3 restores the seed and lets the released
-# installer upgrade off it), so there is nothing to learn from continuing past a
-# failure.
+# installer upgrade off it, proof 4 removes what proof 3 installed so the file
+# under review meets a machine with nothing on it), so there is nothing to learn
+# from continuing past a failure.
 
 set -u
 
@@ -43,6 +49,10 @@ INSTALLER_LOG=/tmp/installer.log
 # The package under review, copied into the image at build time so proof 2 can
 # run this checkout's own upgrade on the bench rather than a released artifact.
 CANDIDATE_SRC=/opt/tls-proxy/candidate/agentic_hil
+# The installer under review, copied in beside it, for proof 4.
+CANDIDATE_INSTALLER=/opt/tls-proxy/candidate/install.sh
+CANDIDATE_INSTALLER_LOG=/tmp/candidate-installer.log
+CANDIDATE_UNINSTALL_LOG=/tmp/candidate-uninstall.log
 CANDIDATE_SEED_LOG=/tmp/candidate-seed.log
 CANDIDATE_REPORT=/tmp/candidate-upgrade.json
 CANDIDATE_ERRORS=/tmp/candidate-upgrade.err
@@ -362,10 +372,71 @@ pass "proof 3, the released installer detected the trust failure and finished ag
     "$detection"
 printf '      agentic-hil --version: %s (the latest release)\n' "$installed"
 
+heading "Proof 4: the one-line installer in this checkout, on the same bench"
+# Proof 3 measures the installer an operator can fetch today. The file in this
+# working tree is the one they fetch after the next release, and without this
+# proof every line of its certificate handling would first meet a real proxy on
+# someone else's machine. So it runs here too, same proxy, same store, same
+# index.
+#
+# It is given the machine a newcomer has, and proof 3 left the latest release
+# installed, so that goes first. A first install is what the one-liner is for,
+# it is the run every new operator makes, and it has to reach the index for the
+# package itself rather than for a version comparison, so there is no way for it
+# to report success without having got past the proxy.
+printf 'setup: uv tool uninstall agentic-hil\n'
+if uv tool uninstall agentic-hil >"$CANDIDATE_UNINSTALL_LOG" 2>&1; then
+    verbatim "uv output" "$CANDIDATE_UNINSTALL_LOG"
+else
+    verbatim "uv output" "$CANDIDATE_UNINSTALL_LOG"
+    fail "proof 4 setup, the installation proof 3 left could not be removed" \
+        "the file under review would have found one here and refreshed it instead of installing it"
+fi
+if uv tool list 2>/dev/null | grep -q '^agentic-hil'; then
+    fail "proof 4 setup, uv still lists an agentic-hil tool" \
+        "the file under review would not be making a first install"
+fi
+printf 'setup: uv lists no agentic-hil, which is the machine the one-liner is written for\n'
+
+printf 'command: sh %s\n' "$CANDIDATE_INSTALLER"
+sh "$CANDIDATE_INSTALLER" >"$CANDIDATE_INSTALLER_LOG" 2>&1
+candidate_installer_status=$?
+verbatim "installer output" "$CANDIDATE_INSTALLER_LOG"
+printf 'exit status: %s\n' "$candidate_installer_status"
+
+if [ "$candidate_installer_status" -ne 0 ]; then
+    fail "proof 4, the installer under review exited $candidate_installer_status" \
+        "the file this checkout would publish does not get through this bench"
+fi
+if ! contains "$CANDIDATE_INSTALLER_LOG" 'invalid peer certificate'; then
+    fail "proof 4, the installer under review never met the trust failure" \
+        "without the failure there is nothing for it to detect, so this run proves nothing"
+fi
+if ! contains "$CANDIDATE_INSTALLER_LOG" "$switch"; then
+    fail "proof 4, the installer under review did not say it was switching to this machine's own store" \
+        "expected a line containing: $switch"
+fi
+
+candidate_installed=$(agentic-hil --version 2>/dev/null)
+if [ -z "$candidate_installed" ]; then
+    fail "proof 4, nothing answers agentic-hil --version after the run" \
+        "the installer reported success and left nothing behind that runs"
+fi
+if [ "$candidate_installed" != "$released_version" ]; then
+    fail "proof 4, the bench does not run the released version" \
+        "agentic-hil --version answered '$candidate_installed', the latest release is '$released_version'"
+fi
+
+candidate_detection=$(grep -F -- "$switch" "$CANDIDATE_INSTALLER_LOG" | head -n 1)
+pass "proof 4, the installer in this checkout detected the trust failure and installed against this machine's own store" \
+    "$candidate_detection"
+printf '      agentic-hil --version: %s (installed where uv had nothing)\n' "$candidate_installed"
+
 heading "Result"
 printf 'Reproduced on one bench: the released 0.16.0 upgrade fails on a TLS-inspecting\n'
 printf 'proxy, the upgrade in this checkout retries against the machine own store and\n'
-printf 'gets through, and the released one-line installer does the same for an operator\n'
-printf 'still on a version from before that retry.\n'
+printf 'gets through, the released one-line installer does the same for an operator\n'
+printf 'still on a version from before that retry, and the one-line installer in this\n'
+printf 'checkout does it for a machine that has none of it yet.\n'
 stop_proxy
 exit 0

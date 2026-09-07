@@ -11,6 +11,7 @@ import signal
 import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
 from contextlib import suppress
@@ -709,6 +710,19 @@ _UV_EXACT_PIN_HINT = (
 )
 
 
+def _uv_said_nothing_to_upgrade(hint: str = "") -> subprocess.CompletedProcess[str]:
+    """The transcript `uv tool upgrade` leaves when it has nothing to install.
+
+    Recorded with uv 0.12.10 on 2026-09-06: stdout is empty, and everything uv
+    says, the sentence and whatever hint stands beside it, arrives on stderr
+    with one blank line between them. Every fixture in this file goes through
+    here, because a fixture that put the sentence on stdout would pin a stream
+    placement uv has never used, and a reader narrowed to one stream would keep
+    passing against it and fail on a bench instead.
+    """
+    return subprocess.CompletedProcess([], 0, "", f"Nothing to upgrade\n\n{hint}\n" if hint else "Nothing to upgrade\n")
+
+
 def _upgrade_reporting(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -897,13 +911,28 @@ def test_the_pin_refusal_says_whose_words_the_relayed_block_is_before_printing_i
     assert flat.index("printed as uv wrote it") < flat.index("reinstall with `uv tool install agentic-hil@latest`")
 
 
+# What uv writes into `python` when an installation was created with an
+# explicit interpreter: the absolute path of that interpreter, never a version
+# number. Which shape it is is not this file's to decide, and
+# tests/container/test_uv_receipt.py asserts it against the real tool on the
+# same branch; these fixtures carry the same shape so that the two tiers
+# cannot disagree about what a receipt looks like.
+_RECORDED_INTERPRETER = "/usr/local/bin/python3.12"
+
+
 @pytest.mark.parametrize(
     "body",
     [
-        pytest.param('[tool]\nrequirements = [{ name = "agentic-hil" }]\n\n[tool.options]\npython = "3.12"\n', id="recorded-under-tool-options"),
-        pytest.param('[tool]\npython = "3.12"\nrequirements = [{ name = "agentic-hil" }]\n', id="recorded-under-tool-the-way-uv-writes-it-now"),
         pytest.param(
-            '[tool]\npython = "3.12"\nrequirements = [{ name = "agentic-hil" }]\n\n[tool.options]\npython = ""\n',
+            f'[tool]\nrequirements = [{{ name = "agentic-hil" }}]\n\n[tool.options]\npython = "{_RECORDED_INTERPRETER}"\n',
+            id="recorded-under-tool-options",
+        ),
+        pytest.param(
+            f'[tool]\npython = "{_RECORDED_INTERPRETER}"\nrequirements = [{{ name = "agentic-hil" }}]\n',
+            id="recorded-under-tool-the-way-uv-writes-it-now",
+        ),
+        pytest.param(
+            f'[tool]\npython = "{_RECORDED_INTERPRETER}"\nrequirements = [{{ name = "agentic-hil" }}]\n\n[tool.options]\npython = ""\n',
             id="recorded-under-tool-beside-an-empty-options-entry",
         ),
     ],
@@ -936,10 +965,10 @@ def test_the_pin_refusal_replays_the_interpreter_the_receipt_recorded(
 
     result = upgrade_installation([])
 
-    assert result["reinstall_command"] == f'uv tool install --python {_quoted("3.12")} "agentic-hil@latest"'
-    assert result["recorded_python"] == "3.12"
+    assert result["reinstall_command"] == f'uv tool install --python {_quoted(_RECORDED_INTERPRETER)} "agentic-hil@latest"'
+    assert result["recorded_python"] == _RECORDED_INTERPRETER
     assert "with_packages" not in result
-    assert "the interpreter 3.12 this installation was created with" in result["summary"]
+    assert f"the interpreter {_RECORDED_INTERPRETER} this installation was created with" in result["summary"]
 
 
 @pytest.mark.parametrize(
@@ -1042,13 +1071,13 @@ def test_the_rendered_pin_note_prints_the_line_it_tells_the_reader_to_run(
     look at. So the reader met one runnable command, uv's, under a paragraph
     telling them not to run it.
     """
-    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST + '\n[tool.options]\npython = "3.12"\n')
+    _uv_tool_receipt(monkeypatch, tmp_path, _RECEIPT_WITH_PYTEST + f'\n[tool.options]\npython = "{_RECORDED_INTERPRETER}"\n')
     monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
     _upgrade_reporting(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -1061,7 +1090,7 @@ def test_the_rendered_pin_note_prints_the_line_it_tells_the_reader_to_run(
     assert str(result["reinstall_command"]) in flat
     assert "installed_extras can" in flat
     assert "with_packages pytest==9.1.1" in flat
-    assert "recorded_python 3.12" in flat
+    assert f"recorded_python {_RECORDED_INTERPRETER}" in flat
     assert f"pinned_version {__version__}" in flat
     assert "already_current yes" in flat
     assert f"newest_release {__version__}" in flat
@@ -1089,7 +1118,7 @@ def test_the_rendered_note_prints_what_the_reinstall_line_leaves_behind(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -1238,7 +1267,7 @@ def test_upgrade_that_finds_nothing_newer_succeeds_without_asking_for_a_restart(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        installed=_uv_said_nothing_to_upgrade(),
         version_after=__version__,
     )
 
@@ -1286,7 +1315,7 @@ def _nothing_to_upgrade(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        installed=_uv_said_nothing_to_upgrade(),
         version_after=__version__,
     )
 
@@ -1644,6 +1673,51 @@ _UV_PIN_AT_CURRENT_HINT = (
 )
 
 
+# What `uv tool upgrade` really writes on a pinned installation, recorded with
+# uv 0.12.10 on 2026-09-06: stdout is empty, and the whole of it, the sentence
+# and the hint, arrives on stderr with one blank line between them. This is the
+# same bytes every other fixture here now carries, named once so the test below
+# can say in its assertions which stream it is reading. The reader joins both
+# streams today and would keep passing if it were narrowed to one; this is the
+# case that would then fail here rather than on a bench.
+_UV_PINNED_UPGRADE_STDERR = _uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT).stderr
+
+
+def test_the_pin_note_is_read_off_the_stream_real_uv_writes_it_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recorded transcript, stdout empty, read to the same outcome as the typed one.
+
+    Nothing here is new behaviour: it is the same already-current note as the
+    test below, asked of the bytes uv actually produced. What it holds is that
+    the sentence and the hint are found where uv puts them, so the note, the
+    pin and the line that clears it survive a reader that stops guessing which
+    stream carries them.
+    """
+    monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
+    _upgrade_reporting(
+        monkeypatch,
+        manager="uv",
+        command=["uv.exe", "tool", "upgrade", "agentic-hil"],
+        installed=subprocess.CompletedProcess([], 0, "", _UV_PINNED_UPGRADE_STDERR),
+        version_after=__version__,
+        resolution=UV_PIP_WOULD_CHANGE_NOTHING,
+    )
+
+    result = upgrade_installation([])
+
+    assert result["ok"] is True
+    assert "error_type" not in result
+    assert result["already_current"] is True
+    assert result["pinned_version"] == __version__
+    assert result["reinstall_command"] == 'uv tool install "agentic-hil[can]@latest"'
+    assert "note rather than as a refusal" in result["summary"]
+    # The premise of the test, kept in the result the operator reads: the
+    # manager said all of it on stderr and nothing on stdout.
+    assert "stdout" not in result["install"], result["install"]
+    assert "Nothing to upgrade" in result["install"]["stderr"], result["install"]
+
+
 def test_a_pin_at_the_release_that_is_installed_is_a_note_and_exits_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1669,7 +1743,7 @@ def test_a_pin_at_the_release_that_is_installed_is_a_note_and_exits_zero(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -1710,7 +1784,7 @@ def test_the_pin_note_carries_the_with_packages_the_same_line_replays(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -1751,7 +1825,7 @@ def test_the_pin_note_is_withdrawn_when_the_index_publishes_a_newer_release(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -1791,7 +1865,7 @@ def test_the_withdrawn_pin_note_carries_every_sentence_exactly_once(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -1830,7 +1904,7 @@ def test_a_withdrawn_note_does_not_name_the_pin_the_resolution_just_cleared(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -1860,7 +1934,7 @@ def test_a_pin_note_above_the_index_says_it_is_ahead_and_not_that_it_is_on_it(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -1919,7 +1993,7 @@ def test_the_refused_pin_names_the_release_the_index_publishes_beside_it(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=subprocess.CompletedProcess([], 0, "Resolved 8 packages in 12ms\nWould install agentic-hil==9.9.9\n", ""),
     )
@@ -1949,7 +2023,7 @@ def test_an_index_that_did_not_answer_leaves_the_pin_note_standing(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -1972,7 +2046,7 @@ def test_the_pinned_installation_that_exits_zero_exits_zero_at_the_command_line(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -1996,7 +2070,7 @@ def test_a_pin_naming_a_version_other_than_the_installed_one_is_refused(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_EXACT_PIN_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_EXACT_PIN_HINT),
         version_after=__version__,
     )
 
@@ -2028,7 +2102,7 @@ def test_a_stale_pin_at_the_installed_release_is_refused_when_the_index_offers_m
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=subprocess.CompletedProcess([], 0, "Resolved 8 packages in 12ms\nWould install agentic-hil==9.9.9\n", ""),
     )
@@ -2071,7 +2145,7 @@ def test_the_currency_probe_upgrades_only_agentic_hil_so_a_stale_dependency_is_n
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -2132,7 +2206,7 @@ def test_a_pin_whose_version_cannot_be_read_is_still_refused(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", "hint: this tool was installed with an exact version pin."),
+        installed=_uv_said_nothing_to_upgrade("hint: this tool was installed with an exact version pin."),
         version_after=__version__,
     )
 
@@ -2348,7 +2422,14 @@ def test_a_per_user_pip_installation_is_upgraded_inside_its_own_scheme(
     assert reinstall_command_with_extras(("can",)) == '"PYTHON" -m pip install --upgrade --user "agentic-hil[can]"'
 
 
-def _installation_located_at(monkeypatch: pytest.MonkeyPatch, *, distribution_at: Path, user_site: Path) -> None:
+def _installation_located_at(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    distribution_at: Path,
+    user_site: Path,
+    preferred_user_scheme: str | None = None,
+    other_schemes: dict[str, Path] | None = None,
+) -> None:
     """One per-user site, and one place the distribution sits, both stated.
 
     Stated rather than read off whichever interpreter the suite happens to be
@@ -2357,8 +2438,27 @@ def _installation_located_at(monkeypatch: pytest.MonkeyPatch, *, distribution_at
     the Linux CI container, where the suite runs against the system Python at
     `/usr/local`: an assertion about the test host rather than about the code,
     and the container is where it was caught.
+
+    The purelib answer is per scheme name, and an unnamed scheme is refused,
+    because which name is asked for is the whole question on a machine whose
+    schemes disagree: a stand-in that answered one directory whatever it was
+    handed would pass code that asked for the wrong one. `user_site` belongs to
+    `preferred_user_scheme`, the scheme pip installs a `--user` install into;
+    `other_schemes` carries any further scheme the machine also has, with the
+    different directory it names.
     """
-    monkeypatch.setattr("sysconfig.get_path", lambda name, scheme=None, *_args, **_kwargs: str(user_site) if name == "purelib" else "")
+    preferred = preferred_user_scheme or f"{os.name}_user"
+    sites = {preferred: user_site, **(other_schemes or {})}
+    preferred_scheme_of = sysconfig.get_preferred_scheme
+
+    def get_path(name: str, scheme: str | None = None, *_args: object, **_kwargs: object) -> str:
+        if name != "purelib":
+            return ""
+        assert scheme is not None, "the caller has to say which scheme it means"
+        return str(sites[scheme])
+
+    monkeypatch.setattr("sysconfig.get_path", get_path)
+    monkeypatch.setattr("sysconfig.get_preferred_scheme", lambda key: preferred if key == "user" else preferred_scheme_of(key))
     monkeypatch.setattr("importlib.metadata.distribution", lambda _name: SimpleNamespace(locate_file=lambda _relative: distribution_at))
 
 
@@ -2399,6 +2499,57 @@ def test_a_virtual_environment_is_never_called_a_per_user_installation(
     monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "python"))
     _installation_located_at(monkeypatch, distribution_at=user_site, user_site=user_site)
 
+    assert _user_site_installation() is False
+
+
+def test_a_framework_macos_installation_is_read_off_the_scheme_pip_installs_into(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-user scheme on a python.org or Homebrew macOS Python is not `posix_user`.
+
+    `os.name` is `posix` there, so a lookup built out of it asks for
+    `posix_user`, `~/.local/lib/python3.13/site-packages`. pip asks
+    `sysconfig.get_preferred_scheme("user")` instead, gets
+    `osx_framework_user`, and that is the directory `pip install --user
+    agentic-hil` wrote into. Reading the other name finds nothing of ours
+    there, calls the installation system-wide, and drops `--user` from the
+    upgrade. pip then uninstalls the copy it does find, in the framework
+    per-user site, and installs the replacement into the system site: the live
+    console script over a missing package that `_user_site_installation` exists
+    to prevent, on the one platform where the two names differ.
+
+    No Mac is needed to state it, because all that differs is which name
+    sysconfig answers with. The table itself is worth recording once beside
+    this test, with `python3 -c "import sysconfig;
+    print(sysconfig.get_preferred_scheme('user'));
+    print(sysconfig.get_path('purelib', 'osx_framework_user'));
+    print(sysconfig.get_path('purelib', 'posix_user'))"` on such an
+    interpreter.
+    """
+    from agentic_hil.upgrade import _user_site_installation
+
+    framework_user_site = tmp_path / "Library" / "Python" / "3.13" / "lib" / "python" / "site-packages"
+    other_user_site = tmp_path / ".local" / "lib" / "python3.13" / "site-packages"
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "Library" / "Frameworks" / "Python.framework"))
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "Library" / "Frameworks" / "Python.framework"))
+    _installation_located_at(
+        monkeypatch,
+        distribution_at=framework_user_site,
+        user_site=framework_user_site,
+        preferred_user_scheme="osx_framework_user",
+        other_schemes={"posix_user": other_user_site},
+    )
+    assert _user_site_installation() is True
+
+    # And the other direction on the same machine: a copy sitting in the scheme
+    # pip does not install into is not this installation, so the flag stays off.
+    _installation_located_at(
+        monkeypatch,
+        distribution_at=other_user_site,
+        user_site=framework_user_site,
+        preferred_user_scheme="osx_framework_user",
+        other_schemes={"posix_user": other_user_site},
+    )
     assert _user_site_installation() is False
 
 
@@ -2887,7 +3038,7 @@ def test_a_relocated_uv_tool_installation_is_not_upgraded_across_its_recorded_pi
     monkeypatch.setattr("agentic_hil.upgrade._installed_extras", lambda: ("can",))
     calls = _upgrade_through_the_manager_this_installation_names(
         monkeypatch,
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_EXACT_PIN_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_EXACT_PIN_HINT),
         version_after=__version__,
     )
 
@@ -3808,7 +3959,7 @@ def test_a_live_server_is_named_where_a_manager_ran_and_moved_nothing_too(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        installed=_uv_said_nothing_to_upgrade(),
         version_after=__version__,
     )
     monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
@@ -3838,7 +3989,7 @@ def test_a_live_server_is_named_on_the_pin_note_as_well(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )
@@ -3873,7 +4024,7 @@ def test_the_pin_refusal_names_the_running_server_and_asks_for_the_restart(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_EXACT_PIN_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_EXACT_PIN_HINT),
         version_after=__version__,
     )
     monkeypatch.setattr("agentic_hil.upgrade._processes_holding_installation", lambda: [_LIVE_SERVER])
@@ -3901,7 +4052,7 @@ def test_a_pin_refusal_on_a_quiet_machine_still_says_no_restart_is_needed(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_EXACT_PIN_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_EXACT_PIN_HINT),
         version_after=__version__,
     )
 
@@ -4142,7 +4293,7 @@ def test_a_host_that_cannot_read_its_process_table_says_so_where_the_manager_mov
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", ""),
+        installed=_uv_said_nothing_to_upgrade(),
         version_after=__version__,
     )
     _table_cannot_be_read(monkeypatch)
@@ -4165,7 +4316,7 @@ def test_a_host_that_cannot_read_its_process_table_says_so_on_the_pin_note(
         monkeypatch,
         manager="uv",
         command=["uv.exe", "tool", "upgrade", "agentic-hil"],
-        installed=subprocess.CompletedProcess([], 0, "Nothing to upgrade\n", _UV_PIN_AT_CURRENT_HINT),
+        installed=_uv_said_nothing_to_upgrade(_UV_PIN_AT_CURRENT_HINT),
         version_after=__version__,
         resolution=UV_PIP_WOULD_CHANGE_NOTHING,
     )

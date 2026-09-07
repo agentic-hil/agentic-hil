@@ -865,9 +865,22 @@ class ComPortService:
         self.sessions: dict[str, ComPortSession] = {}
 
     def reconfigure(self, config: AgenticHILConfig) -> None:
-        # The port config carries its own permissions, so an inequality here also
-        # covers a revoked grant: a session may not outlive the permission that
-        # authorized it.
+        # Unreachable with a session open, and kept for the day it is not. The
+        # description reload is the only caller, and it refuses with
+        # config_reload_in_open_run as soon as this server holds one lease; a COM
+        # session holds one from before its port is opened until after its
+        # release is confirmed, so the stop below cannot be written while there
+        # is a session to write it for.
+        #
+        # The comparison is not a permission check. A reload revokes nothing:
+        # every entry it builds carries the grants parsed at startup, so for a
+        # port this server already knows, the permissions block of the new entry
+        # is the one the session is already holding, and what can differ is a
+        # description field or the entry disappearing.
+        #
+        # The loop stays because it is the local fail-safe. If that refusal is
+        # ever narrowed to the sections nothing holds, this is what keeps a held
+        # device name meaning the same physical board.
         for port_id, session in list(self.sessions.items()):
             if config.com_ports.get(port_id) != session.port_config:
                 self._stop_session(session, "config_reloaded")
@@ -1262,7 +1275,7 @@ class ComPortService:
             return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "serial_backend_not_available", "summary": "pyserial is not installed or could not be imported.", "likely_causes": ["install Agentic HIL with its runtime dependencies", "pyserial installation is broken"], "side_effect_committed": False}
 
         def open_failure(error: BaseException) -> JsonObject:
-            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": likely_causes("com_port_open_failed")}
+            return {"ok": False, "tool": "com_session_start", "port_id": port_id, "error_type": "com_port_open_failed", "summary": "COM port could not be opened.", "backend_error": str(error), "likely_causes": open_failure_causes(error)}
 
         try:
             # Built unopened so the modem lines are decided BEFORE the port is
@@ -1795,6 +1808,32 @@ def stable_device_name(device: str, stable_names: dict[str, str]) -> str | None:
         return stable_names.get(os.path.realpath(device))
     except OSError:  # pragma: no cover - realpath does not raise for a plain string on POSIX
         return None
+
+
+def open_failure_causes(error: BaseException) -> list[str]:
+    """The likely causes of an open the OS refused, read off its number where the number decides.
+
+    One number has a cause of its own. `EACCES` on a POSIX host is the device
+    node's mode refusing this user, which on a Linux bench is the most common
+    first-run failure of all: the user is not in the group that owns
+    `/dev/ttyACM0`. The comment beside `PORT_BUSY_ERRNOS` keeps that number out
+    of the busy set for exactly this reason, and a refusal that then listed a
+    second holder among its causes sent the reader hunting for a process that
+    does not exist. Read the way `serial_port_busy` reads its own numbers,
+    through `raised_errno` and never the message, so a wrapper or a libc in
+    another language changes nothing.
+
+    On Windows the same number is the opposite thing: pyserial reports
+    `CreateFile` on a port another program holds as errno 13, "Access is
+    denied", so there the causes stay the ones the open failure always had,
+    with the second holder among them.
+    """
+    if os.name != "nt" and raised_errno(error, errno.EACCES):
+        return [
+            "this user may not open the device: on Linux add the user to the group that owns it (dialout on Debian and Ubuntu, uucp on Arch and Fedora) and log in again",
+            "a udev rule or the device node's mode denies this user (ls -l on the device shows its owner and group)",
+        ]
+    return likely_causes("com_port_open_failed")
 
 
 def likely_causes(error_type: str) -> list[str]:

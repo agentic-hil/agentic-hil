@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -211,6 +212,34 @@ def test_the_script_forwards_the_positional_parameters(monkeypatch: pytest.Monke
     """The other half of the arrangement: the script has to consume them."""
     assert 'exec python -m pytest "$@"' in ci_linux.SCRIPT
     assert "{args}" not in ci_linux.SCRIPT
+
+
+def test_the_test_job_installs_every_extra_a_library_fact_test_needs() -> None:
+    """A test that asks a library what it says has to have the library.
+
+    `tests/test_pyocd_unknown_target_phrases.py` holds the two phrases the
+    `target_type_invalid` classification is matched on against the installed
+    pyOCD's own refusal, and that classification is the only thing that unlocks
+    the `pyocd pack find` / `pyocd pack install` remediation: an earlier phrase
+    list matched nothing pyOCD prints and every such failure fell through to
+    `unknown_debugger_error` with no mention of CMSIS packs. The file opens
+    with `importorskip("pyocd")`, `requirements/dev.txt` is what the hosted
+    matrix installs, and this tool is what a developer runs the POSIX half
+    with. With the extra missing from both, a pyOCD release that rewords the
+    refusal is invisible on every leg that runs `tests/`, and the file that
+    exists to notice it reports itself as skipped.
+
+    Both halves are named because they are installed by different means: the
+    lock file is the hosted matrix and the container image, the extras list in
+    the script is this tool. The generating command in the lock's header is
+    asserted too, so the next regeneration of the lock keeps the extra rather
+    than quietly dropping it back out.
+    """
+    lock = (Path(__file__).resolve().parents[1] / "requirements" / "dev.txt").read_text(encoding="utf-8")
+
+    assert re.search(r"^pyocd==", lock, flags=re.MULTILINE), "requirements/dev.txt pins no pyocd, so every hosted leg importorskips the pyOCD phrase tests"
+    assert "--extra pyocd" in lock.split("\n", 2)[1], lock.split("\n", 2)[:2]
+    assert "pip install -q -e '.[dev,can,pyocd]'" in ci_linux.SCRIPT, ci_linux.SCRIPT
 
 
 def test_no_arguments_still_runs_the_whole_suite_quietly(monkeypatch: pytest.MonkeyPatch) -> None:

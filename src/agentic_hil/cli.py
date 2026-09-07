@@ -3124,7 +3124,14 @@ def _holds_from_collision(busy: JsonObject) -> JsonObject:
     Marked `owner_active: False` because what refused here was a device lock, not
     the project lock a live session holds, and `raced_a_run` so the reason the
     write stopped is legible rather than looking like a bench that was busy all
-    along."""
+    along.
+
+    The holder travels with what the refusal said about it: who, since when,
+    how long ago it last said so, and `holder_heartbeat_stale` when it stopped
+    saying so. The status route carries that flag in every `busy_devices`
+    entry (`DEVICE_HOLD_FIELDS`), and TROUBLESHOOTING reads it as "hung rather
+    than busy: stop that process"; a collision that dropped it told the
+    operator a heartbeat age with nothing to read it against."""
     resource = busy.get("resource")
     holds: JsonObject = {"owner_active": False, "raced_a_run": True}
     if isinstance(resource, str):
@@ -3133,7 +3140,7 @@ def _holds_from_collision(busy: JsonObject) -> JsonObject:
     holder = busy.get("holder")
     if isinstance(holder, dict):
         holds["holder"] = holder
-    for field in ("held_since", "heartbeat_age_s"):
+    for field in ("held_since", "heartbeat_age_s", "holder_heartbeat_stale"):
         if busy.get(field) is not None:
             holds[field] = busy[field]
     return holds

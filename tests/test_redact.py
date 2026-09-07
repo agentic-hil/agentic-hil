@@ -22,6 +22,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from support import scaled_time_bound
 
 from agentic_hil.cli import emit_result
 from agentic_hil.redact import redact_sensitive
@@ -265,7 +266,7 @@ def test_a_long_unterminated_value_is_masked_in_linear_time() -> None:
     out = redact_sensitive({"stderr": line})["stderr"]
     elapsed = time.perf_counter() - start
 
-    assert elapsed < 5.0, f"redaction of a 1 MB unterminated value took {elapsed:.2f}s"
+    assert elapsed < scaled_time_bound(5.0), f"redaction of a 1 MB unterminated value took {elapsed:.2f}s"
     assert out == 'PASSWORD="[redacted]'
 
 
@@ -286,7 +287,7 @@ def test_a_long_scheme_like_run_without_a_url_is_scanned_in_linear_time() -> Non
     out = redact_sensitive({"stderr": line})["stderr"]
     elapsed = time.perf_counter() - start
 
-    assert elapsed < 5.0, f"scanning a 1 MB scheme-like run took {elapsed:.2f}s"
+    assert elapsed < scaled_time_bound(5.0), f"scanning a 1 MB scheme-like run took {elapsed:.2f}s"
     assert out == line
 
 

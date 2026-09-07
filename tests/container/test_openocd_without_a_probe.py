@@ -20,14 +20,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from fixtures.fake_openocd_no_probe import (
+    RECORDED_NO_PROBE_RETURNCODE,
+    RECORDED_NO_PROBE_STDERR,
+    THE_LINE_THE_CLASSIFIER_READS,
+)
 
-from .conftest import COMMAND_TIMEOUT_S, CONTAINER_ONLY, fixture_configuration
+from .conftest import COMMAND_TIMEOUT_S, CONTAINER_ONLY, coordination_record_states, fixture_configuration
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
 
@@ -134,3 +140,153 @@ def test_doctor_accepts_a_bound_configuration_whose_openocd_is_installed(tmp_pat
     reported = json.loads(agentic_hil("doctor", "--json", cwd=project, config=config).stdout)
     checked = reported["debuggers"]["dut"].get("check") or reported["debugger"]
     assert checked["executable"] == shutil.which("openocd"), checked
+
+
+# ---------------------------------------------------------------------------
+# #509: the probe-unplugged transcript, from the binary rather than from a fake.
+#
+# The first failure every newcomer sees is the probe not plugged in, and no
+# test had ever seen what OpenOCD says about it: the unit fixture for a failed
+# open prints `unable to connect to the target`, which is a different bucket,
+# and the `libusb_open` line sat in one test as a carried warning beside a
+# printed marker. What the installed build words its refusal as is OpenOCD's
+# to change, and a rewording drops the run to `unknown_debugger_error`, where
+# the abort-point proof is withheld, the lease quarantines and the operator is
+# sent to `recover` over a bench nothing touched.
+
+# The recording lives in the fake the unit tier runs, and is imported here
+# rather than restated, so the two tiers are held to one transcript and a one
+# sided edit of either is a failure rather than a silent divergence.
+# OpenOCD 0.12.0, 2026-09-06, in this image, with nothing on USB.
+#
+# A libusb refusal is not recordable here: the container has no USB bus, so
+# libusb has nothing to refuse and the transcript carries the open failure
+# alone. On a host without a udev rule the same run prints
+# `Error: libusb_open() failed with LIBUSB_ERROR_ACCESS` ahead of it.
+
+THE_THREE_TOOLS = [
+    ("probe_target", {}),
+    ("reset_target", {"mode": "run"}),
+    ("flash_firmware", {"image_path": "build/firmware.elf"}),
+]
+
+
+def effectful_project(tmp_path: Path) -> tuple[Path, Path]:
+    """A project whose debugger may flash and reset, with an image to flash."""
+    project = tmp_path / "project"
+    (project / "build").mkdir(parents=True)
+    (project / "build" / "firmware.elf").write_bytes(b"\x7fELFfake")
+    config = fixture_configuration(project, tmp_path / "config" / "config.yaml", tmp_path / "state", grant_flash_and_reset=True)
+    return project, config
+
+
+STALE_RECORDING = "the recording in tests/fixtures/fake_openocd_no_probe.py is stale: take it again from this image and note the version and the date"
+
+
+def test_the_installed_openocd_refuses_a_missing_probe_before_init_with_the_recorded_line() -> None:
+    """The premise: what this OpenOCD prints with no probe, and where it stops.
+
+    The whole transcript, not only the classified line, because the fake the
+    unit tier runs prints this recording and nothing else asserts the two are
+    the same text: an edit to either side is caught here, with the message
+    naming the file to re record. The stage marker is asked for after `init`
+    the way the backend asks for it, and it must not print: the refusal is
+    OpenOCD's own, before any target was addressed, which is what lets the
+    backend say the board was never touched.
+    """
+    from agentic_hil.backends.openocd import OPENOCD_INIT_STAGE_MARKER
+
+    refused = subprocess.run(
+        [shutil.which("openocd"), "-f", "interface/stlink.cfg", "-f", "target/stm32f4x.cfg", "-c", "init", "-c", f"echo {OPENOCD_INIT_STAGE_MARKER}", "-c", "shutdown"],
+        capture_output=True,
+        text=True,
+        timeout=COMMAND_TIMEOUT_S,
+        check=False,
+    )
+
+    assert refused.returncode == RECORDED_NO_PROBE_RETURNCODE, refused
+    assert refused.stderr == RECORDED_NO_PROBE_STDERR, STALE_RECORDING
+    assert THE_LINE_THE_CLASSIFIER_READS in refused.stderr.splitlines(), refused.stderr
+    assert OPENOCD_INIT_STAGE_MARKER not in refused.stdout + refused.stderr, refused
+
+
+@pytest.mark.parametrize(("tool", "arguments"), THE_THREE_TOOLS)
+def test_a_tool_with_no_probe_attached_is_adapter_not_found_and_never_contacted(tmp_path: Path, tool: str, arguments: dict) -> None:
+    """The issue's expected result, produced by the real OpenOCD rather than by a fake.
+
+    `adapter_not_found` with the abort-point proof (`target_contacted` false,
+    `retry_safe` true, `hardware_state` unchanged, `side_effect_status`
+    not_started), no quarantine and no cleanup demand in the coordination
+    records, the classified line on the result and in the log, and the remedy
+    that names the probe rather than `recover`.
+    """
+    from agentic_hil.config import load_config
+    from agentic_hil.tools import AgenticHILToolService
+
+    project, config_path = effectful_project(tmp_path)
+    config = load_config(str(config_path))
+    service = AgenticHILToolService(config)
+    try:
+        result = service.call(tool, arguments)
+    finally:
+        service.close()
+
+    assert result["ok"] is False, json.dumps(result)
+    assert result["error_type"] == "adapter_not_found", json.dumps(result)
+    assert result["backend_error_type"] == "adapter_not_found", json.dumps(result)
+    assert result["target_contacted"] is False, json.dumps(result)
+    assert result["retry_safe"] is True, json.dumps(result)
+    assert result["hardware_state"] == "unchanged", json.dumps(result)
+    assert result["side_effect_status"] == "not_started", json.dumps(result)
+    assert result.get("cleanup_required") is not True, json.dumps(result)
+    assert result.get("quarantine_id") is None, json.dumps(result)
+    assert result.get("quarantined") is not True, json.dumps(result)
+    states = coordination_record_states(config.state_root)
+    assert states, "the run wrote no coordination record at all, so nothing here says a lease was taken and given back"
+    assert set(states) == {"released"}, states
+    assert THE_LINE_THE_CLASSIFIER_READS in result["programmer_output"]["stderr"].splitlines(), result["programmer_output"]
+    assert result["programmer_output"]["returncode"] == 1, result["programmer_output"]
+    assert any("Connect the probe" in step for step in result["remediation"]), result["remediation"]
+    assert not any("recover" in step.lower() for step in result["remediation"]), result["remediation"]
+    log = json.loads((project / result["log_path"]).read_text(encoding="utf-8"))
+    assert log["returncode"] == 1, log
+    assert log["timed_out"] is False, log
+    assert THE_LINE_THE_CLASSIFIER_READS in log["stderr"].splitlines(), log
+
+
+def test_the_console_script_shows_the_operator_the_line_and_the_remedy(tmp_path: Path) -> None:
+    """`agentic-hil test-reactor` over a plan whose one step is a reset, with no probe.
+
+    The operator's surface for the same refusal: exit 1, the heading naming
+    `adapter_not_found`, OpenOCD's own line printed as OpenOCD wrote it, the
+    step's abort-point proof, and the remedy in the vocabulary a shell has.
+    The JSON document beside it carries the same result under the step.
+    """
+    project, config = effectful_project(tmp_path)
+    plan = project / ".agentic-hil" / "testconfig.yaml"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text("version: 4\nsteps:\n  - {device: dut, action: reset}\n", encoding="utf-8")
+
+    rendered = agentic_hil("test-reactor", cwd=project, config=config)
+    document = agentic_hil("test-reactor", "--json", cwd=project, config=config)
+
+    assert rendered.returncode == 1, rendered.stdout + rendered.stderr
+    assert rendered.stdout.startswith("Failed: adapter_not_found"), rendered.stdout
+    assert THE_LINE_THE_CLASSIFIER_READS in rendered.stdout, rendered.stdout
+    assert re.search(r"target_contacted\s+no\b", rendered.stdout), rendered.stdout
+    assert re.search(r"quarantined\s+no\b", rendered.stdout), rendered.stdout
+    assert re.search(r"hardware_state\s+unchanged\b", rendered.stdout), rendered.stdout
+    assert "Call `agentic-hil debugger-probes`" in rendered.stdout, rendered.stdout
+    assert "Connect the probe" in rendered.stdout, rendered.stdout
+    assert "agentic-hil recover" not in rendered.stdout, rendered.stdout
+
+    assert document.returncode == 1, document.stdout + document.stderr
+    result = json.loads(document.stdout)
+    assert result["error_type"] == "adapter_not_found", result
+    step = result["steps"][0]["result"]
+    assert step["tool"] == "reset_target", step
+    assert step["error_type"] == "adapter_not_found", step
+    assert step["target_contacted"] is False, step
+    assert step["hardware_state"] == "unchanged", step
+    assert step["quarantined"] is False, step
+    assert THE_LINE_THE_CLASSIFIER_READS in step["programmer_output"]["stderr"].splitlines(), step["programmer_output"]

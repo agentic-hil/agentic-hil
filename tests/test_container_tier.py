@@ -324,3 +324,25 @@ def test_no_layer_installs_from_the_index_without_hashes() -> None:
     assert installs
     for line in installs:
         assert line.rstrip().endswith("-e .") or "--require-hashes" in line, line
+
+
+def test_the_pinned_pyocd_is_the_one_the_locked_dependency_set_installs() -> None:
+    """Two pins on one package, and the later one wins.
+
+    `requirements/container.in` installs pyOCD before the checkout is copied in;
+    the locked dependency set is installed after it and pins pyOCD too, so
+    whatever `requirements/dev.txt` says is the release that ends up in the image
+    and the release the recorded refusals in this tier were taken from. Let the
+    two drift and `requirements/container.in` documents a version the image does
+    not have, which is the one thing a pin is for. Regenerating the one lock and
+    bumping the other are the same decision, and this is what says so.
+    """
+    wanted = CONTAINER_REQUIREMENTS_IN.read_text(encoding="utf-8")
+    bootstrap = re.search(r"^pyocd==(\d+\.\d+\.\d+)$", wanted, re.MULTILINE)
+    assert bootstrap is not None, "requirements/container.in does not pin pyocd the way it pins uv"
+
+    lock = (REPOSITORY_ROOT / "requirements" / "dev.txt").read_text(encoding="utf-8")
+    locked = re.search(r"^pyocd==(\S+)", lock, re.MULTILINE)
+
+    assert locked is not None, "requirements/dev.txt pins no pyocd, so the container's own pin is the only one and the hosted legs have no pyOCD at all"
+    assert locked.group(1) == bootstrap.group(1), (locked.group(1), bootstrap.group(1))

@@ -80,6 +80,13 @@ PYOCD_NOT_FOUND: JsonObject = {
 BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "pyocd_not_found": "debugger_not_found",
     "probe_not_found": "adapter_not_found",
+    # The debugger failed and its output says no more than that. `debugger_error`
+    # is the name the debug-session path has always published for exactly that
+    # (`_start_failure` in gdbdebug), and a caller that reads one word for it in
+    # a failed session and another in a failed command has to learn two. The
+    # backend's own `unknown_debugger_error` travels beside it in
+    # `backend_error_type` for a reader at that layer (#506).
+    "unknown_debugger_error": "debugger_error",
 }
 
 # Legal characters in a pyOCD target type name, from pyocd.target.
@@ -688,11 +695,18 @@ class PyOCDBackend:
         exactly the window that was asked for. Anything else is `None`, and the
         caller reports a failed read rather than a short answer, because half of
         a status word is a different number rather than a smaller one.
+
+        The two refusals below and the verdict in `_finish_symbol_read` are the
+        results of this bucket that no classifier saw, because pyOCD said nothing
+        in them, so each merges the catalogue's steps itself where the branches
+        through `_failure_result` are given them. Without that, the only shapes
+        of `memory_read_failed` reaching an operator with no next step at all
+        were the ones the entry's own first step is written to explain.
         """
         try:
             staging_dir = Path(tempfile.mkdtemp(prefix="agentic-hil-pyocd-read-"))
         except OSError as error:
-            return {"result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs could not be created.", "backend_error": str(error), **NOT_CONTACTED}, "data": None}
+            return {"result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs could not be created.", "backend_error": str(error), **NOT_CONTACTED, **remediation_fields("memory_read_failed", self.backend_name)}, "data": None}
         try:
             memory_path = staging_dir / "symbol-memory.bin"
             argument = pyocd_command_path(memory_path)
@@ -702,7 +716,7 @@ class PyOCDBackend:
                 # unquoted backslash as an escape and ends a single-quoted word
                 # at the next quote, so a path it cannot carry has to stop the
                 # read instead of silently redirecting it.
-                return {"result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs cannot be named on pyOCD's command line.", "backend_error": f"temporary directory path contains a quote character: {memory_path}", **NOT_CONTACTED}, "data": None}
+                return {"result": {"ok": False, "tool": tool, "backend": self.backend_name, "error_type": "memory_read_failed", "summary": "The private file this read needs cannot be named on pyOCD's command line.", "backend_error": f"temporary directory path contains a quote character: {memory_path}", **NOT_CONTACTED, **remediation_fields("memory_read_failed", self.backend_name)}, "data": None}
             result = self._run_pyocd(tool, ["commander", *PYOCD_READ_CONNECT_ARGS, "--command", f"savemem {hex(address_value)} {size_bytes} {argument}", *self._connection_args()])
             data: bytes | None = None
             if result.get("ok"):
@@ -727,14 +741,19 @@ class PyOCDBackend:
 
         A run that succeeded and left no usable file is a failed read that did
         reach the target, which is the one case the exit code alone would report
-        as success.
+        as success. It is also the one failure of this kind that no classifier
+        saw, because pyOCD reported none: the result was built as a success and
+        is turned into a refusal here, so the catalogue's steps for the bucket
+        have to be merged here too. Without that the operator met the only shape
+        of `memory_read_failed` that carries no next step, while the same bucket
+        out of the same backend carried one whenever pyOCD had said something.
         """
         result = read["result"]
         result.update({"symbol": symbol, "address": resolved["address"], "size_bytes": int(resolved["size_bytes"]), "resolved_from": resolved["resolved_from"], "symbol_source": resolved["symbol_source"]})
         if not result.get("ok") and "side_effect_status" not in result:
             result.update({"side_effect_status": "unknown", "retry_safe": False})
         if result.get("ok") and read["data"] is None:
-            result.update({"ok": False, "error_type": "memory_read_failed", "summary": "pyOCD reported a completed run but left no file holding the requested bytes.", "target_contacted": True})
+            result.update({"ok": False, "error_type": "memory_read_failed", "summary": "pyOCD reported a completed run but left no file holding the requested bytes.", "target_contacted": True, **remediation_fields("memory_read_failed", self.backend_name)})
         return result
 
     def _connection_args(self) -> list[str]:
@@ -1056,7 +1075,7 @@ class PyOCDBackend:
             "reset_failed": "Debugger failed to reset the target.",
             "memory_read_failed": "Debugger failed to read the requested target memory.",
             "timeout": "Debugger command timed out.",
-            "unknown_debugger_error": "Debugger failed with an unknown error.",
+            "debugger_error": "Debugger failed with an unknown error.",
         }.get(error_type, "Debugger failed with an unknown error.")
 
     def _likely_causes(self, error_type: str) -> list[str]:

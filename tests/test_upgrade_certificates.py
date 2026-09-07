@@ -77,7 +77,8 @@ UV_PIP_RESOLUTION_TRUST_FAILURE = subprocess.CompletedProcess[str](
 UV_TOOL_PIN_AT_CURRENT = subprocess.CompletedProcess[str](
     [],
     0,
-    "Nothing to upgrade\n",
+    "",
+    "Nothing to upgrade\n\n"
     f"hint: `agentic-hil` is pinned to `{__version__}` (installed with an exact version pin); "
     "reinstall with `uv tool install agentic-hil@latest` to upgrade to a new version.",
 )

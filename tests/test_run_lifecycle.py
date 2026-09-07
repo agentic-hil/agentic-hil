@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from conftest import FAKE_OPENOCD, write_authoritative_config, write_config
+from support import scaled_time_bound
 from test_test_reactor import RecordingService, write_test_config
 
 from agentic_hil.config import ConfigError, load_authoritative_config, load_config
@@ -96,7 +97,7 @@ def wait_for_state(config, handle: str, states: set[str], timeout_s: float = 60.
         if status.get("state") in states:
             return status
         waited_s = time.monotonic() - started
-        assert waited_s < timeout_s, (
+        assert waited_s < scaled_time_bound(timeout_s), (
             f"{handle} was still in state {status.get('state')!r} after {waited_s:.1f}s of waiting for one of "
             f"{sorted(states)}; it says {status.get('summary')!r} and its worker printed:\n{worker_log(config, handle)}"
         )
@@ -141,7 +142,7 @@ def wait_for_progress_step(workspace: Path, config, handle: str, step: int, time
             f"its report says {last_report(workspace).get('summary')!r}"
         )
         waited_s = time.monotonic() - started
-        assert waited_s < timeout_s, (
+        assert waited_s < scaled_time_bound(timeout_s), (
             f"{handle} was still in state {state!r} on step {reached!r} after {waited_s:.1f}s of waiting for step {step}; "
             f"its report says {last_report(workspace).get('summary')!r}"
         )
@@ -254,7 +255,7 @@ def test_a_stop_ends_a_delay_that_would_have_waited_ten_minutes(tmp_path: Path) 
     result = TestReactor(config, service, stop_requested=StopOnQuestion(2)).run(load_test_config(str(path), str(tmp_path)))  # type: ignore[arg-type]
     elapsed_s = time.monotonic() - started
 
-    assert elapsed_s < 30, elapsed_s
+    assert elapsed_s < scaled_time_bound(30), elapsed_s
     step = result["steps"][0]["result"]
     assert step["ok"] is True
     assert step["stop_requested"] is True
@@ -327,7 +328,7 @@ def test_a_detached_start_answers_with_a_handle_and_the_report_path(tmp_path: Pa
     detached_runs.append((load_authoritative_config(workspace), result["run"]))
     assert result["ok"] is True, result.get("worker_output") or result
     # The plan waits ten minutes; the start command does not.
-    assert elapsed_s < 60, elapsed_s
+    assert elapsed_s < scaled_time_bound(60), elapsed_s
     assert result["run"].startswith("run-")
     assert result["report_path"] == ".agentic-hil/reports/last-report.json"
     assert result["state"] == "running"
@@ -1049,11 +1050,20 @@ def test_the_record_writer_publishes_only_by_rename_and_never_unlinks_first(tmp_
     published = path.read_bytes()
     runlifecycle.write_run_record(config, handle, running)
 
-    assert len(at_the_rename) == 2, at_the_rename
-    # Nothing existed before the first publication, and the first publication was
-    # still whole and still the published bytes when the second one landed.
-    assert at_the_rename[0] is None
-    assert at_the_rename[1] == published
+    # Two publications, so at least two renames, and possibly more: a rename over
+    # a file another process has open is refused on Windows, which is the whole
+    # reason write_run_record retries, and on a host whose scanner opens a file
+    # the moment it appears the refusal is ordinary rather than exceptional. A
+    # count would call that retry a defect. What is actually claimed here is a
+    # property of every rename, however many there are, so it is asserted over
+    # all of them: the name leads to nothing until the first document lands, and
+    # from then on it leads to the whole of that document and never to half of
+    # one. A writer that unlinked before renaming would be caught by the last of
+    # these, because the name would lead to nothing at the second publication.
+    assert len(at_the_rename) >= 2, at_the_rename
+    assert at_the_rename[0] is None, at_the_rename
+    assert all(seen is None or seen == published for seen in at_the_rename), at_the_rename
+    assert at_the_rename[-1] == published, at_the_rename
     assert json.loads(published.decode("utf-8")) == starting
     assert json.loads(path.read_text(encoding="utf-8")) == running
 

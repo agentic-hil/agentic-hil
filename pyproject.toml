@@ -65,8 +65,11 @@ pyocd = ["pyocd>=0.36"]
 dev = [
   "build>=1.2",
   "pytest>=8.0",
-  # Deliberately not in addopts below: a bare `pytest` stays one process, and
-  # `pytest -n auto` is the parallel invocation, which CONTRIBUTING.md documents.
+  # Required rather than a convenience: `addopts` below asks for `--dist
+  # loadgroup`, so an environment without this plugin refuses every session with
+  # "unrecognized arguments: --dist". The worker count stays off `addopts`, so a
+  # bare `pytest` is still one process and `pytest -n auto` is still the parallel
+  # invocation, which CONTRIBUTING.md documents.
   "pytest-xdist>=3.6",
   "ruff>=0.6",
   "twine>=5.0"
@@ -102,7 +105,16 @@ testpaths = ["tests"]
 # "pytest" does not, which is how CI collected zero evaluation tests.
 pythonpath = ["."]
 python_files = ["test_*.py"]
-addopts = "--strict-markers"
+# `--dist loadgroup` is the scheduler, not the worker count: without `-n` it
+# starts nothing, and with it every test carrying an `xdist_group` mark runs on
+# one worker instead of being spread by the default balancing. It is configured
+# here rather than passed by each caller so that a bare `pytest -n auto`, the CI
+# legs, tools/ci_linux.py and the container invocation all schedule the same way,
+# and a caller that forgets it cannot exist. What needs it today: the two tests
+# in tests/test_install_scripts.py that drive step 5 of install.ps1 against the
+# machine's real process table, one planting a process named like an agent CLI
+# and the other asserting that none is running.
+addopts = "--strict-markers --dist loadgroup"
 # The two tiers that need something the hosted matrix has not got. Registered
 # here because `--strict-markers` above refuses a marker nothing declared, and
 # named here rather than only in the directories they live in so `pytest -m

@@ -182,6 +182,7 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
 ROOT = Path(__file__).resolve().parents[1]
 FAKE_OPENOCD = ROOT / "tests" / "fixtures" / "fake_openocd.py"
 FAKE_OPENOCD_NO_TARGET = ROOT / "tests" / "fixtures" / "fake_openocd_no_target.py"
+FAKE_OPENOCD_NO_PROBE = ROOT / "tests" / "fixtures" / "fake_openocd_no_probe.py"
 FAKE_OPENOCD_MISSING_CFG = ROOT / "tests" / "fixtures" / "fake_openocd_missing_cfg.py"
 FAKE_OPENOCD_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_openocd_unconfirmed.py"
 FAKE_OPENOCD_POST_INIT_UNCONFIRMED = ROOT / "tests" / "fixtures" / "fake_openocd_post_init_unconfirmed.py"
@@ -345,6 +346,12 @@ def write_config(
     auto_probe_ids: bool = True,
     interface_cfg: str = "interface/stlink.cfg",
     target_cfg: str = "target/stm32f4x.cfg",
+    # The budget a call written from this configuration runs under. Five seconds
+    # suits the bulk of the suite, whose fakes answer at once. A test whose child
+    # does real work hands this the same factor every wall-clock bound in the
+    # suite takes, so a loaded host is granted the allowance rather than being
+    # reported as a child that stopped working.
+    timeout_s: float = 5,
     # Omitted from the written entry by default, so the bulk of the suite keeps
     # exercising the file that never named a connect mode and is read at the
     # default. A test that wants the key writes it.
@@ -374,7 +381,7 @@ def write_config(
         "interface_cfg": interface_cfg,
         "target_cfg": target_cfg,
         "flash_address": flash_address,
-        "timeout_s": 5,
+        "timeout_s": timeout_s,
         **({"connect_mode": connect_mode} if connect_mode is not None else {}),
     }
     # Omitted entirely by default, so the common test config exercises the same

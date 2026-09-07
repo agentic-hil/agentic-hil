@@ -408,6 +408,36 @@ def uv_tool(tmp_path: Path, uv_binary: str, uv_cache: Path) -> UvTool:
     return UvTool(directory=directory, bin_directory=bin_directory, cache=uv_cache, uv=uv_binary)
 
 
+def a_path_without(name: str, path: str) -> str:
+    """``path`` with every directory that resolves ``name`` taken out, checked rather than assumed.
+
+    The image installs this checkout editable, so ``/usr/local/bin`` carries an
+    ``agentic-hil`` console script, and every uv these tests use is on PATH too.
+    A test about a machine where one of those does not resolve has to build that
+    machine rather than assume it: the assertion here is what makes the premise
+    part of the test instead of a property of whichever image it runs in.
+    """
+    kept = [directory for directory in path.split(os.pathsep) if directory and shutil.which(name, path=directory) is None]
+    stripped = os.pathsep.join(kept)
+    assert shutil.which(name, path=stripped) is None, stripped
+    assert stripped, "nothing was left on PATH, so the child could not start at all"
+    return stripped
+
+
+def recording_uv(into: Path, real_uv: str, log: Path) -> Path:
+    """A ``uv`` that writes each argument list it is given to ``log``, then runs the real one.
+
+    A test that reads only the end state cannot tell a receipt reached by the
+    route it means from one reached by another, so the commands are recorded
+    beside the outcome and asserted with it.
+    """
+    into.mkdir(parents=True, exist_ok=True)
+    wrapper = into / "uv"
+    wrapper.write_text(f'#!/bin/sh\nprintf \'%s\n\' "$*" >> "{log}"\nexec "{real_uv}" "$@"\n', encoding="utf-8")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
 def _yaml_scalar(value: object) -> str:
     """One configuration value the way an operator writes it: quoted text, a bare number, a lowercase boolean."""
     if isinstance(value, bool):
@@ -424,10 +454,12 @@ def fixture_configuration(
     *,
     executable: str | None = None,
     timeout_s: int = 20,
+    target_cfg: str = "target/stm32f4x.cfg",
     com_port_device: str | None = None,
     com_port_fields: dict[str, object] | None = None,
     com_port_identity_source: str | None = "device",
     can_buses_yaml: str = "can_buses: {}\n",
+    grant_flash_and_reset: bool = False,
 ) -> Path:
     """A configuration for a project with no hardware behind it.
 
@@ -439,7 +471,9 @@ def fixture_configuration(
     ``executable`` is the YAML value for ``debuggers.dut.executable`` verbatim,
     so a test can name a wrapper, the bare name ``openocd`` or ``null``; the
     default is the absolute path of the OpenOCD this image installs.
-    ``timeout_s`` is the deadline that entry gives its process. ``com_port_device``
+    ``timeout_s`` is the deadline that entry gives its process, and ``target_cfg``
+    the target script it names, a search name the installed OpenOCD resolves
+    against its own script tree, or one it cannot. ``com_port_device``
     adds one serial port, ``dut``, on that device, writable, because the one
     bridge in this project that carries bytes into a port has to have a port.
     The port declares ``identity_source: device``: version 3 refuses a port that
@@ -450,9 +484,13 @@ def fixture_configuration(
     declaration to write, or None to write none, for an entry whose identity
     one of those added keys carries instead. ``can_buses_yaml`` is the
     whole ``can_buses:`` section verbatim, for a test that declares a bus on a
-    virtual CAN interface; the default declares none.
+    virtual CAN interface; the default declares none. ``grant_flash_and_reset``
+    opens the two effectful debugger permissions, for a test whose whole point
+    is that a flash or a reset never reached the board: with them closed the
+    refusal is `permission_denied` and the spawn under test never happens.
     """
     executable_value = repr(shutil.which("openocd")) if executable is None else executable
+    effectful = "true" if grant_flash_and_reset else "false"
     entry_lines = "".join(f"    {key}: {_yaml_scalar(value)}\n" for key, value in (com_port_fields or {}).items())
     identity_line = "" if com_port_identity_source is None else f"    identity_source: {com_port_identity_source}\n"
     com_ports = (
@@ -486,11 +524,11 @@ debuggers:
     executable: {executable_value}
     probe_id: "FIXTUREPROBE0001"
     interface_cfg: interface/stlink.cfg
-    target_cfg: target/stm32f4x.cfg
+    target_cfg: {target_cfg}
     timeout_s: {timeout_s}
     permissions:
-      allow_flash: false
-      allow_reset: false
+      allow_flash: {effectful}
+      allow_reset: {effectful}
       allow_debug_execution: false
       allow_raw_debugger_commands: false
       allow_mass_erase: false
@@ -573,6 +611,23 @@ class PtyPair:
         for stream in (self.socat.stdout, self.socat.stderr):
             if stream is not None:
                 stream.close()
+
+
+def coordination_record_states(state_root: str | Path) -> list[str]:
+    """Every coordination record a run left behind, by state, in file order.
+
+    Every record rather than only the blocking ones, and a list rather than a
+    set. Filtering for ``cleanup_required``, ``quarantined`` and
+    ``recovery_pending`` answers the empty set both when a run released
+    everything and when a run wrote no record at all, so a check written over
+    the filtered answer holds whatever happened and can never go red. What a
+    caller wants to say is that the records are there and that all of them say
+    ``released``, and both halves of that can.
+    """
+    records = Path(state_root) / "coordination" / "records"
+    if not records.is_dir():
+        return []
+    return [str(json.loads(path.read_text(encoding="utf-8")).get("state")) for path in sorted(records.glob("*.json"))]
 
 
 def _wait_until(condition: Callable[[], bool], timeout_s: float, what: str, process: subprocess.Popen[bytes] | None = None) -> None:

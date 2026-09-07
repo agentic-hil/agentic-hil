@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 from conftest import write_config
+from support import scaled_time_bound
 
 from agentic_hil import comstdio
 from agentic_hil.comstdio import run_com_stdio
@@ -322,7 +323,7 @@ def test_stdin_reader_stops_without_external_input_on_windows() -> None:
         errors = comstdio.stop_stdin_reader(reader, 0.5)
         elapsed = time.monotonic() - started
 
-        assert elapsed < SHUTDOWN_CEILING_S, f"stop_stdin_reader blocked for {elapsed:.2f} s waiting on stdin"
+        assert elapsed < scaled_time_bound(SHUTDOWN_CEILING_S), f"stop_stdin_reader blocked for {elapsed:.2f} s waiting on stdin"
         assert not reader.thread.is_alive() or any("remained blocked" in str(error) for error in errors), errors
     finally:
         release.set()
@@ -356,7 +357,7 @@ def test_stdin_reader_stop_ends_a_read_already_in_flight_on_windows(monkeypatch:
 
         assert errors == [], errors
         assert not reader.thread.is_alive()
-        assert elapsed < SHUTDOWN_CEILING_S, f"stop_stdin_reader waited {elapsed:.2f} s on a read in flight"
+        assert elapsed < scaled_time_bound(SHUTDOWN_CEILING_S), f"stop_stdin_reader waited {elapsed:.2f} s on a read in flight"
         assert reader.owned_fd[0] is None, "the reader did not close its own descriptor on the way out"
     finally:
         with suppress(OSError):
@@ -412,4 +413,4 @@ def test_com_stdio_ends_a_failed_session_without_waiting_on_stdin(tmp_path: Path
     assert code == 1
     assert stdout == ""
     assert the_one_document_on(stderr)["error_type"] == "serial_read_failed"
-    assert elapsed < SHUTDOWN_CEILING_S, f"com-stdio waited {elapsed:.2f} s on stdin after its session had failed"
+    assert elapsed < scaled_time_bound(SHUTDOWN_CEILING_S), f"com-stdio waited {elapsed:.2f} s on stdin after its session had failed"

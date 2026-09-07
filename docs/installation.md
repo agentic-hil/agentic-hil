@@ -173,8 +173,9 @@ agentic-hil --version` is a diagnostic only.
 For direct PEAK/SocketCAN adapters add the CAN extra (`uv tool install
 'agentic-hil[can]'`), and for the pyOCD backend `agentic-hil[pyocd]`. Both are
 optional because they carry platform-specific drivers that flashing and UART do
-not need; without them those tools refuse with `can_backend_not_available`
-rather than failing at import.
+not need; without them those tools refuse by name rather than failing at
+import: the CAN tools with `can_backend_not_available`, and a pyOCD probe
+with `debugger_not_found` carrying `backend_error_type: pyocd_not_found`.
 
 Adding one of them to an installation that already exists means rewriting that
 environment, so stop the agent host first (it runs the MCP server out of that
@@ -186,14 +187,22 @@ an extra without stopping the host.
 ## Upgrading
 
 To upgrade later, run `agentic-hil upgrade`: it upgrades through the manager
-that owns the installation running it, keeps the extras, and refuses before it
-removes anything if the MCP server is still running. It reports success only
-when the version actually moved, and names both numbers when it did. An
-installation that is already current and one the package manager holds at an
-exact version pin are two separate refusals, and neither asks for a restart:
-there would be nothing new to load. Installing without an exact pin, as the
-lines above do, keeps the second one from arising at all; the Claude Code plugin
-pins on purpose and states the consequence where it does.
+that owns the installation running it, keeps the extras, and reports success
+only when the version actually moved, naming both numbers when it did.
+
+An installation that is already at the newest release exits 0 and carries
+`already_current`, and so does one the package manager holds at a pin at the
+release it is already running: nothing was withheld, so neither is a refusal.
+A pin that does hold a newer release back is the one refusal here, exit 1 with
+`upgrade_blocked_by_pin` and the line that reinstalls the installation whole.
+Installing without an exact pin, as the lines above do, keeps that case from
+arising at all; the Claude Code plugin pins on purpose and states the
+consequence where it does.
+
+`restart_required` is true whenever an MCP server started out of this
+installation is still running, on an upgrade that moved and on one that found
+nothing to move alike. That process is running the code that was on disk when
+it started, so it keeps answering with it until it is restarted once.
 
 ## Uninstalling
 

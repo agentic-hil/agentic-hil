@@ -1251,7 +1251,38 @@ class AgenticHILToolService:
         returned rather than raised, and unchanged: a plan that does not load, or
         resolves outside `workspace_root`, and a coordination failure the run
         could not answer for itself.
+
+        One refusal is this server's own, because only this server can see it.
+        A plan is a run of its own and takes the devices it names up front, and
+        an agent that opened `bench_run_start` on this server already has a run
+        open: the plan used to meet that hold as `device_busy` naming this
+        process's own pid, with the catalogue's advice to wait for another
+        owner's run to end, which is a run that ends when this agent ends it.
+        It is `run_already_active`, the one-run-per-owner answer, decided here
+        before anything is spawned or locked, so the detached form is refused
+        the same way and leaves no worker and no record behind.
         """
+        if self.coordinator.run_active:
+            run = self.coordinator.run_status()
+            label = f" ({run['run_label']})" if run.get("run_label") else ""
+            return {
+                "ok": False,
+                "tool": "test_reactor_run",
+                "error_type": "run_already_active",
+                "summary": (
+                    f"This session already holds an open run through `bench_run_start`{label}, and a test plan is a run of its own "
+                    "that takes the devices it names up front; end the open run with `bench_run_stop`, then run the plan."
+                ),
+                "declared_devices": run.get("declared_devices"),
+                "run_label": run.get("run_label"),
+                "run_started_at": run.get("run_started_at"),
+                "next_step": "Call `bench_run_stop`, then `test_reactor_run` again; the plan declares and holds every device it names for itself.",
+                "retry_safe": False,
+                "side_effect_committed": False,
+                "side_effect_status": "not_started",
+                "hardware_state": "unchanged",
+                **remediation_fields("run_already_active"),
+            }
         # Deferred, and it has to be: `reactorrun` reaches the reactor, which
         # imports this module, so the import cannot stand at the top of this file.
         # Nothing is paid for it at startup either, since a server that is never

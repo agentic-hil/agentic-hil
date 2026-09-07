@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 from conftest import write_config
+from test_can_likely_causes import assert_causes_are_about_the_bus
 
 from agentic_hil.can import open_python_can_adapter, socketcan_interface_missing
 from agentic_hil.config import load_config
@@ -137,6 +138,10 @@ def test_a_wrapped_enodev_is_classified_as_no_contact(tmp_path: Path, monkeypatc
     assert result["retry_safe"] is True
     assert result["target_contacted"] is False
     assert any("ip link" in step for step in result["remediation"])
+    # The refusal says what may have caused it, about this interface (#517). Not
+    # the remediation, which says what to do next: an operator reads both, and
+    # the classifier reads this one back out of the record.
+    assert_causes_are_about_the_bus(result["likely_causes"], CAN_INTERFACE_NOT_FOUND_ERROR, result)
 
 
 def test_a_bare_oserror_carrying_enodev_is_classified_the_same_way(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,6 +155,10 @@ def test_a_bare_oserror_carrying_enodev_is_classified_the_same_way(tmp_path: Pat
     result = open_python_can_adapter(config, BUS_ID, config.can_buses[BUS_ID], False)
 
     assert result["error_type"] == CAN_INTERFACE_NOT_FOUND_ERROR
+    # "The same way" includes the causes: the pair exists to prove the two paths
+    # answer alike, and an answer that named the interface on one of them only
+    # would be a difference the operator sees (#517).
+    assert_causes_are_about_the_bus(result["likely_causes"], CAN_INTERFACE_NOT_FOUND_ERROR, result)
 
 
 @pytest.mark.parametrize("number", [errno.ENETDOWN, errno.EPERM, errno.ENXIO])
@@ -165,6 +174,10 @@ def test_every_other_errno_keeps_the_markerless_result(tmp_path: Path, monkeypat
 
     assert result["error_type"] == "can_adapter_open_failed"
     assert "side_effect_status" not in result
+    # A failure that cannot say what it did to the bus can still say what may
+    # have caused it, and says it about the adapter rather than about a serial
+    # or debug log (#523).
+    assert_causes_are_about_the_bus(result["likely_causes"], "can_adapter_open_failed", result)
 
 
 def test_the_peak_adapter_is_left_alone(tmp_path: Path) -> None:
@@ -218,6 +231,9 @@ def test_a_missing_socketcan_interface_refuses_and_frees_the_lease(tmp_path: Pat
         assert result["lease_state"] == "released"
         assert result["retry_safe"] is True
         assert service.coordinator.blocked is False
+        assert_causes_are_about_the_bus(result["likely_causes"], CAN_INTERFACE_NOT_FOUND_ERROR, result)
+        classified = service.call("classify_last_error")
+        assert classified["likely_causes"] == result["likely_causes"], classified
     finally:
         service.close()
     assert not coordination_record_states(config) & {"cleanup_required", "quarantined", "recovery_pending"}

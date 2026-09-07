@@ -33,6 +33,7 @@ import socket
 import stat
 import threading
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -163,6 +164,19 @@ class DeviceBusyError(RuntimeError):
 
     def __init__(self, result: JsonObject):
         super().__init__(str(result.get("summary", "Physical device is held by another owner.")))
+        self.result = result
+
+
+class DeviceWaitStoppedError(RuntimeError):
+    """The wait for a held device ended because the waiting run was asked to stop.
+
+    Not a busy refusal, though it is raised from the same loop: the device may
+    well have come free a moment later. The run was asked to end, and a run
+    that holds nothing yet ends by taking nothing, which is what the result
+    says: stopped, before any step, with nothing to release."""
+
+    def __init__(self, result: JsonObject):
+        super().__init__(str(result.get("summary", "The wait for a physical device was stopped on request.")))
         self.result = result
 
 
@@ -352,13 +366,20 @@ class BenchMutex:
         with self._guard:
             return resource in self._held
 
-    def acquire(self, resources: list[str] | tuple[str, ...], *, wait_s: float = 0.0) -> list[str]:
+    def acquire(self, resources: list[str] | tuple[str, ...], *, wait_s: float = 0.0, stop_requested: Callable[[], bool] | None = None) -> list[str]:
         """Hold every named physical device, or hold none of them.
 
         Returns the resources this call newly took (an already-held device
         contributes nothing). Raises DeviceBusyError naming the holder, which is
         the whole point: silent waiting hides a collision, so a wait happens only
-        when the caller asked for one and it is bounded."""
+        when the caller asked for one and it is bounded.
+
+        ``stop_requested`` is asked on every turn of the wait, and a wait it
+        answers yes to ends at once with DeviceWaitStoppedError, everything this
+        call had taken given back. It is how a run that is still waiting for its
+        devices hears the cooperative stop: without it the stop file was read
+        only between steps, and a run granted a long wait for a held bench had
+        no step to be between for the whole of that wait."""
         wanted = physical_resources(resources)
         if not wanted:
             return []
@@ -367,7 +388,7 @@ class BenchMutex:
             taken: list[str] = []
             try:
                 for resource in wanted:
-                    if self._take(resource, deadline):
+                    if self._take(resource, deadline, stop_requested):
                         taken.append(resource)
             except BaseException:
                 for resource in reversed(taken):
@@ -485,7 +506,7 @@ class BenchMutex:
             result["waited_s"] = round(waited_s, 3)
         return result
 
-    def _take(self, resource: str, deadline: float) -> bool:
+    def _take(self, resource: str, deadline: float, stop_requested: Callable[[], bool] | None = None) -> bool:
         held = self._held.get(resource)
         if held is not None:
             held.holders += 1
@@ -497,6 +518,24 @@ class BenchMutex:
                 lock.acquire()
                 break
             except (BlockingIOError, OSError) as error:
+                # Asked before the deadline is judged: a run told to stop while
+                # it waits is a stopped run, whether or not the wait was about
+                # to run out, and the answer must not depend on which came
+                # first by a poll interval.
+                if stop_requested is not None and stop_requested():
+                    raise DeviceWaitStoppedError(
+                        {
+                            "ok": False,
+                            "error_type": "run_stopped",
+                            "stopped": True,
+                            "stopped_after_step": 0,
+                            "summary": f"A stop was requested while this run waited for {resource}, so it ended before taking any device.",
+                            "resource": resource,
+                            "waited_s": round(time.monotonic() - started, 3),
+                            "retry_safe": True,
+                            "side_effect_committed": False,
+                        }
+                    ) from error
                 if time.monotonic() >= deadline:
                     result = self.busy_result(resource, waited_s=time.monotonic() - started)
                     if isinstance(error, OSError) and not isinstance(error, BlockingIOError):

@@ -22,11 +22,12 @@ import time
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from agentic_hil.config import load_config
 from agentic_hil.tools import AgenticHILToolService
 
-from .conftest import COMMAND_TIMEOUT_S, CONTAINER_ONLY
+from .conftest import COMMAND_TIMEOUT_S, CONTAINER_ONLY, coordination_record_states
 
 pytestmark = [pytest.mark.container, CONTAINER_ONLY]
 
@@ -38,7 +39,14 @@ RECORDED_NO_PROBE_FOR_UID = "No connected debug probe matches unique ID 'NOSUCHP
 # its probe drivers) is nowhere near it, short enough that a run which waits it
 # out is a failure and not a slow job. The bound the refusal is held to is half
 # of it.
-TIMEOUT_S = 10
+#
+# Measured rather than guessed, and raised from 10 because the guess was too
+# close: that start-up took 8.5 s in this image on a loaded machine, which is
+# past the old half-of-it bound and near enough to the old timeout that the
+# refusal would have been reaped as one. A timeout is the failure this file
+# exists to tell apart from a refusal, so a machine's load must not be able to
+# manufacture it here.
+TIMEOUT_S = 40
 
 
 def real_pyocd() -> str:
@@ -101,14 +109,6 @@ logs:
         encoding="utf-8",
     )
     return config_path
-
-
-def blocking_record_states(config) -> set[str]:
-    records = Path(config.state_root) / "coordination" / "records"
-    if not records.is_dir():
-        return set()
-    states = {json.loads(path.read_text(encoding="utf-8")).get("state") for path in records.glob("*.json")}
-    return {state for state in states if isinstance(state, str)} & {"cleanup_required", "quarantined", "recovery_pending"}
 
 
 def test_the_installed_pyocd_still_refuses_with_the_sentences_the_fixture_recorded(tmp_path: Path) -> None:
@@ -183,9 +183,68 @@ def test_a_tool_with_no_probe_attached_refuses_promptly_against_the_real_pyocd(t
     assert result["hardware_state"] == "unchanged", result
     assert result.get("cleanup_required") is not True, result
     assert result.get("quarantine_id") is None, result
-    assert not blocking_record_states(config), blocking_record_states(config)
-    assert elapsed_s < TIMEOUT_S / 2, (elapsed_s, result)
+    states = coordination_record_states(config.state_root)
+    assert states, "the run wrote no coordination record at all, so nothing here says a lease was taken and given back"
+    assert set(states) == {"released"}, states
+    assert elapsed_s < scaled_time_bound(TIMEOUT_S / 2), (elapsed_s, result)
     log = json.loads((project / result["log_path"]).read_text(encoding="utf-8"))
     assert log["timed_out"] is False, log
     assert "-W" in log["command"].split() or "--no-wait" in log["command"].split(), log["command"]
     assert log["stdout"] == RECORDED_NO_PROBE, log
+
+
+# ---------------------------------------------------------------------------
+# #509: the wording behind `target_type_invalid`, on the one leg that has pyOCD.
+#
+# tests/test_pyocd_unknown_target_phrases.py holds the classifier's two markers
+# against the installed pyOCD's own refusal, and it `importorskip`s pyOCD, so
+# the hosted matrix has to install the extra for those markers to be pinned
+# anywhere the matrix runs. What that file cannot say is what the sentence was
+# when the fixture was written: it asserts the markers, not the words. That is
+# what belongs here, where a real pyOCD is guaranteed, and it is the only thing
+# added, because a second copy of the markers would be a second copy of a fact
+# that has one owner. The refusal itself is made by that file's helper, imported
+# rather than restated for the same reason. The `target_type_invalid`
+# classification is what unlocks the `pyocd pack find` / `pyocd pack install`
+# remediation; an earlier phrase list matched nothing pyOCD printed and every
+# such failure fell to `unknown_debugger_error`.
+
+# Not a plausible near-miss of a real part: unresolvable on any host, including
+# one whose CMSIS-pack cache is full of vendor targets.
+UNRESOLVABLE_TARGET_TYPE = "agentic_hil_no_such_target_type"
+# pyOCD 0.45.1, 2026-09-06, in this image: `Board(Session(None, ...))` with
+# this target override. The unit fixture (tests/fixtures/fake_pyocd_unknown_target.py)
+# wraps the same sentence in the log prefix and suffix the command line adds.
+RECORDED_UNKNOWN_TARGET = (
+    f"Target type {UNRESOLVABLE_TARGET_TYPE} not recognized. Use 'pyocd list --targets' to see currently "
+    "available target types. See <https://pyocd.io/docs/target_support.html> for how to install additional "
+    "target support."
+)
+STALE_RECORDING = "the sentence in tests/fixtures/fake_pyocd_unknown_target.py is stale: take it again from this image and note the version and the date"
+
+
+def test_the_installed_pyocd_refuses_an_unknown_target_with_the_sentence_the_fixture_reproduces(tmp_path: Path) -> None:
+    """The words, the fixture's copy of them, and what the classifier makes of them.
+
+    The markers themselves belong to tests/test_pyocd_unknown_target_phrases.py,
+    which the hosted matrix runs against a real pyOCD; the helper that produces
+    the refusal is that file's, imported here so the two tiers ask the tool the
+    same question. What is added here is the recording: the sentence as it read
+    when the unit fake was written, so a reworded release is a failure that
+    names the file to re record rather than a fake drifting away from the tool
+    it stands in for.
+    """
+    from fixtures.fake_pyocd_unknown_target import TARGET_NOT_RECOGNIZED
+    from test_pyocd_unknown_target_phrases import real_pyocd_refusal
+
+    from agentic_hil.backends.pyocd import PyOCDBackend
+
+    message = real_pyocd_refusal(UNRESOLVABLE_TARGET_TYPE)
+
+    assert message == RECORDED_UNKNOWN_TARGET, STALE_RECORDING
+    assert TARGET_NOT_RECOGNIZED.format(target=UNRESOLVABLE_TARGET_TYPE) == f"0001042 C {message} [__main__]", STALE_RECORDING
+
+    project = tmp_path / "project"
+    project.mkdir()
+    config = load_config(str(pyocd_configuration(project, tmp_path / "config" / "config.yaml", tmp_path / "state")))
+    assert PyOCDBackend(config)._classify_output(f"0001042 C {message} [__main__]", "flash_firmware") == "target_type_invalid"

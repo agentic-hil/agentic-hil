@@ -14,7 +14,7 @@ Use STM32 Nucleo-F446RE + ST-Link + OpenOCD + Python 3.10 or newer as the suppor
 
 ## Development
 
-- Install: `python -m pip install -e '.[dev,can]'`
+- Install: `python -m pip install -e '.[dev,can,pyocd]'`
 - Lint: `ruff check src tests evals tools`
 - Test: `pytest`
 - Test on all cores: `pytest -n auto`, about five times faster than the single process (a minute and a half against seven and a half on fourteen cores). Not the default, so a bare `pytest` still runs one process. Nothing is marked serial; what a new test has to keep true for that to stay so is in CONTRIBUTING.md under "Running the suite on all cores".

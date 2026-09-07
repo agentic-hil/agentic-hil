@@ -774,12 +774,16 @@ def test_the_session_writes_an_event_log_in_the_order_things_happened(pty_pair: 
 def test_a_device_that_vanishes_under_a_session_ends_the_reader_as_a_failed_read_and_a_fresh_device_opens_again(pty_pair: PtyPair, tmp_path: Path) -> None:
     """`serial_read_failed`: socat is killed under an open session, and the slave with it.
 
-    pyserial's read on a hung-up terminal returns nothing while the device
-    reported readiness, which it raises as a disconnect; the reader records
-    that as its error, the session is no longer active, and `com_read` says
-    so with the reader's error nested rather than answering a quiet empty
-    read. The stop still confirms, and a fresh pair behind the same
-    configured link opens again, so the failed session held nothing back.
+    pyserial has two sentences for a hung-up terminal: a read that returns
+    nothing while the device reported readiness, which it raises as a
+    disconnect, and the kernel's `Input/output error` on the slave of a pair
+    whose other end is gone. Which one the reader meets depends on whether
+    its read lands before or after the close reaches the device, so the test
+    accepts either; what it pins is what follows. The reader records the
+    error, the session is no longer active, and `com_read` says so with the
+    reader's error nested rather than answering a quiet empty read. The stop
+    still confirms, and a fresh pair behind the same configured link opens
+    again, so the failed session held nothing back.
     """
     project, config, _state = a_project(tmp_path, pty_pair)
     responder = start_responder(pty_pair, tmp_path, PING_PONG)
@@ -799,7 +803,8 @@ def test_a_device_that_vanishes_under_a_session_ends_the_reader_as_a_failed_read
         assert failed["ok"] is False, failed
         assert failed["error_type"] == "session_not_active", failed
         assert failed["reader_error"]["error_type"] == "serial_read_failed", failed
-        assert "returned no data" in failed["reader_error"]["backend_error"], failed
+        backend_error = failed["reader_error"]["backend_error"]
+        assert "returned no data" in backend_error or "Input/output error" in backend_error, failed
         assert "Start it again" in failed["summary"], failed
 
         listed = server.call("com_ports_list")["ports"][PORT]

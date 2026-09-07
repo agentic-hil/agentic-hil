@@ -19,6 +19,7 @@ where the interpreter or the daemon is missing, and say what would have run it.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -27,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -188,9 +190,25 @@ def _both_code() -> dict[str, str]:
 
 
 def _posix_shell() -> str:
+    """The `sh` these tests drive the scripts with: the shell itself, never Git for Windows' launcher.
+
+    Git for Windows puts two programs named `sh.exe` on a machine. The one under
+    `usr/bin` is the shell. The one under `bin` is a launcher that starts it
+    after prepending Git's own `/mingw64/bin` and `/usr/bin` to whatever PATH it
+    was handed, so a test that hands it a PATH holding a stand-in `curl` has its
+    stand-in shadowed by the real one, and the fetch-route tests then download
+    the real installer from the network and run it. Which of the two
+    `shutil.which` finds is a matter of PATH order and differs between machines;
+    where it finds the launcher, the shell beside it is what runs.
+    """
     found = shutil.which("sh")
     if found is None:
         pytest.skip("no POSIX sh on this machine; Git Bash provides one on Windows")
+    launcher = Path(found)
+    if os.name == "nt" and launcher.parent.name.lower() == "bin" and launcher.parent.parent.name.lower() != "usr":
+        shell = launcher.parent.parent / "usr" / "bin" / "sh.exe"
+        if shell.is_file():
+            return str(shell)
     return found
 
 
@@ -1134,12 +1152,21 @@ def _machine_whose_only_python_is(tmp_path: Path, python_body: str) -> tuple[dic
     return env, project, marker, uv_log, fetched
 
 
+# What a plain system interpreter answers when it is asked where it lives: the
+# same path for both of its prefixes. That equality is what tells a virtual
+# environment apart from an interpreter that is not in one, and it is what pip
+# itself reads before it refuses a `--user` install, so every stub below carries
+# an answer for it. The three here answer as the interpreter in `/usr/bin` does;
+# the fourth, further down, answers as a venv's does.
+_PLAIN_PREFIXES = "  *base_prefix*) printf '%s\\n%s\\n' /usr /usr; exit 0 ;;\n  *prefix*) printf '%s\\n' /usr; exit 0 ;;\n"
+
 # A python3 that answers the version probe and then has no pip at all: the
 # default state of a Debian or Ubuntu server without python3-pip, and of most
 # minimal container images.
 _PYTHON_WITHOUT_PIP = (
     'case "$*" in\n'
     "  *version_info*) exit 0 ;;\n"
+    f"{_PLAIN_PREFIXES}"
     "esac\n"
     'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
     '  echo "/usr/bin/python3: No module named pip" >&2\n'
@@ -1153,6 +1180,7 @@ _PYTHON_WITHOUT_PIP = (
 _PYTHON_EXTERNALLY_MANAGED = (
     'case "$*" in\n'
     "  *version_info*) exit 0 ;;\n"
+    f"{_PLAIN_PREFIXES}"
     '  *"pip --version"*) echo "pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)"; exit 0 ;;\n'
     '  *"pip install"*) echo "error: externally-managed-environment" >&2; exit 1 ;;\n'
     "esac\n"
@@ -1164,6 +1192,7 @@ _PYTHON_EXTERNALLY_MANAGED = (
 _PYTHON_WITH_A_FAILING_PIP = (
     'case "$*" in\n'
     "  *version_info*) exit 0 ;;\n"
+    f"{_PLAIN_PREFIXES}"
     '  *"pip --version"*) echo "pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)"; exit 0 ;;\n'
     '  *"pip install"*) echo "ERROR: Could not find a version that satisfies the requirement agentic-hil"; exit 1 ;;\n'
     "esac\n"
@@ -2242,8 +2271,10 @@ def test_both_scripts_merge_the_recorded_extras_into_a_uv_refresh() -> None:
     does not lose it. The PowerShell side has no interpreter in every checkout, so
     this static check is its regression guard: it reads uv's receipt, builds the
     merged spec plus the recorded `--with` arguments, and hands them to
-    `tool install --reinstall` rather than reinstalling the bare name through
-    `tool upgrade` when the receipt is there.
+    `tool install` rather than reinstalling the bare name through `tool upgrade`
+    when the receipt is there. The reinstall flag is what the arm decides, and
+    it is passed as its own value so that reading the record is not something
+    only one arm does.
     """
     shell = _code_only(_shell_source())
     powershell = _code_only(_powershell_source())
@@ -2251,10 +2282,10 @@ def test_both_scripts_merge_the_recorded_extras_into_a_uv_refresh() -> None:
     # Both read the requirement uv recorded, from the receipt beside the tool env.
     assert "uv-receipt.toml" in shell, shell
     assert "uv-receipt.toml" in powershell, powershell
-    # Both build the merged requirement and reinstall from it under --reinstall,
-    # with the recorded --with requirements replayed after it.
-    assert re.search(r'tool install --upgrade --reinstall "\$\(refresh_spec .*\$with_flags', shell), shell
-    assert re.search(r"'tool', 'install', '--upgrade', '--reinstall', \(Get-RefreshSpec", powershell), powershell
+    # Both build the merged requirement and install from it, with the arm's
+    # reinstall flag ahead of it and the recorded --with requirements after it.
+    assert re.search(r'tool install --upgrade \$uv_reinstall "\$\(refresh_spec .*\$with_flags', shell), shell
+    assert re.search(r"'tool', 'install', '--upgrade'\) \+ \$reinstall \+ @\(\(Get-RefreshSpec", powershell), powershell
     assert re.search(r"foreach \(\$recordedWith in \$recorded\.Withs\).*'--with', \$recordedWith", powershell), powershell
     # Both read the whole recorded requirement set, not just the first object, so a
     # multiline receipt's --with requirements are seen.
@@ -4165,10 +4196,837 @@ def test_the_powershell_fetch_route_leaves_the_users_registry_path_untouched(tmp
     assert transcript.count("[Environment]::SetEnvironmentVariable('Path'") == 1, transcript
 
 
+# The one agent CLI this suite may start a process for, and how long it lingers.
+# `opencode` rather than `claude` or `codex`: the machine running these tests
+# plausibly has one of those two open, and a matcher that read the real one
+# would make the test report on somebody's session instead of on its own child.
+STEP_FIVE_AGENT = "opencode"
+# Long enough that the child cannot die inside the run it was planted for. Step 5
+# is the last thing the script does, and on a contended host the four steps ahead
+# of it take longer than any figure written down here on its own would allow, so
+# the lifetime is derived from the ceiling the run itself is held to rather than
+# chosen a second time. A child that goes first leaves step 5 reading a table
+# without it and answering that no agent CLI is running, which is the one
+# sentence these two tests exist to tell apart.
+LINGER_S = SCRIPT_TIMEOUT_S + 60
+# The machine's process table is the one thing the two tests below share, and
+# they are the only tests in this suite that share anything. Step 5 reads the
+# whole of it, which is its job: an operator's agent CLI is wherever they
+# started it, and a scan narrowed to the test's own directory would be a scan
+# the real thing could hide from. So the test that plants a node process named
+# like an agent CLI and the test that asserts none is running cannot run at the
+# same time, or the second one reads the first one's child and is told a restart
+# is required. One group name, written here once and carried by every party, and
+# `--dist loadgroup` in pyproject.toml's addopts, which is what makes a group
+# stay on one worker.
+STEP_FIVE_PROCESS_TABLE_GROUP = "install-step-five-process-table"
+
+
+def _a_node_shaped_interpreter(into: Path) -> Path:
+    """A `node.exe` that is really this interpreter, so a real process can wear npm's shape.
+
+    An npm-installed agent CLI is a JavaScript file run by node: the process's
+    own name is `node`, and the only place the CLI's name appears is the
+    command line. There is no node in this repository's tooling and no npm
+    install to make one with, and none is needed for what step 5 has to read.
+    This interpreter under that name, running a file named for the CLI,
+    produces exactly the pair `Get-Process -Name opencode` cannot see: a
+    process called node whose command line names opencode.
+
+    The copy is taken from the base interpreter and not from `sys.executable`.
+    A virtual environment's `python.exe` on Windows is a launcher that starts
+    the interpreter its `home` names with the very same command line, so a copy
+    of it puts two processes in the table for one child, both carrying the
+    argument this test asks about and only one of them the PID it holds. The
+    real interpreter starts once.
+
+    A Windows python.exe carried off on its own finds neither its runtime nor
+    its home and exits 106 before it runs a line, so the DLLs beside it come
+    along and a `pyvenv.cfg` naming the interpreter it was copied from is
+    written next to it. Without that file there is no process at all, and every
+    assertion below would be about a table that never held one.
+    """
+    into.mkdir(parents=True, exist_ok=True)
+    beside = Path(sys.base_prefix)
+    node = into / "node.exe"
+    shutil.copy2(beside / "python.exe", node)
+    for library in beside.glob("*.dll"):
+        shutil.copy2(library, into / library.name)
+    (into / "pyvenv.cfg").write_text(
+        f"home = {beside}\ninclude-system-site-packages = false\n",
+        encoding="utf-8",
+    )
+    return node
+
+
+def _a_process_that_lingers(node: Path, script: Path, *arguments: str) -> subprocess.Popen[bytes]:
+    """One real child, asserted to be running before anything is asked about it.
+
+    A child that died on the way up would leave the process table empty and
+    every branch of step 5 answering the calm sentence, which is the answer
+    this test exists to disbelieve.
+
+    `arguments` go on the command line after the script, which is how a
+    caller puts an agent CLI's name somewhere on a stranger's line without
+    that line being the CLI.
+    """
+    script.write_text(f"import time\n\ntime.sleep({LINGER_S})\n", encoding="utf-8")
+    started = subprocess.Popen([str(node), str(script), *arguments], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    assert started.poll() is None, f"{node.name} {script.name} exited with {started.returncode} before the install ran"
+    return started
+
+
+@WINDOWS_ONLY
+@pytest.mark.xdist_group(STEP_FIVE_PROCESS_TABLE_GROUP)
+def test_step_five_names_the_npm_installed_agent_cli_and_not_the_node_beside_it(tmp_path: Path) -> None:
+    """install.ps1's restart block against the real process table, with a real pair of children.
+
+    `Get-Process -Name opencode` answers nothing for an npm installation,
+    because the process Windows knows is `node`, and step 5 then told an
+    operator with the CLI open in front of them that nothing needed restarting.
+    The MCP registration it just wrote is read at session start, so that
+    operator's next question reaches a session that never loaded it.
+
+    Two processes run for this: one node whose command line names the CLI, and
+    one node running something else entirely, with the CLI's name sitting in
+    an argument of its own. The first has to be named with its PID, and the
+    second may not appear at all, because a block that names a stranger's
+    process is worse than one that names nothing: it asks an operator to quit
+    whatever else they had running. The name in that argument is what says the
+    match is on the program being run and not on the words on the line.
+
+    Everything the run touches is this test's own: its home, its manager bin,
+    its tool directory and its two children, and this machine's own
+    installation is nowhere on the PATH the script is handed.
+    """
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes="99.0.0")
+    # Step 4 registers for whichever CLIs resolve, and step 5 reports on those
+    # alone, so the bench's claude is taken off and the one CLI is opencode.
+    (bench.early_bin / "claude.cmd").unlink()
+    (bench.early_bin / f"{STEP_FIVE_AGENT}.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+    node = _a_node_shaped_interpreter(tmp_path / "npm" / "node_modules" / ".bin")
+    # Every child that starts is registered before the next one is attempted, so
+    # a second planting that fails cannot leave the first one alive. The other
+    # test in this group asserts that no agent CLI is running and follows this
+    # one on the same worker, and a survivor here is a process it would find.
+    children: list[subprocess.Popen[bytes]] = []
+
+    try:
+        started = _a_process_that_lingers(node, node.parent / f"{STEP_FIVE_AGENT}.js")
+        children.append(started)
+        unrelated = _a_process_that_lingers(node, node.parent / "some-other-tool.js", "--report", STEP_FIVE_AGENT)
+        children.append(unrelated)
+        result, transcript = bench.run("--no-can", manager_bin_on_path=False)
+        # Read before the kill below, and asserted after it: a child that exited
+        # during the run leaves step 5 with nothing to find, and the calm
+        # sentence it then prints is correct about the table it read. That is a
+        # failure of the planting, not of the block, and it says so here rather
+        # than arriving as the assertion about RESTART REQUIRED.
+        outlived_the_run = (started.poll(), unrelated.poll())
+    finally:
+        for child in children:
+            child.kill()
+            child.wait(timeout=SCRIPT_TIMEOUT_S)
+
+    assert outlived_the_run == (None, None), f"a planted child exited before step 5 read the process table: {outlived_the_run}\n{transcript}"
+    assert result.returncode == 0, transcript
+    assert f"registering the skill and the MCP server for {STEP_FIVE_AGENT}" in transcript, transcript
+    assert "RESTART REQUIRED" in transcript, transcript
+    assert f"{STEP_FIVE_AGENT} is running right now (PID {started.pid})" in transcript, transcript
+    assert "no agent CLI of yours is running" not in transcript, transcript
+    # The other node is a process of somebody else's, and nothing in the block
+    # may point at it.
+    assert f"PID {unrelated.pid}" not in transcript, transcript
+    assert "some-other-tool" not in transcript, transcript
+
+
+@WINDOWS_ONLY
+@pytest.mark.xdist_group(STEP_FIVE_PROCESS_TABLE_GROUP)
+def test_step_five_says_there_is_nothing_to_restart_when_only_an_unrelated_node_runs(tmp_path: Path) -> None:
+    """The other direction, which is what a command-line matcher can get wrong.
+
+    Once the matcher stops asking for a process called `opencode` and starts
+    reading argument lists, every node on the machine is a candidate. An
+    operator with a build watcher running and no agent CLI open must still be
+    told there is nothing to restart, or the block means nothing the next time
+    it does name something.
+
+    The watcher here carries the CLI's own name in an argument, which is the
+    case a matcher that reads the line without anchoring the name to the
+    program gets wrong: `--report opencode` is not opencode running.
+    """
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes="99.0.0")
+    (bench.early_bin / "claude.cmd").unlink()
+    (bench.early_bin / f"{STEP_FIVE_AGENT}.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+    node = _a_node_shaped_interpreter(tmp_path / "npm" / "node_modules" / ".bin")
+    unrelated = _a_process_that_lingers(node, node.parent / "some-other-tool.js", "--report", STEP_FIVE_AGENT)
+
+    try:
+        result, transcript = bench.run("--no-can", manager_bin_on_path=False)
+        # This test would pass on an empty table for the wrong reason, so the
+        # watcher has to have been there for the whole run as well.
+        outlived_the_run = unrelated.poll()
+    finally:
+        unrelated.kill()
+        unrelated.wait(timeout=SCRIPT_TIMEOUT_S)
+
+    assert outlived_the_run is None, f"the planted watcher exited before step 5 read the process table: {outlived_the_run}\n{transcript}"
+    assert result.returncode == 0, transcript
+    assert f"registering the skill and the MCP server for {STEP_FIVE_AGENT}" in transcript, transcript
+    assert "restart: no agent CLI of yours is running, so there is nothing to restart" in transcript, transcript
+    assert "RESTART REQUIRED" not in transcript, transcript
+
+
 # What this harness does not reach, so nobody reads the tests above as reaching
 # it: the `irm ... | iex` form (the script arrives here as a file, and a script
-# read from a pipe binds its parameters differently); the PEP 668 and no-pip
-# fallbacks, which reach Install-Uv and so the network; and step 5's restart
-# block, which reads the real process table for a running claude, codex or
-# opencode. The fetch route is reached by the last test alone, on a hosted
-# runner, because the installer it runs edits the registry of whoever runs it.
+# read from a pipe binds its parameters differently); and the PEP 668 and no-pip
+# fallbacks, which reach Install-Uv and so the network. Step 5's restart block
+# is reached by the two tests above, against the real process table and two real
+# children of this test's own. The fetch route is reached by one test alone, on
+# a hosted runner, because the installer it runs edits the registry of whoever
+# runs it.
+
+
+# ---------------------------------------------------------------------------
+# The routes and refusals no run had executed (#507): step 2 on a machine with
+# nothing, its fetch failure, the digest abort against the real hashing tools,
+# the virtualenv interpreter, step 4 with no agent CLI, and the spellings the
+# PowerShell script refused.
+
+
+def _uv_that_installs_a_stub(path: Path, *, marker: Path | None = None, version: str = "9.9.9") -> None:
+    """A `uv` that answers `tool dir --bin` and writes a stub `agentic-hil` on `tool install`.
+
+    The stub answers `--version` and accepts `agent-install`, recording the
+    agent it was asked for in `marker` where one is given. The manager is not
+    what the tests below are about; step 2 has to end for steps 3 to 5 to run.
+    """
+    record = f'echo "\\$3" >> "{marker}"; ' if marker is not None else ""
+    _stub_executable(
+        path,
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        '  if [ "$3" = "--bin" ]; then echo "$UV_TOOL_BIN_DIR"; else echo "$UV_TOOL_ROOT"; fi\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "list" ]; then echo "No tools installed"; exit 0; fi\n'
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        '  cat > "$UV_TOOL_BIN_DIR/agentic-hil" <<STUB\n'
+        "#!/bin/sh\n"
+        'case "\\$1" in\n'
+        f'  --version) echo "{version}" ;;\n'
+        f"  agent-install) {record}echo registered ;;\n"
+        "esac\n"
+        "exit 0\n"
+        "STUB\n"
+        '  chmod +x "$UV_TOOL_BIN_DIR/agentic-hil"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+    )
+
+
+def _shell_run(env: dict[str, str], project: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [_posix_shell(), str(SHELL_SCRIPT), *arguments],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=SCRIPT_TIMEOUT_S,
+        check=False,
+    )
+
+
+# The interpreter a shell with a virtual environment activated resolves
+# `python3` to: new enough, with a pip, and that pip refusing `--user` with the
+# sentence pip 26.1.2 wrote on 2026-09-06 inside a venv made by this suite's own
+# interpreter (`python -m venv`, then `pip install --user --no-index
+# agentic-hil`).
+#
+# The prefixes are answered the way a venv's interpreter answers them, and out
+# of nothing but the two names asked for: `sys.prefix` is the environment,
+# `sys.base_prefix` is the interpreter it was made from, and they differ. The
+# stub never reads `$VIRTUAL_ENV`, because the shell exports that only for an
+# activated environment while pip refuses in both cases, so a stub keyed on it
+# would answer this question for the script instead of asking it.
+PIP_USER_REFUSAL_IN_A_VIRTUALENV = "ERROR: Can not perform a '--user' install. User site-packages are not visible in this virtualenv."
+
+
+def _python_in_a_virtualenv(prefix: Path, base_prefix: Path) -> str:
+    return (
+        'case "$*" in\n'
+        "  *version_info*) exit 0 ;;\n"
+        f"  *base_prefix*) printf '%s\\n%s\\n' '{prefix}' '{base_prefix}'; exit 0 ;;\n"
+        f"  *prefix*) printf '%s\\n' '{prefix}'; exit 0 ;;\n"
+        f'  *"pip --version"*) echo "pip 26.1.2 from {prefix}/lib/python3.13/site-packages/pip (python 3.13)"; exit 0 ;;\n'
+        f'  *"pip install"*) echo "{PIP_USER_REFUSAL_IN_A_VIRTUALENV}" >&2; exit 1 ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+
+
+@pytest.mark.parametrize("activated", [True, False], ids=["with-virtual-env-exported", "with-nothing-in-the-environment"])
+def test_an_activated_virtualenv_falls_back_to_uv_on_pips_user_refusal(tmp_path: Path, activated: bool) -> None:
+    """The one-liner pasted into a shell with a venv activated, run end to end.
+
+    `find_python` accepts the venv's interpreter, `install_with_pip` meets
+    pip's refusal, and the run used to end on `pip could not install` with
+    uv one pinned fetch away. The step 2 line has to say which interpreter is
+    a virtual environment's and that uv takes over, and the run has to end the
+    way the no-pip and PEP 668 runs end: with the package installed by uv.
+    The real pip inside a real venv is driven in the container tier; this is
+    the same refusal from a stand-in that says what pip said.
+
+    Run twice over: once with `VIRTUAL_ENV` exported, which is the activated
+    shell, and once with nothing of the sort in the environment, which is a
+    PATH that reaches a venv's `bin` for some other reason (a wrapper script, a
+    Makefile, a `direnv` that edited PATH alone). pip refuses in both, because
+    what it reads is the interpreter's own prefixes, so a script that answered
+    the question out of `$VIRTUAL_ENV` would still end the second run on the
+    refusal.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    venv = tmp_path / "venv"
+    env, project, marker, uv_log, fetched = _machine_whose_only_python_is(tmp_path, _python_in_a_virtualenv(venv, tmp_path / "base"))
+    if activated:
+        env["VIRTUAL_ENV"] = str(venv)
+    result = _install_on(env, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert "pip could not install" not in transcript, transcript
+    lines = transcript.splitlines()
+    starts = [index for index, line in enumerate(lines) if "step 2/" in line]
+    ends = [index for index, line in enumerate(lines) if "step 3/" in line]
+    assert starts, transcript
+    step_two = "\n".join(lines[starts[0] : ends[0] if ends else None])
+    assert re.search(r"virtual ?env", step_two, re.IGNORECASE), transcript
+    assert "python3" in step_two, transcript
+    assert "falling back to uv" in step_two, transcript
+    assert fetched.is_file(), transcript
+    assert "tool install" in (uv_log.read_text(encoding="utf-8") if uv_log.is_file() else ""), transcript
+    assert marker.read_text(encoding="utf-8").strip() == "uv", transcript
+
+
+def test_a_machine_with_neither_uv_nor_a_new_python_stops_at_step_two_naming_it(tmp_path: Path) -> None:
+    """TROUBLESHOOTING section 1a, run: the step 2 line, the stop on the fetch, and the rerun that picks up.
+
+    No uv, every `python3`, `python` and `py` too old, and a `curl` that
+    exits 6 (could not resolve host, the code curl gives an unreachable
+    astral.sh). The script says `no uv and no Python 3.10 or newer here`,
+    fails on the fetch, installs nothing, and exits non-zero. Then uv appears
+    on PATH, and the same line continues past step 2, which is the
+    idempotence the section promises.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    home = tmp_path / "home"
+    project = home / "project"
+    early_bin = tmp_path / "early-bin"
+    later_bin = tmp_path / "later-bin"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    for directory in (project, early_bin, later_bin, uv_bin):
+        directory.mkdir(parents=True)
+    for too_old in ("python3", "python", "py"):
+        _stub_executable(early_bin / too_old, "exit 1\n")
+    _stub_executable(early_bin / "curl", 'echo "curl: (6) Could not resolve host: astral.sh" >&2\nexit 6\n')
+    env = {"HOME": str(home), "PATH": f"{early_bin}:/usr/bin:/bin", "UV_TOOL_BIN_DIR": str(uv_bin)}
+    assert shutil.which("uv", path=env["PATH"]) is None
+
+    stopped = _shell_run(env, project, "--no-agent-install", "--no-can")
+
+    transcript = f"{stopped.stdout}{stopped.stderr}"
+    assert stopped.returncode != 0, transcript
+    assert re.search(r"step 2/\d+ +package: no uv and no Python 3\.10 or newer here, fetching Astral's uv installer first", transcript), transcript
+    assert "could not fetch the uv installer" in transcript, transcript
+    assert "step 3/" not in transcript, transcript
+    assert not (home / ".local" / "bin").exists(), transcript
+    assert not (uv_bin / "agentic-hil").exists(), transcript
+
+    _uv_that_installs_a_stub(later_bin / "uv")
+    resumed = _shell_run({**env, "PATH": f"{later_bin}:{env['PATH']}"}, project, "--no-agent-install", "--no-can")
+
+    transcript = f"{resumed.stdout}{resumed.stderr}"
+    assert resumed.returncode == 0, transcript
+    assert "no uv and no Python" not in transcript, transcript
+    assert "uv is here, installing" in transcript, transcript
+    assert "step 3/" in transcript, transcript
+    assert (uv_bin / "agentic-hil").is_file(), transcript
+
+
+def test_no_agent_cli_on_path_prints_the_agent_install_line_and_writes_nothing(tmp_path: Path) -> None:
+    """README's promise for a host with no claude, codex or opencode: say so, print the line, write nothing.
+
+    The line is the literal one README.md and TROUBLESHOOTING.md quote, and
+    the three files an agent-install would write are checked for absence
+    under the sandboxed HOME, because "nothing of an agent's was written" is
+    a claim about the disk.
+    """
+    if os.name != "posix":
+        pytest.skip("the shell install flow is exercised on the POSIX half")
+
+    home = tmp_path / "home"
+    project = home / "project"
+    tools = tmp_path / "tools"
+    uv_bin = tmp_path / "uv-tools" / "bin"
+    for directory in (project, tools, uv_bin):
+        directory.mkdir(parents=True)
+    marker = tmp_path / "agent-install-was-run"
+    _uv_that_installs_a_stub(tools / "uv", marker=marker)
+    path = f"{tools}:/usr/bin:/bin"
+    for cli in ("claude", "codex", "opencode"):
+        assert shutil.which(cli, path=path) is None, f"{cli} resolves on {path}, so this is not the host the test is about"
+
+    result = _shell_run({"HOME": str(home), "PATH": path, "UV_TOOL_BIN_DIR": str(uv_bin)}, project)
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, transcript
+    assert re.search(r"step 4/\d+ +agent: no claude, codex or opencode CLI on this PATH, so nothing of an agent's was written", transcript), transcript
+    assert "\n    agentic-hil agent-install --agent <claude-code|codex|opencode>\n" in transcript, transcript
+    assert not marker.exists(), transcript
+    for written in (home / ".claude.json", home / ".codex" / "config.toml", home / ".config" / "opencode" / "opencode.json"):
+        assert not written.exists(), f"{written} was written:\n{transcript}"
+    assert "nothing to restart" in transcript, transcript
+
+
+# The hashing tools install.sh reaches for, in the order it tries them, and
+# the recorded shape of one line each, taken on 2026-09-06 from the tools the
+# suite ran against (GNU coreutils 8.32 sha256sum, Perl Digest::SHA shasum
+# 6.04, OpenSSL 3.5.7): the first two print the digest first, openssl last.
+#
+#     sha256sum:  <64 hex>  <file>
+#     shasum:     <64 hex>  <file>
+#     openssl:    SHA2-256(<file>)= <64 hex>
+HASHING_TOOLS = ("sha256sum", "shasum", "openssl")
+
+# What the fetch route needs from the machine before it reaches the digest
+# check, besides the hashing tool under test and the stand-in curl.
+_FETCH_ROUTE_TOOLS = ("mktemp", "rm", "cat", "head", "tr", "sed", "awk", "grep", "cut", "sort", "uname", "dirname", "basename", "id", "ls", "mkdir", "chmod", "cp", "mv", "touch", "wc", "env", "date", "expr", "tail", "readlink", "stat", "perl")
+
+
+def _real_tool(name: str) -> str | None:
+    """Where this host keeps `name`: beside the POSIX shell under `core_perl` for the Perl `shasum`, else on PATH.
+
+    Git for Windows keeps its Perl scripts one directory down from the shell,
+    where its own PATH reaches them and the Python process's does not. On
+    Windows that copy comes first, before whatever PATH finds, because a
+    `shasum.bat` there (Strawberry Perl installs one, and the hosted Windows
+    runners carry it) is run by cmd.exe and starts `perl` by name, which cmd.exe
+    looks for on the PATH these tests hand the script, where the stand-in
+    `perl` is a shell script it cannot start. The script beside the shell names
+    its interpreter on its first line by a path the shell resolves itself. A
+    batch wrapper found anywhere is not a tool for these tests, for the same
+    reason.
+    """
+    if os.name == "nt" and shutil.which("sh") is not None:
+        beside = Path(_posix_shell()).parent / "core_perl" / name
+        if beside.is_file():
+            return str(beside)
+    found = shutil.which(name)
+    if found is None or Path(found).suffix.lower() in {".bat", ".cmd"}:
+        return None
+    return found
+
+
+def _path_exposing_only(tmp_path: Path, hashing_tool: str) -> Path:
+    """A PATH directory of wrappers around the real tools, with the other two hashing tools absent.
+
+    A wrapper rather than a symlink, because the tools are run by absolute
+    path from wherever this host keeps them, and a hard link or a copy of a
+    program that needs the libraries beside it would not start. `command -v`
+    finds an executable file, so hiding a tool means a PATH on which it is not
+    there at all.
+    """
+    directory = tmp_path / f"only-{hashing_tool}"
+    directory.mkdir()
+    for name in (*_FETCH_ROUTE_TOOLS, hashing_tool):
+        real = _real_tool(name)
+        if real is None:
+            continue
+        _stub_executable(directory / name, f'exec "{Path(real).as_posix()}" "$@"\n')
+    for hidden in HASHING_TOOLS:
+        if hidden != hashing_tool:
+            assert shutil.which(hidden, path=str(directory)) is None, hidden
+    return directory
+
+
+@pytest.mark.parametrize("hashing_tool", HASHING_TOOLS)
+def test_a_substituted_installer_is_refused_with_the_digest_the_real_hashing_tool_computed(tmp_path: Path, hashing_tool: str) -> None:
+    """A fetched installer that is not the pinned bytes: refused, with the found digest, and never run.
+
+    `sha256_of` parses three tools' output, and every other fetch-route test
+    plants a `sha256sum` that answers the pinned digest for any file, so the
+    mismatch had never been reached and the `shasum` and `openssl` branches,
+    which is every Mac and every minimal image without coreutils, had never
+    run at all. Here the real tool hashes a payload of this test's own, the
+    `found` line has to carry the digest hashlib computes for the same bytes,
+    and the payload's marker has to be absent, which is the rule that the
+    bytes are not executed.
+    """
+    if _real_tool(hashing_tool) is None:
+        pytest.skip(f"{hashing_tool} is not on this machine")
+    home = tmp_path / "home"
+    project = home / "project"
+    project.mkdir(parents=True)
+    marker = tmp_path / "the-substituted-installer-ran"
+    payload = tmp_path / "payload.sh"
+    payload.write_bytes(f"#!/bin/sh\ntouch '{marker.as_posix()}'\n".encode())
+    expected_found = hashlib.sha256(payload.read_bytes()).hexdigest()
+    pinned = SHELL_UV_SHA256.search(_shell_source())
+    assert pinned is not None
+    assert expected_found != pinned.group(1)
+    exposed = _path_exposing_only(tmp_path, hashing_tool)
+    _stub_executable(
+        exposed / "curl",
+        'out=""\n'
+        'while [ $# -gt 0 ]; do\n'
+        '  if [ "$1" = "-o" ]; then out="$2"; fi\n'
+        "  shift\n"
+        "done\n"
+        '[ -n "$out" ] || exit 1\n'
+        f'cp "{payload.as_posix()}" "$out"\n'
+        "exit 0\n",
+    )
+
+    result = _shell_run({"HOME": str(home), "PATH": str(exposed)}, project, "--no-agent-install", "--no-can")
+
+    transcript = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 1, transcript
+    assert "the pinned uv installer does not match its recorded hash, so it was not run." in transcript, transcript
+    assert f"expected {pinned.group(1)}" in transcript, transcript
+    assert f"found    {expected_found}" in transcript, transcript
+    assert "the pin in this script may be stale" in transcript, transcript
+    assert not marker.exists(), f"the substituted installer was executed:\n{transcript}"
+    assert not (home / ".local").exists(), transcript
+
+
+# uv's receipt for a tool installed with `--python <absolute path>` on Windows,
+# recorded with uv 0.12.10 on 2026-09-06: the interpreter is a TOML literal
+# string (single quotes, backslashes kept as they are) at the `[tool]` level,
+# and never a version number. Every path in the receipt is written by that
+# same rule, the entrypoint's included, which is why both are quoted alike
+# here. The paths are redacted to neutral ones of the same shape.
+_RECEIPT_WITH_A_WINDOWS_INTERPRETER = (
+    "[tool]\n"
+    "requirements = [\n"
+    '    { name = "agentic-hil", extras = ["can"] },\n'
+    '    { name = "pytest", specifier = "==8.3.5" },\n'
+    "]\n"
+    "python = 'C:\\Python313\\python.exe'\n"
+    "entrypoints = [\n"
+    "    { name = \"agentic-hil\", install-path = 'C:\\x\\bin\\agentic-hil.exe', from = \"agentic-hil\" },\n"
+    "]\n"
+)
+
+
+def test_the_powershell_receipt_reader_reads_the_literal_string_uv_writes_for_a_windows_interpreter(tmp_path: Path) -> None:
+    """The recorded shape of the key, which the reader's regex (double quotes only) never matched.
+
+    A path with backslashes is written by uv as a literal string, so every
+    Windows receipt with a recorded interpreter carries single quotes, and a
+    reader that reads only `python = "..."` replays nothing: the reinstall
+    runs without `--python`, real uv drops the key, and the operator's
+    interpreter is forgotten with nothing said. The `--with` beside it is the
+    other half of the same record and has to survive on the same line.
+    """
+    invocations, said = _run_powershell_uv_refresh(tmp_path, _RECEIPT_WITH_A_WINDOWS_INTERPRETER)
+
+    reinstalls = _reinstall_lines(invocations)
+    assert len(reinstalls) == 1, invocations
+    assert "--python C:\\Python313\\python.exe" in reinstalls[0], invocations
+    assert "--with pytest==8.3.5" in reinstalls[0], invocations
+    assert "tool upgrade" not in invocations, invocations
+    assert "the receipt records the interpreter C:\\Python313\\python.exe, so the reinstall keeps it" in said, said
+
+
+@WINDOWS_ONLY
+def test_the_powershell_installer_accepts_the_equals_spellings_the_shell_installer_accepts(tmp_path: Path) -> None:
+    """`--agent=<name>` and `--version=<x>` bind the way `--agent <name>` and `--version <x>` do.
+
+    Both spellings are documented for install.sh and both are accepted there;
+    Windows PowerShell 5.1 binds only the two-token form and put the other in
+    `$Rest`, where the script called it an unknown option and exited 2.
+    """
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes=release)
+
+    result, transcript = bench.run("--agent=claude-code", "--no-agent-install", "--no-can")
+
+    assert "unknown option" not in transcript, transcript
+    assert result.returncode == 0, transcript
+    assert "--no-agent-install was given" in transcript, transcript
+
+    pinned, transcript = bench.run(f"--version={release}", "--no-agent-install", "--no-can")
+
+    assert "unknown option" not in transcript, transcript
+    assert pinned.returncode == 0, transcript
+    assert f"--version {release} was asked for" in transcript, transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_step_four_with_no_agent_cli_prints_the_agent_install_line_and_writes_nothing(tmp_path: Path) -> None:
+    """The shell test of the same name, on the script Windows runs."""
+    release = _powershell_release()
+    bench = _WindowsBench(tmp_path, installed=None, manager_writes=release)
+    (bench.early_bin / "claude.cmd").unlink()
+
+    result, transcript = bench.run("--no-can")
+
+    assert result.returncode == 0, transcript
+    assert re.search(r"step 4/\d+ +agent: no claude, codex or opencode CLI on this PATH, so nothing of an agent's was written", transcript), transcript
+    assert "    agentic-hil agent-install --agent <claude-code|codex|opencode>" in transcript, transcript
+    assert not bench.marker.exists(), transcript
+    for written in (bench.home / ".claude.json", bench.home / ".codex" / "config.toml"):
+        assert not written.exists(), f"{written} was written:\n{transcript}"
+    assert "nothing to restart" in transcript, transcript
+
+
+# ---------------------------------------------------------------------------
+# install.ps1 against the real uv, on this Windows machine, in an isolated tool
+# directory. Every PowerShell claim above is made against a stub manager; these
+# are the runs the pin on that script had no evidence for: the fresh install,
+# the refresh over it, and the interpreter uv recorded surviving the refresh.
+# uv comes from its own wheel on the package index, unpacked into the session's
+# scratch space, and never from this machine's PATH; the tool directory, the
+# bin, the cache and the home are the test's own.
+
+
+def _receipt_document(path: Path) -> dict:
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - only a 3.10 collection reaches this
+        import tomli as tomllib  # type: ignore[no-redef]
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="session")
+def real_uv_on_windows(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """`uv.exe` out of the uv wheel the index serves, once per session.
+
+    The two tests that take this fixture are the only ones in this file that
+    reach the world, and everything they are about (the receipt real uv writes,
+    the branch install.ps1 takes over it) needs the real manager. So this fetch
+    is also the canary: a machine with no index, which is every offline run of
+    the suite's own gate, skips here the way the Docker tests skip when the
+    daemon does not answer, rather than failing for a reason that is nothing to
+    do with the code.
+    """
+    if os.name != "nt":
+        pytest.skip("install.ps1 runs under Windows PowerShell 5.1, which exists on Windows alone")
+    into = tmp_path_factory.mktemp("real-uv")
+    downloaded = subprocess.run(
+        [sys.executable, "-m", "pip", "download", "--quiet", "--disable-pip-version-check", "--no-deps", "--only-binary=:all:", "--dest", str(into), "uv"],
+        capture_output=True,
+        text=True,
+        timeout=CONTAINER_TIMEOUT_S,
+        check=False,
+    )
+    if downloaded.returncode != 0:
+        pytest.skip(f"the index did not serve the uv wheel, so the real manager is not available here: {downloaded.stderr.strip().splitlines()[-1] if downloaded.stderr.strip() else downloaded.returncode}")
+    wheels = sorted(into.glob("uv-*.whl"))
+    assert len(wheels) == 1, wheels
+    with zipfile.ZipFile(wheels[0]) as wheel:
+        members = [name for name in wheel.namelist() if name.endswith("/scripts/uv.exe")]
+        assert len(members) == 1, wheel.namelist()
+        (into / "bin").mkdir()
+        (into / "bin" / "uv.exe").write_bytes(wheel.read(members[0]))
+    return into / "bin"
+
+
+@pytest.fixture(scope="session")
+def real_uv_cache(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return tmp_path_factory.mktemp("real-uv-cache")
+
+
+class _RealUvWindowsBench:
+    """The `_WindowsBench` directories with the real uv on PATH instead of a stub, and no agent CLI."""
+
+    def __init__(self, tmp_path: Path, uv_bin: Path, cache: Path) -> None:
+        self.bench = _WindowsBench(tmp_path, installed=None, manager_writes=None, uv=False)
+        (self.bench.early_bin / "claude.cmd").unlink()
+        self.uv_bin = uv_bin
+        self.cache = cache
+        self.python_installs = tmp_path / "uv-python"
+
+    @property
+    def tool_bin(self) -> Path:
+        return self.bench.uv_bin
+
+    @property
+    def receipt(self) -> Path:
+        return self.bench.uv_tools / "agentic-hil" / "uv-receipt.toml"
+
+    def environment(self, *, tool_bin_on_path: bool) -> dict[str, str]:
+        environment = self.bench.environment(manager_bin_on_path=False, UV_CACHE_DIR=str(self.cache), UV_PYTHON_INSTALL_DIR=str(self.python_installs))
+        ahead = [str(self.uv_bin), *([str(self.tool_bin)] if tool_bin_on_path else [])]
+        environment["PATH"] = os.pathsep.join([*ahead, environment["PATH"]])
+        return environment
+
+    def uv(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(self.uv_bin / "uv.exe"), *arguments], capture_output=True, text=True, env=self.environment(tool_bin_on_path=False), timeout=CONTAINER_TIMEOUT_S, check=False)
+
+    def run(self, *arguments: str, tool_bin_on_path: bool) -> tuple[subprocess.CompletedProcess[str], str]:
+        result = subprocess.run(
+            [_windows_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(POWERSHELL_SCRIPT), *arguments],
+            cwd=str(self.bench.project),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=self.environment(tool_bin_on_path=tool_bin_on_path),
+            timeout=CONTAINER_TIMEOUT_S,
+            check=False,
+        )
+        return result, f"{result.stdout}{result.stderr}"
+
+    def installed_version(self) -> str:
+        return self.bench.version_in(self.tool_bin)
+
+
+@WINDOWS_ONLY
+def test_the_powershell_installer_installs_refreshes_and_binds_every_flag_spelling_with_the_real_uv(tmp_path: Path, real_uv_on_windows: Path, real_uv_cache: Path) -> None:
+    """install.ps1 end to end, three times, against the real uv and the real index.
+
+    Fresh: no tool, its bin not on PATH, so the run installs and prints the
+    one line that adds the bin. Refresh: the bin on PATH, no `--no-can`, so
+    the run is a refresh through the receipt and the receipt gains `can`; the
+    version stays, so the closing sentence is the kept one. Then the
+    `--agent=<name>` spelling, over the installed tool, accepted the way
+    install.sh accepts it.
+    """
+    bench = _RealUvWindowsBench(tmp_path, real_uv_on_windows, real_uv_cache)
+    release = _powershell_release()
+
+    fresh, transcript = bench.run("--no-agent-install", "--no-can", tool_bin_on_path=False)
+
+    assert fresh.returncode == 0, transcript
+    assert "no agentic-hil on this PATH, installing it user-local" in transcript, transcript
+    assert "uv is here, installing agentic-hil user-local with uv tool install" in transcript, transcript
+    assert f"agentic-hil landed in {bench.tool_bin}, which is not on your PATH" in transcript, transcript
+    assert "[Environment]::SetEnvironmentVariable('Path'" in transcript, transcript
+    assert bench.receipt.is_file(), transcript
+    document = _receipt_document(bench.receipt)
+    assert document["tool"]["requirements"][0].get("extras", []) == [], document
+    installed = bench.installed_version()
+    assert installed, transcript
+    assert CALM_LINE in transcript, transcript
+
+    refreshed, transcript = bench.run("--no-agent-install", tool_bin_on_path=True)
+
+    assert refreshed.returncode == 0, transcript
+    # Which branch step 1 takes is decided by what the index served against the
+    # number this checkout stamps, and in the window between a release commit
+    # and PyPI publishing it the answer is the other branch. That window is
+    # documented and tested elsewhere in this file, and it is not what this run
+    # is about, so it is skipped rather than read as a failure.
+    if "refreshing this current installation" not in transcript:
+        pytest.skip(f"the index served {installed} while this checkout stamps {release}, so this run met the release window and not the refresh branch")
+    assert f"agentic-hil {installed} is here and not older than" in transcript, transcript
+    assert f"agentic-hil is installed in {bench.tool_bin}, already on your PATH" in transcript, transcript
+    document = _receipt_document(bench.receipt)
+    assert document["tool"]["requirements"][0].get("extras") == ["can"], document
+    assert bench.installed_version() == installed, transcript
+    assert f"This installation stayed at {installed}, {KEPT_CURRENT_TAIL}" in transcript, transcript
+
+    spelled, transcript = bench.run("--agent=claude-code", "--no-agent-install", tool_bin_on_path=True)
+
+    assert "unknown option" not in transcript, transcript
+    assert spelled.returncode == 0, transcript
+    assert "--no-agent-install was given" in transcript, transcript
+
+
+@WINDOWS_ONLY
+def test_the_powershell_refresh_keeps_the_interpreter_the_real_uv_recorded(tmp_path: Path, real_uv_on_windows: Path, real_uv_cache: Path) -> None:
+    """`uv tool install --python <absolute path>`, then install.ps1 over it, then the receipt read back.
+
+    The container tier makes this claim for install.sh on Linux, where uv
+    writes the path as a basic string. On Windows the path has backslashes and
+    uv writes a literal string, which is the shape the reader missed, so the
+    claim is made here, on the script Windows runs, against the receipt the
+    real uv writes. After the refresh the receipt still names the interpreter
+    and the transcript says it was kept.
+    """
+    bench = _RealUvWindowsBench(tmp_path, real_uv_on_windows, real_uv_cache)
+    interpreter = Path(sys.base_prefix) / "python.exe"
+    assert interpreter.is_file(), interpreter
+    installed = bench.uv("tool", "install", "--python", str(interpreter), "agentic-hil")
+    assert installed.returncode == 0, f"{installed.stdout}\n{installed.stderr}"
+    before = _receipt_document(bench.receipt)
+    assert before["tool"]["python"] == str(interpreter), before
+
+    refreshed, transcript = bench.run("--no-agent-install", "--no-can", tool_bin_on_path=True)
+
+    assert refreshed.returncode == 0, transcript
+    assert "refreshing this current installation" in transcript, transcript
+    assert f"the receipt records the interpreter {interpreter}, so the reinstall keeps it" in transcript, transcript
+    after = _receipt_document(bench.receipt)
+    assert after["tool"].get("python") == str(interpreter), after
+    assert "python" not in after["tool"].get("options", {}), after
+
+
+# ---------------------------------------------------------------------------
+# What docs/installation.md tells an operator to expect from `agentic-hil
+# upgrade`. The page is the one the installers and the README send a reader to,
+# and its account of the two no-op outcomes was written before #450 and #459
+# decided them the other way. The code's answer is the one that stands here,
+# because those issues settled it and the two other pages already say it.
+
+
+UPGRADE_SECTION_HEADING = "## Upgrading"
+
+
+def _installation_page_section(heading: str) -> str:
+    """One `##` section of docs/installation.md, from its heading to the next one."""
+    text = (REPOSITORY_ROOT / "docs" / "installation.md").read_text(encoding="utf-8")
+    start = text.index(heading)
+    after = text.find("\n## ", start + len(heading))
+    return text[start : after if after != -1 else len(text)]
+
+
+def test_the_installation_page_describes_the_upgrade_outcomes_the_code_produces() -> None:
+    """The page says two refusals where the code has two successes, and no restart where it asks for one.
+
+    Since #450 an installation that is already at the newest release and one
+    the manager holds at the release it is running both exit 0 and carry
+    `already_current`, and since #459 `restart_required` on either is true
+    while a server started out of this installation is still up: nothing was
+    replaced, so that process answers with whatever was on disk when it
+    started. The page still says the two are refusals and that neither asks
+    for a restart, which is the one place an operator would learn to read
+    exit 0 as unexpected and to skip the restart the result asked for.
+
+    So the section may not carry the old sentence, and it has to name the two
+    fields by which the outcome is actually read.
+    """
+    section = _installation_page_section(UPGRADE_SECTION_HEADING)
+
+    for withdrawn in ("two separate refusals", "neither asks for a restart", "there would be nothing new to load"):
+        assert withdrawn not in section, f"docs/installation.md still says {withdrawn!r}:\n{section}"
+    assert "already_current" in section, section
+    assert "restart_required" in section, section
+    assert re.search(r"exits? 0", section), section
+    # The condition that makes the restart true is what the sentence has to
+    # carry: a server that was already running is the whole of it.
+    assert re.search(r"server[^.]*running|running[^.]*server", section), section
+
+
+def test_the_two_pages_that_already_describe_the_restart_keep_describing_it() -> None:
+    """The neighbours that must not change, so the correction lands on the stale page.
+
+    TROUBLESHOOTING.md and AI_AGENT_QUICKSTART.md were written after #450 and
+    #459 and carry the account the code produces. A change that made all three
+    agree by taking the restart out of these two would agree with nothing the
+    code does.
+    """
+    for page in (REPOSITORY_ROOT / "TROUBLESHOOTING.md", REPOSITORY_ROOT / "AI_AGENT_QUICKSTART.md"):
+        text = page.read_text(encoding="utf-8")
+        assert "already_current" in text, page
+        assert "restart_required" in text, page
+        assert "two separate refusals" not in text, page
+        assert "neither asks for a restart" not in text, page

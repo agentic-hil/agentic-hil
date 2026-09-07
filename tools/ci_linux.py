@@ -138,8 +138,15 @@ if [ ! -f pyproject.toml ]; then
 fi
 """
 
+# `pyocd` alongside `dev` and `can` because the suite asks the installed pyOCD
+# what it says: tests/test_pyocd_unknown_target_phrases.py drives pyOCD's own
+# code to produce the refusal the `target_type_invalid` classification is
+# matched on, and that classification is the only thing that unlocks the CMSIS
+# pack remediation. Without the extra the file skips itself and a release that
+# rewords the refusal goes unnoticed; an `importorskip` is only a test on a run
+# that installed the library.
 SCRIPT = CLONE_SCRIPT + """
-pip install -q -e '.[dev,can]'
+pip install -q -e '.[dev,can,pyocd]'
 exec python -m pytest "$@"
 """
 # `bash -c` takes the word after the script as `$0`, not as `$1`. It is only a

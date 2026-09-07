@@ -36,6 +36,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -48,6 +49,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from support import scaled_time_bound
 
 from agentic_hil.can import IP_COMMAND_PATHS
 
@@ -598,7 +600,7 @@ def test_a_read_on_a_quiet_bus_waits_the_asked_time_and_no_longer_than_the_bus_t
         # loose enough not to flake on a loaded runner where a pipe round trip
         # and two JSON encodings sit on top of the wait.
         assert waited >= 1.0, f"a read asked to wait 1.0s came back after only {waited:.2f}s"
-        assert waited < BUS_TIMEOUT_S + WAIT_SLACK_S, f"a read asked to wait 1.0s waited {waited:.2f}s, past the bus timeout"
+        assert waited < scaled_time_bound(BUS_TIMEOUT_S + WAIT_SLACK_S), f"a read asked to wait 1.0s waited {waited:.2f}s, past the bus timeout"
 
         began = time.monotonic()
         capped = server.call("can_read", {"bus_id": "bus", "wait_timeout_s": 30.0})
@@ -608,7 +610,7 @@ def test_a_read_on_a_quiet_bus_waits_the_asked_time_and_no_longer_than_the_bus_t
         # least that long and nothing like the 30s it was told. The upper bound is
         # generous for the same reason as above, not a second product property.
         assert waited >= BUS_TIMEOUT_S, f"a read asked to wait 30s on a bus with timeout_s {BUS_TIMEOUT_S} came back after only {waited:.2f}s"
-        assert waited < BUS_TIMEOUT_S + WAIT_SLACK_S + 2.0, f"a read asked to wait 30s on a bus with timeout_s {BUS_TIMEOUT_S} waited {waited:.2f}s, nowhere near capped"
+        assert waited < scaled_time_bound(BUS_TIMEOUT_S + WAIT_SLACK_S + 2.0), f"a read asked to wait 30s on a bus with timeout_s {BUS_TIMEOUT_S} waited {waited:.2f}s, nowhere near capped"
 
 
 # ---------------------------------------------------------------------------
@@ -666,6 +668,11 @@ def test_listen_only_is_refused_on_a_virtual_interface_and_the_send_gate_answers
         assert sent["listen_only"] is True, sent
         assert sent["listen_only_enforcement"] == "link_verified", sent
         assert sent["side_effect_committed"] is False and sent["retry_safe"] is False, sent
+        # Over the real kernel too, the mode refusal names the bus and the entry
+        # that declared it rather than a serial or debugger log (#523).
+        mode_causes = sent["likely_causes"]
+        assert mode_causes and not any("COM port" in cause or "debugger" in cause for cause in mode_causes), sent
+        assert any("listen_only" in cause for cause in mode_causes), sent
         assert a_frame_at_the_far_end(peer, timeout_s=1.0) is None, "a refused send put a frame on the interface"
 
 
@@ -699,50 +706,104 @@ def test_a_channel_that_names_no_interface_is_refused_as_not_found_and_leaves_th
         assert started["ok"] is True, started
 
 
-def test_a_session_on_an_interface_that_is_down_shows_the_two_current_answers_neither_naming_the_down_link(tmp_path: Path, vcan_down: str) -> None:
-    """A characterisation of what a down interface answers today, pending the issue this behaviour is recorded under.
+def assert_refused_as_down(refused: dict, *, bus_id: str, channel: str, adapter: str) -> None:
+    """Every field the decided refusal carries (#511)."""
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "can_interface_down", refused
+    assert refused["tool"] == "can_session_start", refused
+    assert refused["bus_id"] == bus_id, refused
+    assert refused["adapter"] == adapter, refused
+    assert refused["field"] == f"can_buses.{bus_id}.channel", refused
+    assert refused["channel"] == channel, refused
+    assert refused["interface_state"] == "down", refused
+    assert channel in refused["summary"] and "down" in refused["summary"], refused
+    assert refused["target_contacted"] is False, refused
+    assert refused["side_effect_committed"] is False, refused
+    assert refused["side_effect_status"] == "not_started", refused
+    assert refused["retry_safe"] is True, refused
+    assert refused["quarantined"] is False, refused
+    assert refused.get("cleanup_required") is not True, refused
+    assert "quarantine_guidance" not in refused, refused
+    assert refused["lease_state"] == "released", refused
+    assert re.search(r"sudo ip link set \S+ up", refused["remediation"][0]), refused["remediation"]
+    assert f"ip link set {channel} up" in json.dumps(refused), refused
+    assert any("recover --confirm-safe-state" in step for step in refused["do_not"]), refused
 
-    The kernel lets a CAN_RAW socket bind an interface that exists and is down,
-    and then answers a receive with ENETDOWN and a send with the same. So the
-    product's two answers, recorded here against the real kernel, are both wrong
-    for the reason the wave report records, and neither names a down link:
 
-    * with the default `clear_rx_queue`, the socket opens, the pre-session drain
-      fails on the ENETDOWN receive, and the start is refused as
-      `can_queue_clear_failed`, "the adapter was closed", which names the drain
-      and not the link;
-    * with `clear_rx_queue: false`, the start reports `ok` and "CAN bus session
-      started." over a link that cannot carry a frame.
+def test_a_session_on_an_interface_that_is_down_is_refused_before_contact_for_both_clear_rx_queue_values(tmp_path: Path, vcan_down: str) -> None:
+    """A link that exists and is down is refused as `can_interface_down` before the socket is opened (#511).
 
-    This test pins that behaviour so the tier exercises the down link through the
-    real kernel and so the fix, when the shape is decided, changes a test that
-    was measuring the wrong answers. It deliberately asserts no `can_interface_down`
-    contract: no issue or owner decision names one yet, and the wave rule is that
-    a test encodes decided behaviour, not an author's proposal. The report field
-    that a fix would add is the missing one: neither answer carries a `channel` naming the
-    interface that is down.
+    The kernel lets a CAN_RAW socket bind an interface that is administratively
+    down and answers a receive and a send with ENETDOWN, so the two answers this
+    replaces were `can_queue_clear_failed` naming the drain (default
+    `clear_rx_queue`) and `ok` over a link that carries nothing
+    (`clear_rx_queue: false`); neither carried a `channel`, and neither told the
+    operator to bring the link up. Now the state is read before the socket is
+    opened (the IFF_UP flag; `operstate` reads `unknown` on an up vcan and is
+    not the signal), both values of `clear_rx_queue` get the one refusal, the
+    listing shows no session behind it, and once `ip link set up` brought the
+    interface up the same entry opens the ordinary way on the same server.
     """
     project, config = can_project(tmp_path, bus_entry("bus", vcan_down))
 
     with live_server(project, config) as server:
-        default = server.call("can_session_start", {"bus_id": "bus"})
-        assert default["ok"] is False, default
-        assert default["error_type"] == "can_queue_clear_failed", default
-        assert "Network is down" in json.dumps(default), default
-        assert default["quarantined"] is False and default["lease_state"] == "released", default
-        assert "channel" not in default, default
-        assert server.call("can_buses_list")["buses"]["bus"]["session_active"] is False
+        for arguments in ({"bus_id": "bus"}, {"bus_id": "bus", "clear_rx_queue": False}):
+            refused = server.call("can_session_start", arguments)
+            assert_refused_as_down(refused, bus_id="bus", channel=vcan_down, adapter="socketcan")
+            assert "Network is down" not in json.dumps(refused), "the refusal was decided by the drain, not by the link state"
+            assert server.call("can_buses_list")["buses"]["bus"]["session_active"] is False
 
-        no_drain = server.call("can_session_start", {"bus_id": "bus", "clear_rx_queue": False})
-        assert no_drain["ok"] is True, no_drain
-        assert no_drain["summary"] == "CAN bus session started.", no_drain
-        assert "channel" not in no_drain, no_drain
-        assert server.call("can_session_stop", {"bus_id": "bus"})["ok"] is True
-
-        # Brought up, the same entry opens the ordinary way.
+        # Brought up, the same entry opens the ordinary way, with no restart.
         assert ip_link("set", "up", vcan_down).returncode == 0
         started = server.call("can_session_start", {"bus_id": "bus"})
         assert started["ok"] is True, started
+        assert started["summary"] == "CAN bus session started.", started
+        assert server.call("can_buses_list")["buses"]["bus"]["session_active"] is True
+        assert server.call("can_session_stop", {"bus_id": "bus"})["ok"] is True
+
+
+def test_a_peak_bus_on_a_down_netdev_meets_the_same_refusal_under_its_own_adapter_name(tmp_path: Path, vcan_down: str) -> None:
+    """The `peak` netdev channels route through socketcan and reach the state read too."""
+    project, config = can_project(tmp_path, bus_entry("bus", vcan_down, adapter="peak"))
+
+    with live_server(project, config) as server:
+        refused = server.call("can_session_start", {"bus_id": "bus"})
+        assert_refused_as_down(refused, bus_id="bus", channel=vcan_down, adapter="peak")
+
+        assert ip_link("set", "up", vcan_down).returncode == 0
+        started = server.call("can_session_start", {"bus_id": "bus"})
+        assert started["ok"] is True, started
+        assert server.call("can_session_stop", {"bus_id": "bus"})["ok"] is True
+
+
+def test_the_interface_state_the_product_reads_is_the_iff_up_flag_and_not_operstate(vcan_down: str) -> None:
+    """The state read, against the real kernel's sysfs.
+
+    Recorded in this image: a down vcan's `flags` reads `0x80` and its
+    `operstate` `down`; the same vcan after `ip link set up` reads `0x81` and
+    `operstate` `unknown`. So `operstate` cannot be the signal, and the read
+    answers `up` where it says `unknown`. A name with no netdev has no sysfs
+    entry and reads no state at all: only a proven down link refuses.
+
+    What the kernel publishes is read and asserted first, before the product's
+    seam is imported at all, so that this test states the recording the unit
+    tier's fake answers with even on the run where the seam does not exist yet.
+    """
+    flags = Path("/sys/class/net") / vcan_down / "flags"
+    operstate = Path("/sys/class/net") / vcan_down / "operstate"
+    down_flags, down_operstate = flags.read_text(encoding="utf-8"), operstate.read_text(encoding="utf-8")
+    assert ip_link("set", "up", vcan_down).returncode == 0
+    up_flags, up_operstate = flags.read_text(encoding="utf-8"), operstate.read_text(encoding="utf-8")
+    assert (down_flags, down_operstate) == ("0x80\n", "down\n"), (down_flags, down_operstate)
+    assert (up_flags, up_operstate) == ("0x81\n", "unknown\n"), (up_flags, up_operstate)
+    assert not (Path("/sys/class/net") / f"{vcan_down}x").exists()
+
+    from agentic_hil.can import socketcan_interface_state
+
+    assert socketcan_interface_state(vcan_down) == "up"
+    assert ip_link("set", "down", vcan_down).returncode == 0
+    assert socketcan_interface_state(vcan_down) == "down"
+    assert socketcan_interface_state(f"{vcan_down}x") is None
 
 
 def test_a_link_taken_down_under_a_session_fails_the_send_as_an_unknown_effect_that_ends_with_the_call(tmp_path: Path, vcan: str) -> None:
@@ -770,6 +831,11 @@ def test_a_link_taken_down_under_a_session_fails_the_send_as_an_unknown_effect_t
         assert failed["cleanup_reasons"] == ["can_effect_unconfirmed"], failed
         assert failed["incident_stood_down"]["stood_down"] is True, failed
         assert failed["quarantined"] is False, failed
+        # Over the real kernel too, the send failure names causes about the bus
+        # rather than falling through to a serial or debugger table (#517).
+        causes = failed["likely_causes"]
+        assert causes and not any("COM port" in cause or "debugger" in cause for cause in causes), failed
+        assert any(("bus" in cause or "adapter" in cause or "interface" in cause or "node" in cause) for cause in causes), failed
 
         read = server.call("can_read", {"bus_id": "bus", "wait_timeout_s": 0.0})
         assert read["ok"] is True and read["lease_state"] == "active", read
@@ -797,6 +863,11 @@ def test_an_interface_deleted_under_a_session_fails_the_read_and_quarantines_not
         assert failed["retry_safe"] is True, failed
         assert failed["quarantined"] is False, failed
         assert failed["lease_state"] == "active", failed
+        # The failed read carries causes about the interface it was reading, on
+        # the real kernel as in the fakes (#523).
+        read_causes = failed["likely_causes"]
+        assert read_causes and not any("COM port" in cause or "debugger" in cause for cause in read_causes), failed
+        assert any(("interface" in cause or "link" in cause or "adapter" in cause or "bus" in cause) for cause in read_causes), failed
 
         stopped = server.call("can_session_stop", {"bus_id": "bus"})
         assert stopped["ok"] is True and stopped["was_active"] is True, stopped
@@ -1103,6 +1174,11 @@ def test_a_receive_queue_that_never_empties_is_the_clear_limit_and_the_lease_is_
         assert refused["cleanup_confirmed"] is True, refused
         assert refused["lease_state"] == "released", refused
         assert refused["quarantined"] is False, refused
+        # The clear limit is a fact about the traffic on this bus, and says so
+        # rather than sending the reader to another transport's log (#523).
+        limit_causes = refused["likely_causes"]
+        assert limit_causes and not any("COM port" in cause or "debugger" in cause for cause in limit_causes), refused
+        assert any(("bus" in cause or "queue" in cause or "frames" in cause or "traffic" in cause) for cause in limit_causes), refused
         assert server.call("can_buses_list")["buses"]["bus"]["session_active"] is False
 
 

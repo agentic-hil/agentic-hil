@@ -76,6 +76,13 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
     "probe_unconfirmed": "target_state_unconfirmed",
     "flash_unconfirmed": "flash_failed",
     "reset_unconfirmed": "reset_failed",
+    # The debugger failed and its output says no more than that. `debugger_error`
+    # is the name the debug-session path has always published for exactly that
+    # (`_start_failure` in gdbdebug), and a caller that reads one word for it in
+    # a failed session and another in a failed command has to learn two. The
+    # backend's own `unknown_debugger_error` travels beside it in
+    # `backend_error_type` for a reader at that layer (#506).
+    "unknown_debugger_error": "debugger_error",
 }
 
 # OpenOCD's own words for an erase it could not carry out: `flash_erase_address`
@@ -87,6 +94,17 @@ BACKEND_ERROR_TO_PUBLIC_ERROR = {
 # on a hope, and the broad flash bucket below is the honest answer until somebody
 # measures the next wording.
 OPENOCD_ERASE_FAILURE_MARKERS = ["failed erasing sectors"]
+
+# Which configured field an unfindable script came from. Both buckets publish
+# the same `debugger_config_not_found`, and the generic summary for it says only
+# that a configuration file could not be found; an operator reading that for a
+# missing target script goes and checks `interface_cfg`, which is the one key
+# that is right. The classification already knows which field's value OpenOCD
+# named, so the summary says it (#506).
+OPENOCD_CONFIG_FIELD_BY_BACKEND_ERROR = {
+    "interface_config_not_found": "interface_cfg",
+    "target_config_not_found": "target_cfg",
+}
 
 OPENOCD_DISABLE_TCP_SERVER_COMMANDS = ["gdb_port disabled", "tcl_port disabled", "telnet_port disabled"]
 # Each of these is `echo`ed by the command string *after* the one command the
@@ -677,7 +695,7 @@ class OpenOCDBackend:
         # line about whatever this run stopped at, including the `invalid command
         # name` its own interpreter answered with, and that line is what the
         # classification, the summary and the causes were all read out of.
-        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._summary_for_error(error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path), **programmer_output_fields(completed)}
+        result = {"ok": False, "tool": tool, "backend": self.backend_name, "started_at": started_at, "finished_at": finished_at, "elapsed_ms": elapsed_ms, "error_type": error_type, "backend_error_type": backend_error_type, "summary": self._failure_summary(backend_error_type, error_type), "likely_causes": self._likely_causes(error_type), **remediation_fields(error_type, self.backend_name), "log_path": display_path(self.config, log_path), **programmer_output_fields(completed)}
         if operation_result is not None:
             result["operation_result"] = operation_result
         if rejected_commands:
@@ -821,6 +839,21 @@ class OpenOCDBackend:
     def _public_error_type(self, backend_error_type: str) -> str:
         return BACKEND_ERROR_TO_PUBLIC_ERROR.get(backend_error_type, backend_error_type)
 
+    def _failure_summary(self, backend_error_type: str, error_type: str) -> str:
+        """The sentence for this failure, with the configured field named where one is known.
+
+        The two script buckets are the one case where the public error_type is
+        less specific than the classification behind it: both are
+        `debugger_config_not_found`, and the generic sentence for it sends a
+        reader to check "the configuration file" when this backend takes two.
+        The field whose value OpenOCD said it could not find is the first thing
+        the operator has to look at, so it is in the sentence rather than only in
+        `backend_error_type` (#506)."""
+        field = OPENOCD_CONFIG_FIELD_BY_BACKEND_ERROR.get(backend_error_type)
+        if field is None:
+            return self._summary_for_error(error_type)
+        return f"OpenOCD could not find the script `{field}` names ({getattr(self.config.debugger, field)})."
+
     def _summary_for_error(self, error_type: str) -> str:
         return {
             "debugger_not_found": "Debugger executable could not be found.",
@@ -834,7 +867,7 @@ class OpenOCDBackend:
             "reset_failed": "Debugger failed to reset the target.",
             "timeout": "Debugger command timed out.",
             "debugger_command_rejected": "OpenOCD refused the command before it opened the debug probe, so the target was not touched.",
-            "unknown_debugger_error": "Debugger failed with an unknown error.",
+            "debugger_error": "Debugger failed with an unknown error.",
         }.get(error_type, "Debugger failed with an unknown error.")
 
     def _likely_causes(self, error_type: str) -> list[str]:

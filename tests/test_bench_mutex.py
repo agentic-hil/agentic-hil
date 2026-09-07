@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 import yaml
 from conftest import write_config
-from support import PUBLISH_ATOMICALLY_SOURCE, publish_atomically, published, read_when_published
+from support import PUBLISH_ATOMICALLY_SOURCE, publish_atomically, published, read_when_published, scaled_time_bound
 from test_test_reactor import RecordingService
 
 from agentic_hil import bench as bench_module
@@ -434,6 +434,17 @@ def test_the_holder_record_names_the_device_it_belongs_to() -> None:
 # its own rather than on the accident of the next lease.
 
 
+# How old a live holder's heartbeat may read to a contender. The step here
+# takes two seconds and beats every interval, so a record written during it
+# is a few tenths of a second old; a record last written at `begin_run` is
+# the whole step old and fails this. The base is the claim and does not
+# move. What a loaded host adds on top of it comes from
+# `AGENTIC_HIL_TEST_TIME_SCALE` through `scaled_time_bound`, because a run
+# that read 1.324 s here had a perfectly live heartbeat and a busy machine
+# under it (#515).
+FRESH_HEARTBEAT_AGE_S = 1.0
+
+
 def _heartbeat_time(record: dict) -> datetime:
     return datetime.fromisoformat(str(record["heartbeat_at"]).replace("Z", "+00:00"))
 
@@ -502,7 +513,7 @@ def _assert_the_holder_read_as_live(before: dict, after: dict, refusal: dict) ->
     # it is pinned in the hung-holder test, not here.
     assert refusal["error_type"] == "device_busy"
     assert refusal["holder"]["label"] == "long-step"
-    assert refusal["heartbeat_age_s"] < 1.0, refusal
+    assert refusal["heartbeat_age_s"] < scaled_time_bound(FRESH_HEARTBEAT_AGE_S), refusal
     assert refusal.get("holder_heartbeat_stale") is not True, refusal
 
 
@@ -519,7 +530,7 @@ def test_a_live_run_in_a_long_delay_keeps_its_heartbeat_fresh(tmp_path: Path, mo
     assert run_refusal["error_type"] == "device_busy"
     assert run_refusal["holder"]["label"] == "long-step"
     assert _heartbeat_time(run_refusal) >= _heartbeat_time(after)
-    assert run_refusal["heartbeat_age_s"] < 1.0, run_refusal
+    assert run_refusal["heartbeat_age_s"] < scaled_time_bound(FRESH_HEARTBEAT_AGE_S), run_refusal
     assert run_refusal.get("holder_heartbeat_stale") is not True, run_refusal
 
 

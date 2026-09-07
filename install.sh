@@ -344,6 +344,34 @@ find_python() {
     return 1
 }
 
+# The prefix of the virtual environment this interpreter belongs to, printed
+# only when it belongs to one; a non-zero return says it does not.
+#
+# pip refuses `--user` inside a virtual environment, in the one sentence it has
+# for it ("User site-packages are not visible in this virtualenv"), because the
+# user site is not on that environment's path. A developer who activates a
+# project's environment and then pastes the one-liner has `python3` resolving
+# to that interpreter, so the run met that refusal and ended on `pip could not
+# install` with uv one pinned fetch away: the same shape the pip-less
+# interpreter above had, on a machine that is anything but broken.
+#
+# The question is put to the interpreter's own prefixes and not to
+# `$VIRTUAL_ENV`. A virtual environment's `sys.prefix` is the environment while
+# its `sys.base_prefix` stays the interpreter it was built from, and that is
+# what pip reads. The shell exports `VIRTUAL_ENV` only for an activated
+# environment, while a PATH that reaches such a bin for any other reason (a
+# wrapper script, a Makefile, a direnv that edited PATH alone) meets the same
+# refusal with nothing exported, so a script that answered out of the
+# environment would still end that run on it.
+python_virtualenv_prefix() {
+    venv_prefixes=$("$1" -c 'import sys; print(sys.prefix); print(sys.base_prefix)' 2>/dev/null) || return 1
+    venv_prefix=$(printf '%s\n' "$venv_prefixes" | sed -n '1p')
+    venv_base=$(printf '%s\n' "$venv_prefixes" | sed -n '2p')
+    [ -n "$venv_prefix" ] || return 1
+    [ "$venv_prefix" != "$venv_base" ] || return 1
+    printf '%s' "$venv_prefix"
+}
+
 # Can this interpreter run pip at all, asked before an install is attempted with
 # it rather than read out of the wreckage afterwards. Debian and Ubuntu ship
 # python3 with no pip module unless python3-pip is installed, and so do most
@@ -767,54 +795,64 @@ refresh_spec() {
 }
 
 install_with_uv() {
+    # --reinstall replaces the files even when the version already on disk is
+    # the one being asked for, which is the repair a rerun over an existing
+    # installation and a rerun at a named release both exist for. A first
+    # install has nothing to replace and passes none.
+    uv_reinstall=""
     case "$INSTALL_MODE" in
-        refresh)
-            if uv_manages_tool; then
-                # uv owns this tool. Reinstall from the requirement uv recorded
-                # merged with this run's extras: the recorded `[can,pyocd]`
-                # survives (a `tool install agentic-hil[can]` would drop pyocd)
-                # and a `--can` a bare recorded requirement never had is added (a
-                # `tool upgrade` would never add it). --reinstall replaces the
-                # files even when the recorded version is already current, which is
-                # the repair the anchor exists for. A recorded `--with` requirement
-                # is replayed as its own --with so the reinstall keeps it too; a bare
-                # `tool install agentic-hil[...]` would drop it. The interpreter
-                # uv recorded is replayed as --python for the same reason: a
-                # reinstall without it rewrites the receipt without the key, and
-                # the operator's choice is gone with nothing said. When uv keeps
-                # no readable receipt, or records a requirement this cannot
-                # rebuild without changing it, fall back to the upgrade that
-                # preserves whatever it did record rather than reinstalling from
-                # a set this could not read back in full.
-                if recorded=$(uv_recorded_requirements); then
-                    recorded_extras=$(printf '%s\n' "$recorded" | sed -n '1p')
-                    recorded_python=$(printf '%s\n' "$recorded" | sed -n '2p')
-                    with_flags=$(uv_with_flags "$recorded")
-                    if [ -n "$recorded_python" ]; then
-                        say "package: the receipt records the interpreter $recorded_python, so the reinstall keeps it"
-                    fi
-                    # Word-splitting on with_flags is intended: each replayed
-                    # requirement is a space-free PEP 508 string. The interpreter
-                    # is one argument whatever it holds, so it stays quoted.
-                    # shellcheck disable=SC2086
-                    run_uv tool install --upgrade --reinstall "$(refresh_spec "$recorded_extras")" $with_flags ${recorded_python:+--python "$recorded_python"}
-                else
-                    run_uv tool upgrade --reinstall agentic-hil
-                fi
-                return 0
-            fi
-            run_uv tool install --upgrade --reinstall "$(package_spec)"
-            ;;
-        pin)
-            # A named release sets the requirement outright, so it goes through
-            # install; --reinstall still forces the replacement even when the
-            # installed version already equals the pin.
-            run_uv tool install --upgrade --reinstall "$(package_spec)"
-            ;;
-        *)
-            run_uv tool install --upgrade "$(package_spec)"
-            ;;
+        refresh | pin) uv_reinstall="--reinstall" ;;
     esac
+    if uv_manages_tool; then
+        # uv owns this tool, whatever this run's arm is called. Reinstall from
+        # the requirement uv recorded merged with this run's extras: the
+        # recorded `[can,pyocd]` survives (a `tool install agentic-hil[can]`
+        # would drop pyocd) and a `--can` a bare recorded requirement never had
+        # is added (a `tool upgrade` would never add it). A recorded `--with`
+        # requirement is replayed as its own --with so the reinstall keeps it
+        # too; a bare `tool install agentic-hil[...]` would drop it. The
+        # interpreter uv recorded is replayed as --python for the same reason:
+        # a reinstall without it rewrites the receipt without the key, and the
+        # operator's choice is gone with nothing said.
+        #
+        # The arm decides the flags, not whether the record is read at all. The
+        # arm comes from what step 1 found on PATH and from whether a --version
+        # was named, and neither question is about what uv owns: a newcomer
+        # rerunning the one-liner from a shell whose PATH does not carry uv's
+        # bin yet takes the default arm, and an operator naming the release
+        # they already run takes the pin arm. Both used to hand uv this run's
+        # spec alone, and uv did as it was told: it recorded that requirement
+        # and uninstalled every extra and `--with` the receipt had beside it,
+        # with nothing in the transcript to say so.
+        #
+        # When uv keeps no readable receipt, or records a requirement this
+        # cannot rebuild without changing it, a rerun over an existing
+        # installation falls back to the upgrade that preserves whatever it did
+        # record rather than reinstalling from a set this could not read back
+        # in full. The other arms have a version to reach and fall through to
+        # the line below.
+        if recorded=$(uv_recorded_requirements); then
+            recorded_extras=$(printf '%s\n' "$recorded" | sed -n '1p')
+            recorded_python=$(printf '%s\n' "$recorded" | sed -n '2p')
+            with_flags=$(uv_with_flags "$recorded")
+            if [ -n "$recorded_python" ]; then
+                say "package: the receipt records the interpreter $recorded_python, so the reinstall keeps it"
+            fi
+            # Word-splitting on uv_reinstall and with_flags is intended: the
+            # first is one optional flag, and each replayed requirement is a
+            # space-free PEP 508 string. The interpreter is one argument
+            # whatever it holds, so it stays quoted.
+            # shellcheck disable=SC2086
+            run_uv tool install --upgrade $uv_reinstall "$(refresh_spec "$recorded_extras")" $with_flags ${recorded_python:+--python "$recorded_python"}
+            return 0
+        fi
+        if [ "$INSTALL_MODE" = "refresh" ]; then
+            run_uv tool upgrade --reinstall agentic-hil
+            return 0
+        fi
+    fi
+    # shellcheck disable=SC2086 # uv_reinstall is one optional flag, split on purpose
+    run_uv tool install --upgrade $uv_reinstall "$(package_spec)"
 }
 
 install_with_pip() {
@@ -1007,9 +1045,38 @@ process_name_for() {
     esac
 }
 
+# The PID of a running agent CLI, or nothing. Two questions, because an agent
+# CLI is not always a process wearing its own name.
+#
+# `pgrep -x` is the first and the exact one: a native binary's `comm` is its own
+# name, and a match on that can name no stranger's process.
+#
+# npm installs the other kind, and the process the kernel then holds is called
+# `node`. `@openai/codex` declares its `codex` command as `bin/codex.js`, that
+# file opens with `#!/usr/bin/env node`, and the launcher's path is the
+# argument; the platform binary started under it is called `codex-x86_64-un...`,
+# which is `comm` cut at the fifteen characters it holds. `pgrep -x codex`
+# matches neither, so a machine with codex open in the next window was told
+# there was nothing to restart, the operator restarted nothing, and the MCP
+# registration this run had just written was read by no session.
+#
+# The second question therefore reads command lines, anchored so that it stays a
+# question about which program is running rather than about which words appear
+# in an argument: the name has to begin a path segment and end its argument or
+# the line, optionally through the `.js` npm's launcher carries. So
+# `/usr/local/bin/codex` and `.../@openai/codex/bin/codex.js` match, while a dev
+# server under node, the native child called `codex-x86_64-...`, and this
+# script's own `--agent codex` do not. A false alarm costs an operator a restart
+# of something that was never ours, in the one part of the transcript that asks
+# them to act.
 running_pid() {
     if have pgrep; then
-        pgrep -x "$1" 2>/dev/null | head -n 1
+        running_exact=$(pgrep -x "$1" 2>/dev/null | head -n 1)
+        if [ -n "$running_exact" ]; then
+            printf '%s\n' "$running_exact"
+            return 0
+        fi
+        pgrep -f "(^|/)$1(\.js)?( |\$)" 2>/dev/null | head -n 1
     fi
 }
 
@@ -1069,7 +1136,11 @@ elif have uv; then
     install_with_uv
     PACKAGE_MANAGER="uv"
 elif DISCOVERED_PYTHON=$(find_python); then
-    if ! python_has_pip "$DISCOVERED_PYTHON"; then
+    if VENV_PREFIX=$(python_virtualenv_prefix "$DISCOVERED_PYTHON"); then
+        step 2 "package: $DISCOVERED_PYTHON is the interpreter of the virtual environment at $VENV_PREFIX, and pip refuses a --user install inside one; falling back to uv"
+        uv_takes_over_from_pip
+        PACKAGE_MANAGER="uv"
+    elif ! python_has_pip "$DISCOVERED_PYTHON"; then
         step 2 "package: $DISCOVERED_PYTHON has no pip module, so pip cannot install with it; falling back to uv"
         uv_takes_over_from_pip
         PACKAGE_MANAGER="uv"

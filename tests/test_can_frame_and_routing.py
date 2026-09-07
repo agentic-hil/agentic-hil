@@ -39,6 +39,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import DEFAULT_TEST_PERMISSIONS, write_config
+from test_can_likely_causes import assert_causes_are_about_the_bus
 
 from agentic_hil.can import (
     CAN_FD_FRAME_DATA_LENGTHS,
@@ -217,6 +218,9 @@ def test_a_classic_bus_configured_past_eight_bytes_is_still_capped_at_the_wire(t
     assert refused["bytes_requested"] == 20
     assert refused["classic_max_frame_data_bytes"] == CLASSIC_CAN_MAX_FRAME_DATA_BYTES
     assert refused["remediation"]
+    # A frame refusal is a fact about the wire, so it names the wire when it is
+    # read back through `classify_last_error` too (#523).
+    assert_causes_are_about_the_bus(refused["likely_causes"], CAN_CLASSIC_FRAME_TOO_LARGE_ERROR, refused)
 
 
 def test_an_operators_tighter_classic_ceiling_still_applies_beneath_the_protocol_cap(tmp_path: Path) -> None:
@@ -247,6 +251,7 @@ def test_fd_payload_lengths_outside_the_discrete_set_are_refused(tmp_path: Path,
     assert refused["bytes_requested"] == length
     assert refused["allowed_lengths"] == list(CAN_FD_FRAME_DATA_LENGTHS)
     assert refused["remediation"]
+    assert_causes_are_about_the_bus(refused["likely_causes"], CAN_FD_FRAME_LENGTH_INVALID_ERROR, refused)
 
 
 @pytest.mark.parametrize("length", list(CAN_FD_FRAME_DATA_LENGTHS))
@@ -285,6 +290,7 @@ def test_a_remote_frame_is_refused_on_an_fd_bus(tmp_path: Path) -> None:
     assert refused["ok"] is False
     assert refused["error_type"] == CAN_FD_REMOTE_FRAME_ERROR
     assert refused["remediation"]
+    assert_causes_are_about_the_bus(refused["likely_causes"], CAN_FD_REMOTE_FRAME_ERROR, refused)
 
 
 def test_a_remote_frame_is_unaffected_on_a_classic_bus(tmp_path: Path) -> None:

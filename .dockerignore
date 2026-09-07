@@ -8,5 +8,8 @@ evals/install/artifacts/
 !src/
 !src/agentic_hil/
 !src/agentic_hil/**
+# And the installer under review, so the same eval can run the file this
+# working tree would publish instead of only the one already published.
+!install.sh
 **/__pycache__/
 **/*.py[cod]

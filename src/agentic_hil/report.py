@@ -831,6 +831,28 @@ def conclusive_success(result: JsonObject) -> bool:
     return overall_success(result)
 
 
+def can_failure_causes(error_type: str) -> list[str] | None:
+    """The CAN causes for this error type, or ``None`` for a type that is not one.
+
+    Imported inside the function because `agentic_hil.can` imports this module,
+    and the table belongs beside the refusals that carry it: one list of strings
+    read from both places is what keeps `classify_last_error` and the refusal
+    that was recorded from answering the same failure differently.
+
+    Asked between the report's own causes and the table the caller handed over,
+    because those tables are the COM port's and the bound debugger's, both keyed
+    by their own error types with a generic fallback. A CAN error type reaches
+    neither, so before this every CAN failure but `can_interface_down` classified
+    as `inspect the COM port log for details`, or as `inspect the debugger log
+    for details` through a service whose backend is a debugger: an answer about
+    the transport that happened to be configured rather than about the bus that
+    failed (#517).
+    """
+    from agentic_hil.can import CAN_LIKELY_CAUSES
+
+    return CAN_LIKELY_CAUSES.get(error_type)
+
+
 def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[str], list[str]]) -> JsonObject:
     report = read_last_failure(config)
     if report.get("ok") is not True and report.get("tool") == "classify_last_error" and report.get("error_type") not in {None, "report_not_found"}:
@@ -845,7 +867,7 @@ def classify_failure_report(config: AgenticHILConfig, likely_causes: Callable[[s
         "tool": "classify_last_error",
         "error_type": error_type,
         "summary": report.get("summary", "Last Agentic HIL failure contained an error."),
-        "likely_causes": report.get("likely_causes", likely_causes(error_type)),
+        "likely_causes": report["likely_causes"] if "likely_causes" in report else (can_failure_causes(error_type) or likely_causes(error_type)),
         "report_path": report.get("report_path"),
         "log_path": report.get("log_path"),
         "source_tool": report.get("tool"),

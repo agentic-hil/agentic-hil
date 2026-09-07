@@ -5,10 +5,19 @@ include TROUBLESHOOTING.md
 include SECURITY.md
 include LICENSE
 include docs/mcp-hosts.md
+# Read by tests that pin what the documents promise against what the tools
+# answer, the way test_tool_annotations.py reads docs/mcp-hosts.md.
+include docs/safety-model.md
+include docs/security-design.md
+include docs/installation.md
 recursive-include src/agentic_hil/schemas *.json
 recursive-include src/agentic_hil/templates *.json
 recursive-include src/agentic_hil/skills *.md
 recursive-include tests *.py
+# The refusal recordings are test data, not tooling: the modules that replay
+# them read the file at import, so a distribution without them cannot even
+# collect the tests it does ship.
+recursive-include tests/fixtures *.json
 # The evaluation harness is repository tooling, not package content, so the
 # tests that import it would fail to collect in a source distribution.
 exclude tests/test_install_eval*.py
@@ -36,6 +45,9 @@ exclude tests/container/test_protocol_startup_refusal.py
 # rather than from the distribution, so the pins on them have nothing to read in
 # a source distribution.
 exclude tests/test_install_scripts.py
+# The pin on how that module is scheduled imports it at module scope, so it
+# cannot collect from a distribution that does not carry it either.
+exclude tests/test_process_table_grouping.py
 recursive-include examples *.py *.md *.yaml *.yml
 # The firmware demo is repository content, not package content.
 prune examples/nucleo-f446re_demo

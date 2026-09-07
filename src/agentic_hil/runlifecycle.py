@@ -46,7 +46,8 @@ from agentic_hil.config import (
     safe_read_text,
 )
 from agentic_hil.process import spawn_detached_process
-from agentic_hil.report import last_report_path
+from agentic_hil.redact import filesystem_error_detail
+from agentic_hil.report import CANONICAL_REPORT_KEY, last_report_path
 from agentic_hil.types import AgenticHILConfig, JsonObject
 
 RUN_RECORD_VERSION = 1
@@ -71,10 +72,13 @@ PROGRESS_WRITE_INTERVAL_S = 0.25
 # expense. Far below the slice a waiting step is interrupted on, so it costs a
 # stop nothing in responsiveness.
 STOP_POLL_INTERVAL_S = 0.1
-# How many finished runs the coordination state keeps. Every run leaves a
-# record, including the synchronous ones, so without this the directory grows
-# for the life of the bench. Only terminal records are ever removed, oldest
-# first, and a record whose run is still going is not a candidate at all.
+# How many ended runs the coordination state keeps. Every run leaves a record,
+# including the synchronous ones, so without this the directory grows for the
+# life of the bench. Removed oldest first, and a record whose run is still
+# going is not a candidate at all: what decides that is the lock behind the
+# record, not its state field, so a record left saying `running` by a worker
+# that was killed hard counts as ended too. Only those records, and only their
+# own files.
 RUN_RECORDS_KEPT = 100
 # How often a record write is retried while somebody is reading it. One process
 # writes a record and any number poll it, and on Windows a rename over a file
@@ -145,6 +149,15 @@ def lock_path(config: AgenticHILConfig, handle: str) -> Path:
 
 def stop_path(config: AgenticHILConfig, handle: str) -> Path:
     return runs_directory(config) / f"{validated_run_handle(handle)}.stop"
+
+
+def worker_log_path(config: AgenticHILConfig, handle: str) -> Path:
+    """Where a detached worker's output goes, beside the record it will write.
+
+    Named here rather than at each of the three places that want it: the spawn
+    opens it, a refusal reads it, and the prune removes it. A name spelled out
+    three times is a name two of those can drift away from."""
+    return runs_directory(config) / f"{validated_run_handle(handle)}.log"
 
 
 def read_run_record(config: AgenticHILConfig, handle: str) -> JsonObject | None:
@@ -305,12 +318,98 @@ def _records_newest_first(directory: Path) -> list[Path]:
     return [path for _, path in dated]
 
 
-def prune_run_records(config: AgenticHILConfig) -> None:
-    """Drop the oldest finished runs once there are more than a bench needs.
+def orphan_sweep_window_s() -> float:
+    """How old a handle's files must be before a handle with no record is one.
 
-    Only terminal records, and only their own three files. A run still going is
-    never a candidate, so this cannot take the record out from under a reader
-    asking what a live run is doing."""
+    The window a detached start waits for its worker in, computed for the
+    largest device wait the bench admits, and not a second number: the prune
+    runs inside another run's registration and cannot know which wait the start
+    that left these files behind was handed, so the only age it can be sure has
+    outlasted every start is the widest window any of them can wait in. A
+    threshold built from the startup window alone would delete the log of a
+    start still legitimately holding for a busy bench, and that log is what its
+    refusal quotes."""
+    return worker_publish_window_s(MAX_WAIT_S)
+
+
+def _orphan_files_by_handle(directory: Path) -> dict[str, list[Path]]:
+    """The stop, lock and log files whose handle has no record, per handle.
+
+    One listing for all of them, and grouped by handle rather than treated file
+    by file, because the files of one attempt are one thing: the log is as old
+    as the spawn and the stop is written at the end of the window, so dating
+    each on its own would take the log of a handle whose stop was planted a
+    moment ago."""
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        # The same silence the record listing keeps, and for the same reason:
+        # housekeeping owes the run it was called from a return, never a raise.
+        return {}
+    records = {entry.name[: -len(".json")] for entry in entries if entry.suffix == ".json"}
+    orphans: dict[str, list[Path]] = {}
+    for entry in entries:
+        if entry.suffix not in (".stop", ".lock", ".log"):
+            continue
+        handle = entry.name[: -len(entry.suffix)]
+        if RUN_HANDLE_PATTERN.match(handle) is None or handle in records:
+            continue
+        orphans.setdefault(handle, []).append(entry)
+    return orphans
+
+
+def _sweep_orphaned_run_files(config: AgenticHILConfig, directory: Path) -> None:
+    """Remove the files of handles that never became runs.
+
+    A start that gives up on a worker which published nothing plants a stop
+    under its handle, and the log the spawn opened is already there; a worker
+    that hung before it could take its registration writes no record, so the
+    handle is not among the candidates the record prune globs and its files
+    outlive every prune. On a bench whose workers are killed or hang that is one
+    set of files per attempt for the life of the bench, invisible to a reader,
+    which is what the cap of kept records exists to prevent.
+
+    Two things hold them back. Age, because inside the window a start waits in
+    the worker may yet publish and the files are its own. And the lock, because
+    a registration takes it before it writes its first record, so a handle whose
+    lock is held is a worker alive between those two steps, and the stop among
+    its files is what will end it at its first step boundary if it does reach
+    the board. Only when both say the attempt is over does the set go, the lock
+    with it: a probe leaves the lock file behind, so a sweep that removed the
+    pair and not the lock would trade unbounded growth for slower unbounded
+    growth."""
+    cutoff = time.time() - orphan_sweep_window_s()
+    for handle, paths in _orphan_files_by_handle(directory).items():
+        try:
+            newest = max(path.stat().st_mtime for path in paths)
+        except OSError:
+            continue
+        if newest > cutoff or not worker_is_gone(config, handle):
+            continue
+        for candidate in {*paths, lock_path(config, handle)}:
+            try:
+                candidate.unlink()
+            except OSError:
+                continue
+
+
+def prune_run_records(config: AgenticHILConfig) -> None:
+    """Drop the oldest ended runs once there are more than a bench needs, and
+    the leftovers of attempts that never became runs at all.
+
+    A run still going is never a candidate, so this cannot take the record out
+    from under a reader asking what a live run is doing. Whether it is going is
+    asked of the lock rather than of the record's state field: a worker killed
+    hard leaves a record that says `running` for ever, and a prune that read
+    only the field kept every one of those, so a bench whose runners get
+    rebooted grew past the cap without bound and paid one lock probe per such
+    record on every listing. A record whose lock can be taken is a run that has
+    ended however it ended, and past the cap it goes with its own files.
+
+    The sweep that follows is not part of the cap and does not wait for it. A
+    bench whose starts keep timing out writes no records at all, so its count
+    never reaches the cap while its directory grows by a set of files per
+    attempt, and that is the bench the growth was reported from."""
     directory = runs_directory(config)
     try:
         records = _records_newest_first(directory)
@@ -327,8 +426,12 @@ def prune_run_records(config: AgenticHILConfig) -> None:
             record = read_run_record(config, handle)
         except ConfigError:
             record = None
-        if record is not None and record.get("state") not in TERMINAL_RUN_STATES:
+        if record is not None and record.get("state") not in TERMINAL_RUN_STATES and not worker_is_gone(config, handle):
             continue
+        # Built by name rather than through the path helpers: a `run-*.json`
+        # file whose stem is not a valid handle is not this code's file, and it
+        # is still swept out from under the cap rather than left to the refusal
+        # a helper would raise over it.
         for candidate in (path, directory / f"{handle}.stop", directory / f"{handle}.lock", directory / f"{handle}.log"):
             try:
                 candidate.unlink()
@@ -337,6 +440,55 @@ def prune_run_records(config: AgenticHILConfig) -> None:
                 # way there is nothing to do about it here: pruning is
                 # housekeeping and must never be the reason a run fails.
                 continue
+    _sweep_orphaned_run_files(config, directory)
+
+
+def _prune_after_a_start_that_left_no_record(config: AgenticHILConfig) -> None:
+    """Prune from the one route that produces files nothing else will clear.
+
+    Every other prune on a bench is paid for by a registration, which happens
+    when a worker comes alive and writes its first record. A start that gives up
+    on a worker, or whose worker died before it could say anything, leaves a
+    stop and a log under a handle that never registers, and on a bench where
+    that is what keeps happening no registration ever comes: the sweep would
+    never run on the one bench that needs it. So the route that leaves those
+    files behind clears the ones the routes before it left.
+
+    What this start itself left is inside the window and stays; it is the
+    attempts old enough that nothing is coming for them that go. Refusals are
+    swallowed for the reason the prune swallows its own: this is housekeeping
+    after a failure that has already been decided, and it may not change the
+    answer the caller is about to be handed."""
+    try:
+        prune_run_records(config)
+    except (ConfigError, OSError):
+        return
+
+
+def _runs_directory_unwritable(config: AgenticHILConfig, handle: str, summary: str, error: BaseException, **named: str) -> ConfigError:
+    """The refusal for a runs directory this process cannot write into.
+
+    Raised before any device is taken, and on both routes into a run: the
+    detached start's log open and the registration's first record. The run is
+    refused rather than run unwatched because the record is what a handle
+    names: without it nobody can ask what the run is doing or ask it to stop by
+    name, and a detached worker would run the whole plan behind a start command
+    that reported it never came up. Nothing was locked or driven, so the retry
+    is safe once the directory is."""
+    return ConfigError(
+        "run_state_unwritable",
+        summary,
+        {
+            "run": handle,
+            "runs_directory": display_path(config, str(runs_directory(config))),
+            **named,
+            **filesystem_error_detail(error),
+            "retry_safe": True,
+            "side_effect_committed": False,
+            "side_effect_status": "not_started",
+            "hardware_state": "unchanged",
+        },
+    )
 
 
 class RunRegistration:
@@ -386,7 +538,24 @@ class RunRegistration:
             "pid": os.getpid(),
             "started_at": utc_now_iso(),
         }
-        registration._write(RUN_STARTING, {})
+        # The first record is required where every later one is best effort.
+        # A run that is going and loses its record is a run nobody can watch,
+        # and the plan is what the bench is for; a run that cannot publish that
+        # it exists has taken nothing yet and is refused instead, because the
+        # handle its caller holds would otherwise name nothing: no status, no
+        # stop by name, and for a detached worker a whole plan run behind a
+        # start command told the worker never came up.
+        try:
+            registration._write(RUN_STARTING, {}, force=True, required=True)
+        except (ConfigError, OSError, ValueError) as error:
+            registration._lock.release()
+            raise _runs_directory_unwritable(
+                config,
+                handle,
+                "This run's record could not be written under the runs directory, so the run was refused before it took any device: a run with no record is one nobody can watch or stop by name.",
+                error,
+                record_path=display_path(config, str(record_path(config, handle))),
+            ) from error
         prune_run_records(config)
         return registration
 
@@ -436,21 +605,29 @@ class RunRegistration:
             self._pending = None
 
     def finish(self, result: JsonObject) -> None:
-        """The one terminal record, written from the run's own result."""
+        """The one terminal record, written from the run's own result.
+
+        The run's own report travels into the record beside the shared path.
+        `report_path` is the workspace mirror, which the next run overwrites;
+        the per-run copy under the state root is the one that stays this
+        run's, and a status asked after any later run has to be able to name
+        it. It is taken from the result because the report writer is where it
+        is decided, and left off a record whose result did not carry one (a
+        report that could not be written) rather than invented."""
         self._pending = None
         stopped = bool(result.get("stopped"))
-        self._write(
-            RUN_STOPPED if stopped else RUN_FINISHED,
-            {
-                "run_ok": bool(result.get("ok")),
-                "error_type": result.get("error_type"),
-                "failed_step": result.get("failed_step"),
-                "stopped_after_step": result.get("stopped_after_step"),
-                "report_path": result.get("report_path", self.report_path),
-                "finished_at": utc_now_iso(),
-            },
-            force=True,
-        )
+        fields: JsonObject = {
+            "run_ok": bool(result.get("ok")),
+            "error_type": result.get("error_type"),
+            "failed_step": result.get("failed_step"),
+            "stopped_after_step": result.get("stopped_after_step"),
+            "report_path": result.get("report_path", self.report_path),
+            "finished_at": utc_now_iso(),
+        }
+        canonical = result.get(CANONICAL_REPORT_KEY)
+        if isinstance(canonical, str) and canonical:
+            fields[CANONICAL_REPORT_KEY] = canonical
+        self._write(RUN_STOPPED if stopped else RUN_FINISHED, fields, force=True)
         self._terminal = True
 
     def stop_requested(self) -> bool:
@@ -473,8 +650,11 @@ class RunRegistration:
         self._stop_seen = stop_requested_at(self.config, self.handle)
         return self._stop_seen is not None
 
-    def _write(self, state: str, fields: JsonObject, *, force: bool = False) -> bool:
-        """Publish the record, or say the throttle held this one back."""
+    def _write(self, state: str, fields: JsonObject, *, force: bool = False, required: bool = False) -> bool:
+        """Publish the record, or say the throttle held this one back.
+
+        ``required`` lets a failed write out as the error it was; `take` asks it
+        of the first record, and nothing else does."""
         now = time.monotonic()
         if not force and now - self._last_write < PROGRESS_WRITE_INTERVAL_S:
             return False
@@ -483,6 +663,8 @@ class RunRegistration:
         try:
             write_run_record(self.config, self.handle, record)
         except (ConfigError, OSError, ValueError):
+            if required:
+                raise
             # A record that could not be written is a run nobody can watch, not
             # a run that should stop. The plan is what the bench is for. Reported
             # as written all the same: asking again forever would turn a
@@ -559,6 +741,8 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
         if worker.poll() is not None and exited_at is None:
             exited_at = time.monotonic()
         if record is None and exited_at is not None and time.monotonic() - exited_at > WORKER_EXIT_GRACE_S:
+            output = worker_output(config, handle)
+            _prune_after_a_start_that_left_no_record(config)
             return {
                 "ok": False,
                 "tool": "test_reactor_start",
@@ -566,7 +750,7 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
                 "summary": "The detached run's worker process ended before it could say what it was doing.",
                 "run": handle,
                 "exit_code": worker.poll(),
-                "worker_output": worker_output(config, handle),
+                "worker_output": output,
                 "retry_safe": True,
                 "side_effect_committed": False,
             }
@@ -577,13 +761,15 @@ def start_detached_run(config: AgenticHILConfig, test_config_path: str, *, wait_
             # and reach the board it ends at the first step boundary instead of
             # running the whole plan behind a caller told the start had failed.
             _plant_stop_after_unresponsive(config, handle)
+            output = worker_output(config, handle)
+            _prune_after_a_start_that_left_no_record(config)
             return {
                 "ok": False,
                 "tool": "test_reactor_start",
                 "error_type": "run_worker_unresponsive",
                 "summary": "The detached run's worker process did not say what it was doing within the startup window; a cooperative stop was left under its handle in case it is still alive.",
                 "run": handle,
-                "worker_output": worker_output(config, handle),
+                "worker_output": output,
                 "retry_safe": False,
                 "side_effect_committed": False,
             }
@@ -635,9 +821,11 @@ def _detached_terminal_result(handle: str, record: JsonObject, report: str) -> J
         "finished_at": record.get("finished_at"),
         "summary": (
             f"The detached run under handle {handle} {ended} before the start command returned and {verdict}; "
-            f"its report is at {record.get('report_path', report)}."
+            f"its report is at {run_report_named(record) or report}."
         ),
     }
+    if record.get(CANONICAL_REPORT_KEY):
+        result[CANONICAL_REPORT_KEY] = record[CANONICAL_REPORT_KEY]
     if not run_ok:
         result["error_type"] = record.get("error_type") or "unknown"
         for field in ("failed_step", "stopped_after_step"):
@@ -710,8 +898,28 @@ def spawn_run_worker(config: AgenticHILConfig, handle: str, test_config_path: st
     left reading a detached run's stderr once the command that started it has
     returned, and a full pipe would block the run mid-plan. The report is what
     a caller reads; this is for the case where there is no report because the
-    worker could not get far enough to write one."""
-    with open(runs_directory(config) / f"{validated_run_handle(handle)}.log", "ab") as handle_log:
+    worker could not get far enough to write one.
+
+    The log is opened before the worker exists, and a runs directory that
+    refuses the open refuses the start: it used to leave here as the bare
+    ``PermissionError`` it was, which the command printed as a traceback, and
+    the same directory would have refused the worker's record next, which is
+    the plan run behind a start command that reported the worker never came
+    up. So it is the refusal the registration raises for its record, with the
+    log named, and no worker is spawned."""
+    log_path = worker_log_path(config, handle)
+    try:
+        # Closed by the `with` below; opened apart from it so the refusal is the open's alone and never the spawn's.
+        handle_log = open(log_path, "ab")  # noqa: SIM115
+    except OSError as error:
+        raise _runs_directory_unwritable(
+            config,
+            handle,
+            "The detached run's log could not be opened under the runs directory, so no worker was started and nothing was touched.",
+            error,
+            log_path=display_path(config, str(log_path)),
+        ) from error
+    with handle_log:
         return spawn_detached_process(
             [
                 sys.executable,
@@ -740,7 +948,7 @@ def worker_output(config: AgenticHILConfig, handle: str, limit: int = 4000) -> s
     and a start command that answered "it did not come up" without it would send
     an operator to a file they do not know exists."""
     try:
-        text = (runs_directory(config) / f"{validated_run_handle(handle)}.log").read_text(encoding="utf-8", errors="replace")
+        text = worker_log_path(config, handle).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
     return text[-limit:]
@@ -796,11 +1004,33 @@ def run_status(config: AgenticHILConfig, handle: str | None = None) -> JsonObjec
     }
 
 
+def run_report_named(record: JsonObject) -> str | None:
+    """The report a reader is sent to for a finished run: its own copy first.
+
+    The per-run copy under the state root is the run's report; the shared
+    workspace path beside it is a mirror the next run replaces, and after any
+    later run a reader sent there finds another run's verdict. The mirror is
+    named only for a record that carries no per-run path, which is a report
+    that could not be written at all."""
+    canonical = record.get(CANONICAL_REPORT_KEY)
+    if isinstance(canonical, str) and canonical:
+        return canonical
+    mirror = record.get("report_path")
+    return mirror if isinstance(mirror, str) and mirror else None
+
+
 def run_status_summary(state: str, record: JsonObject, requested_at: str | None) -> str:
     if state in TERMINAL_RUN_STATES:
         verdict = "passed" if record.get("run_ok") else f"did not pass ({record.get('error_type') or 'unknown'})"
         ended = "was stopped on request" if state == RUN_STOPPED else "ended"
-        return f"This run {ended} and {verdict}; its report is at {record.get('report_path')}."
+        return f"This run {ended} and {verdict}; its report is at {run_report_named(record)}."
+    if state == RUN_STARTING:
+        # A run that has not published `running` holds nothing yet: it is
+        # taking its devices, or waiting for a holder to give one up. Saying it
+        # is on its first step would send a reader away expecting a report the
+        # device wait may never let the run write.
+        pending = " A stop has been requested; the run ends before any step runs." if requested_at else ""
+        return f"This run is starting: it is taking the devices its plan declares and has run no step.{pending}"
     progress = record.get("progress") or {}
     where = f"step {progress.get('step')} ({progress.get('action')})" if progress.get("step") else "its first step"
     iteration = f", iteration {progress['iteration']}" if progress.get("iteration") else ""
@@ -860,8 +1090,9 @@ def request_run_stop(config: AgenticHILConfig, handle: str) -> JsonObject:
     """Ask a run to end after the step it is in.
 
     Cooperative and nothing else: this writes a file, and the run reads it
-    between its steps and inside a wait. Nothing here reaches the process, so a
-    run cannot be left half way through a step by whoever asked it to stop."""
+    between its steps, inside a waiting step and inside the wait for a device
+    another run holds. Nothing here reaches the process, so a run cannot be
+    left half way through a step by whoever asked it to stop."""
     validated_run_handle(handle)
     record = read_run_record(config, handle)
     if record is None:
@@ -901,6 +1132,12 @@ def request_run_stop(config: AgenticHILConfig, handle: str) -> JsonObject:
         }
     requested_at = utc_now_iso()
     atomic_write_text(stop_path(config, handle), json.dumps({"run": handle, "requested_at": requested_at, "requested_by_pid": os.getpid()}, indent=2) + "\n")
+    if state == RUN_STARTING:
+        # Read inside the device wait as well as between steps, so a run that
+        # holds nothing yet ends there: nothing to finish, nothing to close.
+        summary = "A stop was requested; the run is still taking its devices, so it ends before any step runs, releases whatever it took and writes its report."
+    else:
+        summary = "A stop was requested; the run finishes the step it is in, closes its devices in the usual order and writes its report."
     return {
         **public_run_fields(record),
         "ok": True,
@@ -908,5 +1145,5 @@ def request_run_stop(config: AgenticHILConfig, handle: str) -> JsonObject:
         "state": state,
         "stop_requested": True,
         "stop_requested_at": requested_at,
-        "summary": "A stop was requested; the run finishes the step it is in, closes its devices in the usual order and writes its report.",
+        "summary": summary,
     }

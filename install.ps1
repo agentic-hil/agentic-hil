@@ -96,10 +96,18 @@ $ShowHelp = [bool]$Help
 $SystemCertsMode = if ($NoSystemCerts) { 'never' } elseif ($SystemCerts) { 'always' } else { 'auto' }
 
 # Two spellings carry an inner dash, which no PowerShell parameter name can, so
-# they arrive here rather than bound. Everything else binds by itself.
+# they arrive here rather than bound, and so does every `--name=value` form:
+# PowerShell binds `--agent claude-code` as two tokens and leaves
+# `--agent=claude-code` whole. install.sh accepts both spellings and this
+# script's own usage text documents the flags without saying which half of them
+# Windows would refuse, so an operator copying a line from the same
+# documentation met `unknown option` and exit 2. Everything else binds by
+# itself.
 foreach ($token in @($Rest)) {
     if ($null -eq $token) { continue }
     switch -Regex ($token) {
+        '^--agent=(.+)$' { $Agent = $Matches[1] }
+        '^--version=(.+)$' { $Version = $Matches[1] }
         '^--no-agent-install$' { $WithAgentInstall = $false }
         '^--no-can$' { $WithCan = $false }
         '^--can$' { $WithCan = $true }
@@ -282,8 +290,17 @@ function Get-UvRecordedRequirements {
         } elseif ($line -match '^\s*\[') {
             $inOptions = $false
             $section = if ($line -match '^\s*\[tool\]\s*$') { 'tool' } else { 'other' }
-        } elseif ($line -match '^\s*python\s*=\s*"([^"]*)"\s*$') {
-            if ($inOptions -or $section -eq 'tool') { $python = $Matches[1] }
+        } elseif ($line -match '^\s*python\s*=\s*(?:"([^"]*)"|''([^'']*)'')\s*$') {
+            # Both TOML string forms, because uv writes a literal string (single
+            # quotes, backslashes kept as they are) for any path that carries a
+            # backslash, which is every interpreter path on Windows. Reading only
+            # the basic form found nothing on such a receipt, so the reinstall ran
+            # with no --python, uv resolved an interpreter of its own and dropped
+            # the key, and the operator's interpreter was forgotten with nothing
+            # said about it.
+            if ($inOptions -or $section -eq 'tool') {
+                $python = if ($Matches.ContainsKey(1)) { $Matches[1] } else { $Matches[2] }
+            }
         } elseif ($inOptions) {
             if ($line -match '\S' -and $line -notmatch '^\s*#') { return $null }
         }
@@ -377,47 +394,53 @@ function Get-RefreshSpec {
 }
 
 function Install-WithUv {
-    if ($script:InstallMode -eq 'refresh') {
-        if (Test-UvManagesTool) {
-            # uv owns this tool. Reinstall from the requirement uv recorded merged
-            # with this run's extras: the recorded `[can,pyocd]` survives (a
-            # `tool install agentic-hil[can]` would drop pyocd) and a `--can` a
-            # bare recorded requirement never had is added (a `tool upgrade` would
-            # never add it). --reinstall replaces the files even when the recorded
-            # version is already current, which is the repair the anchor exists
-            # for. A recorded `--with` requirement is replayed as its own --with so
-            # the reinstall keeps it too; a bare `tool install agentic-hil[...]`
-            # would drop it. The interpreter uv recorded is replayed as --python
-            # for the same reason: a reinstall without it rewrites the receipt
-            # without the key, and the operator's choice is gone with nothing
-            # said. When uv keeps no readable receipt, or records a requirement
-            # this cannot rebuild without changing it, fall back to the upgrade
-            # that preserves whatever it did record.
-            $recorded = Get-UvRecordedRequirements
-            if ($null -ne $recorded) {
-                $uvArgs = @('tool', 'install', '--upgrade', '--reinstall', (Get-RefreshSpec -Recorded $recorded.Extras))
-                foreach ($recordedWith in $recorded.Withs) { $uvArgs += @('--with', $recordedWith) }
-                if ($recorded.Python) {
-                    Write-Say "package: the receipt records the interpreter $($recorded.Python), so the reinstall keeps it"
-                    $uvArgs += @('--python', $recorded.Python)
-                }
-                Invoke-Uv -Arguments $uvArgs
-            } else {
-                Invoke-Uv -Arguments @('tool', 'upgrade', '--reinstall', 'agentic-hil')
+    # --reinstall replaces the files even when the version already on disk is
+    # the one being asked for, which is the repair a rerun over an existing
+    # installation and a rerun at a named release both exist for. A first
+    # install has nothing to replace and passes none.
+    $reinstall = if ($script:InstallMode -eq 'refresh' -or $script:InstallMode -eq 'pin') { @('--reinstall') } else { @() }
+    if (Test-UvManagesTool) {
+        # uv owns this tool, whatever this run's arm is called. Reinstall from
+        # the requirement uv recorded merged with this run's extras: the
+        # recorded `[can,pyocd]` survives (a `tool install agentic-hil[can]`
+        # would drop pyocd) and a `--can` a bare recorded requirement never had
+        # is added (a `tool upgrade` would never add it). A recorded `--with`
+        # requirement is replayed as its own --with so the reinstall keeps it
+        # too; a bare `tool install agentic-hil[...]` would drop it. The
+        # interpreter uv recorded is replayed as --python for the same reason:
+        # a reinstall without it rewrites the receipt without the key, and the
+        # operator's choice is gone with nothing said.
+        #
+        # The arm decides the flags, not whether the record is read at all. The
+        # arm comes from what step 1 found on PATH and from whether a version
+        # was named, and neither question is about what uv owns, so a first-run
+        # arm and a pin arm reached a tool uv already held and handed it this
+        # run's spec alone; uv then recorded that requirement and uninstalled
+        # every extra and `--with` the receipt had beside it, with nothing in
+        # the transcript to say so.
+        #
+        # When uv keeps no readable receipt, or records a requirement this
+        # cannot rebuild without changing it, a rerun over an existing
+        # installation falls back to the upgrade that preserves whatever it did
+        # record. The other arms have a version to reach and fall through to
+        # the line below.
+        $recorded = Get-UvRecordedRequirements
+        if ($null -ne $recorded) {
+            $uvArgs = @('tool', 'install', '--upgrade') + $reinstall + @((Get-RefreshSpec -Recorded $recorded.Extras))
+            foreach ($recordedWith in $recorded.Withs) { $uvArgs += @('--with', $recordedWith) }
+            if ($recorded.Python) {
+                Write-Say "package: the receipt records the interpreter $($recorded.Python), so the reinstall keeps it"
+                $uvArgs += @('--python', $recorded.Python)
             }
+            Invoke-Uv -Arguments $uvArgs
             return
         }
-        Invoke-Uv -Arguments @('tool', 'install', '--upgrade', '--reinstall', (Get-PackageSpec))
-        return
+        if ($script:InstallMode -eq 'refresh') {
+            Invoke-Uv -Arguments @('tool', 'upgrade', '--reinstall', 'agentic-hil')
+            return
+        }
     }
-    if ($script:InstallMode -eq 'pin') {
-        # A named release sets the requirement outright, so it goes through
-        # install; --reinstall forces the replacement even when the installed
-        # version already equals the pin.
-        Invoke-Uv -Arguments @('tool', 'install', '--upgrade', '--reinstall', (Get-PackageSpec))
-        return
-    }
-    Invoke-Uv -Arguments @('tool', 'install', '--upgrade', (Get-PackageSpec))
+    Invoke-Uv -Arguments (@('tool', 'install', '--upgrade') + $reinstall + @((Get-PackageSpec)))
 }
 
 if ($SystemCertsMode -eq 'always') { Enable-SystemCerts }
@@ -702,6 +725,48 @@ function Get-ProcessNameForAgent {
     return $AgentId
 }
 
+function Get-RunningAgentProcessId {
+    <#
+        The PID of a running agent CLI, or $null. Two questions, because an
+        agent CLI is not always a process wearing its own name.
+
+        Get-Process -Name is the first and the exact one: a native binary's
+        process name is its own, and a match on that can name no stranger's
+        process.
+
+        npm installs the other kind, and the process Windows then holds is
+        called node. An npm-installed CLI is a JavaScript launcher run by the
+        node runtime, so the only place the CLI's own name appears is the
+        command line, and a machine with the CLI open in the next window was
+        told there was nothing to restart; the operator restarted nothing, and
+        the MCP registration this run had just written was read by no session.
+
+        The second question therefore reads command lines, anchored so that it
+        stays a question about which program is running rather than about which
+        words appear in an argument: the name has to begin a path segment and
+        end its argument or the line, optionally through the .js the launcher
+        carries. A false alarm costs an operator a restart of something that was
+        never ours, in the one part of the transcript that asks them to act.
+    #>
+    param([string]$ProcessName)
+    $exact = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue) | Select-Object -First 1
+    if ($exact) { return $exact.Id }
+    $pattern = '[\\/]' + [regex]::Escape($ProcessName) + '(\.js)?(["'' ]|$)'
+    try {
+        # Lowest PID first, so a machine running two of them names the same one
+        # twice rather than whichever the enumeration happened to reach first.
+        $listed = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Sort-Object ProcessId)
+    } catch {
+        return $null
+    }
+    foreach ($candidate in $listed) {
+        if ($candidate.CommandLine -and $candidate.CommandLine -match $pattern) {
+            return $candidate.ProcessId
+        }
+    }
+    return $null
+}
+
 # Step 1: what is already here, and what does this run call itself.
 #
 # An installation found here goes through step 2 either way. This line is the
@@ -954,9 +1019,9 @@ if (-not $WithAgentInstall) {
 $running = @()
 foreach ($agentId in $configured) {
     $processName = Get-ProcessNameForAgent $agentId
-    $process = @(Get-Process -Name $processName -ErrorAction SilentlyContinue) | Select-Object -First 1
-    if ($process) {
-        $running += [pscustomobject]@{ Name = $processName; ProcessId = $process.Id }
+    $agentProcessId = Get-RunningAgentProcessId -ProcessName $processName
+    if ($null -ne $agentProcessId) {
+        $running += [pscustomobject]@{ Name = $processName; ProcessId = $agentProcessId }
     }
 }
 if ($running.Count -eq 0 -and $env:CLAUDECODE) {

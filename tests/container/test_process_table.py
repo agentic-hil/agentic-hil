@@ -28,6 +28,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -178,3 +179,134 @@ def test_a_server_started_from_the_installation_is_named_under_restart_required_
     finally:
         server.kill()
         server.wait(timeout=30)
+
+
+# ---------------------------------------------------------------------------
+# #509: the two ways a Linux process is attributed to an installation, each
+# held against a real child read out of the kernel's own files rather than
+# against a /proc tree typed by hand.
+#
+# The unit tier (tests/test_agentic_hil.py, `_proc_entry`) writes cmdline and
+# environ bytes itself, so the NUL termination, the readability of environ,
+# the symlink the kernel resolves through and the 65536-byte cap are all
+# assumptions of the person who typed them; #459 was that class of assumption
+# on a bench. Here the child is the recording.
+
+
+def an_installation_shaped_environment(tmp_path: Path) -> Path:
+    """`<tmp>/uv/tools/agentic-hil`, whose `bin/python` is a symlink to this interpreter.
+
+    The layout uv creates and the one `owning_manager` reads as a tool
+    installation, which is what makes the prefix an owned one; and the symlink
+    is the Linux fact the whole reader exists for, because the kernel resolves
+    every process started through it to the interpreter outside.
+    """
+    environment = tmp_path / "uv" / "tools" / "agentic-hil"
+    (environment / "bin").mkdir(parents=True)
+    (environment / "bin" / "python").symlink_to(sys.executable)
+    return environment
+
+
+def holders_as_seen_from(environment: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """`_processes_holding_installation()` as the installation at `environment` would run it."""
+    from agentic_hil.upgrade import _processes_holding_installation
+
+    monkeypatch.setattr(sys, "prefix", str(environment))
+    monkeypatch.setattr(sys, "executable", str(environment / "bin" / "python"))
+    holders = _processes_holding_installation()
+    assert holders is not None, "this host published no process table"
+    return holders
+
+
+def test_a_child_started_by_the_environments_own_python_is_named_by_the_path_it_was_invoked_by(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`<env>/bin/python -m ...` from the project directory: what `/proc` holds, and what the upgrade makes of it.
+
+    The image the kernel resolves is the interpreter outside the environment,
+    which is why the image can never attribute it; `cmdline` still carries the
+    path the caller spelled, `environ` carries `VIRTUAL_ENV`, `cwd` is the
+    project, and the start time agrees with `ps`. The holders list then names
+    the child once, with the project directory and the start time beside it.
+    """
+    from agentic_hil.process import process_working_directory
+
+    environment = an_installation_shaped_environment(tmp_path)
+    invoked_as = environment / "bin" / "python"
+    project = tmp_path / "project"
+    project.mkdir()
+    child = subprocess.Popen([str(invoked_as), "-c", "import time; time.sleep(60)"], cwd=str(project), env={**os.environ, "VIRTUAL_ENV": str(environment)})
+    try:
+        time.sleep(SETTLE_S)
+
+        entries = snapshot_process_images()
+        assert entries is not None, "this host published no process table"
+        mine = [entry for entry in entries if entry.pid == child.pid]
+        assert len(mine) == 1, f"pid {child.pid} is running and the snapshot holds {len(mine)} entries for it"
+        entry = mine[0]
+
+        assert Path(entry.image) == Path(os.path.realpath(sys.executable)), entry
+        assert not entry.image.startswith(str(environment)), entry
+        assert entry.launch_arguments == (str(invoked_as), "-c"), entry
+        assert entry.virtual_env == str(environment), entry
+        assert process_working_directory(child.pid) == str(project), child.pid
+        started = filetime_epoch_seconds(entry.created_ns)
+        assert started is not None, entry
+        assert abs(started - start_time_ps_reports(child.pid)) <= AGREEMENT_S, (started, start_time_ps_reports(child.pid))
+
+        holders = holders_as_seen_from(environment, monkeypatch)
+
+        assert [holder["pid"] for holder in holders] == [child.pid], holders
+        assert holders[0]["image"] == entry.image, holders[0]
+        assert holders[0]["working_directory"] == str(project), holders[0]
+        assert holders[0]["started_at"], holders[0]
+        assert os.getpid() not in {holder["pid"] for holder in holders}, holders
+    finally:
+        child.kill()
+        child.wait(timeout=30)
+
+
+def test_a_child_started_from_an_activated_environment_is_named_by_virtual_env_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`python3 -m agentic_hil ...` after `source <env>/bin/activate`: a relative argv and `VIRTUAL_ENV`.
+
+    An activated environment starts its children by a bare name found on
+    PATH, so argv[0] is relative and says nothing about where it came from;
+    what says so is the `VIRTUAL_ENV` the activation exported. The child is
+    named on that alone, and a sibling of the same interpreter with neither
+    fact is not, which is the whole risk of reading command lines: the same
+    system interpreter runs every other Python program on the machine.
+    """
+    environment = an_installation_shaped_environment(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    activated = subprocess.Popen(
+        ["python3", "-c", "import time; time.sleep(60)"],
+        executable=sys.executable,
+        cwd=str(project),
+        env={**{key: value for key, value in os.environ.items() if key != "VIRTUAL_ENV"}, "VIRTUAL_ENV": str(environment)},
+    )
+    unrelated = subprocess.Popen(
+        ["python3", "-c", "import time; time.sleep(60)"],
+        executable=sys.executable,
+        cwd=str(project),
+        env={key: value for key, value in os.environ.items() if key != "VIRTUAL_ENV"},
+    )
+    try:
+        time.sleep(SETTLE_S)
+
+        entries = snapshot_process_images()
+        assert entries is not None, "this host published no process table"
+        by_pid = {entry.pid: entry for entry in entries}
+        assert by_pid[activated.pid].launch_arguments == ("python3", "-c"), by_pid[activated.pid]
+        assert by_pid[activated.pid].virtual_env == str(environment), by_pid[activated.pid]
+        assert by_pid[unrelated.pid].launch_arguments == ("python3", "-c"), by_pid[unrelated.pid]
+        assert by_pid[unrelated.pid].virtual_env == "", by_pid[unrelated.pid]
+        assert by_pid[activated.pid].image == by_pid[unrelated.pid].image, "the two children run the same interpreter, or the control proves nothing"
+
+        holders = holders_as_seen_from(environment, monkeypatch)
+
+        assert [holder["pid"] for holder in holders] == [activated.pid], holders
+        assert holders[0]["working_directory"] == str(project), holders[0]
+    finally:
+        activated.kill()
+        activated.wait(timeout=30)
+        unrelated.kill()
+        unrelated.wait(timeout=30)

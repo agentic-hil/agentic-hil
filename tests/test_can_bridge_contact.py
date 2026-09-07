@@ -26,10 +26,12 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import write_config
+from test_can_likely_causes import assert_causes_are_about_the_bus
 
 from agentic_hil.can import CanBusService, ProcessCanAdapterSession, bridge_opened_before_failing, open_process_adapter
+from agentic_hil.comports import likely_causes as com_port_likely_causes
 from agentic_hil.config import load_config
-from agentic_hil.report import ContactMarker
+from agentic_hil.report import ContactMarker, classify_failure_report
 
 
 class RecordingBridge:
@@ -105,6 +107,10 @@ def test_a_bridge_that_opened_then_answered_in_the_wrong_shape_does_not_claim_no
     assert "side_effect_committed" not in result
     assert result["cleanup_confirmed"] is True
     assert bridge.closed is True
+    # The refusal also says what may have caused it, about the bridge and the
+    # adapter it drives, rather than about whichever probe or COM port happens to
+    # be configured beside them (#523).
+    assert_causes_are_about_the_bus(result["likely_causes"], "can_adapter_protocol_unsupported", result)
 
 
 def test_a_bridge_on_the_wrong_protocol_version_does_not_claim_nothing_happened(
@@ -162,6 +168,34 @@ def test_a_bridge_that_never_answered_the_open_is_not_read_as_never_started(
     assert "side_effect_committed" not in result
 
 
+def test_a_bridge_timeout_recorded_as_the_last_failure_is_classified_about_the_bus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole path for a type no module spells (#523).
+
+    `can_adapter_timeout` is built inside `agentic_hil.bridge` out of the session
+    class's prefix, comes back through `open_process_adapter` untouched, and is
+    written into the failure record by `session_start`. That record is what
+    `classify_last_error` reads, so this is the case where a type nobody can grep
+    for sends its reader to a serial log.
+    """
+    config = process_bus_config(tmp_path)
+    install_bridge(
+        monkeypatch,
+        {"ok": False, "adapter": "process", "error_type": "can_adapter_timeout", "summary": "CAN adapter bridge request timed out."},
+    )
+    service = CanBusService(config)
+    try:
+        started = service.session_start("bench", clear_rx_queue=False)
+    finally:
+        service.close()
+
+    assert started["error_type"] == "can_adapter_timeout", started
+    classified = classify_failure_report(config, com_port_likely_causes)
+    assert classified["error_type"] == "can_adapter_timeout", classified
+    assert_causes_are_about_the_bus(classified["likely_causes"], "can_adapter_timeout", classified)
+
+
 def test_an_unreadable_answer_to_open_is_not_read_as_never_started(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -173,7 +207,11 @@ def test_an_unreadable_answer_to_open_is_not_read_as_never_started(
     )
 
     assert result["ok"] is False
+    assert result["error_type"] == "can_adapter_invalid_response"
     assert "side_effect_committed" not in result
+    # An unreadable answer is still a CAN failure, and its causes are about the
+    # bridge that gave it rather than about a serial or debug log (#523).
+    assert_causes_are_about_the_bus(result["likely_causes"], "can_adapter_invalid_response", result)
 
 
 # --- Where the bus provably was not touched, the report still says so ---------

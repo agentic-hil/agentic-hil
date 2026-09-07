@@ -749,6 +749,28 @@ def _plain_line_would_remove(manager: str, installed_extras: tuple[str, ...], re
     )
 
 
+def _preferred_user_scheme() -> str:
+    """The scheme name pip installs a `--user` install into on this interpreter.
+
+    Not `f"{os.name}_user"`. On a framework macOS Python, the kind python.org
+    and Homebrew ship, `os.name` is `posix` while the scheme pip uses is
+    `osx_framework_user`, and the two name different directories: the
+    distribution sits in one and a lookup built out of `os.name` reads the
+    other, finds nothing of ours, and calls a per-user installation
+    system-wide. `--user` is then dropped, and pip uninstalls from the
+    framework site while installing into the system one, which is the shim over
+    a missing package this whole check exists to prevent.
+
+    `get_preferred_scheme` is what pip itself asks, and it has answered since
+    3.10, which is this package's floor. The fallback is the old name, for an
+    interpreter whose sysconfig does not answer at all.
+    """
+    try:
+        return sysconfig.get_preferred_scheme("user")
+    except (AttributeError, KeyError, OSError):
+        return f"{os.name}_user"
+
+
 def _user_site_installation() -> bool:
     """Whether the distribution about to be replaced lives in this user's own site.
 
@@ -780,7 +802,7 @@ def _user_site_installation() -> bool:
     except Exception:
         return False
     try:
-        user_site = sysconfig.get_path("purelib", f"{os.name}_user")
+        user_site = sysconfig.get_path("purelib", _preferred_user_scheme())
     except (KeyError, OSError):
         return False
     if located is None or not user_site:
@@ -3036,6 +3058,24 @@ def _running_processes_as_a_notice(holders: list[JsonObject] | None, previous_ve
     }
 
 
+class ManagerRefusalOverATableThatWasRead(ConfigError):
+    """The missing-manager refusal, carrying what the process table said first.
+
+    `replace_installation` reads the table as its first statement and looks for
+    the manager several statements later, so the one condition it raises for is
+    raised over an answer it already has. That answer travels with the refusal
+    rather than being read again by whoever catches it: a second read is a
+    second machine state, and what a result says about the operator's processes
+    has to be what was true before anything ran. `holders` carries the three
+    states the read has, the list, the empty list and `None` for a table that
+    could not be read, and no caller has to know which one it is.
+    """
+
+    def __init__(self, error: ConfigError, holders: list[JsonObject] | None) -> None:
+        super().__init__(error.error_type, error.summary, error.details)
+        self.holders = holders
+
+
 def replace_installation(*, tool: str) -> JsonObject:
     """Hand this installation to its own package manager and report what moved.
 
@@ -3062,7 +3102,14 @@ def replace_installation(*, tool: str) -> JsonObject:
     # the upgrade before it are sitting.
     _remove_superseded_launchers()
 
-    manager, command = _upgrade_command()
+    try:
+        manager, command = _upgrade_command()
+    except ConfigError as error:
+        # The one raise here is over a table that has already been read, so the
+        # read goes with it (#498). Dropping it made the one refusal of this
+        # tool that had an answer report a constant instead, which is the error
+        # #475 fixed everywhere the manager did run.
+        raise ManagerRefusalOverATableThatWasRead(error, still_running) from error
     previous_version = __version__
     # Both read before anything runs. They describe the installation as it is
     # now, and the one result that needs them is the one where it is not there
@@ -3233,6 +3280,18 @@ def replace_installation(*, tool: str) -> JsonObject:
 # reporting a transient reason there would send a caller to close a run and come
 # back for a refusal that was waiting all along. The bench hold is last because
 # it is the only one of the three that changes by itself.
+#
+# None of them carries `restart_required` (#498). Each answers before anything
+# has read the process table, so none of them knows whether a server started out
+# of this installation is still running, and `false` there was read as "every
+# server is current" on exactly the machine where it is not: a server started
+# before an earlier upgrade goes on answering with that release whatever this
+# refusal did. The field is left off the way a table that could not be read
+# leaves it off, and the summaries gain nothing, because a sentence about a
+# question nobody put is not an answer either. This is a property of what each
+# refusal did rather than of the number of them: the refusal raised inside
+# `replace_installation` for a missing manager reads the table first and
+# therefore owes what the read found.
 
 
 def _upgrade_permission_denied(config: AgenticHILConfig) -> JsonObject:
@@ -3249,7 +3308,6 @@ def _upgrade_permission_denied(config: AgenticHILConfig) -> JsonObject:
         # scope the catalogue is looked up by below (round 1, finding 3).
         "permission": "permissions.allow_upgrade",
         "running_version": __version__,
-        "restart_required": False,
         "path": config.config_path,
         "workspace_root": config.workspace_root,
         **remediation_fields("permission_denied", "allow_upgrade"),
@@ -3307,7 +3365,6 @@ def _upgrade_cli_only_on_host() -> JsonObject:
         ),
         "platform": sys.platform,
         "running_version": __version__,
-        "restart_required": False,
         "upgrade_command": "agentic-hil upgrade",
         "installed_extras": list(_installed_extras()),
         **remediation_fields("upgrade_cli_only_on_host"),
@@ -3337,7 +3394,6 @@ def _upgrade_in_open_run(bench: JsonObject) -> JsonObject:
             "underneath them would move the rules during the run they govern, so nothing was changed."
         ),
         "running_version": __version__,
-        "restart_required": False,
         "held_devices": list(bench.get("held_devices") or []),
         "device_holds": list(bench.get("device_holds") or []),
         "owner_active": bool(bench.get("owner_active")),
@@ -3378,8 +3434,32 @@ def server_upgrade(config: AgenticHILConfig, bench: JsonObject) -> JsonObject:
     try:
         result = replace_installation(tool=SERVER_UPGRADE)
     except ConfigError as error:
-        return {"tool": SERVER_UPGRADE, **error.to_dict(), "running_version": __version__, "restart_required": False, **NOT_STARTED, "retry_safe": False}
+        return _no_manager_to_hand_it_to(error)
     return _reported_as_running_code(result, config)
+
+
+def _no_manager_to_hand_it_to(error: ConfigError) -> JsonObject:
+    """The one refusal this tool raises rather than returns, as a document.
+
+    A host that got an exception here would show its operator a transport error
+    about a PATH, so the raise becomes a result like every other refusal. What
+    it is not is one of the three gates above: this one is raised from inside
+    `replace_installation`, after that function has read the process table, so
+    it owes what the read found rather than the silence a question nobody put
+    owes (#498). The answer and its sentence are the ones every other outcome
+    that replaced nothing gives, because that is what this is: `false` where the
+    table was read and held none, the holders named where it held some, and the
+    sentence with no field at all where it could not be read.
+
+    A `ConfigError` from anywhere else would not have that read behind it and
+    gets no restart fields, which is the same rule applied to a refusal that
+    never asked.
+    """
+    refusal: JsonObject = {"tool": SERVER_UPGRADE, **error.to_dict(), "running_version": __version__}
+    if isinstance(error, ManagerRefusalOverATableThatWasRead):
+        waiting = _nothing_new_to_load(error.holders)
+        refusal = {**refusal, **waiting, "summary": f"{error.summary} {_restart_sentence(waiting)}"}
+    return {**refusal, **NOT_STARTED, "retry_safe": False}
 
 
 def _reported_as_running_code(result: JsonObject, config: AgenticHILConfig) -> JsonObject:

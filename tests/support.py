@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import os
 import shutil
 import time
@@ -29,6 +30,52 @@ LAUNCHER_ROOT = REAL_HOME / f"{LAUNCHER_PREFIX}{os.getpid()}"
 _WINDOWS_SYNCHRONIZE = 0x00100000
 _WINDOWS_WAIT_OBJECT_0 = 0x00000000
 _WINDOWS_ERROR_INVALID_PARAMETER = 87
+
+# One factor for every wall-clock bound in the suite (#515). A bound says how
+# long something may take; on a machine running four other suites it also has to
+# say how much of the scheduler it will forgive, and that second number is the
+# runner's to set, not the test author's.
+TIME_SCALE_VARIABLE = "AGENTIC_HIL_TEST_TIME_SCALE"
+# Below 1.0 the factor narrows every bound at once, which is the opposite of
+# what a runner setting it wants, and the failures it causes name the code under
+# test rather than the factor. Above the maximum every wall-clock assertion in
+# the suite is true whatever the product does, so a green run stops meaning
+# anything. Both ends are refused where the value can still be read.
+TIME_SCALE_MINIMUM = 1.0
+TIME_SCALE_MAXIMUM = 100.0
+
+
+def scaled_time_bound(base: float) -> float:
+    """Return ``base`` widened by the runner's one time scale factor.
+
+    With `AGENTIC_HIL_TEST_TIME_SCALE` unset the number comes back untouched, so
+    every test keeps the claim it already made and the default suite is the
+    suite it was. Set, the factor multiplies the bound, which is how a contended
+    host widens every bound the same way from one place.
+
+    An exported but empty value reads as unset, because that is how a CI leg
+    spells "not set" when it forwards a variable nobody set. Anything else that
+    is not a finite number between `TIME_SCALE_MINIMUM` and `TIME_SCALE_MAXIMUM`
+    raises, naming the variable and the value it was given: falling back to 1.0
+    would hand a runner that meant to buy slack the narrow bounds back with no
+    word about it, which is the silent rerun this exists to end.
+
+    The environment is read on every call rather than at import, so a runner
+    that exports the variable after this module is imported still gets it.
+    """
+    raw = os.environ.get(TIME_SCALE_VARIABLE)
+    if raw is None or not raw.strip():
+        return float(base)
+    try:
+        factor = float(raw.strip())
+    except ValueError:
+        factor = None
+    if factor is None or not math.isfinite(factor) or not (TIME_SCALE_MINIMUM <= factor <= TIME_SCALE_MAXIMUM):
+        raise ValueError(
+            f"{TIME_SCALE_VARIABLE} must be a number between {TIME_SCALE_MINIMUM} and "
+            f"{TIME_SCALE_MAXIMUM}, got {raw!r}"
+        )
+    return float(base) * factor
 
 
 def publish_atomically(path: str, text: str) -> None:

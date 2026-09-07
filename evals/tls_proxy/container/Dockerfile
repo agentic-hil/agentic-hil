@@ -49,6 +49,13 @@ RUN chmod 0755 /opt/tls-proxy/entrypoint.sh
 # the whole tree: the entrypoint places it into the tool environment it builds.
 COPY src/agentic_hil /opt/tls-proxy/candidate/agentic_hil
 
+# The installer under review, for the same reason. Proof 3 fetches the one on
+# the releases page, which is the file an operator meets today; proof 4 runs
+# this one, which is the file they meet after the next release, so a change to
+# the certificate retry is read on this bench before it ships rather than off
+# an operator's proxy afterwards.
+COPY install.sh /opt/tls-proxy/candidate/install.sh
+
 USER bench
 WORKDIR /home/bench
 
