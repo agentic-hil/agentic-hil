@@ -1383,6 +1383,13 @@ def _attach_with_broker(config: AgenticHILConfig, bus_id: str, participant: str,
         if code is None:
             with suppress(BaseException):
                 started.terminate()
+        if attempts == 0:
+            # No descriptor was ever read, so `last` is still the sentence set
+            # up before the loop, which says a broker could not be reached or
+            # started and nothing else. A broker *was* started, and saying so,
+            # with the log to read and the two timeouts that did not fit each
+            # other, is the whole of what is honestly known here.
+            raise ParticipantError(_deadline_refusal(code, bus_id, participant, bus_key, lock_root, start_timeout_s, config.can_buses[bus_id].timeout_s))
     raise ParticipantError(last)
 
 
@@ -1498,6 +1505,51 @@ def _explained_exit_refusal(exit_code: int, bus_id: str, participant: str, bus_k
     backend_error = document.get("backend_error") or document.get("stderr_tail")
     if isinstance(backend_error, str) and backend_error.strip():
         refusal["backend_error"] = backend_error.strip()
+    return refusal
+
+
+def _deadline_refusal(exit_code: int | None, bus_id: str, participant: str, bus_key: str, lock_root: Path, start_timeout_s: float, bus_timeout_s: float) -> JsonObject:
+    """The refusal for a broker that never published and never explained itself.
+
+    Nothing in the broker log is known to belong to this attempt. Either the
+    broker was still inside its adapter open when the deadline arrived, and was
+    terminated before it could write anything, or it exited with a code no
+    branch here can read, which attributes nothing either. `_last_broker_document`
+    would still return something, because that file is appended by every broker
+    ever started for this bus, and quoting it here would hand the caller an
+    earlier broker's failure as this attempt's cause. A confidently wrong cause
+    is worse than a generic one, so the log is named as a place to look and not
+    quoted.
+
+    What the refusal can say honestly is what this client did: it started a
+    broker, it waited this long, and the bus's own adapter timeout is that long.
+    The two numbers stand beside each other because they are set independently,
+    and a bus whose adapter may take longer than the client waits is the
+    ordinary way a broker gets terminated with nothing written.
+    """
+    log_path = broker_log_path(bus_key, lock_root)
+    refusal: JsonObject = {
+        "ok": False,
+        "error_type": "can_broker_unavailable",
+        "summary": (
+            f"The CAN broker started for this bus exited with code {exit_code}, which this client has no reading for, before it published; its log is the only account of it."
+            if exit_code is not None
+            else "The CAN broker started for this bus published nothing before the attach deadline and was terminated; nothing about this attempt reached its log."
+        ),
+        "bus_id": bus_id,
+        "participant": participant,
+        "bus_key": bus_key,
+        "broker_log": str(log_path),
+        "broker_start_timeout_s": start_timeout_s,
+        "bus_timeout_s": bus_timeout_s,
+        "retry_safe": True,
+        "side_effect_committed": False,
+    }
+    if exit_code is not None:
+        # The one thing an unreadable exit still attributes is itself. A code
+        # this client's own `terminate` produced is not passed here, because a
+        # signal this client sent is not evidence about the adapter.
+        refusal["broker_exit_code"] = exit_code
     return refusal
 
 
