@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 from conftest import write_config
+from support import scaled_time_bound
 
 from agentic_hil.backends.pyocd import TARGET_TYPE_INVALID_DOC, PyOCDBackend
 from agentic_hil.config import load_config
@@ -173,6 +174,55 @@ def stub_pyocd(tmp_path: Path) -> Path:
     return path
 
 
+# The budget the stub runs under. It is a Python process that imports pyOCD
+# twice, once for the probe list and once for the refusal, so five seconds is
+# ample on an idle machine and runs out on a loaded one: the service then
+# terminates the child, its stderr is empty, and every assertion below reads as
+# a stub that stopped reaching pyOCD, which is the one failure this file exists
+# to catch and is in that case the wrong answer.
+#
+# So the budget takes the same factor every wall-clock bound in the suite takes
+# (#522), which keeps these tests measuring what they measured, and the run
+# below reads the log envelope's `timed_out` before it reads any wording.
+STUB_TIMEOUT_S = 5.0
+
+
+def stub_config(directory: Path) -> Path:
+    """The configuration both runs against the stub are driven from."""
+    directory.mkdir(parents=True, exist_ok=True)
+    return write_config(
+        directory,
+        debugger_type="pyocd",
+        debugger_executable=stub_pyocd(directory),
+        probe_id="PYOCD123",
+        target_type=UNRESOLVABLE_TARGET_TYPE,
+        timeout_s=scaled_time_bound(STUB_TIMEOUT_S),
+    )
+
+
+def run_the_stub(directory: Path) -> tuple[dict, dict]:
+    """`probe_target` against the stub, as the refusal and the log it wrote.
+
+    The envelope is read here, before either test reads a word of the refusal,
+    because a terminated child makes every wording claim below false for a
+    reason that has nothing to do with pyOCD. Reported as a failure and never as
+    a skip: a file that stops asserting on exactly the hosts this is about would
+    be green with the product broken.
+    """
+    config = load_config(str(stub_config(directory)))
+    service = AgenticHILToolService(config)
+    try:
+        refused = service.call("probe_target")
+    finally:
+        service.close()
+    log = json.loads((Path(config.workspace_root) / refused["log_path"]).read_text(encoding="utf-8"))
+    assert log["timed_out"] is False, (
+        f"the stub was terminated after {scaled_time_bound(STUB_TIMEOUT_S)}s instead of refusing, so nothing here is "
+        f"about pyOCD's wording; this host needs a larger AGENTIC_HIL_TEST_TIME_SCALE"
+    )
+    return refused, log
+
+
 def test_the_real_refusal_reaches_the_cmsis_pack_remediation(tmp_path: Path) -> None:
     """Stage 2: the words have to arrive as the fix, not only as a category.
 
@@ -180,22 +230,7 @@ def test_the_real_refusal_reaches_the_cmsis_pack_remediation(tmp_path: Path) -> 
     so the classifier, the catalogue lookup and the substituted command are
     exercised together on wording nobody in this repository chose.
     """
-    config = load_config(
-        str(
-            write_config(
-                tmp_path,
-                debugger_type="pyocd",
-                debugger_executable=stub_pyocd(tmp_path),
-                probe_id="PYOCD123",
-                target_type=UNRESOLVABLE_TARGET_TYPE,
-            )
-        )
-    )
-    service = AgenticHILToolService(config)
-    try:
-        refused = service.call("probe_target")
-    finally:
-        service.close()
+    refused, _ = run_the_stub(tmp_path)
 
     assert refused["ok"] is False
     assert refused["error_type"] == "target_type_invalid"
@@ -214,29 +249,7 @@ def test_the_stub_carries_the_installed_pyocd_wording(tmp_path: Path) -> None:
     above passing on wording of its own: the failure mode this whole file exists
     to remove.
     """
-    log = json.loads(
-        _run_stub_and_read_log(tmp_path),
-    )
+    _, log = run_the_stub(tmp_path)
 
     assert real_pyocd_refusal() in log["stderr"]
     assert log["returncode"] == 1
-
-
-def _run_stub_and_read_log(tmp_path: Path) -> str:
-    config = load_config(
-        str(
-            write_config(
-                tmp_path,
-                debugger_type="pyocd",
-                debugger_executable=stub_pyocd(tmp_path),
-                probe_id="PYOCD123",
-                target_type=UNRESOLVABLE_TARGET_TYPE,
-            )
-        )
-    )
-    service = AgenticHILToolService(config)
-    try:
-        refused = service.call("probe_target")
-    finally:
-        service.close()
-    return (Path(config.workspace_root) / refused["log_path"]).read_text(encoding="utf-8")
