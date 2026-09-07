@@ -435,7 +435,7 @@ class CanBusService:
             try:
                 self._stop_session(existing, "replaced")
             except Exception as error:
-                return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "Previous CAN bus session could not be closed and remains registered for cleanup retry.", "backend_error": str(error)})
+                return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "Previous CAN bus session could not be closed and remains registered for cleanup retry.", "backend_error": str(error), **can_likely_causes("can_adapter_close_failed")})
             self.sessions.pop(bus_id, None)
         bus_config = bus["bus_config"]
         try:
@@ -521,7 +521,7 @@ class CanBusService:
                 try:
                     self._stop_session(session, "start_failed", defer_release=True)
                 except BaseException as close_error:
-                    written = self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN initialization failed and the session remains registered for cleanup retry.", "backend_error": str(close_error)})
+                    written = self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN initialization failed and the session remains registered for cleanup retry.", "backend_error": str(close_error), **can_likely_causes("can_adapter_close_failed")})
                     if isinstance(error, (KeyboardInterrupt, SystemExit)):
                         error.args = (*error.args, f"Cleanup error: {close_error}")
                         raise error from close_error
@@ -533,7 +533,7 @@ class CanBusService:
                 if written.get("audit_ok") is False:
                     return written
                 if not session.lease.release(safe_state_confirmed=session.safe_state_confirmed, processes_reaped=session.process_reaped):
-                    return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN lease release remained unconfirmed.", "cleanup_required": True})
+                    return self._write_report({"ok": False, "tool": "can_session_start", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN lease release remained unconfirmed.", "cleanup_required": True, **can_likely_causes("can_adapter_close_failed")})
                 self.sessions.pop(bus_id, None)
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
                     raise error
@@ -558,13 +558,13 @@ class CanBusService:
         try:
             audit_error = self._stop_session(session, "requested", defer_release=True)
         except Exception as error:
-            return self._write_report({"ok": False, "tool": "can_session_stop", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN bus session could not be closed and remains registered for cleanup retry.", "backend_error": str(error)})
+            return self._write_report({"ok": False, "tool": "can_session_stop", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN bus session could not be closed and remains registered for cleanup retry.", "backend_error": str(error), **can_likely_causes("can_adapter_close_failed")})
         result = {"ok": True, "tool": "can_session_stop", "bus_id": bus_id, "was_active": True, "session": self._session_status(session), "summary": "CAN bus session stopped."}
         written = self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
         if written.get("audit_ok") is False:
             return {**written, "cleanup_required": True, "quarantined": True}
         if not session.lease.release(safe_state_confirmed=session.safe_state_confirmed, processes_reaped=session.process_reaped):
-            return self._write_report({"ok": False, "tool": "can_session_stop", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN lease release remained unconfirmed.", "cleanup_required": True})
+            return self._write_report({"ok": False, "tool": "can_session_stop", "bus_id": bus_id, "error_type": "can_adapter_close_failed", "summary": "CAN lease release remained unconfirmed.", "cleanup_required": True, **can_likely_causes("can_adapter_close_failed")})
         self.sessions.pop(bus_id, None)
         return recommit_report_with_status(self.config, written, session.lease.status())
 
@@ -644,7 +644,7 @@ class CanBusService:
             return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
         frames = normalize_received_frames(read.get("frames", []))
         if frames is None:
-            return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned malformed frame data.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response")})
+            return self._write_report({"ok": False, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "error_type": "can_adapter_invalid_response", "summary": "CAN adapter returned malformed frame data.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response"), **can_likely_causes("can_adapter_invalid_response")})
         result = {"ok": True, "tool": "can_read", "bus_id": bus_id, "adapter": session.adapter_session.adapter_name, "frames_read": len(frames), "frames": frames, "adapter_result": public_backend_result(read, ["frames"]), "log_path": display_path(self.config, session.log_path), "summary": "CAN frame(s) read." if frames else "No CAN frames were available."}
         audit_error = append_jsonl_audited(self.config, session.log_path, {"direction": "rx", **result})
         return self._write_report(mark_audit_failure(result, audit_error) if audit_error is not None else result)
@@ -678,7 +678,7 @@ class CanBusService:
             return {"ok": False, "tool": tool, "error_type": "invalid_argument", "summary": "bus_id is required."}
         bus_config = self.config.can_buses.get(bus_id)
         if bus_config is None:
-            return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "can_bus_not_configured", "summary": "CAN bus is not available in the authoritative config.", "configured_buses": sorted(self.config.can_buses.keys())}
+            return {"ok": False, "tool": tool, "bus_id": bus_id, "error_type": "can_bus_not_configured", "summary": "CAN bus is not available in the authoritative config.", "configured_buses": sorted(self.config.can_buses.keys()), **can_likely_causes("can_bus_not_configured")}
         return {"ok": True, "bus_config": bus_config}
 
     def _active_session(self, bus_id: str, tool: str) -> JsonObject:
@@ -757,7 +757,7 @@ class CanBusService:
             drained += len(frames)
             if not frames:
                 return self._audit_queue_clear_result(session, {"ok": True, "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "committed" if drained else "not_started", "retry_safe": drained == 0})
-        return self._audit_queue_clear_result(session, {"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": "can_queue_clear_limit", "summary": "CAN receive queue did not become empty within the bounded drain limit.", "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "partial" if drained else "not_started", "retry_safe": drained == 0})
+        return self._audit_queue_clear_result(session, {"ok": False, "tool": "can_session_start", "bus_id": session.bus_id, "error_type": "can_queue_clear_limit", "summary": "CAN receive queue did not become empty within the bounded drain limit.", "frames_drained": drained, "side_effect_committed": drained > 0, "side_effect_status": "partial" if drained else "not_started", "retry_safe": drained == 0, **can_likely_causes("can_queue_clear_limit")})
 
     def _audit_queue_clear_result(self, session: CanBusSession, result: JsonObject) -> JsonObject:
         audit_error = append_jsonl_audited(self.config, session.log_path, {"event": "queue_clear_complete", **result})
@@ -904,6 +904,7 @@ def listen_only_send_refusal(bus_id: str, bus_config: CanBusConfig, tool: str = 
         "side_effect_status": "not_started",
         "retry_safe": False,
         **remediation_fields(LISTEN_ONLY_MODE_ERROR),
+        **can_likely_causes(LISTEN_ONLY_MODE_ERROR),
     }
 
 
@@ -982,7 +983,7 @@ class PythonCanAdapterSession:
             # frame was sent by this call, so it refuses instead of reporting
             # an unknown bus effect. The process-bridge adapter
             # stays markerless: a broken bridge process is an unknown.
-            return {"ok": False, "error_type": "can_read_failed", "summary": "CAN adapter failed to read frames.", "backend_error": str(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True}
+            return {"ok": False, "error_type": "can_read_failed", "summary": "CAN adapter failed to read frames.", "backend_error": str(error), "side_effect_committed": False, "side_effect_status": "not_started", "retry_safe": True, **can_likely_causes("can_read_failed")}
 
     def close(self) -> JsonObject:
         shutdown = getattr(self.bus, "shutdown", None)
@@ -1438,10 +1439,10 @@ def open_python_can_adapter(config: AgenticHILConfig, bus_id: str, bus_config: C
     try:
         import can
     except ImportError:
-        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters.", "side_effect_committed": False}
+        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_backend_not_available", "summary": "python-can is not installed. Install agentic-hil[can] to use direct CAN adapters.", "side_effect_committed": False, **can_likely_causes("can_backend_not_available")}
 
     def open_failure(error: BaseException) -> JsonObject:
-        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error)}
+        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": bus_config.adapter, "error_type": "can_adapter_open_failed", "summary": "CAN adapter could not be opened.", "backend_error": str(error), **can_likely_causes("can_adapter_open_failed")}
 
     # A `peak` bus whose channel names a Linux kernel netdev is routed to
     # `socketcan`, the same interface a `socketcan` bus opens through, rather
@@ -1693,6 +1694,7 @@ def listen_only_unconfirmed(can_module: object, interface: str, bus: object, bus
             f"channel was closed rather than used to observe a bus it would have ACKed on. {state['detail']}"
         ),
         **remediation_fields(LISTEN_ONLY_UNCONFIRMED_ERROR, bus_config.adapter),
+        **can_likely_causes(LISTEN_ONLY_UNCONFIRMED_ERROR),
     }
 
 
@@ -1794,6 +1796,18 @@ class ProcessCanAdapterSession(ProcessBridgeSession):
         super().__init__(child)
         self.timeout_s = timeout_s
 
+    def _bridge_error(self, kind: str, summary: str) -> JsonObject:
+        """The transport's own refusal, carrying the causes of its CAN error type.
+
+        `agentic_hil.bridge` builds the type out of `error_prefix` and the kind
+        it is called with and knows nothing about CAN, so the row is attached
+        here, where the prefix that makes it a CAN error type is set. These
+        dictionaries go back to `open_process_adapter` and into the report
+        unchanged, so this is the one place the causes can be put on them.
+        """
+        result = super()._bridge_error(kind, summary)
+        return {**result, **can_likely_causes(result.get("error_type"))}
+
     def send(self, frame: CanFrame) -> JsonObject:
         result = self.request("send", {"frame": bridge_frame(frame)}, self.timeout_s)
         if result.get("ok") is True and (set(result) - {"ok", "backend", "summary"} or not _optional_strings(result, "backend", "summary")):
@@ -1884,12 +1898,12 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
         return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "config_invalid", "field": f"can_buses.{bus_id}.executable", "summary": "adapter: process requires executable.", "side_effect_committed": False}
     executable = resolve_work_path(config, bus_config.executable)
     if not Path(executable).is_file():
-        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_not_found", "summary": "CAN adapter bridge executable could not be found.", "side_effect_committed": False}
+        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_not_found", "summary": "CAN adapter bridge executable could not be found.", "side_effect_committed": False, **can_likely_causes("can_adapter_not_found")}
     command = invocation(executable)
     try:
         child = spawn_managed_process(command, cwd=str(Path(executable).parent), text=True, encoding="utf-8", errors="replace", stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as error:
-        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_process_start_failed", "summary": "CAN adapter bridge process could not be started.", "backend_error": str(error), "side_effect_committed": False}
+        return {"ok": False, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "error_type": "can_adapter_process_start_failed", "summary": "CAN adapter bridge process could not be started.", "backend_error": str(error), "side_effect_committed": False, **can_likely_causes("can_adapter_process_start_failed")}
     session = ProcessCanAdapterSession(child, bus_config.timeout_s)
     try:
         opened = session.request("open", {"channel": bus_config.channel, "bitrate": bus_config.bitrate, "fd": bus_config.fd, "data_bitrate": bus_config.data_bitrate, "receive_own_messages": bus_config.receive_own_messages, "listen_only": bus_config.listen_only, "clear_rx_queue": clear_rx_queue, "poll_interval_ms": bus_config.poll_interval_ms}, bus_config.timeout_s)
@@ -1942,7 +1956,7 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
         bus_contact_unknown = opened.get("ok") is True or opened.get("error_type") in BRIDGE_OPEN_UNANSWERED or opened_before_failing
         if opened.get("ok") is True:
             opened = (
-                {"ok": False, "error_type": "can_adapter_protocol_unsupported", "summary": "CAN process adapter must return a valid protocol version 2 open response.", **remediation_fields("can_adapter_protocol_unsupported")}
+                {"ok": False, "error_type": "can_adapter_protocol_unsupported", "summary": "CAN process adapter must return a valid protocol version 2 open response.", **remediation_fields("can_adapter_protocol_unsupported"), **can_likely_causes("can_adapter_protocol_unsupported")}
                 if not valid_open
                 else {
                     "ok": False,
@@ -1956,16 +1970,21 @@ def open_process_adapter(config: AgenticHILConfig, bus_id: str, bus_config: CanB
                         "`listen_only: true` in its open result."
                     ),
                     **remediation_fields(LISTEN_ONLY_UNCONFIRMED_ERROR, "process"),
+                    **can_likely_causes(LISTEN_ONLY_UNCONFIRMED_ERROR),
                 }
             )
         try:
             session.close()
         except BridgeCleanupError as cleanup_error:
-            return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **opened, "cleanup_required": True, "cleanup_error": cleanup_error.result, "session": session}
+            return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **can_likely_causes(opened.get("error_type")), **opened, "cleanup_required": True, "cleanup_error": cleanup_error.result, "session": session}
         # Named apart from the marker parameter it used to shadow: three branches
         # above now write to that marker, and a rebind here read as one of them.
         no_contact_field: JsonObject = {} if bus_contact_unknown else {"side_effect_committed": False}
-        return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **opened, "cleanup_confirmed": True, **no_contact_field}
+        # The causes go in ahead of `**opened` for the reason `can_send` does
+        # it: a bridge that answered with causes of its own keeps them, and a
+        # bridge that named one of these error types without them gets the row
+        # the same failure has everywhere else.
+        return {"tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), **can_likely_causes(opened.get("error_type")), **opened, "cleanup_confirmed": True, **no_contact_field}
     result = {"ok": True, "tool": "can_session_start", "bus_id": bus_id, "adapter": "process", "command": command_for_log(command), "backend": opened.get("backend", "process"), "session": session, "summary": "CAN adapter bridge opened."}
     if bus_config.listen_only:
         result.update({"listen_only": True, "listen_only_enforcement": LISTEN_ONLY_ENFORCEMENT["process"]})
@@ -2009,6 +2028,7 @@ def payload_frame(bus_config: CanBusConfig, payload: JsonObject) -> JsonObject:
                 "as FD occupies the position RTR held in classic CAN, so an FD controller has none to send."
             ),
             **remediation_fields(CAN_FD_REMOTE_FRAME_ERROR),
+            **can_likely_causes(CAN_FD_REMOTE_FRAME_ERROR),
         }
     data_hex = payload.get("data_hex", "")
     if not isinstance(data_hex, str):
@@ -2026,6 +2046,7 @@ def payload_frame(bus_config: CanBusConfig, payload: JsonObject) -> JsonObject:
                 "bytes_requested": len(data),
                 "allowed_lengths": list(CAN_FD_FRAME_DATA_LENGTHS),
                 **remediation_fields(CAN_FD_FRAME_LENGTH_INVALID_ERROR),
+                **can_likely_causes(CAN_FD_FRAME_LENGTH_INVALID_ERROR),
             }
     elif len(data) > CLASSIC_CAN_MAX_FRAME_DATA_BYTES:
         return {
@@ -2036,6 +2057,7 @@ def payload_frame(bus_config: CanBusConfig, payload: JsonObject) -> JsonObject:
             "bytes_requested": len(data),
             "classic_max_frame_data_bytes": CLASSIC_CAN_MAX_FRAME_DATA_BYTES,
             **remediation_fields(CAN_CLASSIC_FRAME_TOO_LARGE_ERROR),
+            **can_likely_causes(CAN_CLASSIC_FRAME_TOO_LARGE_ERROR),
         }
     if len(data) > bus_config.max_frame_data_bytes:
         return {"ok": False, "tool": "can_send", "error_type": "invalid_argument", "summary": "CAN frame data exceeds configured max_frame_data_bytes.", "bytes_requested": len(data), "max_frame_data_bytes": bus_config.max_frame_data_bytes}
@@ -2094,7 +2116,7 @@ def normalize_received_frames(raw_frames: object) -> list[JsonObject] | None:
 
 
 def invalid_can_bridge_response(method: str) -> JsonObject:
-    return {"ok": False, "error_type": "can_adapter_invalid_response", "summary": f"CAN process adapter returned an invalid {method} response.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response")}
+    return {"ok": False, "error_type": "can_adapter_invalid_response", "summary": f"CAN process adapter returned an invalid {method} response.", "side_effect_status": "unknown", "cleanup_required": True, **remediation_fields("can_adapter_invalid_response"), **can_likely_causes("can_adapter_invalid_response")}
 
 
 def _optional_strings(result: JsonObject, *fields: str) -> bool:
