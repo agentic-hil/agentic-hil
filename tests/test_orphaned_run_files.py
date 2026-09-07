@@ -459,7 +459,20 @@ def test_a_start_that_gives_up_on_its_worker_sweeps_the_attempts_before_it(tmp_p
     workspace, plan = bench_workspace(tmp_path, monkeypatch, LONG_DELAY_PLAN)
     config = load_authoritative_config(workspace)
     monkeypatch.setattr(runlifecycle, "WORKER_PUBLISH_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(runlifecycle, "MAX_WAIT_S", 0.0)
+    # The start's own deadline and the sweep's threshold are two numbers built
+    # from the same two constants, and only this test brings them close enough
+    # to collide. The deadline is worker_publish_window_s(wait_s) with the
+    # wait_s passed below, so it stays at 0.05 and the start still gives up at
+    # once. The threshold is worker_publish_window_s(MAX_WAIT_S), and at 0.0 it
+    # was 0.05 as well: everything older than fifty milliseconds is swept,
+    # including the files this start planted for itself a read, a prune, a glob
+    # and a directory listing earlier. On a loaded host that stretch takes
+    # longer than fifty milliseconds and the last two assertions lose the files
+    # they are about. Five seconds puts this attempt about a thousand times
+    # inside the window while the orphan planted at sixty seconds stays well
+    # outside it, and the test runs no slower for it. Shipped, the two numbers
+    # are 30 and 900, which is the thousandfold margin this restores.
+    monkeypatch.setattr(runlifecycle, "MAX_WAIT_S", 5.0)
     earlier = plant_orphan_files(config, ORPHAN_HANDLE, age_s=60.0, with_lock=True)
 
     def spawn_that_never_publishes(config, handle: str, test_config_path: str, *, wait_s: float) -> UnresponsiveWorker:
