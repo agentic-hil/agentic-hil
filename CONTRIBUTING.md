@@ -35,6 +35,12 @@ cancelled two runs whose tests were green. `tools/ci_linux.py` and the review
 loop container below stay one process by design; their durations and their
 limits are their own.
 
+`AGENTIC_HIL_TEST_TIME_SCALE` multiplies every wall-clock bound the suite takes
+through `scaled_time_bound` by one factor, accepted from 1.0 to 100 and left at
+1.0 while the variable is unset, so a machine that is busy with something else
+widens the allowance for its scheduler in one place instead of loosening one
+bound per red run.
+
 Nothing has to be marked to make this safe. Every test already gets its own
 HOME, config, state and temporary storage, and its device-lock root, its CAN
 broker endpoint and its run records all follow that HOME, so two workers cannot
