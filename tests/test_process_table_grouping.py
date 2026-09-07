@@ -372,11 +372,13 @@ def test_the_document_that_says_how_to_run_the_suite_says_where_the_scheduler_co
     if not CONTRIBUTING.is_file():
         pytest.skip("CONTRIBUTING.md is repository content and does not ship in a source distribution")
     text = CONTRIBUTING.read_text(encoding="utf-8")
-    paragraphs = [block for block in text.split("\n\n") if "xdist_group" in block]
-    assert paragraphs, "CONTRIBUTING.md no longer says anything about the group marker"
-    said = "\n\n".join(paragraphs)
-    assert "--dist loadgroup" in said, said
-    assert "addopts" in said, f"the document does not say the scheduler comes from the configuration:\n{said}"
+    assert "xdist_group" in text, "CONTRIBUTING.md no longer says anything about the group marker"
+    paragraphs = [block for block in text.split("\n\n") if "--dist loadgroup" in block]
+    assert paragraphs, "CONTRIBUTING.md no longer names the scheduler the grouped tests need"
+    silent = [block for block in paragraphs if "addopts" not in block]
+    assert not silent, "these paragraphs name --dist loadgroup without saying it comes from addopts:\n" + "\n\n".join(
+        silent
+    )
 
 
 def test_step_fives_scan_still_reads_the_whole_process_table() -> None:
