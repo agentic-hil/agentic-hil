@@ -521,12 +521,10 @@ def test_classifier_buckets_from_recorded_tool_output(tmp_path: Path, backend_na
 # memory read is driven below on its own, because a read needs a flashed ELF
 # to resolve its symbol against, which no single transcript can provide.
 #
-# Five of these pairs have no catalogue entry at all today (verify_failed on
-# ST-Link and on pyOCD, flash_failed on pyOCD and on OpenOCD, memory_read_failed
-# on pyOCD), so what the row pins for them is the bucket and the absence of
-# steps. Writing those entries is owed and is not #506's subject: an operator
-# who meets a failed verify gets no next step, and that is a gap in the
-# catalogue rather than a wrong classification.
+# The remediation is compared against `remediation_fields` rather than spelled
+# out, so a row follows its bucket's entry wherever the catalogue puts it. The
+# five entries these rows once pinned as absent are written at the bottom of
+# this file (#516).
 TOOL_RESULT_ROWS = [
     ("stlink", "probe_target", {}, "Error: No ST-LINK detected!\n", "probe_not_found", "adapter_not_found", "refused"),
     ("stlink", "probe_target", {}, "ST-LINK SN  : STLINK123\nError: no device found\n", "target_not_detected", "target_not_detected", "refused"),
@@ -1033,10 +1031,10 @@ def test_troubleshooting_still_names_both_plausibility_keys() -> None:
 # ---------------------------------------------------------------------------
 # The five backend-scoped remediation entries the classifier buckets are owed.
 #
-# `verify_failed`, `flash_failed` and `memory_read_failed` have no catalogue
-# entry at all today, scoped or unscoped, so the row table above can pin only
-# the bucket and the absence of steps: an operator whose flash failed to verify
-# is told which bucket the failure fell in and nothing about what to do next.
+# `verify_failed`, `flash_failed` and `memory_read_failed` had no catalogue
+# entry at all, scoped or unscoped, so the row table above could pin only the
+# bucket and the absence of steps: an operator whose flash failed to verify was
+# told which bucket the failure fell in and nothing about what to do next.
 # What each of them has to say is the tool's own account of that operation, so
 # the entries are scoped per backend the way `flash_erase_failed` already is. A
 # failed verify under STM32CubeProgrammer is a different investigation from a
