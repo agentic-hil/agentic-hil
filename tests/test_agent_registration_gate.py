@@ -9,13 +9,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from evals.install.registration_gate import AGENTS, REPORT_PREFIX, SCENARIOS
-from tools.test_agent_registration import main, read_report, run_logged
+from evals.install.registration_gate import AGENTS, REPORT_PREFIX, SCENARIOS, SCENARIOS_BY_MODE, SCRIPT_SCENARIOS
+from tools.test_agent_registration import combine_reports, container_command, main, read_report, run_logged
 
 
 def passing_report() -> dict:
     return {
         "ok": True,
+        "mode": "all",
         "versions": {"codex": "codex-cli 0.145.0", "claude-code": "2.1.218 (Claude Code)"},
         "cases": [{"agent": agent, "scenario": scenario, "status": "passed"} for agent in AGENTS for scenario in SCENARIOS],
     }
@@ -58,6 +59,40 @@ def test_missing_docker_fails_and_replaces_old_green_report(tmp_path: Path, monk
     monkeypatch.setattr("tools.test_agent_registration.shutil.which", lambda _name: None)
     assert main(["--output", str(tmp_path)]) == 1
     assert json.loads((tmp_path / "report.json").read_text())["ok"] is False
+
+
+def stage_report(mode: str) -> dict:
+    report = passing_report()
+    report["mode"] = mode
+    report["image_id"] = f"sha256:{mode}"
+    report["cases"] = [row for row in report["cases"] if row["scenario"] in SCENARIOS_BY_MODE[mode]]
+    for row in report["cases"]:
+        if row["scenario"] in SCRIPT_SCENARIOS:
+            row["installer_sha256"] = "checkout-installer"
+    return report
+
+
+def test_combined_gate_requires_real_script_cases() -> None:
+    wheel = stage_report("wheel")
+    script = stage_report("script")
+    report = combine_reports([script, wheel], "checkout-installer")
+    assert len(report["cases"]) == 20
+    with pytest.raises(ValueError, match="both script and wheel"):
+        combine_reports([wheel], "checkout-installer")
+    with pytest.raises(AssertionError):
+        read_report(REPORT_PREFIX + json.dumps(wheel))
+
+
+def test_script_stage_must_execute_the_reviewed_installer() -> None:
+    with pytest.raises(ValueError, match="this checkout's install.sh"):
+        combine_reports([stage_report("script"), stage_report("wheel")], "different-installer")
+
+
+@pytest.mark.parametrize(("mode", "network"), [("script", "bridge"), ("wheel", "none")])
+def test_only_script_downloads_get_network_without_host_secrets(mode: str, network: str) -> None:
+    command = container_command("docker", "test-case", "sha256:tested", mode)
+    assert command[command.index("--network") + 1] == network
+    assert not {"-e", "--env", "--env-file", "-v", "--volume", "--mount", "--privileged"} & set(command)
 
 
 @pytest.mark.parametrize("exit_code", [1, 125, 137])

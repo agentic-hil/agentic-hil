@@ -1,14 +1,19 @@
-"""Offline black-box gates against the installed wheel and actual agent CLIs.
+"""Black-box registration gates for install.sh and the current source wheel.
 
-Only the registration-gate Docker target runs this module. No imports from
-agentic_hil, mocks, credentials, host homes, or hardware are involved.
+The script target downloads the published package through the real installer;
+the wheel target checks the current source offline. Neither receives credentials,
+host homes, or hardware, and neither mocks an agent CLI or repairs a script's
+registration before checking it.
 """
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -22,7 +27,7 @@ except ImportError:  # Host-side report tests also run on Python 3.10.
     import tomli as tomllib
 
 AGENTS = ("codex", "claude-code")
-SCENARIOS = (
+WHEEL_SCENARIOS = (
     "fresh-install",
     "merge-and-repeat",
     "setup",
@@ -32,6 +37,9 @@ SCENARIOS = (
     "missing-registration-control",
     "broken-launcher-control",
 )
+SCRIPT_SCENARIOS = ("script-explicit-agent", "script-auto-detect")
+SCENARIOS = WHEEL_SCENARIOS + SCRIPT_SCENARIOS
+SCENARIOS_BY_MODE = {"wheel": WHEEL_SCENARIOS, "script": SCRIPT_SCENARIOS, "all": SCENARIOS}
 REPORT_PREFIX = "AGENT_REGISTRATION_GATE="
 
 
@@ -40,9 +48,10 @@ def require(condition: object, detail: str) -> None:
         raise AssertionError(detail)
 
 
-def validate_report(report: dict) -> None:
+def validate_report(report: dict, *, mode: str = "all") -> None:
     """A green exit without every required case is a failure, including skips."""
-    expected = {(agent, scenario) for agent in AGENTS for scenario in SCENARIOS}
+    require(report.get("mode") == mode, f"expected {mode} registration evidence")
+    expected = {(agent, scenario) for agent in AGENTS for scenario in SCENARIOS_BY_MODE[mode]}
     rows = report["cases"]
     actual = [(row["agent"], row["scenario"]) for row in rows]
     require(len(actual) == len(expected) and set(actual) == expected, "missing or duplicate registration cases")
@@ -83,11 +92,12 @@ class Case:
         self.skill = self.home / (".codex" if agent == "codex" else ".claude") / "skills/agentic-hil/SKILL.md"
         self.launcher = self.home / ".local/bin/agentic-hil"
         self.cli = "codex" if agent == "codex" else "claude"
+        self.expected_tools = Path(__file__).with_name("tools.list.expected").read_text().splitlines()
 
-    def run(self, command: list[str], *, cwd: Path | None = None, input_text: str | None = None) -> subprocess.CompletedProcess:
+    def run(self, command: list[str], *, cwd: Path | None = None, input_text: str | None = None, timeout_s: int = 45) -> subprocess.CompletedProcess:
         result = subprocess.run(
             command, cwd=cwd or self.workspace, env=self.env,
-            input=input_text, capture_output=True, text=True, timeout=45, check=False,
+            input=input_text, capture_output=True, text=True, timeout=timeout_s, check=False,
         )
         return result
 
@@ -176,8 +186,7 @@ class Case:
         require([item.get("id") for item in responses] == [1, 2, 3], f"incomplete MCP exchange: {output}")
         require(responses[0]["result"]["serverInfo"] == {"name": "agentic-hil", "version": self.version}, "wrong MCP server identity")
         tools = responses[1]["result"]["tools"]
-        expected = (Path(__file__).with_name("tools.list.expected")).read_text().splitlines()
-        require(sorted(tool["name"] for tool in tools) == expected, "MCP tools/list does not match the shipped contract")
+        require(sorted(tool["name"] for tool in tools) == self.expected_tools, "MCP tools/list does not match the shipped contract")
         require(all(tool.get("annotations", {}).get("title") for tool in tools), "MCP tools lack annotations")
         result = responses[2]["result"]
         if provisioned:
@@ -195,6 +204,7 @@ class Case:
         self.config.write_text(text, encoding="utf-8")
 
     def exercise(self, scenario: str) -> None:
+        require(scenario in WHEEL_SCENARIOS, f"not a wheel scenario: {scenario}")
         self.install_wheel()
         if scenario in {"invalid-config", "operator-conflict"}:
             if scenario == "invalid-config":
@@ -248,7 +258,57 @@ class Case:
             raise AssertionError(f"negative control went green: {scenario}")
 
 
-def main() -> int:
+class ScriptCase(Case):
+    """The only installer here is the repository's unmodified install.sh."""
+
+    def exercise(self, scenario: str) -> None:
+        require(scenario in SCRIPT_SCENARIOS, f"not a script scenario: {scenario}")
+        script = Path("/opt/registration/install.sh")
+        # Start without a package, manager, wheelhouse or package cache. The
+        # pinned uv bootstrap and PyPI download must happen inside install.sh.
+        for key in ("PIPX_HOME", "PIPX_BIN_DIR", "PIP_NO_INDEX", "PIP_FIND_LINKS"):
+            self.env.pop(key)
+        for command in ("agentic-hil", "uv", "pipx"):
+            require(shutil.which(command, path=self.env["PATH"]) is None, f"{command} was preinstalled")
+        require(not Path("/opt/registration-wheels").exists(), "script test received prebuilt package wheels")
+        require(not self.config.exists() and not self.skill.exists(), "script test did not start clean")
+        self.expect_missing()
+        command = ["sh", str(script)]
+        if scenario == "script-explicit-agent":
+            command.extend(["--agent", self.agent])
+        result = self.run(command, timeout_s=300)
+        print(f"install.sh ({self.agent}, {scenario}):\n{result.stdout}{result.stderr}", flush=True)
+        require(result.returncode == 0, f"install.sh failed with exit {result.returncode}: {result.stdout}\n{result.stderr}")
+        require(self.launcher.is_file() and self.launcher.resolve().is_relative_to(self.home), "install.sh did not install a user-local launcher")
+        self.version = self.checked([str(self.launcher), "--version"]).strip()
+        release = re.search(r'^RELEASE="(\d+)\.(\d+)\.(\d+)"$', script.read_text(), re.MULTILINE)
+        installed = re.match(r"^(\d+)\.(\d+)\.(\d+)", self.version)
+        require(release is not None and installed is not None, "script or installed package did not report a version")
+        require(tuple(map(int, installed.groups())) >= tuple(map(int, release.groups())), "install.sh installed below its release floor")
+        # Read the installed distribution's declaration through its interpreter.
+        # The release downloaded by install.sh need not have the development
+        # checkout's tool list or skill version. This does not register anything.
+        interpreter = self.home / ".local/share/uv/tools/agentic-hil/bin/python"
+        metadata = json.loads(self.checked([str(interpreter), "-c", (
+            "import json; from importlib.metadata import distribution; "
+            "from agentic_hil.contracts import MCP_TOOL_NAMES; "
+            "d = distribution('agentic-hil'); "
+            "s = d.locate_file('agentic_hil/skills/agentic-hil/SKILL.md'); "
+            "print(json.dumps({'skill': s.read_text(), 'tools': sorted(MCP_TOOL_NAMES), 'version': d.version}))"
+        )]))
+        require(metadata["version"] == self.version, "script launcher and installed distribution disagree")
+        self.packaged_skill = metadata["skill"]
+        self.expected_tools = metadata["tools"]
+        require({"project_config_create", "project_config_describe", "debugger_info", "flash_firmware"} <= set(self.expected_tools), "published package lacks core MCP tools")
+        # No agent-install/setup call from the harness: the script must have
+        # created the integration itself before either real CLI checks it.
+        self.verify()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("wheel", "script"), default="wheel")
+    mode = parser.parse_args(argv).mode
     require(sys.platform == "linux" and os.getuid() != 0, "registration gate requires its non-root Linux container")
     versions = {}
     pins = json.loads(Path("/opt/agent-clis/package.json").read_text())["dependencies"]
@@ -259,20 +319,24 @@ def main() -> int:
         require(re.search(rf"(?<![\d.]){re.escape(pins[package])}(?![\d.])", result.stdout), f"CLI version differs from lock: {result.stdout}")
     rows = []
     for agent in AGENTS:
-        for scenario in SCENARIOS:
+        for scenario in SCENARIOS_BY_MODE[mode]:
             started = time.monotonic()
             row = {"agent": agent, "scenario": scenario, "status": "failed"}
             try:
-                Case(agent, scenario).exercise(scenario)
+                case = (ScriptCase if mode == "script" else Case)(agent, scenario)
+                case.exercise(scenario)
+                row["package_version"] = case.version
+                if mode == "script":
+                    row["installer_sha256"] = hashlib.sha256(Path("/opt/registration/install.sh").read_bytes()).hexdigest()
                 row["status"] = "passed"
             except Exception:
                 row["detail"] = traceback.format_exc()
             row["seconds"] = round(time.monotonic() - started, 2)
             rows.append(row)
             print(json.dumps(row), flush=True)
-    report = {"ok": all(row["status"] == "passed" for row in rows), "versions": versions, "cases": rows}
+    report = {"ok": all(row["status"] == "passed" for row in rows), "mode": mode, "versions": versions, "cases": rows}
     print(REPORT_PREFIX + json.dumps(report), flush=True)
-    validate_report(report)
+    validate_report(report, mode=mode)
     return 0
 
 

@@ -120,7 +120,23 @@ USER eval
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/python3", "-m", "evals.install.container_entrypoint"]
 
-# Deterministic registration gate: the same locked real CLIs, no model/login.
+# Script installation starts with agent CLIs and system Python, but without
+# Agentic HIL, uv, pipx, a tool cache or prepared package wheels. install.sh
+# downloads and installs the published package during the test run itself.
+FROM agent-clis AS script-registration-gate
+RUN useradd --create-home --user-group --shell /bin/bash eval
+COPY evals /opt/evals
+COPY install.sh /opt/registration/install.sh
+ENV HOME=/home/eval \
+    USERPROFILE=/home/eval \
+    PYTHONPATH=/opt \
+    DISABLE_AUTOUPDATER=1 \
+    PATH=/opt/agent-clis/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+USER eval
+WORKDIR /home/eval
+ENTRYPOINT ["/usr/bin/python3", "-m", "evals.install.registration_gate", "--mode", "script"]
+
+# Current-source registration gate: the same locked real CLIs, no model/login.
 # Build the working tree into a wheel; runtime installation is user-local and
 # offline. The source is never on the installed server's import path.
 FROM agent-clis AS registration-gate

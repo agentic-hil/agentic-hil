@@ -1,6 +1,6 @@
 # LLM installation evaluation
 
-For deterministic, login-free Codex and Claude Code registration tests required
+For login-free installation-script and Codex/Claude Code registration tests required
 by CI, see [Docker registration gates](REGISTRATION_GATES.md).
 
 This evaluator measures whether a selected **agent CLI and model** can follow
