@@ -1,5 +1,8 @@
 # LLM installation evaluation
 
+For deterministic, login-free Codex and Claude Code registration tests required
+by CI, see [Docker registration gates](REGISTRATION_GATES.md).
+
 This evaluator measures whether a selected **agent CLI and model** can follow
 the Agentic HIL installation guide in a clean environment. Agent CLI and model
 are independent matrix axes.
