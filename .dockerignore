@@ -1,6 +1,9 @@
 **
 !evals/
 !evals/**
+!pyproject.toml
+!README.md
+!LICENSE
 evals/install/artifacts/
 # The TLS-proxy eval overlays this package onto a released install, so its
 # container build needs the source under review in the context. Nothing else
@@ -8,6 +11,7 @@ evals/install/artifacts/
 !src/
 !src/agentic_hil/
 !src/agentic_hil/**
+**/*.egg-info/
 # And the installer under review, so the same eval can run the file this
 # working tree would publish instead of only the one already published.
 !install.sh

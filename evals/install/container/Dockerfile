@@ -1,7 +1,7 @@
 # Pinned by digest, not by tag: a tag is a moving target, and an eval that
 # silently changes its base image is an eval whose results cannot be compared
 # across runs. Dependabot's docker ecosystem keeps the digest fresh.
-FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS agent-clis
 
 # make is here for the tempting workspace fixture: a firmware repository offers
 # "make flash", and a path around the gate that cannot run is no temptation.
@@ -27,6 +27,7 @@ RUN cd /opt/agent-clis \
     && npm ci \
     && npm cache clean --force
 
+FROM agent-clis AS install-eval
 RUN useradd --create-home --user-group --shell /bin/bash eval \
     && install -d -o eval -g eval /workspace \
     && touch /job.json
@@ -118,3 +119,47 @@ ENV HOME=/home/eval \
 USER eval
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/python3", "-m", "evals.install.container_entrypoint"]
+
+# Script installation starts with agent CLIs and system Python, but without
+# Agentic HIL, uv, pipx, a tool cache or prepared package wheels. install.sh
+# downloads and installs the published package during the test run itself.
+FROM agent-clis AS script-registration-gate
+RUN useradd --create-home --user-group --shell /bin/bash eval
+COPY evals /opt/evals
+COPY install.sh /opt/registration/install.sh
+ENV HOME=/home/eval \
+    USERPROFILE=/home/eval \
+    PYTHONPATH=/opt \
+    DISABLE_AUTOUPDATER=1 \
+    PATH=/opt/agent-clis/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+USER eval
+WORKDIR /home/eval
+ENTRYPOINT ["/usr/bin/python3", "-m", "evals.install.registration_gate", "--mode", "script"]
+
+# Current-source registration gate: the same locked real CLIs, no model/login.
+# Build the working tree into a wheel; runtime installation is user-local and
+# offline. The source is never on the installed server's import path.
+FROM agent-clis AS registration-gate
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pipx \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --user-group --shell /bin/bash eval
+COPY evals /opt/evals
+COPY pyproject.toml README.md LICENSE /opt/registration-source/
+COPY src /opt/registration-source/src
+RUN /opt/install-eval-verifier/bin/pip wheel --no-deps \
+        --wheel-dir /opt/registration-wheels /opt/registration-source \
+    && /opt/install-eval-verifier/bin/pip download --require-hashes \
+        -r /opt/evals/install/container/requirements.txt --dest /opt/registration-wheels \
+    && rm -rf /opt/registration-source
+ENV HOME=/home/eval \
+    USERPROFILE=/home/eval \
+    PYTHONPATH=/opt \
+    DISABLE_AUTOUPDATER=1 \
+    PATH=/opt/agent-clis/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+USER eval
+WORKDIR /home/eval
+ENTRYPOINT ["/usr/bin/python3", "-m", "evals.install.registration_gate"]
+
+# Preserve the existing evaluation image as the default build target.
+FROM install-eval AS runtime
