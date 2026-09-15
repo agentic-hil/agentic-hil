@@ -112,7 +112,8 @@ Pinned:
   index serves under that name, which is what Scorecard's pinned-dependencies
   check read off the old build. Regenerate the lock after editing the input
   with `uv pip compile --generate-hashes --universal --python-version 3.12
-  requirements/container.in -o requirements/container.txt`;
+  requirements/container.in -o requirements/container.txt`, or with
+  `python tools/refresh_locks.py`, which runs the command every lock records;
 - the dependency set, installed with `--require-hashes` from
   `requirements/dev.txt`, which is the same locked file the hosted matrix job
   installs from. This checkout goes on top of it with `--no-deps`.

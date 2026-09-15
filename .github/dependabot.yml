@@ -1,33 +1,17 @@
 version: 2
 updates:
-  # This entry covers pyproject.toml and the lock files under requirements/.
-  # The pip ecosystem already looks into a requirements/ subdirectory from the
-  # configured directory, so a second entry pointing at "/requirements" does not
-  # add coverage - it produces a duplicate pull request against the same file
-  # for every update, which is what it did.
-  - package-ecosystem: pip
-    directory: "/"
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
-      timezone: Europe/Berlin
-    open-pull-requests-limit: 5
-    # wrapt is not a dependency this project declares. It arrives through
-    # python-can, which requires wrapt~=1.10, so anything from 2.0 up cannot
-    # resolve. python-can 4.6.1 is the newest release and predates wrapt 2.0.0
-    # by two months, so there is no version to move to; the ceiling is upstream,
-    # not here. Mirror that ceiling instead of reopening the same unmergeable
-    # pull request every month, and keep 1.x patches flowing. Drop this once
-    # python-can ships a release that accepts wrapt 2.
-    ignore:
-      - dependency-name: "wrapt"
-        update-types:
-          - version-update:semver-major
-    groups:
-      python-dependencies:
-        patterns:
-          - "*"
+  # No pip entry, on purpose. Every file under requirements/ is a `uv pip
+  # compile --universal --generate-hashes` lock, and Dependabot cannot update
+  # one: it moves pins one at a time and, where it re-resolves a file, does so
+  # for one interpreter on one platform, which twice produced a lock no runner
+  # could install (a pylink-square past the ceiling pyocd sets, the Windows
+  # and macOS markers gone). The weekly refresh is .github/workflows/
+  # lock-refresh.yml, which runs the command each lock records with --upgrade
+  # and opens the pull request itself, and the "Lock files match their inputs"
+  # job in ci.yml holds every other change to those files to the same rule.
+  # The wrapt ceiling the pip entry mirrored (python-can requires wrapt~=1.10)
+  # needs no mirror now: uv resolves the whole set, so it never proposes what
+  # cannot resolve.
 
   # The eval container's base image is pinned by digest. Without this entry the
   # digest never moves, and a pin that never moves is a stale, vulnerable image

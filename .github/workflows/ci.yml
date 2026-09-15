@@ -9,6 +9,10 @@ on:
     branches:
       - master
       - main
+  # The lock refresh (lock-refresh.yml) opens its pull request with the
+  # workflow token, which starts no pull_request run, and starts this workflow
+  # on its branch by hand instead. The check runs land on the same commit.
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -252,6 +256,33 @@ jobs:
       - name: Check release version consistency
         run: python tools/check_version_consistency.py
 
+  # Every lock under requirements/ is recompiled from the command on its own
+  # second line, without --upgrade, and has to come out unchanged. A lock that
+  # does not follow from its input any more is named here with the pins that
+  # move, instead of thirteen installs above failing with ResolutionImpossible
+  # or, worse, installing a pin nobody resolved. uv comes from the hashes the
+  # container lock carries for it, the same release the container tier runs.
+  lock_consistency:
+    name: Lock files match their inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv by the hashes the container lock carries
+        run: |
+          python tools/refresh_locks.py --uv-requirement > uv-requirement.txt
+          python -m pip install --require-hashes -r uv-requirement.txt
+
+      - name: Recompile every lock from its recorded command
+        run: python tools/refresh_locks.py --check
+
   audit:
     name: Production dependency audit
     runs-on: ubuntu-latest
@@ -306,6 +337,7 @@ jobs:
       - test
       - container_tests
       - release_metadata
+      - lock_consistency
       - audit
       - agent-registration
     if: ${{ always() }}
@@ -323,6 +355,10 @@ jobs:
           fi
           if [[ "${{ needs.release_metadata.result }}" != "success" ]]; then
             echo "Release metadata consistency finished with ${{ needs.release_metadata.result }}"
+            exit 1
+          fi
+          if [[ "${{ needs.lock_consistency.result }}" != "success" ]]; then
+            echo "Lock consistency finished with ${{ needs.lock_consistency.result }}"
             exit 1
           fi
           if [[ "${{ needs.audit.result }}" != "success" ]]; then

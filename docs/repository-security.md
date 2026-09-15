@@ -2,7 +2,7 @@
 
 This repository uses file-based controls for dependency monitoring and release integrity:
 
-- Dependabot monitors pip and GitHub Actions dependencies (`.github/dependabot.yml`).
+- The Python dependency locks under `requirements/` are refreshed weekly by `.github/workflows/lock-refresh.yml`, which recompiles each hash-pinned lock with the `uv pip compile` command the lock records and opens the pull request; a CI job recompiles every lock on every pull request and fails when one no longer follows from its input. Dependabot monitors GitHub Actions and container base images (`.github/dependabot.yml`).
 - PyPI publishing uses GitHub Actions OIDC trusted publishing, with no long-lived API tokens.
 - The publish workflow refuses releases whose tag does not match the `pyproject.toml` version and generates digital attestations for the uploaded distributions.
 - CI runs ruff and the full test suite across Linux/macOS/Windows and Python 3.10 to 3.13; a single `Required CI` gate aggregates the matrix for branch protection.
