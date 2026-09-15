@@ -49,6 +49,9 @@ exclude tests/test_install_scripts.py
 # The pin on how that module is scheduled imports it at module scope, so it
 # cannot collect from a distribution that does not carry it either.
 exclude tests/test_process_table_grouping.py
+# The lock refresh is `tools/refresh_locks.py`, imported at module scope, and
+# the workflows and lock inputs it is tested against are repository content too.
+exclude tests/test_refresh_locks.py
 recursive-include examples *.py *.md *.yaml *.yml
 # The firmware demo is repository content, not package content.
 prune examples/nucleo-f446re_demo
