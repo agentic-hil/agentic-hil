@@ -13,6 +13,13 @@ updates:
       time: "06:00"
       timezone: Europe/Berlin
     open-pull-requests-limit: 5
+    # The floors in requirements/runtime.in mirror pyproject.toml, and a test
+    # holds them to it. The default strategy rewrites a floor to the newest
+    # release even when the floor already allows it (tomli>=2 became
+    # tomli>=2.4.1 while every lock already pinned 2.4.1), which changes no
+    # version and fails that test. This strategy leaves a requirement alone
+    # while the new release satisfies it, and still moves the exact pins.
+    versioning-strategy: increase-if-necessary
     # wrapt is not a dependency this project declares. It arrives through
     # python-can, which requires wrapt~=1.10, so anything from 2.0 up cannot
     # resolve. python-can 4.6.1 is the newest release and predates wrapt 2.0.0
