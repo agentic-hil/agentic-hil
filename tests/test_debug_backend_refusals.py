@@ -698,10 +698,17 @@ def closed_reporting_its_own_failure(service: AgenticHILToolService) -> BaseExce
     Raising out of `close` in a `finally` replaces every assertion the test came
     to make with the cleanup's own complaint, so the error is returned and
     asserted on with the rest.
+
+    A close that refused leaves the coordinator open on purpose: the process is
+    about to end and the operating system drops its device holds. This process
+    is the test worker and goes on, so the hold is ended here, or its heartbeat
+    thread keeps refreshing a record in a sandbox that no longer exists from
+    inside whichever test runs next.
     """
     try:
         service.close()
     except BaseException as error:  # noqa: BLE001 - asserted on by the caller
+        service.coordinator.bench.release_all()
         return error
     return None
 

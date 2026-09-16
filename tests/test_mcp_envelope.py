@@ -480,13 +480,18 @@ def test_a_cleanup_error_at_eof_is_raised_rather_than_a_clean_exit(tmp_path: Pat
     service, _factory = com_service(tmp_path, monkeypatch)
     monkeypatch.setattr(service.com_ports, "close", lambda: (_ for _ in ()).throw(RuntimeError("port would not close")))
 
-    with pytest.raises(RuntimeError, match="port would not close"):
-        run_stdio_server(
-            service.config,
-            input_stream=io.StringIO(lines(tools_call(1, "com_session_start", {"port_id": PORT_ID}))),
-            output_stream=io.StringIO(),
-            tools=service,
-        )
+    try:
+        with pytest.raises(RuntimeError, match="port would not close"):
+            run_stdio_server(
+                service.config,
+                input_stream=io.StringIO(lines(tools_call(1, "com_session_start", {"port_id": PORT_ID}))),
+                output_stream=io.StringIO(),
+                tools=service,
+            )
+    finally:
+        # The bench was not released, and the process that would now exit is
+        # this worker, which goes on: the hold is ended here.
+        service.coordinator.bench.release_all()
 
 
 # --- the real server child over byte pipes ------------------------------------

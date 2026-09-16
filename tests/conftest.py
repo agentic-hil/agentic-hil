@@ -5,6 +5,7 @@ import os
 import shutil
 import struct
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Generator, Iterator
@@ -176,6 +177,38 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
         result = yield
     finally:
         assert_still_sandboxed(f"after {item.nodeid} ran")
+    return result
+
+
+HEARTBEAT_THREAD_NAME = "agentic-hil-heartbeat"
+_REPORTED_HEARTBEAT_THREADS: set[int] = set()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> Generator[None, object, object]:
+    """No device hold outlives the test that took it.
+
+    A `BenchMutex` refreshes every held device from a thread it starts with the
+    first hold and stops with the last release. A test that drops its owner
+    without releasing (a simulated crash, a coordinator never closed) leaves
+    that thread running for the rest of the worker's life, writing into a
+    sandbox that no longer exists, through helpers a later test may have
+    patched: one such refresh landed inside a test asserting that its patched
+    directory helper was never called, and the leg went red on a line the
+    test never touched. After every finalizer has run, so a fixture's own close
+    counts, the thread is named here rather than in whichever test it hits.
+    A stopped thread leaves its wait at once; only a leaked one is still alive
+    after the join. A leaked thread cannot be stopped from here and stays for
+    the rest of the worker, so it is charged to the test that leaked it and to
+    no test after.
+    """
+    result = yield
+    pumps = [thread for thread in threading.enumerate() if thread.name == HEARTBEAT_THREAD_NAME]
+    for thread in pumps:
+        thread.join(timeout=2.0)
+    leaked = [thread for thread in pumps if thread.is_alive() and thread.ident not in _REPORTED_HEARTBEAT_THREADS]
+    _REPORTED_HEARTBEAT_THREADS.update(thread.ident for thread in leaked if thread.ident is not None)
+    assert not leaked, f"{item.nodeid} left {len(leaked)} device heartbeat thread(s) running: a bench hold was never released"
     return result
 
 
