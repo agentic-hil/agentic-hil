@@ -740,23 +740,26 @@ def test_com_write_that_stays_short_after_retry_records_event_without_quarantine
     session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), lease, start_reader=False)
     service.sessions["dut"] = session
 
-    result = service.write_bytes("dut", b"0123456789")
+    try:
+        result = service.write_bytes("dut", b"0123456789")
 
-    assert result["ok"] is False, result
-    assert result["error_type"] == "serial_write_incomplete"
-    assert result["bytes_written"] == 8
-    assert result["bytes_requested"] == 10
-    assert result["data"]["text"] == "01234567"
-    # Bounded: the initial attempt plus SHORT_WRITE_RETRY_LIMIT retries, and
-    # not one call more even though the handle never stops confirming
-    # progress.
-    assert len(handle.writes) == 4
-    # Confirmed, not unknown, so this is recorded rather than quarantined:
-    # the lease is not held for it and the bench is not blocked.
-    assert session.lease.state == "active"
-    assert session.lease.cleanup_reasons() == []
-    assert session.lease.reported_cleanup_reasons() == ["serial_write_incomplete"]
-    assert service.coordinator.blocked is False
+        assert result["ok"] is False, result
+        assert result["error_type"] == "serial_write_incomplete"
+        assert result["bytes_written"] == 8
+        assert result["bytes_requested"] == 10
+        assert result["data"]["text"] == "01234567"
+        # Bounded: the initial attempt plus SHORT_WRITE_RETRY_LIMIT retries, and
+        # not one call more even though the handle never stops confirming
+        # progress.
+        assert len(handle.writes) == 4
+        # Confirmed, not unknown, so this is recorded rather than quarantined:
+        # the lease is not held for it and the bench is not blocked.
+        assert session.lease.state == "active"
+        assert session.lease.cleanup_reasons() == []
+        assert session.lease.reported_cleanup_reasons() == ["serial_write_incomplete"]
+        assert service.coordinator.blocked is False
+    finally:
+        service.coordinator.close()
 
 
 class AnswersDuringTheWriteSerialHandle:
@@ -1006,15 +1009,18 @@ def test_com_write_whose_tx_entry_cannot_be_written_still_quarantines(tmp_path: 
     session = ComPortSession("dut", config.com_ports["dut"], handle, str(log_path), lease, start_reader=False)
     service.sessions["dut"] = session
 
-    result = service.write_bytes("dut", b"version\n")
+    try:
+        result = service.write_bytes("dut", b"version\n")
 
-    assert handle.writes == [b"version\n"]
-    assert result["audit_ok"] is False, result
-    assert overall_success(result) is False
-    assert result["audit_error"]["backend_error"]
-    assert session.audit_broken is True
-    assert session.lease.state == "cleanup_required"
-    assert service._active_session("dut", "com_write")["error_type"] == "resource_quarantined"
+        assert handle.writes == [b"version\n"]
+        assert result["audit_ok"] is False, result
+        assert overall_success(result) is False
+        assert result["audit_error"]["backend_error"]
+        assert session.audit_broken is True
+        assert session.lease.state == "cleanup_required"
+        assert service._active_session("dut", "com_write")["error_type"] == "resource_quarantined"
+    finally:
+        service.coordinator.close()
 
 
 class DyingMidReadSerialHandle:

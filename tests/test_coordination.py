@@ -1684,10 +1684,15 @@ def test_multi_lease_incident_shrinks_sibling_markers_on_release(tmp_path: Path)
     assert owner._read_record(owner.project_key)["resources"] == ["physical:incident-b"]
 
     # Simulate an unclean owner death (drop OS locks WITHOUT close()'s re-persist).
+    # A dead owner's heartbeat thread is dead with it: left running, it outlives
+    # this test and refreshes the device record from inside whichever test the
+    # worker runs next.
     for lock in list(l2.locks):
         lock.release()
     if owner.project_lock is not None:
         owner.project_lock.release()
+    with owner.bench._guard:
+        owner.bench._stop_heartbeat_pump()
 
     recovery = HardwareCoordinator(config, "recovery")
     result = recovery.recover(safe_state_confirmed=True, quarantine_id=quarantine_id)

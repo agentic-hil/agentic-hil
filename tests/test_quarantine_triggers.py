@@ -798,9 +798,12 @@ def test_a_can_report_that_landed_is_not_reported_as_unpersisted_because_the_lea
         assert refused["cleanup_reasons"] == ["can_reader_audit_broken"], refused
     finally:
         # The session's ledger is broken by arrangement, so its stop refuses
-        # to confirm; that refusal is the product's and not this test's.
+        # to confirm; that refusal is the product's and not this test's. The
+        # refusal leaves the device hold to the process's end, which for this
+        # worker never comes, so the hold is ended here.
         with suppress(RuntimeError):
             service.close()
+        service.coordinator.bench.release_all()
 
 
 # ---------------------------------------------------------------------------
