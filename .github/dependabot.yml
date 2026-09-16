@@ -20,8 +20,16 @@ updates:
     # not here. Mirror that ceiling instead of reopening the same unmergeable
     # pull request every month, and keep 1.x patches flowing. Drop this once
     # python-can ships a release that accepts wrapt 2.
+    #
+    # pylink-square has the same shape: it arrives through pyocd, which requires
+    # pylink-square<2.0, so the 2.0.1 pull request could not resolve and every
+    # hash-pinned install in the matrix failed. Mirror pyocd's ceiling the same
+    # way and drop it once pyocd accepts pylink-square 2.
     ignore:
       - dependency-name: "wrapt"
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "pylink-square"
         update-types:
           - version-update:semver-major
     groups:
