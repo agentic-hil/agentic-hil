@@ -2,7 +2,7 @@
 # (.github/workflows/workflow.yml).
 #
 # Regenerate the hash-pinned lock file after editing, or run
-# `python tools/refresh_locks.py`, which runs the command every lock records:
+# `python tools/refresh_locks.py --regenerate`, which runs the command every lock records:
 #   uv pip compile --generate-hashes --universal requirements/sbom.in -o requirements/sbom.txt
 build
 cyclonedx-bom

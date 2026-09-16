@@ -14,7 +14,7 @@
 # enter the image that the required container check runs in.
 #
 # Regenerate the hash-pinned lock file after editing, or run
-# `python tools/refresh_locks.py`, which runs the command every lock records:
+# `python tools/refresh_locks.py --regenerate`, which runs the command every lock records:
 #   uv pip compile --generate-hashes --universal --python-version 3.12 requirements/container.in -o requirements/container.txt
 uv==0.12.13
 pyocd==0.45.1

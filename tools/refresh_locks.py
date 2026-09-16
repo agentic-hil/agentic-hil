@@ -7,33 +7,39 @@ a lock is only ever written by the resolver and the options that wrote it:
 hashes, and the whole set is resolved against its input at once, so no pin can
 move past a ceiling another package sets.
 
-Updating the files any other way does not work, and has been tried. Dependabot
-moved pins one at a time and, where it re-resolved a file, resolved it for one
-interpreter on one platform: pylink-square went to 2.0.1 in a lock whose pyocd
-requires it below 2.0, the markers that carry colorama, pywin32-ctypes and
-hidapi to Windows and macOS were dropped, and every hash-pinned install in CI
-failed with ResolutionImpossible. The refresh workflow runs this tool instead,
-and CI runs ``--check`` on every pull request so that a lock which no longer
-follows from its input is caught by name rather than by thirteen installs.
+Updating the files any other way does not work, and has been tried. Dependabot's
+pip ecosystem moved pins one at a time and, where it re-resolved a file,
+resolved it for one interpreter on one platform: pylink-square went to 2.0.1 in
+a lock whose pyocd requires it below 2.0, the markers that carry colorama,
+pywin32-ctypes and hidapi to Windows and macOS were dropped, and every
+hash-pinned install in CI failed with ResolutionImpossible. Dependabot now runs
+as the uv ecosystem, which reruns the recorded commands itself, and CI runs
+``--check`` on every pull request so that a lock which no longer follows from
+its input is caught by name rather than by thirteen installs.
 
-Three modes:
-
-    python tools/refresh_locks.py
-        Refresh. Every exact pin in a .in file moves to its newest release,
-        then every lock is recompiled with --upgrade.
+Four modes:
 
     python tools/refresh_locks.py --check
         Verify. Every lock is recompiled without --upgrade and the tree is
         left as it was; a lock that came out different fails the run with
         the pins that moved.
 
+    python tools/refresh_locks.py --regenerate
+        Repair. Every lock is recompiled without --upgrade and the result is
+        kept: the pins already in the lock stay where they resolve, and what
+        was dropped or crossed a ceiling is put back.
+
+    python tools/refresh_locks.py
+        Refresh. Every exact pin in a .in file moves to its newest release,
+        then every lock is recompiled with --upgrade.
+
     python tools/refresh_locks.py --uv-requirement
         Print uv's own hash-pinned lines from requirements/container.txt, so
-        the workflows install the resolver with --require-hashes like
-        everything else they install.
+        a workflow installs the resolver with --require-hashes like
+        everything else it installs.
 
-``--summary PATH`` writes what a refresh changed as one Markdown table, which
-is the body of the pull request that carries it.
+``--summary PATH`` writes what a refresh or a regeneration changed as one
+Markdown table.
 """
 
 from __future__ import annotations
@@ -232,30 +238,29 @@ def check(root: Path, run: Runner) -> list[str]:
         moved = ", ".join(f"{change.name} {change.before or 'absent'} to {change.after or 'absent'}" for change in changes)
         problems.append(f"{relative} does not follow from its input: recompiling it moves {moved or 'no pin, but the file changed'}")
     if problems:
-        problems.append("Regenerate with the command on the lock's second line, or refresh every lock with: python tools/refresh_locks.py")
+        problems.append("Regenerate every lock from its recorded command with: python tools/refresh_locks.py --regenerate")
     return problems
 
 
-def refresh(root: Path, run: Runner) -> list[Change]:
-    changes = bump_exact_pins(root, run)
+def refresh(root: Path, run: Runner, upgrade: bool = True) -> list[Change]:
+    """Recompile every lock in place; with `upgrade`, move the exact pins first."""
+    changes = bump_exact_pins(root, run) if upgrade else []
     for lock in lock_files(root):
-        changes.extend(recompile(root, lock, run, upgrade=True))
+        changes.extend(recompile(root, lock, run, upgrade=upgrade))
     return changes
 
 
-def summary(changes: list[Change]) -> str:
-    """The refresh as one Markdown table, by file and then by name."""
+def summary(changes: list[Change], upgrade: bool = True) -> str:
+    """The run as one Markdown table, by file and then by name."""
     if not changes:
         return "Every lock was already current.\n"
     rows = ["| Package | File | From | To |", "| --- | --- | --- | --- |"]
     for change in sorted(changes, key=lambda change: (change.file, change.name)):
         rows.append(f"| {change.name} | {change.file} | {change.before or 'absent'} | {change.after or 'absent'} |")
-    return (
-        "Every lock file under `requirements/` recompiled with the `uv pip compile` command recorded on its second line, "
-        "with `--upgrade`, after each exact pin in the `.in` inputs moved to its newest release.\n\n"
-        + "\n".join(rows)
-        + "\n"
-    )
+    lead = "Every lock file under `requirements/` recompiled with the `uv pip compile` command recorded on its second line"
+    if upgrade:
+        lead += ", with `--upgrade`, after each exact pin in the `.in` inputs moved to its newest release"
+    return f"{lead}.\n\n" + "\n".join(rows) + "\n"
 
 
 def uv_requirement(root: Path) -> str:
@@ -280,8 +285,9 @@ def main(argv: list[str] | None = None, run: Runner = run_uv) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="recompile without upgrading and fail if any lock changes")
+    mode.add_argument("--regenerate", action="store_true", help="recompile without upgrading and keep the result")
     mode.add_argument("--uv-requirement", action="store_true", help="print uv's hash-pinned lines from the container lock")
-    parser.add_argument("--summary", type=Path, help="write what the refresh changed to this Markdown file")
+    parser.add_argument("--summary", type=Path, help="write what the run changed to this Markdown file")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1], help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
     root = arguments.root.resolve()
@@ -294,8 +300,9 @@ def main(argv: list[str] | None = None, run: Runner = run_uv) -> int:
             for problem in problems:
                 print(problem, file=sys.stderr)
             return 1 if problems else 0
-        changes = refresh(root, run)
-        text = summary(changes)
+        upgrade = not arguments.regenerate
+        changes = refresh(root, run, upgrade=upgrade)
+        text = summary(changes, upgrade=upgrade)
         if arguments.summary:
             arguments.summary.write_text(text, encoding="utf-8")
         sys.stdout.write(text)

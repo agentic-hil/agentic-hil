@@ -9,10 +9,6 @@ on:
     branches:
       - master
       - main
-  # The lock refresh (lock-refresh.yml) opens its pull request with the
-  # workflow token, which starts no pull_request run, and starts this workflow
-  # on its branch by hand instead. The check runs land on the same commit.
-  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -260,8 +256,11 @@ jobs:
   # second line, without --upgrade, and has to come out unchanged. A lock that
   # does not follow from its input any more is named here with the pins that
   # move, instead of thirteen installs above failing with ResolutionImpossible
-  # or, worse, installing a pin nobody resolved. uv comes from the hashes the
-  # container lock carries for it, the same release the container tier runs.
+  # or, worse, installing a pin nobody resolved: a Dependabot pull request
+  # edits dev.txt pin by pin, and a pin edited that way can cross a ceiling
+  # another package sets, the way pylink-square crossed pyocd's. uv comes from
+  # the hashes the container lock carries for it, the same release the
+  # container tier runs.
   lock_consistency:
     name: Lock files match their inputs
     runs-on: ubuntu-latest

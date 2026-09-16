@@ -62,7 +62,7 @@ Agentic HIL does not implement authentication, password storage, encryption prot
 
 ## Secure Development Practices
 
-The project uses type-annotated Python with schema-validated configuration, pytest end-to-end tests against fake backend fixtures, ruff linting in CI, a 3-OS × 4-Python-version CI matrix, a weekly refresh of the hash-pinned dependency locks by the resolver that wrote them, and Dependabot for GitHub Actions and container base images. Major behavior changes should include or update automated tests and preserve the configured safety boundaries documented in `CONTRIBUTING.md` and `SECURITY.md`. Configuration bypasses are treated as vulnerabilities; see `SECURITY.md` for reporting.
+The project uses type-annotated Python with schema-validated configuration, pytest end-to-end tests against fake backend fixtures, ruff linting in CI, a 3-OS × 4-Python-version CI matrix, Dependabot for dependency monitoring, and a CI job that recompiles every hash-pinned dependency lock from the command it records. Major behavior changes should include or update automated tests and preserve the configured safety boundaries documented in `CONTRIBUTING.md` and `SECURITY.md`. Configuration bypasses are treated as vulnerabilities; see `SECURITY.md` for reporting.
 
 ## Same-Identity Limitation
 

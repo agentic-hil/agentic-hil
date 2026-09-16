@@ -2,11 +2,6 @@ name: Dependency Review
 
 on:
   pull_request:
-  # The lock refresh (lock-refresh.yml) opens its pull request with the
-  # workflow token, which starts no pull_request run, and starts this one on
-  # its branch by hand; the two references below are then what the action
-  # compares, since there is no pull request event to read them from.
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,5 +20,3 @@ jobs:
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: moderate
-          base-ref: ${{ github.event_name == 'workflow_dispatch' && 'master' || '' }}
-          head-ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || '' }}

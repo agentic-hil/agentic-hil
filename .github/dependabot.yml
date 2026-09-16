@@ -1,17 +1,48 @@
 version: 2
 updates:
-  # No pip entry, on purpose. Every file under requirements/ is a `uv pip
-  # compile --universal --generate-hashes` lock, and Dependabot cannot update
-  # one: it moves pins one at a time and, where it re-resolves a file, does so
-  # for one interpreter on one platform, which twice produced a lock no runner
-  # could install (a pylink-square past the ceiling pyocd sets, the Windows
-  # and macOS markers gone). The weekly refresh is .github/workflows/
-  # lock-refresh.yml, which runs the command each lock records with --upgrade
-  # and opens the pull request itself, and the "Lock files match their inputs"
-  # job in ci.yml holds every other change to those files to the same rule.
-  # The wrapt ceiling the pip entry mirrored (python-can requires wrapt~=1.10)
-  # needs no mirror now: uv resolves the whole set, so it never proposes what
-  # cannot resolve.
+  # The uv ecosystem, not pip, for the locks under requirements/. Every file
+  # there is a `uv pip compile --universal --generate-hashes` lock, and the
+  # pip ecosystem regenerated the ones with a .in input through pip-compile:
+  # one interpreter, one platform, the markers that carry the Windows and
+  # macOS packages gone and the entries the other interpreters need with them.
+  # The uv ecosystem reruns `uv pip compile` itself, with --universal,
+  # --generate-hashes and --python-version read off each lock, so what it
+  # writes is what the recorded command writes. dev.txt is compiled from
+  # pyproject.toml rather than a .in file and is edited pin by pin instead;
+  # the "Lock files match their inputs" job in ci.yml recompiles every lock
+  # on every pull request and names the pin that does not follow.
+  - package-ecosystem: uv
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    # Two ceilings set upstream, mirrored here so the bot does not propose what
+    # cannot resolve, month after month. A pin edited one at a time crosses a
+    # ceiling nothing checks; these two have.
+    #
+    # wrapt arrives through python-can, which requires wrapt~=1.10, so anything
+    # from 2.0 up cannot resolve. python-can 4.6.1 is the newest release and
+    # predates wrapt 2.0.0 by two months; the ceiling is upstream, not here.
+    # Drop this once python-can ships a release that accepts wrapt 2.
+    #
+    # pylink-square arrives through pyocd, which requires pylink-square<2.0,
+    # and the pin that crossed that ceiling is what left every hash-pinned
+    # install in the matrix with ResolutionImpossible. Drop this once pyocd
+    # ships a release that accepts pylink-square 2.
+    ignore:
+      - dependency-name: "wrapt"
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "pylink-square"
+        update-types:
+          - version-update:semver-major
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
 
   # The eval container's base image is pinned by digest. Without this entry the
   # digest never moves, and a pin that never moves is a stale, vulnerable image
