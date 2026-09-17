@@ -38,10 +38,16 @@ from __future__ import annotations
 
 import re
 import shlex
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - exercised on 3.10 only
+    import tomli as tomllib
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
@@ -137,6 +143,109 @@ def test_a_bare_pytest_in_a_checkout_is_still_one_process(pytestconfig: pytest.C
     # The real ini, not an empty answer that would pass whatever it carried.
     assert "--strict-markers" in addopts, addopts
     assert worker_setting(addopts) is None, addopts
+
+
+# The production dependency audit: what `pip install 'agentic-hil[can,pyocd]'`
+# resolves to, locked with hashes so the audit reads pins rather than whatever
+# the index served that minute, and the auditor's own lock beside it.
+PRODUCTION_LOCK = REPOSITORY_ROOT / "requirements" / "production.txt"
+AUDIT_LOCK = REPOSITORY_ROOT / "requirements" / "audit.txt"
+
+
+def hosted_installs() -> list[str]:
+    """Every `pip install` any job of the hosted workflow runs."""
+    workflow = workflow_document(WORKFLOW)
+    return [line for job in workflow["jobs"].values() for line in run_lines(job) if re.search(r"\bpip install\b", line)]
+
+
+def locked_pins(lock: Path) -> dict[str, list[str]]:
+    """Each `name==version` in a lock, with the lines that follow it up to the next pin."""
+    entries: dict[str, list[str]] = {}
+    current: list[str] = []
+    for line in lock.read_text(encoding="utf-8").splitlines():
+        pin = re.match(r"^([A-Za-z0-9._-]+)==", line)
+        if pin is not None:
+            current = entries.setdefault(pin.group(1).lower().replace("_", "-"), [])
+        else:
+            current.append(line)
+    return entries
+
+
+def test_no_hosted_job_installs_from_the_index_without_hashes() -> None:
+    """A version is a name the index answers for; a hash is the bytes.
+
+    The matrix installs its dependency set from `requirements/dev.txt` with
+    `--require-hashes` and the checkout with `--no-deps`, so nothing it runs
+    came off the index on the index's word alone. The audit job installed the
+    production extras and pip-audit the other way, and Scorecard read both
+    commands (code scanning alerts 77 and 78). One unpinned install in any job
+    is what every other pin is cosmetic against, so every job is held to the
+    matrix's rule: a hash for everything fetched, and `--no-deps` for the
+    checkout, which comes off the runner's disk and has no artifact to hash.
+    """
+    installs = hosted_installs()
+
+    assert installs
+    for line in installs:
+        if "--require-hashes" in line:
+            continue
+        assert re.search(r"--no-deps(\s+-e)?\s+\.$", line), line
+
+
+def test_the_auditor_is_installed_from_its_own_lock() -> None:
+    """pip-audit is the one program whose word the audit's verdict is.
+
+    A release of it substituted on the index would run inside the job that
+    exists to notice substituted releases, so it is installed from
+    `requirements/audit.txt` with `--require-hashes` like the build tooling of
+    the release pipeline is, and the lock pins it with its hash.
+    """
+    audit = workflow_document(WORKFLOW)["jobs"]["audit"]
+    installs = [line for line in run_lines(audit) if re.search(r"\bpip install\b", line)]
+
+    assert installs == ["python -m pip install --require-hashes -r requirements/audit.txt"], installs
+    pins = locked_pins(AUDIT_LOCK)
+    assert "pip-audit" in pins, sorted(pins)
+    for name, tail in pins.items():
+        assert any("--hash=sha256:" in line for line in tail), name
+
+
+def test_the_audit_reads_the_locked_production_dependency_set() -> None:
+    """What is audited is what a bench's install resolves to, pinned.
+
+    `requirements/production.txt` is compiled from `pyproject.toml` with the two
+    optional extras a bench installs and without the dev extra, so a pytest
+    advisory does not turn the production audit red and a python-can or pyOCD
+    one does. pip-audit reads it with `--require-hashes`, which is the mode in
+    which it audits the pins as written instead of resolving through pip, and
+    every pin carries its hash so that mode has nothing to fall back to. Every
+    dependency `pyproject.toml` declares for that set is in the lock, so a
+    dependency added without regenerating it fails here rather than going
+    unaudited.
+    """
+    audit = workflow_document(WORKFLOW)["jobs"]["audit"]
+    audits = [line for line in run_lines(audit) if line.startswith("pip-audit")]
+
+    assert audits == ["pip-audit --require-hashes -r requirements/production.txt"], run_lines(audit)
+
+    lock = PRODUCTION_LOCK.read_text(encoding="utf-8")
+    recorded = re.search(r"^#\s+(uv pip compile .*)$", lock, flags=re.MULTILINE)
+    assert recorded is not None, lock[:200]
+    command = shlex.split(recorded.group(1))
+    assert "--generate-hashes" in command and "--universal" in command, command
+    assert "pyproject.toml" in command, command
+    extras = [command[index + 1] for index, word in enumerate(command) if word == "--extra"]
+    assert sorted(extras) == ["can", "pyocd"], extras
+
+    project = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    extras_declared = project["optional-dependencies"]
+    declared = project["dependencies"] + extras_declared["can"] + extras_declared["pyocd"]
+    pins = locked_pins(PRODUCTION_LOCK)
+    for requirement in declared:
+        name = re.match(r"[A-Za-z0-9._-]+", requirement).group(0).lower().replace("_", "-")
+        assert name in pins, (requirement, sorted(pins))
+    for name, tail in pins.items():
+        assert any("--hash=sha256:" in line for line in tail), name
 
 
 # The nightly bench job, held to the rules that keep a machine with a board on
