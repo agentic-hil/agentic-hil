@@ -1,0 +1,9 @@
+# The auditor the production dependency audit job runs
+# (.github/workflows/ci.yml). It reads requirements/production.txt, the
+# dependency set of the published distribution with both extras, compiled from
+# pyproject.toml the way requirements/dev.txt is; the command that regenerates
+# that lock is recorded at its top.
+#
+# Regenerate the hash-pinned lock file after editing:
+#   uv pip compile --generate-hashes --universal --python-version 3.10 requirements/audit.in -o requirements/audit.txt
+pip-audit

@@ -266,13 +266,19 @@ jobs:
           python-version: "3.x"
           cache: pip
 
-      - name: Install production dependencies
-        run: python -m pip install '.[can,pyocd]'
+      # Nothing here comes off the index by version alone, which is what both
+      # of this job's installs used to do (code scanning alerts 77 and 78). The
+      # auditor comes from its own hash-pinned lock, and the audited set is not
+      # installed at all: `requirements/production.txt` is what
+      # `pip install 'agentic-hil[can,pyocd]'` resolves to, compiled from
+      # pyproject.toml the way requirements/dev.txt is, and with hashes required
+      # pip-audit audits its pins as written instead of resolving anything
+      # through pip.
+      - name: Install pip-audit
+        run: python -m pip install --require-hashes -r requirements/audit.txt
 
       - name: Audit production dependencies
-        run: |
-          python -m pip install pip-audit
-          pip-audit
+        run: pip-audit --require-hashes -r requirements/production.txt
 
   agent-registration:
     name: Agent registration (Docker)
