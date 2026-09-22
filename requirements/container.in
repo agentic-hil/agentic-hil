@@ -15,7 +15,7 @@
 #
 # Regenerate the hash-pinned lock file after editing:
 #   uv pip compile --generate-hashes --universal --python-version 3.12 requirements/container.in -o requirements/container.txt
-uv==0.12.13
+uv==0.12.16
 pyocd==0.45.1
 setuptools>=77
 wheel
