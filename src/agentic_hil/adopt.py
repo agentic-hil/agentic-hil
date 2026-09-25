@@ -1616,6 +1616,7 @@ def _held_refusal(existing: AgenticHILConfig, open_holds: JsonObject) -> JsonObj
         "path": existing.config_path,
         "workspace_root": existing.workspace_root,
         "next_step": "Close the run with `bench_run_stop` and stop any open COM or CAN session, then call this again.",
+        **remediation_fields("config_write_in_open_run"),
         **NOT_STARTED,
         "retry_safe": True,
     }
