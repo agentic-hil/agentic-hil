@@ -138,6 +138,30 @@ def test_that_leaves_the_repository_unreadable():
     (TREE / ".git" / "config").write_text("[core", encoding="utf-8")
 """
 
+# The shape of the suite's own nested runs: a test that starts a pytest session
+# of the checkout it belongs to, and requires that session to pass quietly.
+RUNS_A_SESSION_OF_ITS_OWN_TREE = """
+import subprocess
+import sys
+from pathlib import Path
+
+from support import scaled_time_bound
+
+TREE = Path(__file__).resolve().parents[1]
+
+
+def test_that_runs_a_session_of_its_own_tree():
+    nested = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/nested_session.py", "-q", "-p", "no:cacheprovider"],
+        cwd=TREE,
+        capture_output=True,
+        text=True,
+        timeout=scaled_time_bound(120.0),
+    )
+    said = [line for line in (nested.stdout + nested.stderr).splitlines() if line.strip()]
+    assert nested.returncode == 0 and len(said) == 2, nested.stdout + nested.stderr
+"""
+
 
 def a_tree_running_the_suites_conftest(tree: Path, test_module: str, *, gitignore: str = GITIGNORE) -> Path:
     """The suite's conftest and the module it imports, one test module, and nothing else."""
@@ -195,14 +219,16 @@ def a_checkout(tree: Path) -> Path:
 def run_the_suite(pytester: pytest.Pytester, tree: Path, *args: str, **environment: str) -> pytest.RunResult:
     """Run the tree's suite quietly, in a pytest process of its own, started in the tree's root.
 
-    None of this run's own git or xdist context reaches it: an inherited GIT_DIR
-    would point the inner git at another repository, and an inherited
-    PYTEST_XDIST_WORKER would tell the inner controller it is a worker. The
-    context is a private one, so nothing set here outlives the call.
+    None of this run's own git, xdist or test context reaches it: an inherited
+    GIT_DIR would point the inner git at another repository, an inherited
+    PYTEST_XDIST_WORKER would tell the inner controller it is a worker, and an
+    inherited PYTEST_CURRENT_TEST would tell it that a test of another session
+    started it. The context is a private one, so nothing set here outlives the
+    call.
     """
     with pytest.MonkeyPatch.context() as patch:
         for name in list(os.environ):
-            if name.upper().startswith(("GIT_", "PYTEST_XDIST_")):
+            if name.upper().startswith(("GIT_", "PYTEST_XDIST_")) or name.upper() == "PYTEST_CURRENT_TEST":
                 patch.delenv(name)
         for name, value in environment.items():
             patch.setenv(name, value)
@@ -397,6 +423,31 @@ def test_without_git_on_path_the_check_stays_silent(pytester: pytest.Pytester) -
 
 
 @needs_git
+def test_git_failing_at_the_start_says_so_in_one_line(pytester: pytest.Pytester) -> None:
+    """A checkout git cannot read when the run starts is named in one line, and nothing else changes.
+
+    The tree has a `.git` and git is on PATH, so this run is one the check is
+    meant for, and without a start listing there is nothing to compare the
+    finish with. Staying silent would read as a clean tree nobody looked at, so
+    one line says the tree was not checked, carrying git's own error, and the
+    run keeps the status its tests gave it, the file a test left included.
+    """
+    tree = a_checkout(a_tree_running_the_suites_conftest(pytester.path / "tree", LEAVES_ONE_FILE_BEHIND))
+    (tree / ".git" / "config").write_text("[core", encoding="utf-8")
+    error = gits_own_error(tree, "ls-files", "--others", "--exclude-standard")
+
+    result = run_the_suite(pytester, tree)
+
+    output = everything_it_said(result)
+    assert result.ret == pytest.ExitCode.OK, output
+    result.assert_outcomes(passed=1)
+    said = [line for line in output.splitlines() if line.strip()]
+    assert len(said) == 3, output
+    assert len([line for line in said if error in line]) == 1, f"no line carries git's own error {error!r}:\n{output}"
+    assert (tree / "stray.txt").is_file()
+
+
+@needs_git
 def test_git_failing_at_the_finish_says_so_in_one_line(pytester: pytest.Pytester) -> None:
     """A tree git cannot read at the end is named in one line, and the run keeps its status.
 
@@ -443,3 +494,27 @@ def test_under_xdist_only_the_controller_lists_the_tree(pytester: pytest.Pyteste
     assert "pip/cache/http-v2/entry.body" in output, output
     listings = [line for line in trace.read_text(encoding="utf-8").splitlines() if "built-in: git" in line and " ls-files" in line]
     assert len(listings) == 2, "\n".join(listings)
+
+
+@needs_git
+def test_a_session_a_test_starts_leaves_the_check_to_the_run(pytester: pytest.Pytester) -> None:
+    """A pytest session started from inside a test is part of that test, and the run around it checks the tree.
+
+    Two tests in this suite start a session of this checkout and require it to
+    pass. Such a session begins and ends while the workers of the run that
+    started it keep writing, so its own listings would compare a tree other
+    tests are changing, and a file any of them left would fail it, and with it
+    the test that started it, which wrote nothing. The run that owns the test
+    sees the whole session and names the file; the session inside it passes
+    and says nothing, which is what the test starting it requires here.
+    """
+    tree = a_tree_running_the_suites_conftest(pytester.path / "tree", RUNS_A_SESSION_OF_ITS_OWN_TREE)
+    (tree / "tests" / "nested_session.py").write_text(LEAVES_ONE_FILE_BEHIND, encoding="utf-8")
+    a_checkout(tree)
+
+    result = run_the_suite(pytester, tree)
+
+    output = everything_it_said(result)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED, output
+    result.assert_outcomes(passed=1)
+    assert "stray.txt" in output, output
