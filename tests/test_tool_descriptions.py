@@ -19,6 +19,7 @@ result that only exists in a table is not one a caller ever meets.
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -26,6 +27,7 @@ import pytest
 import yaml
 from test_agent_provisioning import attached_hardware, written_document
 from test_agent_provisioning import bench as provisioning_bench
+from test_can_listen_only import PCAN_PARAMETER_OFF, can_config, fake_can_module, fake_pcan_bus, install_pcan_basic
 from test_config_reload import add_second_board, rewrite
 from test_config_reload import bench as reload_bench
 from test_config_reload import service as reload_service
@@ -42,6 +44,7 @@ from agentic_hil.contracts import MCP_TOOL_NAMES, MCP_TOOLS
 from agentic_hil.knowledge import (
     CONFIG_DESCRIPTION_RIGHT,
     CONFIG_PERMISSIONS_RIGHT,
+    LISTEN_ONLY_UNCONFIRMED_ERROR,
     RECOVERY_PHYSICAL_CHECK_ERROR,
     TEST_PLAN_URI,
     recovery_operator_command,
@@ -242,6 +245,23 @@ def test_a_config_changed_refusal_says_what_to_show_the_operator_and_both_ways_o
     assert "--accept-config-change" in prose, prose
 
 
+def test_the_operator_adds_the_override_to_their_own_line_only_after_reviewing_both_digests(tmp_path: Path) -> None:
+    """The flag is the operator's acceptance of the change, so it is theirs to add
+    once they have looked, and the line the refusal hands over leaves it out."""
+    config, incident, _ = config_changed_incident(tmp_path)
+    service = AgenticHILToolService(config)
+    try:
+        refused = service.call("hardware_recover", {})
+    finally:
+        service.close()
+
+    assert refused["error_type"] == "config_changed", refused
+    steps = [step for step in refused.get("remediation", []) if "--accept-config-change" in step]
+    assert steps, refused
+    assert all("only after" in step and "both digests" in step for step in steps), steps
+    assert refused["operator_command"] == recovery_operator_command(incident)
+
+
 def test_a_bench_with_nothing_standing_is_told_what_a_quarantine_is(tmp_path: Path) -> None:
     config = config_for(tmp_path)
     open_incident(config, "debugger_result_unconfirmed")
@@ -404,3 +424,24 @@ def test_a_stop_for_a_run_that_already_ended_asks_nothing_of_it(tmp_path: Path, 
     assert answered["ok"] is True, answered
     assert answered["stop_requested"] is False
     assert "already ended" in answered["summary"], answered["summary"]
+
+
+def test_a_listen_only_bus_the_adapter_cannot_be_held_to_is_refused_rather_than_opened(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Said by the refusal: the adapter did not confirm the mode, so it was closed
+    again and no session stands, rather than one listening anyway."""
+    config = can_config(tmp_path, "peak", "PCAN_USBBUS1", listen_only=True)
+    bus = fake_pcan_bus(reported=PCAN_PARAMETER_OFF)
+    monkeypatch.setitem(sys.modules, "can", fake_can_module(lambda **kwargs: bus))
+    install_pcan_basic(monkeypatch)
+    service = AgenticHILToolService(config)
+    try:
+        refused = service.call("can_session_start", {"bus_id": "bench", "clear_rx_queue": False})
+        read = service.call("can_read", {"bus_id": "bench"})
+    finally:
+        service.close()
+
+    assert refused["error_type"] == LISTEN_ONLY_UNCONFIRMED_ERROR, refused
+    assert "closed rather than used" in refused["summary"], refused["summary"]
+    assert any("listen_only" in step for step in refused["do_not"]), refused["do_not"]
+    assert read["error_type"] == "session_not_active", read
+    assert bus.closed is True
