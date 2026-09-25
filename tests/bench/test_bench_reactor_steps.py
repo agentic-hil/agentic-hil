@@ -186,7 +186,7 @@ def results(report: dict) -> list[dict]:
     return [record["result"] for record in report["steps"]]
 
 
-def test_a_plan_stops_at_main_reads_the_counter_before_it_starts_and_reads_it_counting_after_a_delay(bench: Bench, firmware: Path) -> None:
+def test_a_plan_stops_at_main_reads_the_counter_before_it_starts_and_reads_it_counting_after_a_delay(bench: Bench, gdb: None, firmware: Path) -> None:
     """Every debug step kind and every claim `read_symbol` allows, in one plan.
 
     The plan resets the board into halt, runs it to `main`, and makes the two
@@ -330,7 +330,7 @@ RED_CLAIMS = [
 
 @pytest.mark.parametrize(("claim", "error_type", "summary"), RED_CLAIMS)
 def test_a_claim_the_counter_does_not_meet_fails_the_run_at_that_step_and_the_session_is_still_closed(
-    bench: Bench, firmware: Path, claim: dict, error_type: str, summary: str
+    bench: Bench, gdb: None, firmware: Path, claim: dict, error_type: str, summary: str
 ) -> None:
     """Each way a `read_symbol` step can be red, against a value the board fixes at zero.
 
