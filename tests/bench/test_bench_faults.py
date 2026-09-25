@@ -586,7 +586,7 @@ def test_a_faulted_board_is_probed_reset_in_every_mode_and_flashed_back_to_the_d
     flash_the_demo_over(server, port)
 
 
-def test_debug_session_attach_on_a_faulted_board_names_the_hardfault_and_stops_clean(bench: Bench, board_images: BoardImages, servers) -> None:
+def test_debug_session_attach_on_a_faulted_board_names_the_hardfault_and_stops_clean(bench: Bench, gdb: None, board_images: BoardImages, servers) -> None:
     """Attach to a core that is already in its fault handler: the session has to say so.
 
     The core was running the fault image, so it sits in the HardFault handler
@@ -653,7 +653,7 @@ def test_debug_session_attach_on_a_faulted_board_names_the_hardfault_and_stops_c
     assert_session_stops_halted(server)
 
 
-def test_debug_session_reset_halt_on_a_faulted_board_runs_from_main_into_the_named_fault(bench: Bench, board_images: BoardImages, servers) -> None:
+def test_debug_session_reset_halt_on_a_faulted_board_runs_from_main_into_the_named_fault(bench: Bench, gdb: None, board_images: BoardImages, servers) -> None:
     """From reset, through `main`, into the fault: each stop named for what it is.
 
     A reset into halt clears the fault, so the session's own start must not
@@ -771,7 +771,7 @@ def test_a_board_the_watchdog_keeps_restarting_is_held_by_a_halt_restarted_by_a_
     assert_quiet(server, port)
 
 
-def test_debug_session_attach_on_a_self_resetting_board_holds_it_halted_and_leaves_it_halted(bench: Bench, board_images: BoardImages, servers) -> None:
+def test_debug_session_attach_on_a_self_resetting_board_holds_it_halted_and_leaves_it_halted(bench: Bench, gdb: None, board_images: BoardImages, servers) -> None:
     """A debug session over a board that restarts itself keeps it still, and so does its end.
 
     Attaching halts the core, and the watchdog is frozen while the core is
