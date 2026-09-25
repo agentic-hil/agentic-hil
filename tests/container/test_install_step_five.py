@@ -11,11 +11,15 @@ evals/install/container/package-lock.json pins; its package.json declares
 `"bin": {"codex": "bin/codex.js"}` and that file opens with
 `#!/usr/bin/env node`, both read out of the published tarball on 2026-09-06)
 is therefore a process whose `comm` is `node` and whose second argument is the
-path of the `codex` launcher; its native child is `codex-x86_64-un...`,
-which is `codex-x86_64-unknown-linux-musl` cut at the fifteen characters
-`comm` holds. `pgrep -x codex` matches neither. So a machine with codex open
-was told `no agent CLI of yours is running, so there is nothing to restart`,
-the operator did not restart it, and the tools did not appear.
+path of the `codex` launcher. That launcher is not all of it: installed with
+`npm install -g` and recorded at its first prompt
+(tests/fixtures/npm_agent_cli_process_table_recordings.json), codex runs the
+platform binary the package vendors as the launcher's child, and that binary's
+`comm` is `codex` in full, because its path ends in `bin/codex`. So
+`pgrep -x codex` answers with the binary. The command-line question step 5
+asks when that one answers nothing is there for a CLI that npm installs as a
+node script: that is a process called `node`, and the launcher's path is its
+argument, as it is for the codex launcher here.
 
 None of the five branches of step 5 had ever produced output in a test: the
 restart lines were grepped out of the source. Here they run against the real
@@ -29,9 +33,12 @@ those are the whole of the shape. The image has no node and no codex, so the
 names come from the published package rather than from a run of it; the
 recording that would replace them is named in the report.
 
-Which of the two processes step 5 names is decided here, and it is the node
-parent: that is the process an operator quits, and the native child goes with
-it. So the child is present in the table for every case below, and no case may
+Which of the two processes step 5 names is the one whose `comm` is the
+command's own name, the binary. The launcher forwards SIGINT, SIGTERM and
+SIGHUP to it and, when it ends, exits with its status or raises the signal it
+ended on. So any end of the binary ends the launcher too, while ending the
+launcher reaches the binary only through that forwarding, which a SIGKILL
+skips. The launcher is in the table for every npm case below, and no case may
 name it.
 """
 
@@ -244,22 +251,24 @@ def test_step_five_names_a_running_npm_installed_codex(machine: Machine) -> None
     """The shape npm gives codex, in the real process table, and the block step 5 owes for it."""
     codex = machine.npm_cli("codex", "@openai/codex", NATIVE_CODEX)
     child = machine.native_children[codex.pid]
-    # The premise, read out of the kernel: this is what a `pgrep -x codex`
-    # cannot see, on either process.
+    # The premise, read out of the kernel: the shape the recording holds, a
+    # `node` running the launcher and under it the one process called `codex`,
+    # which is the process `pgrep -x codex` answers with.
     assert comm_of(codex.pid) == "node", comm_of(codex.pid)
     arguments = cmdline_of(codex.pid)
     assert arguments[0] == "node" and arguments[1].endswith("/codex"), arguments
-    assert comm_of(child) == NATIVE_CODEX[:15], comm_of(child)
-    assert subprocess.run(["pgrep", "-x", "codex"], capture_output=True, text=True, check=False).stdout.strip() == ""
+    assert comm_of(child) == "codex", comm_of(child)
+    assert subprocess.run(["pgrep", "-x", "codex"], capture_output=True, text=True, check=False).stdout.strip() == str(child)
 
     transcript = machine.install("--agent", "codex")
 
     assert "codex registered" in transcript, transcript
-    assert f"RESTART REQUIRED: codex is running right now (PID {codex.pid})." in transcript, transcript
-    # The node parent and not the binary under it: that is the process the
-    # operator quits, and naming the child would send them after one that dies
-    # with it anyway.
-    assert f"PID {child}" not in transcript, transcript
+    assert f"RESTART REQUIRED: codex is running right now (PID {child})." in transcript, transcript
+    # The binary and not the node launcher above it: the binary is the one
+    # process called `codex`, any end of it ends the launcher too, and ending
+    # the launcher reaches it only through a forwarded signal, which a SIGKILL
+    # skips.
+    assert f"(PID {codex.pid})" not in transcript, transcript
     assert "nothing to restart" not in transcript, transcript
 
 
@@ -281,13 +290,15 @@ def test_step_five_lists_every_running_cli_whichever_way_each_was_installed(mach
     """
     claude = machine.native_cli("claude")
     codex = machine.npm_cli("codex", "@openai/codex", NATIVE_CODEX)
+    child = machine.native_children[codex.pid]
 
     transcript = machine.install()
 
     assert "claude-code registered" in transcript and "codex registered" in transcript, transcript
     assert "RESTART REQUIRED: these agent CLIs are running right now:" in transcript, transcript
     assert f"    claude (PID {claude.pid})" in transcript, transcript
-    assert f"    codex (PID {codex.pid})" in transcript, transcript
+    assert f"    codex (PID {child})" in transcript, transcript
+    assert f"(PID {codex.pid})" not in transcript, transcript
     assert "restart: 2 of your agent CLIs are running right now" in transcript, transcript
 
 
