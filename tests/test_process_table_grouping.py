@@ -451,6 +451,35 @@ def test_the_document_that_says_how_to_run_the_suite_says_where_the_scheduler_co
     )
 
 
+def test_the_document_that_says_how_to_run_the_suite_says_how_two_runs_share_the_process_table() -> None:
+    """CONTRIBUTING.md names the lock beside the group it completes (#567).
+
+    A second run on the machine now waits for the first run's step 5 tests,
+    and one that waits out its bound fails naming a process that is not its
+    own. Without the paragraph a contributor reads the first as a hang and the
+    second as a stranger's bug. So the paragraph that names the fixture a party
+    asks for also names the file every run takes, says that a second run
+    waits and then fails naming the PID holding it, and says the file belongs
+    to one account.
+    """
+    if not CONTRIBUTING.is_file():
+        pytest.skip("CONTRIBUTING.md is repository content and does not ship in a source distribution")
+    lock = getattr(support, LOCK_PATH, None)
+    assert isinstance(lock, Path), f"tests/support.py declares no {LOCK_PATH} ({lock!r}), so there is no file to document"
+    where = f"~/{lock.relative_to(support.REAL_HOME).as_posix()}"
+    text = CONTRIBUTING.read_text(encoding="utf-8")
+    paragraphs = [block for block in text.split("\n\n") if f"`{LOCK_FIXTURE}`" in block]
+    assert paragraphs, f"CONTRIBUTING.md never names the `{LOCK_FIXTURE}` fixture a party to the process table asks for"
+    facts = {
+        "the file every run takes": where,
+        "that a second run waits": "waits",
+        "that a run that waited out the bound fails naming the holder's PID": "PID",
+        "that the file belongs to one account": "account",
+    }
+    unsaid = [fact for fact, needle in facts.items() if not any(needle in block for block in paragraphs)]
+    assert not unsaid, f"the paragraph naming `{LOCK_FIXTURE}` does not say {', '.join(unsaid)}:\n" + "\n\n".join(paragraphs)
+
+
 def test_step_fives_scan_still_reads_the_whole_process_table() -> None:
     """The installer is not the thing that changes, and this is why.
 
@@ -525,7 +554,8 @@ def test_the_process_table_lock_is_one_path_for_every_session_on_the_machine(tmp
     checkout, a worker or a test's sandbox decides. It is read the way
     `support.REAL_HOME` is read, at import, before any test has moved the home
     it lies under, and a session started from another clone as another worker
-    arrives at the same file.
+    arrives at the same file. It lies beside the suite's other machine-wide
+    lock, the one `tools/run_lock.py` keeps in `~/.agentic-hil`.
     """
     lock = getattr(support, LOCK_PATH, None)
     assert isinstance(lock, Path), (
@@ -534,6 +564,9 @@ def test_the_process_table_lock_is_one_path_for_every_session_on_the_machine(tmp
     )
     assert lock.is_absolute(), lock
     assert lock.is_relative_to(support.REAL_HOME), f"{lock} is not under the home support read at import, {support.REAL_HOME}"
+    assert lock == support.REAL_HOME / ".agentic-hil" / "pytest-process-table.lock", (
+        f"{lock} is not ~/.agentic-hil/pytest-process-table.lock, beside the lock tools/run_lock.py keeps there"
+    )
     for own in (Path(os.path.expanduser("~")), Path(tempfile.gettempdir()), tmp_path, REPOSITORY_ROOT):
         assert not lock.is_relative_to(own), f"{lock} lies under {own}, which belongs to this test or this checkout alone"
     another_clone = tmp_path / "another-clone" / "tests"
@@ -577,9 +610,13 @@ def test_a_session_that_cannot_get_the_process_table_names_the_one_holding_it(
     the PID holding the lock and the test or run it holds it for. The bound is
     a base figure widened by the runner's one time scale, like every other
     wall-clock bound in the suite.
+
+    The lock lies in a directory nobody has made yet, as `~/.agentic-hil` is on
+    a machine that has never run the product or the Linux runner, so the first
+    run to take it makes the directory.
     """
     hold = _the_lock_helper()
-    lock = tmp_path / "process-table.lock"
+    lock = tmp_path / "home" / ".agentic-hil" / "process-table.lock"
     alice = "tests/test_install_scripts.py::test_alice_holds_the_table"
     holder, holder_pid = _a_session_holding_the_table(tmp_path, lock, alice)
     monkeypatch.setenv(support.TIME_SCALE_VARIABLE, "4")
@@ -688,10 +725,11 @@ def test_two_sessions_on_one_machine_never_read_each_others_agent_cli(tmp_path: 
     planted = install_scripts._meeting_marks(meeting, "planted")
     asked = install_scripts._meeting_marks(meeting, "asked")
     assert len(planted) == 2, f"two sessions were started and {len(planted)} of them planted a stand-in:\n{said}"
+    stand_ins = {session: marks["stand_in"] for session, marks in planted.items()}
     crossed = sorted(
-        (mine, answer["named"])
-        for mine, answer in asked.items()
-        if answer["named"].isdigit() and int(answer["named"]) in planted and int(answer["named"]) != mine
+        (stand_ins[session], answer["named"])
+        for session, answer in asked.items()
+        if answer["named"].isdigit() and int(answer["named"]) in set(stand_ins.values()) - {stand_ins[session]}
     )
     assert not crossed, "two sessions on one machine read each other's agent CLI: " + "; ".join(
         f"the session that planted {mine} was told step 5 found {theirs}, which the other session planted"

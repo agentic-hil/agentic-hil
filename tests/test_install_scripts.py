@@ -4787,27 +4787,34 @@ def test_step_five_says_there_is_nothing_to_restart_when_only_an_unrelated_node_
 PROCESS_TABLE_MEETING = "AGENTIC_HIL_TEST_PROCESS_TABLE_MEETING"
 # How long a session that has planted waits for the other one to plant before
 # it asks alone. The two are started in the same moment and differ by their
-# startup, so this bounds that difference and nothing step 5 does.
-PROCESS_TABLE_MEETING_WAIT_S = 10.0
+# startup, so this bounds that difference and nothing step 5 does. Kept apart,
+# the first session waits all of it out for a peer that cannot plant before it
+# is done, and a session whose peer has already finished waits for nothing.
+PROCESS_TABLE_MEETING_WAIT_S = 5.0
 
 
 def _meeting_marks(meeting: Path, stage: str) -> dict[int, dict]:
-    """What each session in a meeting has said at one stage, by the PID of the stand-in it planted."""
+    """What each session in a meeting has said at one stage, by the PID of the session that said it.
+
+    The session's PID and not its stand-in's: two sessions waiting on each
+    other are alive at the same time, while a stand-in's PID is free for the
+    next process the moment the first session is done with it.
+    """
     said = {}
     for mark in meeting.glob(f"*.{stage}"):
-        stand_in = mark.name[: -len(stage) - 1]
-        if not stand_in.isdigit():
+        session = mark.name[: -len(stage) - 1]
+        if not session.isdigit():
             continue
         try:
-            said[int(stand_in)] = json.loads(mark.read_text(encoding="utf-8"))
+            said[int(session)] = json.loads(mark.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             # Being renamed into place on Windows: not said yet.
             continue
     return said
 
 
-def _say_in_the_meeting(meeting: Path, stand_in: int, stage: str, **said: object) -> None:
-    publish_atomically(str(meeting / f"{stand_in}.{stage}"), json.dumps(said))
+def _say_in_the_meeting(meeting: Path, stage: str, **said: object) -> None:
+    publish_atomically(str(meeting / f"{os.getpid()}.{stage}"), json.dumps(said))
 
 
 def _wait_in_the_meeting(until: Callable[[], bool]) -> None:
@@ -4868,15 +4875,15 @@ def test_step_five_names_the_agent_cli_this_test_started_in_the_real_process_tab
     _skip_where_no_stand_in_can_be_planted()
     meeting_directory = os.environ.get(PROCESS_TABLE_MEETING, "")
     meeting = Path(meeting_directory) if meeting_directory else None
-    # Read before this test's stand-in exists, so a stand-in listed here was
-    # gone before this one started.
+    # Read before this test's stand-in exists, so a session listed here was
+    # done with its stand-in before this one started.
     gone_before = sorted(_meeting_marks(meeting, "done")) if meeting is not None else []
     stand_in = _an_agent_cli_as_recorded(tmp_path / "npm")
     peers: list[int] = []
 
     try:
         if meeting is not None:
-            _say_in_the_meeting(meeting, stand_in.pid, "planted", gone_before_it_started=gone_before)
+            _say_in_the_meeting(meeting, "planted", stand_in=stand_in.pid, gone_before_it_started=gone_before)
             _wait_in_the_meeting(lambda: len(_meeting_marks(meeting, "planted")) > 1 or bool(_meeting_marks(meeting, "done")))
         named = _step_five_names_on_this_machine(tmp_path, STEP_FIVE_AGENT)
         # Read before the kill below: a stand-in that went early leaves the
@@ -4884,17 +4891,17 @@ def test_step_five_names_the_agent_cli_this_test_started_in_the_real_process_tab
         # planting and not of the matcher.
         outlived_the_question = stand_in.poll()
         if meeting is not None:
-            _say_in_the_meeting(meeting, stand_in.pid, "asked", named=named)
+            _say_in_the_meeting(meeting, "asked", named=named)
             _wait_in_the_meeting(
                 lambda: set(_meeting_marks(meeting, "planted")) <= set(_meeting_marks(meeting, "asked")) | set(_meeting_marks(meeting, "done"))
             )
-            peers = sorted(set(_meeting_marks(meeting, "planted")) - {stand_in.pid})
+            peers = sorted(said["stand_in"] for session, said in _meeting_marks(meeting, "planted").items() if session != os.getpid())
     finally:
         stand_in.kill()
         stand_in.wait(timeout=SCRIPT_TIMEOUT_S)
         stand_in.stdin.close()
         if meeting is not None:
-            _say_in_the_meeting(meeting, stand_in.pid, "done")
+            _say_in_the_meeting(meeting, "done")
 
     assert outlived_the_question is None, f"the stand-in exited with {outlived_the_question} before the matcher read the process table"
     whose = ", the stand-in another session planted into the same table" if named.isdigit() and int(named) in peers else ""
@@ -5297,7 +5304,7 @@ def _windows_step_five_names(tmp_path: Path, table: dict, agent_id: str) -> str:
 @WINDOWS_ONLY
 @pytest.mark.parametrize("recorded", ["cmd_running", "cmd_after", "powershell_running", "powershell_after"])
 def test_the_replayed_windows_table_answers_what_windows_answered_in_the_recording(tmp_path: Path, recorded: str) -> None:
-    """The replay the two tests below read through, held to what Windows answered while each table stood.
+    """The replay the tests below read through, held to what Windows answered while each table stood.
 
     The recording asked both of step 5's questions for all three names over
     the table's own rows: `Get-Process` for the name, and the command lines
@@ -5387,6 +5394,42 @@ def test_step_five_on_windows_names_the_process_whose_name_is_the_agent_cli_name
     assert named == str(anchor["ProcessId"]), (
         f"step 5 named {described} for {agent_id}, and the one process called {cli} is {anchor['ProcessId']} "
         f"({anchor['CommandLine']!r}, child of {anchor['ParentProcessId']})"
+    )
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("route", ["cmd", "powershell"])
+def test_step_five_on_windows_names_the_node_launcher_when_no_process_has_the_agent_cli_name(tmp_path: Path, route: str) -> None:
+    """Step 5's second question, on the recorded codex table minus its `codex.exe` row.
+
+    Every recorded CLI is found by its name first, so no recorded table needs
+    the question about command lines. This one is the recorded running table
+    with the one process called codex taken out and every other row as it was
+    recorded: a CLI that npm installs as a JavaScript launcher alone, which is
+    what that question is for. `Get-Process -Name codex` finds nothing in it,
+    and the name is still on three command lines: the node launcher's, as
+    each route spelled it, and those of the shell and the console the
+    launcher was started from. Step 5 has to name the launcher and neither of
+    the other two.
+    """
+    recorded = _npm_agent_cli_windows_tables()[f"{route}_running"]
+    launcher = recorded["started"]["codex"]
+    called_codex = [process for process in recorded["processes"] if process["ProcessName"] == "codex"]
+    assert [process["ParentProcessId"] for process in called_codex] == [launcher], (
+        f"the recording's codex.exe is not the one child of the launcher the shim started ({launcher}): {called_codex}"
+    )
+    table = {"processes": [process for process in recorded["processes"] if process["ProcessName"] != "codex"]}
+    by_pid = {process["ProcessId"]: process for process in table["processes"]}
+    carrying_the_name = sorted(process["ProcessId"] for process in table["processes"] if "codex" in process["CommandLine"])
+    assert launcher in carrying_the_name and len(carrying_the_name) == 3, carrying_the_name
+
+    named = _windows_step_five_names(tmp_path, table, "codex")
+
+    found = by_pid.get(int(named)) if named.isdigit() else None
+    described = f"{named} ({found['Name']}, {found['CommandLine']!r})" if found else repr(named)
+    assert named == str(launcher), (
+        f"with no process called codex, step 5 named {described}, and the node launcher the shim started is {launcher} "
+        f"({by_pid[launcher]['CommandLine']!r})"
     )
 
 
