@@ -130,6 +130,25 @@ foreach ($token in @($Rest)) {
 }
 if ($Can) { $WithCan = $true }
 
+# The agent the name after --agent stands for. agent-install reads a name the
+# way every --agent of the CLI does: without the blanks around it, in any case,
+# with `_` for `-`, and as any of the agent's aliases. Step 4 handed the name on
+# as it was typed, so each of those spellings registered the right agent, but
+# step 5 went on from the same text and, after `--agent codex-cli`, looked for a
+# process called codex-cli (#571). The name is read here once, the way the CLI
+# reads it, and everything after the command line works from the agent's id. A
+# name that is no agent's comes back as it was typed, and agent-install refuses
+# it in its own words.
+function Get-AgentIdForName {
+    param([string]$Name)
+    $normalized = $Name.Trim().ToLowerInvariant().Replace('_', '-')
+    if ($normalized -eq 'opencode' -or $normalized -eq 'open-code') { return 'opencode' }
+    if ($normalized -eq 'claude-code' -or $normalized -eq 'claude') { return 'claude-code' }
+    if ($normalized -eq 'codex' -or $normalized -eq 'codex-cli' -or $normalized -eq 'openai-codex') { return 'codex' }
+    return $Name
+}
+if ($Agent) { $Agent = Get-AgentIdForName $Agent }
+
 if ($ShowHelp) {
     Write-Usage
     exit 0

@@ -159,6 +159,31 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# The agent the name after --agent stands for. agent-install reads a name the
+# way every --agent of the CLI does: without the blanks around it, in any case,
+# with `_` for `-`, and as any of the agent's aliases. Step 4 handed the name on
+# as it was typed, so each of those spellings registered the right agent, but
+# step 5 went on from the same text and, after `--agent codex-cli`, looked for a
+# process called codex-cli (#571). The name is read here once, the way the CLI
+# reads it, and everything after the command line works from the agent's id. A
+# name that is no agent's comes back as it was typed, and agent-install refuses
+# it in its own words.
+agent_id_for() {
+    agent_name=$(printf '%s' "$1" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ_' 'abcdefghijklmnopqrstuvwxyz-')
+    agent_name=${agent_name#"${agent_name%%[![:space:]]*}"}
+    agent_name=${agent_name%"${agent_name##*[![:space:]]}"}
+    case "$agent_name" in
+        opencode | open-code) printf '%s' "opencode" ;;
+        claude-code | claude) printf '%s' "claude-code" ;;
+        codex | codex-cli | openai-codex) printf '%s' "codex" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+if [ -n "$AGENT" ]; then
+    AGENT=$(agent_id_for "$AGENT")
+fi
+
 # The certificate store a TLS-intercepting proxy needs, and the only concession
 # this script makes to one. uv validates against roots bundled in its own
 # binary, so on a managed network it fails where curl and apt on the same host
