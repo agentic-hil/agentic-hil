@@ -765,7 +765,8 @@ def test_nothing_on_this_surface_erases_the_chip_and_both_flash_interlocks_arriv
     Catches two ways this bench could stop being the one the rest of this file
     describes. A tool that erases, or an erase option grown onto flashing, would
     put a destructive operation on the agent's surface, and the properties of
-    `flash_firmware` are written out here so an added one fails. And a generated
+    `flash_firmware` and of its `capture` block are written out here so an
+    added one fails. And a generated
     configuration arriving with either flash interlock open would refuse every
     flash on this probe, which is a bench that cannot do the thing this file
     exists to measure.
@@ -783,7 +784,8 @@ def test_nothing_on_this_surface_erases_the_chip_and_both_flash_interlocks_arriv
         answered = server.call(AN_ERASE_TOOL_WOULD_BE_CALLED)
 
     assert [name for name in names if "erase" in name] == [], names
-    assert set(schema["properties"]) == {"image_path", "artifact_id", "reset_after_flash"}, schema["properties"]
+    assert set(schema["properties"]) == {"image_path", "artifact_id", "reset_after_flash", "capture"}, schema["properties"]
+    assert set(schema["properties"]["capture"]["properties"]) == {"port_id", "until", "wait_timeout_s", "max_bytes"}, schema["properties"]["capture"]
     assert answered["ok"] is False, answered
     assert answered["error_type"] == "unknown_tool", answered
 
