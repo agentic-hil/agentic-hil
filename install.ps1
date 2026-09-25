@@ -1053,6 +1053,12 @@ function Register-Agent {
     # reading. It is prose now, addressed to the operator who is about to read
     # it, and a text match on prose would be a worse check than the status it was
     # doubling.
+    #
+    # Status 2 is argparse refusing the command line, and in the one this builds
+    # the only thing it can refuse is the agent name. Then nothing ran and there
+    # is no report: what was printed is the usage and the names the CLI accepts,
+    # so the line after it says the name was refused rather than send the
+    # operator after a half that failed.
     param([string]$AgentId)
     $result = Invoke-Captured -File $AgenticHilCmd -Arguments @('agent-install', '--agent', $AgentId)
     if ($result.ExitCode -eq 0) {
@@ -1060,6 +1066,9 @@ function Register-Agent {
         return
     }
     Write-Host $result.Output.TrimEnd()
+    if ($result.ExitCode -eq 2) {
+        throw "agentic-hil refused the agent name '$AgentId'"
+    }
     throw "agent-install failed for $AgentId; the report above says which half"
 }
 

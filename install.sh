@@ -1427,14 +1427,6 @@ ensure_resolved_for_agent_install() {
     fi
 }
 
-# One agent registered, reported as a result rather than as a document.
-# `agent-install` answers with a JSON report of every path it touched, and on a
-# machine with three agent CLIs that is roughly a hundred and fifty lines of
-# machine-readable detail inside a transcript whose whole job is to say five calm
-# things. On success the operator needs one line. On failure the document is the
-# diagnosis, so then it is printed whole and this stops. The top-level "ok" is
-# read at its own indentation, so a true nested inside a failed report cannot
-# stand in for the answer.
 # One agent registered, reported as a result rather than as a document. On
 # success the operator needs one line; on failure the report is the diagnosis
 # and is printed whole, which is why it is captured rather than streamed: three
@@ -1446,13 +1438,24 @@ ensure_resolved_for_agent_install() {
 # indentation, from back when the report arrived as JSON whoever was reading. It
 # is prose now, addressed to the operator who is about to read it, and a text
 # match on prose would be a worse check than the status it was doubling.
+#
+# Status 2 is argparse refusing the command line, and in the one this builds
+# the only thing it can refuse is the agent name. Then nothing ran and there is
+# no report: what was printed is the usage and the names the CLI accepts, so the
+# line after it says the name was refused rather than send the operator after a
+# half that failed.
 register_agent() {
     registering_agent="$1"
-    if agent_install_report=$("$AGENTIC_HIL_CMD" agent-install --agent "$registering_agent" 2>&1); then
+    agent_install_status=0
+    agent_install_report=$("$AGENTIC_HIL_CMD" agent-install --agent "$registering_agent" 2>&1) || agent_install_status=$?
+    if [ "$agent_install_status" -eq 0 ]; then
         say "agent: $registering_agent registered (skill and MCP server, restart pending)"
         return 0
     fi
     printf '%s\n' "$agent_install_report" >&2
+    if [ "$agent_install_status" -eq 2 ]; then
+        fail "agent: agentic-hil refused the agent name '$registering_agent'"
+    fi
     fail "agent: agent-install failed for $registering_agent; the report above says which half"
 }
 
