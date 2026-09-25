@@ -47,6 +47,7 @@ from contextlib import suppress
 from pathlib import Path
 
 import pytest
+from result_text import assert_text_projects
 from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, DEMO_IMAGE, Bench, BoardImages, child_command
@@ -193,7 +194,7 @@ class Server:
     def call(self, name: str, arguments: dict | None = None, timeout_s: float = REPLY_TIMEOUT_S) -> tuple[bool, dict]:
         """One tool call: whether the host is told it is an error, and the tool's document.
 
-        The document has to be the same in both places a host may read it, and
+        The text a host reads has to be the compact projection of the document, and
         a document that is not `ok` has to be flagged, because a refusal whose
         envelope says the call went fine is a refusal a host acts on as success.
         """
@@ -204,7 +205,7 @@ class Server:
         assert isinstance(document, dict), f"{name} answered no structuredContent: {result}"
         content = result.get("content")
         assert isinstance(content, list) and content and content[0].get("type") == "text", f"{name} answered no content block: {result}"
-        assert json.loads(content[0]["text"]) == document, f"{name} answered two different documents in one result: {result}"
+        assert_text_projects(result)
         errored = bool(result.get("isError"))
         if document.get("ok") is not True:
             assert errored is True, f"{name} refused and the host was told the call went fine: {result}"

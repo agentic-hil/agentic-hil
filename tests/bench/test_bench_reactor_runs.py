@@ -44,6 +44,7 @@ from xml.etree import ElementTree
 
 import pytest
 import yaml
+from result_text import assert_text_projects
 from support import scaled_time_bound
 
 from .conftest import BENCH_ONLY, COMMAND_TIMEOUT_S, Bench, child_command
@@ -220,7 +221,7 @@ class McpServer:
         assert "error" not in answered, f"tools/call {name} answered a protocol error: {answered}{self.diagnostics()}"
         structured = answered["result"].get("structuredContent")
         assert isinstance(structured, dict), f"tools/call {name} answered no structuredContent: {answered}"
-        assert json.loads(answered["result"]["content"][0]["text"]) == structured, f"tools/call {name} answered text that is not its structured document: {answered}"
+        assert_text_projects(answered["result"])
         if structured.get("ok") is not True:
             assert answered["result"].get("isError") is True, f"tools/call {name} answered a result that is not ok without flagging it as an error: {answered}"
         return structured
