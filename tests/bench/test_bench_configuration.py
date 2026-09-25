@@ -28,15 +28,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -47,6 +49,7 @@ from .conftest import (
     COMMAND_TIMEOUT_S,
     DEMO,
     DEMO_IMAGE,
+    REPOSITORY_ROOT,
     Bench,
     child_command,
     isolated_environment,
@@ -114,7 +117,7 @@ class Surface:
         return hashlib.sha256(self.config.read_bytes()).hexdigest()
 
 
-def variant(bench: Bench, name: str) -> Surface:
+def variant(bench: Bench, name: str, rights: tuple[str, ...] = RIGHTS_THESE_TESTS_USE) -> Surface:
     """This session's configuration, copied byte for byte beside it, and a surface over the copy.
 
     Outside the workspace, because the product refuses a configuration stored
@@ -129,7 +132,7 @@ def variant(bench: Bench, name: str) -> Surface:
     shutil.copyfile(bench.config, copy)
     surface = Surface(project=bench.project, environment=isolated_environment(bench.config_root, bench.state_root, AGENTIC_HIL_CONFIG=str(copy)), config=copy)
     permissions = surface.configuration().get("permissions") or {}
-    missing = [right for right in RIGHTS_THESE_TESTS_USE if permissions.get(right) is not True]
+    missing = [right for right in rights if permissions.get(right) is not True]
     if missing:
         pytest.fail(f"this session's configuration does not grant {missing}, and these tests read grants rather than widen them", pytrace=False)
     return surface
@@ -856,3 +859,235 @@ def test_adoption_is_refused_by_the_hold_while_a_session_holds_the_board_and_say
     assert counter(server) == halted_at, "the core moved while the debug session held it"
     assert surface.digest() == left
     surfaces.end_debugging(server)
+
+
+# ---------------------------------------------------------------------------
+# server_upgrade under a hold.
+#
+# The one tool in this file that would change the installation rather than a
+# file. `server_upgrade` answers three gates before it hands anything to a
+# package manager: the permission, then the platform, then whether anything
+# holds the bench, each a returned refusal. The refusal under test is the third,
+# so what it proves is that a held bench stops the call there. Should it ever
+# not, the server asked here has nothing a package manager could reach: every
+# index and proxy is a closed loopback port, pip reads none of its own
+# configuration files, no manager but this interpreter's own pip is on PATH, and
+# pip's cache and scratch are under this test's temporary directory. A child
+# started in exactly that environment establishes, before the server is, that
+# the manager the installation would go to is the pip of this checkout's own
+# virtual environment and that no launcher anywhere else would be moved, and the
+# environment's distribution records and launchers are compared before and after.
+
+PACKAGE_MANAGERS = ("uv", "uvx", "pipx")
+PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+
+WHERE_AN_UPGRADE_WOULD_GO = """
+import json, os, shutil, sys
+from pathlib import Path
+from agentic_hil import upgrade
+from agentic_hil.config import ConfigError
+try:
+    manager, command = upgrade._upgrade_command()
+except ConfigError as error:
+    manager, command = "refused:" + str(error.to_dict().get("error_type")), []
+directory = upgrade._manager_bin_directory()
+dedicated = upgrade._dedicated_environment_root()
+print(json.dumps({
+    "prefix": str(Path(sys.prefix).resolve()),
+    "base_prefix": str(Path(sys.base_prefix).resolve()),
+    "executable": sys.executable,
+    "manager": manager,
+    "command": command,
+    "locks_running_files": upgrade._host_locks_running_files(),
+    "launcher_directory": None if directory is None else str(directory),
+    "dedicated_environment": None if dedicated is None else str(dedicated),
+    "managers_on_path": [name for name in sys.argv[1:] if shutil.which(name)],
+    "no_index": os.environ.get("PIP_NO_INDEX"),
+    "no_pip_configuration": os.environ.get("PIP_CONFIG_FILE") == os.devnull,
+}))
+"""
+
+
+def a_closed_local_port() -> int:
+    """A loopback port nothing listened on a moment ago: bound, read and given back."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def with_nothing_to_install_from(environment: dict[str, str], scratch: Path) -> dict[str, str]:
+    """An environment in which a package manager finds no index, no configuration and no second manager.
+
+    Every variable pip, uv or pipx would read is dropped, and the indexes and
+    proxies come back as a closed loopback port. `PIP_NO_INDEX` stops pip asking
+    an index at all, `PIP_CONFIG_FILE` on the null device stops it reading any
+    configuration file, and `PIP_REQUIRE_VIRTUALENV` stops it outside one. PATH
+    loses every directory that holds uv, uvx or pipx, and pip's cache and every
+    temporary file go under this test's own directory.
+    """
+    closed = f"http://127.0.0.1:{a_closed_local_port()}"
+    kept = {
+        name: value
+        for name, value in environment.items()
+        if not name.upper().startswith(("PIP_", "UV_", "PIPX_")) and name.upper() not in PROXY_VARIABLES
+    }
+    searched = [entry for entry in kept.get("PATH", "").split(os.pathsep) if entry and not any((Path(entry) / name).exists() for name in PACKAGE_MANAGERS)]
+    cache = scratch / "package-manager-cache"
+    temporary = scratch / "package-manager-tmp"
+    cache.mkdir(parents=True, exist_ok=True)
+    temporary.mkdir(parents=True, exist_ok=True)
+    return {
+        **kept,
+        "PATH": os.pathsep.join(searched),
+        "PIP_NO_INDEX": "1",
+        "PIP_CONFIG_FILE": os.devnull,
+        "PIP_REQUIRE_VIRTUALENV": "1",
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PIP_INDEX_URL": f"{closed}/simple",
+        "PIP_EXTRA_INDEX_URL": f"{closed}/simple",
+        "PIP_CACHE_DIR": str(cache),
+        "UV_OFFLINE": "1",
+        "UV_NO_CONFIG": "1",
+        "UV_DEFAULT_INDEX": f"{closed}/simple",
+        "UV_INDEX_URL": f"{closed}/simple",
+        **{name: closed for name in PROXY_VARIABLES},
+        **{name.lower(): closed for name in PROXY_VARIABLES},
+        "TMPDIR": str(temporary),
+    }
+
+
+def an_upgrade_could_reach_only_this_checkout(surface: Surface) -> None:
+    """Fail before any server starts unless the upgrade path, taken wrongly, stays inside this checkout.
+
+    Asked of the product in a child started exactly as the server will be. The
+    installation must belong to this checkout's own virtual environment, the
+    manager must be that environment's pip without `--user` (or a refusal to
+    pick one), no launcher directory outside the environment may be in play,
+    this host must be one where no launcher is renamed or swept, and no second
+    manager may be reachable.
+    """
+    answered = subprocess.run(
+        [sys.executable, "-s", "-c", WHERE_AN_UPGRADE_WOULD_GO, *PACKAGE_MANAGERS],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        cwd=str(surface.project),
+        env=surface.environment,
+        timeout=COMMAND_TIMEOUT_S,
+        check=False,
+    )
+    assert answered.returncode == 0, answered.stderr
+    facts = json.loads(answered.stdout)
+    prefix = Path(facts["prefix"])
+    command = facts["command"]
+    through_this_pip = facts["manager"] == "pip" and command[:5] == [facts["executable"], "-m", "pip", "install", "--upgrade"] and "--user" not in command
+    confined = {
+        "the installation is this checkout's own virtual environment": prefix != Path(facts["base_prefix"]) and prefix.is_relative_to(REPOSITORY_ROOT) and prefix == Path(sys.prefix).resolve(),
+        "the manager is that environment's own pip, or none is picked": through_this_pip or str(facts["manager"]).startswith("refused:"),
+        "no launcher is renamed or swept on this host": facts["locks_running_files"] is False,
+        "no launcher directory outside the environment is in play": facts["launcher_directory"] is None and facts["dedicated_environment"] is None,
+        "no other package manager is on PATH": facts["managers_on_path"] == [],
+        "pip asks no index and reads no configuration file": facts["no_index"] == "1" and facts["no_pip_configuration"] is True,
+    }
+    unmet = [claim for claim, holds in confined.items() if not holds]
+    if unmet:
+        pytest.fail(f"server_upgrade is not asked on this bench, because a wrong answer could reach outside this checkout: {unmet}", pytrace=False)
+
+
+def installation_record() -> dict[str, int]:
+    """This environment's distribution records and launchers, each with its modification time.
+
+    What a package manager rewrites when it installs, upgrades or removes a
+    distribution here, and what nothing else here writes: every `.dist-info`
+    directory and its files, the `.pth` files beside them, and the launchers in
+    `bin`. The server under test runs out of this same environment.
+    """
+    prefix = Path(sys.prefix)
+    record: dict[str, int] = {}
+    for pattern in ("bin/*", "lib/python*/site-packages/*.dist-info", "lib/python*/site-packages/*.dist-info/*", "lib/python*/site-packages/*.pth"):
+        for path in prefix.glob(pattern):
+            with suppress(OSError):
+                record[path.relative_to(prefix).as_posix()] = path.lstat().st_mtime_ns
+    assert any(name.endswith(".dist-info") and "/agentic_hil-" in name for name in record), "the record does not cover the installation it is meant to watch"
+    return record
+
+
+def upgrade_refused_by_the_hold(server: Server, surface: Surface, stop_call: str) -> dict:
+    """`server_upgrade` while a hold stands: refused naming what is held, and nothing started.
+
+    The hold is read from a second process first, and the call is made only
+    when that reading says the bench is held and names what holds it: this test
+    never asks for an upgrade on a bench it has not seen held.
+    """
+    _, outside = surface.document("lease-status")
+    assert outside["ok"] is True, outside
+    if outside.get("bench_held") is not True or not outside.get("held_devices"):
+        pytest.fail(f"the bench does not read as held from a second process, so server_upgrade is not asked: {outside.get('summary')}", pytrace=False)
+    held = set(outside["held_devices"])
+
+    refused = server.call("server_upgrade")
+    assert refused["ok"] is False, refused
+    assert refused["error_type"] == "upgrade_in_open_run", refused
+    assert refused["held_devices"] and set(refused["held_devices"]) == held, refused
+    assert {hold.get("resource") for hold in refused["device_holds"]} == held, refused
+    assert stop_call in json.dumps(refused.get("remediation")), refused
+    assert refused.get("do_not"), refused
+    assert refused["retry_safe"] is True, refused
+    assert refused["side_effect_committed"] is False, refused
+    assert refused["side_effect_status"] == "not_started", refused
+    assert isinstance(refused.get("running_version"), str) and refused["running_version"], refused
+    for installed in ("upgraded_on_disk", "install", "manager", "command", "restart_required"):
+        assert installed not in refused, refused
+    return refused
+
+
+@pytest.mark.skipif(os.name == "nt", reason="on Windows server_upgrade answers upgrade_cli_only_on_host before it reads the bench")
+def test_server_upgrade_is_refused_while_a_session_or_a_declared_run_holds_the_board_and_installs_nothing(
+    bench: Bench, firmware: Path, surfaces: Surfaces, tmp_path: Path
+) -> None:
+    """An open COM session, a debug session and a declared run each refuse `server_upgrade` by name.
+
+    Each hold is read from a second process before the call, and the refusal
+    names exactly the devices that reading found held, the call that ends this
+    hold, and that nothing was started. The holder is not disturbed: the port
+    still reads the banner, the core stays halted, the run is still declared.
+    The environment's distribution records and launchers are the same after all
+    three refusals as before them.
+    """
+    surface = variant(bench, "upgrade-under-a-hold", rights=("allow_upgrade",))
+    surface = replace(surface, environment=with_nothing_to_install_from(surface.environment, tmp_path))
+    an_upgrade_could_reach_only_this_checkout(surface)
+    before = installation_record()
+    port = bench.com_port_name()
+    server = surfaces.start(surface)
+
+    opened = server.call("com_session_start", {"port_id": port, "clear_buffer": True})
+    assert opened["ok"] is True, opened
+    upgrade_refused_by_the_hold(server, surface, "com_session_stop")
+    assert BANNER in banner_after_reset(server, port), "the COM session stopped reading the board after server_upgrade was refused"
+    stopped = server.call("com_session_stop", {"port_id": port})
+    assert stopped["ok"] is True, stopped
+
+    surfaces.debug(server, firmware.relative_to(bench.project).as_posix())
+    halted_at = counter(server)
+    upgrade_refused_by_the_hold(server, surface, "debug_stop_session")
+    assert counter(server) == halted_at, "the core moved while the debug session held it"
+    surfaces.end_debugging(server)
+
+    devices = [{"kind": "debugger", "id": bench.debugger_name()}, {"kind": "uart", "id": port}]
+    started = server.call("bench_run_start", {"devices": devices, "label": "upgrade-under-a-run"})
+    if started.get("ok") is True:
+        surfaces.running.append(server)
+    assert started["ok"] is True, started
+    declared = started["declared_devices"]
+    refused = upgrade_refused_by_the_hold(server, surface, "bench_run_stop")
+    assert set(declared) <= set(refused["held_devices"]), refused
+    still = server.call("bench_run_status")
+    assert still["run_active"] is True and still["declared_devices"] == declared, still
+    stopped = server.call("bench_run_stop")
+    assert stopped["ok"] is True, stopped
+    surfaces.running.remove(server)
+
+    assert installation_record() == before, "the environment's distributions or launchers changed across the refused upgrades"
+    _, free = surface.document("lease-status")
+    assert free["bench_held"] is False and free["held_devices"] == [], free
