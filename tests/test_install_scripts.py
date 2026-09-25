@@ -4567,38 +4567,51 @@ def test_the_replayed_pgrep_answers_what_pgrep_answered_in_the_recording(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("recorded", "agent_id", "cli"),
+    ("recorded", "agent_id", "cli", "started_by_a_node_launcher"),
     [
-        pytest.param("codex_and_opencode", "codex", "codex", id="codex"),
-        pytest.param("codex_and_opencode", "opencode", "opencode", id="opencode"),
-        pytest.param("claude", "claude-code", "claude", id="claude-code"),
+        pytest.param("codex_and_opencode", "codex", "codex", True, id="codex"),
+        pytest.param("codex_and_opencode", "opencode", "opencode", False, id="opencode"),
+        pytest.param("claude", "claude-code", "claude", False, id="claude-code"),
     ],
 )
-def test_step_five_names_the_process_each_recorded_agent_cli_was_started_as(
-    tmp_path: Path, recorded: str, agent_id: str, cli: str
+def test_step_five_names_the_process_whose_comm_is_the_agent_cli_name(
+    tmp_path: Path, recorded: str, agent_id: str, cli: str, started_by_a_node_launcher: bool
 ) -> None:
-    """The PID step 5 prints for a running agent CLI is the process its operator started.
+    """Step 5 names a running agent CLI by the one process whose `comm` is the command's name.
 
-    For codex that is the node launcher, `node /usr/local/bin/codex`, and not
-    the platform binary it starts under itself: the launcher is what an operator
-    quits, and the binary goes with it. The binary is in the recorded table
-    because it is in every real one, and its `comm` is `codex` in full, which is
-    the very word `pgrep -x codex` asks for. Claude Code and opencode are one
-    process each at the recorded versions, so for them the process started and
-    the process named are the same one.
+    For codex that is the platform binary, the child of the
+    `node /usr/local/bin/codex` that was started, and not that launcher: it is
+    the one process in the table called `codex`. The launcher, bin/codex.js of
+    @openai/codex 0.145.0, forwards SIGINT, SIGTERM and SIGHUP to the binary,
+    and when the binary ends, exits with its status or raises the signal it
+    ended on. So any end of the binary ends the launcher too, while ending the
+    launcher reaches the binary only through that forwarding, which a SIGKILL
+    skips. Claude Code and opencode are one process each at the recorded
+    versions, so for them the process started and the process named are the
+    same one.
     """
     if os.name != "posix":
         pytest.skip("install.sh's matcher is replayed on the POSIX half")
     table = _npm_agent_cli_tables()[recorded]
     by_pid = {str(process["pid"]): process for process in table["processes"]}
-    started = str(table["started"][cli])
+    started = by_pid[str(table["started"][cli])]
+    called_by_its_name = [process for process in table["processes"] if process["comm"] == cli]
+    assert len(called_by_its_name) == 1, f"the recording holds {len(called_by_its_name)} processes called {cli}"
+    anchor = called_by_its_name[0]
+    if started_by_a_node_launcher:
+        assert started["comm"] == "node" and anchor["ppid"] == started["pid"], (
+            f"the process called {cli} is not the child of the node launcher that was started: {anchor}, started {started}"
+        )
+    else:
+        assert anchor is started, f"the process called {cli} is not the one that was started: {anchor}, started {started}"
 
     named = _step_five_names(tmp_path, table, agent_id)
 
     found = by_pid.get(named)
     described = f"{named} (`{found['comm']}`, {' '.join(found['argv'])}, child of {found['ppid']})" if found else repr(named)
-    assert named == started, (
-        f"step 5 named {described} for {agent_id}, and {cli} was started as {started} ({' '.join(by_pid[started]['argv'])})"
+    assert named == str(anchor["pid"]), (
+        f"step 5 named {described} for {agent_id}, and the one process called {cli} is {anchor['pid']} "
+        f"({' '.join(anchor['argv'])}, child of {anchor['ppid']})"
     )
 
 
