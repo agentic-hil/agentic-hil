@@ -247,7 +247,7 @@ class Machine:
             # every later test's `pgrep -x codex`.
             if process.pid in self.native_children:
                 with contextlib.suppress(subprocess.TimeoutExpired):
-                    process.wait(timeout=30)
+                    process.wait(timeout=scaled_time_bound(30))
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=scaled_time_bound(30))
