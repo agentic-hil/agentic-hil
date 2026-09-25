@@ -1296,6 +1296,76 @@ class ComPortService:
             result["reader_error"] = session.reader_error
         return {**result, **waited}
 
+    def capture_check(self, capture: JsonObject, tool: str) -> JsonObject:
+        """Whether a capture of one port may start, asked before anything is touched.
+
+        A capture opens its own session around another tool's effect and reads
+        it with `com_read`'s rules, so what would refuse it is asked here, with
+        the answers `com_session_start` and `com_read` give: a port that is not
+        configured, a read permission that is off, an `until` entry the port's
+        encoding cannot carry. A port that already has a session is refused as
+        well. That session is the caller's and may hold bytes the caller has not
+        read yet, so a capture neither clears it nor reads it.
+
+        Answers the checked capture, its wait already capped, or the refusal."""
+        port_id = str(capture.get("port_id", ""))
+        port = self._configured_port(port_id, tool)
+        if not port["ok"]:
+            return port
+        port_config = port["port_config"]
+        if not self.config.com_read_allowed(port_config):
+            return self._permission_denied(tool, "Reading this COM port is disabled by the authoritative config.", port_id, "allow_read")
+        until: JsonObject | None = None
+        if capture.get("until") is not None:
+            until = until_patterns(capture["until"], port_config.encoding, tool=tool, field="capture.until")
+            if not until["ok"]:
+                return {**until, "port_id": port_id}
+        if port_id in self.sessions:
+            return {"ok": False, "tool": tool, "port_id": port_id, "error_type": "invalid_argument", "field": "capture.port_id", "summary": f"COM port {port_id} already has a session, and a capture opens its own. Read that session with com_read or stop it with com_session_stop first."}
+        max_bytes = capture.get("max_bytes")
+        wait_timeout_s = capture.get("wait_timeout_s")
+        return {"ok": True, "port_id": port_id, "until": until, "max_bytes": port_config.max_buffer_bytes if max_bytes is None else int(max_bytes), "wait_s": until_wait_s(None if wait_timeout_s is None else float(wait_timeout_s))}
+
+    def capture_finish(self, checked: JsonObject, tool: str, *, wait: bool) -> tuple[JsonObject, JsonObject]:
+        """Read a capture's session with `com_read`'s rules, then stop it.
+
+        Answers the capture and the stop, the stop exactly as `com_session_stop`
+        answers it. The read waits only when `wait` is true: after an effect
+        that failed there is no output to wait for, and what the session had
+        already buffered is all the capture holds. Without `until` nothing can
+        match, so the read runs until `max_bytes` are buffered or the wait is
+        over rather than answering on the first fragment of a banner.
+
+        `truncated` says the session still held bytes the capture did not
+        return when it stopped; the session log has every one of them. The wait
+        and the entries waited for are carried for the report."""
+        port_id = checked["port_id"]
+        session = self.sessions[port_id]
+        until = checked["until"]
+        try:
+            read = self._read_until(session, port_id, tool, checked["max_bytes"], checked["wait_s"] if wait else 0.0, until or {"entries": [], "patterns": []})
+        except BaseException:
+            with suppress(BaseException):
+                self.session_stop(port_id)
+            raise
+        stop = self.session_stop(port_id)
+        with session.lock:
+            remaining = len(session.buffer)
+        capture: JsonObject = {"port_id": port_id, "bytes_read": read.get("bytes_read", 0), "data": read.get("data") or data_result(b"", session.port_config.encoding)}
+        if until is not None:
+            capture["until_matched"] = read.get("until_matched") is True
+            if "matched" in read:
+                capture["matched"] = read["matched"]
+        if remaining:
+            capture["truncated"] = True
+        capture.update({"overflow_bytes": session.overflow_bytes, "log_path": display_path(self.config, session.log_path)})
+        if read.get("reader_error") is not None:
+            capture["reader_error"] = read["reader_error"]
+        if until is not None:
+            capture["until"] = read["until"]
+        capture["until_wait_s"] = read["until_wait_s"]
+        return capture, stop
+
     def close(self) -> None:
         errors: list[tuple[str, BaseException]] = []
         interrupt: BaseException | None = None
