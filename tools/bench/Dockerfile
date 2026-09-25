@@ -45,10 +45,11 @@ FROM docker.io/library/python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9a
 # cmake and ninja-build are what the demo's Debug preset builds with.
 # libusb-1.0-0 is how OpenOCD and pyOCD reach the probe over USB; OpenOCD pulls
 # it in anyway, and it is named because the tier depends on it directly. tini
-# is process 1: it hands the stop signal on to pytest, and it reaps what the
-# tier's commands leave behind. A debugger server whose parent exited is
-# reparented to process 1, and under a process 1 that never waits it stays a
-# zombie, which still answers a liveness check by pid.
+# is process 1: it hands the stop signal on to pytest and the commands pytest
+# is running, and it reaps what the tier's commands leave behind. A debugger
+# server whose parent exited is reparented to process 1, and under a process 1
+# that never waits it stays a zombie, which still answers a liveness check by
+# pid.
 #
 # Nothing else. No udev, no editor, no compiler for the host: an image that grew
 # a tool the tier does not use would be an image whose results depend on it.
@@ -107,6 +108,13 @@ LABEL agentic-hil.image="bench-tier"
 # pytest does: its fixtures' finalizers run, and the one that puts the demo back
 # on the board runs among them. SIGTERM would end the interpreter with the
 # board still running whichever image the interrupted test had put on it.
+#
+# `-g` hands the signal to pytest's whole process group, as Ctrl-C in a
+# terminal does, and not to pytest alone. The tier drives the board through the
+# product's commands and servers, which it starts and waits on, and Python's
+# subprocess.run gives a command it is waiting on a quarter of a second after an
+# interrupt before it kills it. In the group, each of them hears the interrupt
+# itself and ends the way the product ends an interrupted command.
 STOPSIGNAL SIGINT
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
 CMD ["python", "-m", "pytest", "tests/bench", "-p", "no:cacheprovider"]
